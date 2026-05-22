@@ -168,7 +168,7 @@ Item {
                     font.pixelSize: 18
                     font.weight: Font.Bold
                     font.letterSpacing: -0.2
-                    color: "#0F172A"
+                    color: window.textPrimary
                 }
 
                 Item {
@@ -185,13 +185,13 @@ Item {
                             font.family: window.fontFamily
                             font.pixelSize: 12
                             font.weight: Font.Medium
-                            color: moreArea.containsMouse ? "#0F172A" : "#475569"
+                            color: moreArea.containsMouse ? window.textPrimary : window.textSecondary
                             Behavior on color { ColorAnimation { duration: 120 } }
                         }
                         AppIcon {
                             name: "chevron"
                             size: 12
-                            color: moreArea.containsMouse ? "#0F172A" : "#475569"
+                            color: moreArea.containsMouse ? window.textPrimary : window.textSecondary
                             strokeWidth: 1.8
                             Behavior on color { ColorAnimation { duration: 120 } }
                         }

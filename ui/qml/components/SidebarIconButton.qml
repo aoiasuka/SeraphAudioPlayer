@@ -8,8 +8,8 @@ Item {
 
     property string iconName: ""
     property int iconSize: 18
-    property color iconColor: "#6B7280"
-    property color hoverColor: "#F0F2F5"
+    property color iconColor: "#6E6E73"
+    property color hoverColor: "#F2EFE8"
 
     signal clicked()
 

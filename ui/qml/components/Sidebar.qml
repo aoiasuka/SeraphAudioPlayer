@@ -130,7 +130,7 @@ Rectangle {
 
             Rectangle {
                 width: 32; height: 32; radius: 8
-                color: "#2563EB"
+                color: window.brand
 
                 AppIcon {
                     anchors.centerIn: parent
@@ -150,13 +150,6 @@ Rectangle {
                 color: window.textPrimary
                 elide: Text.ElideRight
             }
-        }
-
-        // menu 按钮独占一行
-        SidebarIconButton {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 36
-            iconName: "menu"
         }
 
         Item { Layout.preferredHeight: 8 }
@@ -191,7 +184,7 @@ Rectangle {
                 font.family: "Microsoft YaHei UI"
                 font.pixelSize: 12
                 font.weight: Font.Medium
-                color: "#6B7280"
+                color: window.textSecondary
             }
 
             Rectangle {
@@ -203,7 +196,7 @@ Rectangle {
                     anchors.centerIn: parent
                     name: "plus"
                     size: 14
-                    color: "#6B7280"
+                    color: window.textSecondary
                     strokeWidth: 2
                 }
 
@@ -241,7 +234,7 @@ Rectangle {
                         width: 28; height: 28; radius: 6
                         gradient: Gradient {
                             orientation: Gradient.Vertical
-                            GradientStop { position: 0; color: "#3B82F6" }
+                            GradientStop { position: 0; color: window.brand }
                             GradientStop { position: 1; color: "#6366F1" }
                         }
                         AppIcon {
@@ -262,7 +255,7 @@ Rectangle {
                             font.family: "Microsoft YaHei UI"
                             font.pixelSize: 13
                             font.weight: Font.Medium
-                            color: "#1F2937"
+                            color: window.textPrimary
                             elide: Text.ElideRight
                         }
                         Text {
@@ -270,7 +263,7 @@ Rectangle {
                             text: dropTarget.containsDrag ? "松开以添加" : (modelData.count + " 首")
                             font.family: "Microsoft YaHei UI"
                             font.pixelSize: 10
-                            color: dropTarget.containsDrag ? window.brand : "#9CA3AF"
+                            color: dropTarget.containsDrag ? window.brand : window.textTertiary
                             Behavior on color { ColorAnimation { duration: 120 } }
                         }
                     }

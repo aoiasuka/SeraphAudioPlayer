@@ -57,11 +57,11 @@ Rectangle {
         antialiasing: true
     }
 
-    // 无封面时的后备底色
+    // 无封面时的后备底色 (与全局深色 token 协调)
     Rectangle {
         anchors.fill: parent
         radius: 16
-        color: "#0F172A" // slate-900
+        color: window.textPrimary
         visible: !root.hasCover
         antialiasing: true
     }

@@ -6,7 +6,7 @@ Item {
     property string iconName: ""
     property int size: 36
     property int iconSize: 18
-    property color iconColor: "#6B7280"
+    property color iconColor: "#6E6E73"
     property bool iconFilled: false
     // -1 表示走 AppIcon 默认 strokeWidth；显式 0 表示纯填充
     property real strokeWidthOverride: -1

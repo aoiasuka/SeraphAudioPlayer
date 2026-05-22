@@ -137,8 +137,8 @@ Item {
                 Layout.preferredWidth: 52
                 Layout.preferredHeight: 52
                 radius: 10
-                color: "#F1F5F9"          // slate-100
-                border.color: "#140F172A"
+                color: window.surfaceAlt
+                border.color: window.borderColor
                 border.width: 1
                 clip: true
 
@@ -175,7 +175,7 @@ Item {
                     visible: !playerVM.currentCoverUrl
                     name: "music"
                     size: 20
-                    color: "#94A3B8"
+                    color: window.textTertiary
                     strokeWidth: 1.5
                 }
 
@@ -196,7 +196,7 @@ Item {
                     font.family: window.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.DemiBold
-                    color: "#0F172A"
+                    color: window.textPrimary
                     elide: Text.ElideRight
                 }
                 Text {
@@ -204,7 +204,7 @@ Item {
                     text: playerVM.formatInfo !== "" ? playerVM.formatInfo : ""
                     font.family: window.fontFamily
                     font.pixelSize: 12
-                    color: "#64748B"
+                    color: window.textSecondary
                     elide: Text.ElideRight
                 }
             }
@@ -217,7 +217,7 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     radius: 17
-                    color: likeArea.containsMouse ? "#140F172A" : "transparent"
+                    color: likeArea.containsMouse ? window.hoverBg : "transparent"
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
@@ -226,7 +226,7 @@ Item {
                     name: "heart"
                     size: 17
                     color: playerVM.currentLiked ? window.likeRed
-                         : (likeArea.containsMouse ? "#475569" : "#94A3B8")
+                         : (likeArea.containsMouse ? window.textSecondary : window.textTertiary)
                     filled: playerVM.currentLiked
                     strokeWidth: 1.8
                 }
@@ -253,14 +253,14 @@ Item {
             // shuffle
             IconCircleBtn {
                 iconName: "shuffle"; size: 32; iconSize: 16
-                iconColor: playerVM.shuffle ? "#0F172A" : "#94A3B8"
+                iconColor: playerVM.shuffle ? window.textPrimary : window.textTertiary
                 onClicked: playerVM.toggleShuffle()
             }
 
             // prev
             IconCircleBtn {
                 iconName: "prev"; size: 36; iconSize: 18
-                iconColor: "#0F172A"
+                iconColor: window.textPrimary
                 iconFilled: true
                 strokeWidthOverride: 0
                 onClicked: playerVM.previous()
@@ -272,7 +272,7 @@ Item {
                 Layout.preferredHeight: 46
                 radius: 23
                 color: playArea.pressed ? "#000000"
-                     : (playArea.containsMouse ? "#0F172A" : "#1E293B")
+                     : (playArea.containsMouse ? "#0F0F11" : window.textPrimary)
                 Behavior on color { ColorAnimation { duration: 150 } }
 
                 scale: playArea.containsMouse ? 1.04 : 1.0
@@ -302,7 +302,7 @@ Item {
             // next
             IconCircleBtn {
                 iconName: "next"; size: 36; iconSize: 18
-                iconColor: "#0F172A"
+                iconColor: window.textPrimary
                 iconFilled: true
                 strokeWidthOverride: 0
                 onClicked: playerVM.next()
@@ -311,7 +311,7 @@ Item {
             // repeat
             IconCircleBtn {
                 iconName: "repeat"; size: 32; iconSize: 16
-                iconColor: playerVM.repeatMode > 0 ? "#0F172A" : "#94A3B8"
+                iconColor: playerVM.repeatMode > 0 ? window.textPrimary : window.textTertiary
                 badgeText: playerVM.repeatMode === 2 ? "1" : ""
                 onClicked: playerVM.cycleRepeatMode()
             }
@@ -333,14 +333,14 @@ Item {
                 font.family: window.fontFamily
                 font.pixelSize: 11
                 font.weight: Font.Medium
-                color: "#94A3B8"
+                color: window.textTertiary
             }
 
             // 音量
             AppIcon {
                 name: playerVM.muted || playerVM.volume === 0 ? "volume-mute" : "volume"
                 size: 17
-                color: "#64748B"
+                color: window.textSecondary
                 strokeWidth: 1.8
 
                 MouseArea {
@@ -369,13 +369,13 @@ Item {
                     width: volumeSlider.availableWidth
                     height: 2
                     radius: 1
-                    color: "#1A0F172A"
+                    color: "#1A000000"
 
                     Rectangle {
                         width: volumeSlider.visualPosition * parent.width
                         height: parent.height
                         radius: parent.radius
-                        color: "#1E293B"
+                        color: window.textPrimary
                     }
                 }
 
@@ -385,7 +385,7 @@ Item {
                     width: volumeSlider.barHovered ? 10 : 0
                     height: width
                     radius: width / 2
-                    color: "#0F172A"
+                    color: window.textPrimary
                     Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
                 }
 
@@ -399,14 +399,14 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     radius: 17
-                    color: qArea.containsMouse ? "#140F172A" : "transparent"
+                    color: qArea.containsMouse ? window.hoverBg : "transparent"
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
                 AppIcon {
                     anchors.centerIn: parent
                     name: "list"
                     size: 17
-                    color: qArea.containsMouse ? "#0F172A" : "#64748B"
+                    color: qArea.containsMouse ? window.textPrimary : window.textSecondary
                     strokeWidth: 1.8
                 }
                 MouseArea {

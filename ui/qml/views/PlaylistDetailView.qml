@@ -100,7 +100,7 @@ Item {
                 radius: 16
                 gradient: Gradient {
                     orientation: Gradient.Vertical
-                    GradientStop { position: 0; color: "#3B82F6" }
+                    GradientStop { position: 0; color: window.brand }
                     GradientStop { position: 1; color: "#6366F1" }
                 }
                 AppIcon {

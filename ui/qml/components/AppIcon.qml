@@ -1,12 +1,12 @@
 import QtQuick
 
 // 统一图标组件 - 用 Canvas + SVG path 解析器绘制 (不依赖 QtQuick.Shapes)
-// 用法: AppIcon { name: "home"; size: 22; color: "#1F2937" }
+// 用法: AppIcon { name: "home"; size: 22; color: "#1C1C1E" }
 Item {
     id: root
     property string name: ""
     property int size: 20
-    property color color: "#1F2937"
+    property color color: "#1C1C1E"
     property real strokeWidth: 1.8
     property bool filled: false
 

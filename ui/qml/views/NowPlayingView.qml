@@ -42,7 +42,7 @@ Item {
         SidebarIconButton {
             iconName: "chevron"
             iconSize: 18
-            iconColor: "#1F2937"
+            iconColor: window.textPrimary
             implicitWidth: 36
             implicitHeight: 36
             onClicked: root.StackView.view.pop()
@@ -100,7 +100,7 @@ Item {
         SidebarIconButton {
             iconName: "more"
             iconSize: 18
-            iconColor: "#1F2937"
+            iconColor: window.textPrimary
             implicitWidth: 36
             implicitHeight: 36
             onClicked: {
@@ -122,7 +122,7 @@ Item {
         width: Math.min(parent.width * 0.6, parent.height * 0.5)
         height: width
         radius: 16
-        color: "#1E40AF"
+        color: window.textPrimary
         clip: true
 
         // 内嵌封面图(若有)
@@ -256,7 +256,7 @@ Item {
                 font.family: "Microsoft YaHei UI"
                 font.pixelSize: 24
                 font.weight: Font.Bold
-                color: "#1F2937"
+                color: window.textPrimary
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignHCenter
             }
@@ -269,7 +269,7 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     radius: 18
-                    color: likeArea.containsMouse ? "#F3F4F6" : "transparent"
+                    color: likeArea.containsMouse ? window.hoverBg : "transparent"
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
@@ -277,7 +277,7 @@ Item {
                     anchors.centerIn: parent
                     name: "heart"
                     size: 22
-                    color: playerVM.currentLiked ? window.likeRed : "#6B7280"
+                    color: playerVM.currentLiked ? window.likeRed : window.textSecondary
                     filled: playerVM.currentLiked
                     strokeWidth: 1.8
                 }
@@ -298,7 +298,7 @@ Item {
             text: playerVM.formatInfo
             font.family: "Microsoft YaHei UI"
             font.pixelSize: 14
-            color: "#6B7280"
+            color: window.textSecondary
             elide: Text.ElideRight
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
@@ -533,30 +533,38 @@ Item {
 
             onMoved: playerVM.seek(value)
 
+            property bool barHovered: progressHover.hovered || pressed
+
+            // 极简单色细线: 与 MiniPlayer 风格统一, hover 时略微变粗
             background: Rectangle {
                 x: progressSlider.leftPadding
                 y: progressSlider.topPadding + progressSlider.availableHeight / 2 - height / 2
                 width: progressSlider.availableWidth
-                height: 4
-                radius: 2
-                color: "#33000000"
+                height: progressSlider.barHovered ? 3 : 2
+                radius: height / 2
+                color: "#1A000000"
+                Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
                 Rectangle {
                     width: progressSlider.visualPosition * parent.width
                     height: parent.height
                     radius: parent.radius
-                    color: "#2563EB"
+                    color: window.textPrimary
                 }
             }
 
+            // handle: 仅 hover 时显现的小圆点
             handle: Rectangle {
                 x: progressSlider.leftPadding + progressSlider.visualPosition * (progressSlider.availableWidth - width)
                 y: progressSlider.topPadding + progressSlider.availableHeight / 2 - height / 2
-                width: 14; height: 14; radius: 7
-                color: "#2563EB"
-                border.color: "#FFFFFF"
-                border.width: 2
+                width: progressSlider.barHovered ? 12 : 0
+                height: width
+                radius: width / 2
+                color: window.textPrimary
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutQuart } }
             }
+
+            HoverHandler { id: progressHover }
         }
 
         RowLayout {
@@ -565,14 +573,14 @@ Item {
                 text: root.formatTime(playerVM.position)
                 font.family: "Microsoft YaHei UI"
                 font.pixelSize: 12
-                color: "#9CA3AF"
+                color: window.textTertiary
             }
             Item { Layout.fillWidth: true }
             Text {
                 text: root.formatTime(playerVM.duration)
                 font.family: "Microsoft YaHei UI"
                 font.pixelSize: 12
-                color: "#9CA3AF"
+                color: window.textTertiary
             }
         }
     }
@@ -588,25 +596,25 @@ Item {
 
         IconCircleBtn {
             iconName: "shuffle"; size: 40; iconSize: 18
-            iconColor: playerVM.shuffle ? "#2563EB" : "#6B7280"
+            iconColor: playerVM.shuffle ? window.textPrimary : window.textTertiary
             onClicked: playerVM.toggleShuffle()
         }
 
         IconCircleBtn {
             iconName: "prev"; size: 44; iconSize: 22
-            iconColor: "#1F2937"
+            iconColor: window.textPrimary
             iconFilled: true
             strokeWidthOverride: 0
             onClicked: playerVM.previous()
         }
 
-        // 主播放按钮
+        // 主播放按钮 (深色实心胶囊, 与 MiniPlayer 风格一致)
         Rectangle {
             Layout.preferredWidth: 64
             Layout.preferredHeight: 64
             radius: 32
-            color: mainPlayArea.pressed ? "#1E40AF"
-                 : (mainPlayArea.containsMouse ? "#1D4ED8" : "#2563EB")
+            color: mainPlayArea.pressed ? "#000000"
+                 : (mainPlayArea.containsMouse ? "#0F0F11" : window.textPrimary)
             Behavior on color { ColorAnimation { duration: 120 } }
 
             AppIcon {
@@ -632,7 +640,7 @@ Item {
 
         IconCircleBtn {
             iconName: "next"; size: 44; iconSize: 22
-            iconColor: "#1F2937"
+            iconColor: window.textPrimary
             iconFilled: true
             strokeWidthOverride: 0
             onClicked: playerVM.next()
@@ -640,7 +648,7 @@ Item {
 
         IconCircleBtn {
             iconName: "repeat"; size: 40; iconSize: 18
-            iconColor: playerVM.repeatMode > 0 ? "#2563EB" : "#6B7280"
+            iconColor: playerVM.repeatMode > 0 ? window.textPrimary : window.textTertiary
             badgeText: playerVM.repeatMode === 2 ? "1" : ""
             onClicked: playerVM.cycleRepeatMode()
         }

@@ -93,7 +93,7 @@ Item {
             drawVu(28, root.vuR, playerVM.peakRight)
 
             // 标签
-            ctx.fillStyle = "#9CA3AF"
+            ctx.fillStyle = "#8E8E93"
             ctx.font = "10px 'Microsoft YaHei UI'"
             ctx.fillText("L", 9, h - 8)
             ctx.fillText("R", 29, h - 8)

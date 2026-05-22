@@ -350,7 +350,7 @@ Item {
                                         radius: window.smallRadius
                                         gradient: Gradient {
                                             orientation: Gradient.Vertical
-                                            GradientStop { position: 0; color: index % 3 === 0 ? "#3B82F6"
+                                            GradientStop { position: 0; color: index % 3 === 0 ? window.brand
                                                                        : index % 3 === 1 ? "#10B981" : "#F59E0B" }
                                             GradientStop { position: 1; color: index % 3 === 0 ? "#6366F1"
                                                                        : index % 3 === 1 ? "#0EA5E9" : "#EF4444" }
