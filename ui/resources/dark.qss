@@ -1,0 +1,155 @@
+/* ============================================================================
+ * AudioPlayerX86 — Dark Theme
+ *
+ * 配色:VS Code Dark+ 风,蓝色高亮 #007acc。
+ * ========================================================================== */
+
+QWidget {
+    background-color: #1e1e1e;
+    color:            #e0e0e0;
+    font-family:      "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-size:        13px;
+}
+
+QMainWindow, QMenuBar {
+    background-color: #1e1e1e;
+}
+
+/* ---------- 菜单 ---------- */
+QMenuBar {
+    border-bottom: 1px solid #2d2d30;
+    padding: 2px 4px;
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 3px;
+}
+QMenuBar::item:selected {
+    background: #2d2d30;
+}
+QMenu {
+    background-color: #252526;
+    border: 1px solid #3e3e42;
+}
+QMenu::item {
+    padding: 6px 24px;
+}
+QMenu::item:selected {
+    background-color: #094771;
+}
+QMenu::separator {
+    height: 1px;
+    background: #3e3e42;
+    margin: 4px 8px;
+}
+
+/* ---------- 标签 ---------- */
+QLabel#titleLabel {
+    font-size: 18px;
+    font-weight: 600;
+    color: #ffffff;
+}
+QLabel#formatLabel {
+    color: #9aa0a6;
+}
+QLabel#timeLabel {
+    color: #9aa0a6;
+    font-family: "Consolas", "Cascadia Mono", monospace;
+}
+QLabel#deviceCaption {
+    color: #9aa0a6;
+}
+
+/* ---------- 按钮 ---------- */
+QPushButton {
+    background-color: #2d2d30;
+    color:            #e0e0e0;
+    border:           1px solid #3e3e42;
+    border-radius:    4px;
+    padding:          6px 16px;
+    min-width:        72px;
+}
+QPushButton:hover {
+    background-color: #3e3e42;
+    border-color:     #565659;
+}
+QPushButton:pressed {
+    background-color: #094771;
+    border-color:     #007acc;
+}
+QPushButton:disabled {
+    color:            #5a5a5a;
+    background-color: #252526;
+    border-color:     #2d2d30;
+}
+QPushButton#playBtn { color: #4ec9b0; }     /* 强调播放 */
+QPushButton#stopBtn { color: #f48771; }     /* 强调停止 */
+
+/* ---------- 进度滑条 ---------- */
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #2d2d30;
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: #007acc;
+    border-radius: 2px;
+}
+QSlider::add-page:horizontal {
+    background: #2d2d30;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #ffffff;
+    border: 1px solid #007acc;
+    width: 12px;
+    height: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+}
+QSlider::handle:horizontal:hover {
+    background: #d4ecff;
+}
+QSlider:disabled::sub-page:horizontal { background: #3e3e42; }
+QSlider:disabled::handle:horizontal   { background: #565659; border-color: #3e3e42; }
+
+/* ---------- 下拉框 ---------- */
+QComboBox {
+    background-color: #2d2d30;
+    color:            #e0e0e0;
+    border:           1px solid #3e3e42;
+    border-radius:    4px;
+    padding:          4px 8px;
+    min-height:       22px;
+}
+QComboBox:hover {
+    border-color: #565659;
+}
+QComboBox:on {
+    border-color: #007acc;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+QComboBox QAbstractItemView {
+    background-color: #252526;
+    color:            #e0e0e0;
+    border: 1px solid #3e3e42;
+    selection-background-color: #094771;
+    outline: 0;
+}
+
+/* ---------- 状态栏 ---------- */
+QStatusBar {
+    background-color: #007acc;
+    color: #ffffff;
+    border-top: 1px solid #094771;
+}
+QStatusBar::item { border: none; }
+
+/* ---------- 对话框文本 ---------- */
+QDialog, QMessageBox {
+    background-color: #252526;
+}

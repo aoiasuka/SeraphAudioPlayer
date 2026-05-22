@@ -1,0 +1,60 @@
+# Build outputs
+build/
+build-*/
+build_app/
+build_app_log.txt
+out/
+bin/
+lib/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.dll
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+install_manifest.txt
+compile_commands.json
+
+# vcpkg
+vcpkg_installed/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+*.aps
+*.opensdf
+*.sdf
+*.opendb
+*.VC.db
+*.VC.opendb
+
+# Qt
+*.qmlc
+*.qmltc
+*.qmlproject.user*
+qrc_*.cpp
+moc_*.cpp
+moc_*.h
+ui_*.h
+
+# Logs / runtime
+*.log
+logs/
+*.tmp
+*.bak
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

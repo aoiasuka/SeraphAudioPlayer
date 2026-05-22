@@ -1,0 +1,38 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="qml/main.qml">../qml/main.qml</file>
+        <file alias="qml/components/MiniPlayer.qml">../qml/components/MiniPlayer.qml</file>
+        <file alias="qml/components/Sidebar.qml">../qml/components/Sidebar.qml</file>
+        <file alias="qml/components/TitleBar.qml">../qml/components/TitleBar.qml</file>
+        <file alias="qml/components/SidebarItem.qml">../qml/components/SidebarItem.qml</file>
+        <file alias="qml/components/SidebarIconButton.qml">../qml/components/SidebarIconButton.qml</file>
+        <file alias="qml/components/AppIcon.qml">../qml/components/AppIcon.qml</file>
+        <file alias="qml/components/HeroBanner.qml">../qml/components/HeroBanner.qml</file>
+        <file alias="qml/components/PlaylistCard.qml">../qml/components/PlaylistCard.qml</file>
+        <file alias="qml/components/TrackRow.qml">../qml/components/TrackRow.qml</file>
+        <file alias="qml/components/IconCircleBtn.qml">../qml/components/IconCircleBtn.qml</file>
+        <file alias="qml/components/QueueDrawer.qml">../qml/components/QueueDrawer.qml</file>
+        <file alias="qml/components/TrackContextMenu.qml">../qml/components/TrackContextMenu.qml</file>
+        <file alias="qml/components/TrackListPage.qml">../qml/components/TrackListPage.qml</file>
+        <file alias="qml/components/PlaceholderPage.qml">../qml/components/PlaceholderPage.qml</file>
+        <file alias="qml/components/ShortcutsDialog.qml">../qml/components/ShortcutsDialog.qml</file>
+        <file alias="qml/components/LyricsView.qml">../qml/components/LyricsView.qml</file>
+        <file alias="qml/components/SpectrumView.qml">../qml/components/SpectrumView.qml</file>
+        <file alias="qml/components/ReorderableTrackList.qml">../qml/components/ReorderableTrackList.qml</file>
+        <file alias="qml/components/EqDialog.qml">../qml/components/EqDialog.qml</file>
+        <file alias="qml/components/SearchUtil.js">../qml/components/SearchUtil.js</file>
+        <file alias="qml/views/NowPlayingView.qml">../qml/views/NowPlayingView.qml</file>
+        <file alias="qml/views/HomeView.qml">../qml/views/HomeView.qml</file>
+        <file alias="qml/views/LibraryView.qml">../qml/views/LibraryView.qml</file>
+        <file alias="qml/views/HistoryView.qml">../qml/views/HistoryView.qml</file>
+        <file alias="qml/views/LikedView.qml">../qml/views/LikedView.qml</file>
+        <file alias="qml/views/SettingsView.qml">../qml/views/SettingsView.qml</file>
+        <file alias="qml/views/PlaylistsView.qml">../qml/views/PlaylistsView.qml</file>
+        <file alias="qml/views/PlaylistDetailView.qml">../qml/views/PlaylistDetailView.qml</file>
+        <file alias="qml/views/ArtistView.qml">../qml/views/ArtistView.qml</file>
+        <file alias="qml/views/ArtistDetailView.qml">../qml/views/ArtistDetailView.qml</file>
+        <file alias="qml/views/AlbumView.qml">../qml/views/AlbumView.qml</file>
+        <file alias="qml/views/AlbumDetailView.qml">../qml/views/AlbumDetailView.qml</file>
+        <file alias="qml/views/SearchResultsView.qml">../qml/views/SearchResultsView.qml</file>
+    </qresource>
+</RCC>
