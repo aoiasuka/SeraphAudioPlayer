@@ -41,7 +41,7 @@ Item {
         anchors.topMargin: 0
         radius: 16
         color: window.sidebarBg
-        border.color: "#33FFFFFF"
+        border.color: window.borderColor
         border.width: 1
 
         ColumnLayout {

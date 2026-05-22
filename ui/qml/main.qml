@@ -23,6 +23,7 @@ ApplicationWindow {
         anchors.right: parent.right
         targetWindow: window
         z: 9999
+        onHamburgerClicked: window.openDrawer()
     }
 
     // ===== 边缘 / 四角 resize 热区 (frameless 模式自管) =====
@@ -97,46 +98,47 @@ ApplicationWindow {
     }
 
     // ---- 主题 token (子组件通过 window.xxx 访问) ----
-    // 全局背景改为动态背景，这里提供备用色
-    readonly property color appBg: "#F0F4F8"
-    // 毛玻璃侧边栏和卡片背景 (半透明)
-    readonly property color sidebarBg: "#88FFFFFF"
-    readonly property color surface: "#99FFFFFF"
-    readonly property color hoverBg: "#33FFFFFF"
-    readonly property color cardHover: "#E6FFFFFF"
-    readonly property color activeBg: "#B3DBEAFE"
-    readonly property color playerBg: "#DDF8F9FA"
+    // 极简护眼主题:
+    //   • 全局背景使用低饱和度复古纸张色, 长时间使用减少疲劳
+    //   • 不再依靠透明叠加表达层级, 改用纯色面板 + 柔和投影
+    //   • 文字使用接近纯黑的深灰提高对比度
+    readonly property color appBg: "#FDFBF7"             // 主背景: 米白纸张色
+    readonly property color appBgSubtle: "#F4F0EA"       // 次级背景: 浅麦色 (备用)
+    readonly property color surface: "#FFFFFF"           // 卡片/弹窗面板: 纯白
+    readonly property color surfaceAlt: "#FAFAFA"        // 备用/分区背景
+    readonly property color surfaceHover: "#F2EFE8"      // 行 hover 浅麦色
+    readonly property color sidebarBg: "#FFFFFF"         // 侧边/抽屉面板
+    readonly property color hoverBg: "#0A000000"         // 通用 hover 4% 黑
+    readonly property color cardHover: "#F2EFE8"
+    readonly property color activeBg: "#FFE8E6FF"        // 选中态: 极淡品牌冷调
+    readonly property color playerBg: "#FFFFFF"
 
-    readonly property color textPrimary: "#111827"
-    readonly property color textSecondary: "#4B5563"
-    readonly property color textTertiary: "#9CA3AF"
+    readonly property color textPrimary: "#1C1C1E"       // iOS 风深灰, 接近纯黑
+    readonly property color textSecondary: "#6E6E73"     // 次级
+    readonly property color textTertiary: "#8E8E93"      // 占位/弱化
 
     readonly property color brand: "#3B82F6"
     readonly property color brandHover: "#2563EB"
     readonly property color brandPress: "#1D4ED8"
-    readonly property color brandSoft: "#BFDBFE"
+    readonly property color brandSoft: "#DBEAFE"
 
     readonly property color heroTop: "#2563EB"
     readonly property color heroBottom: "#4F46E5"
 
-    readonly property color borderColor: "#33E5E7EB"
-    readonly property color divider: "#22000000"
+    readonly property color borderColor: "#1A000000"     // 1px 描边: 10% 黑
+    readonly property color hairline: "#0F000000"        // 极细分隔
+    readonly property color divider: "#14000000"
     readonly property color likeRed: "#EF4444"
 
-    // ===== Design tokens: Glass / Menu / Radii =====
-    // 用于弹窗、菜单、抽屉等浮层的统一毛玻璃材质 (亮玻璃)
-    // 注意: 真正的高斯模糊需要 GraphicsEffects, 这里采用"高不透明度浅色"近似毛玻璃,
-    //       足以遮挡底层文字, 同时保留淡淡的色调过渡感
-    readonly property color glassBg: "#E8F7F8FC"     // 浅色弹窗主体: ~91% 不透明, 避免底层文字穿透
-    readonly property color glassBgSoft: "#A8FFFFFF" // 抽屉/侧边栏可继续使用的半透明
-    // 深色版毛玻璃 (用于右键菜单、深色弹层)
-    readonly property color menuBg: "#E81F2937"      // ~91% 不透明深色, 杜绝下层文字干扰
-    readonly property color menuHoverBg: "#553B82F6"
-    // 玻璃浮层统一描边
-    readonly property color glassBorder: "#33FFFFFF"
-    readonly property color glassBorderDark: "#22000000"
-    // 模态遮罩 (压暗底层, 让焦点集中到弹窗)
-    readonly property color modalScrim: "#99000000"  // 60% 黑色, 强力遮挡
+    // ===== Design tokens: 纯色面板 + 阴影 + 圆角 =====
+    readonly property color surfaceMenu: "#FFFFFF"       // 菜单/弹窗: 纯白
+    readonly property color menuHoverBg: "#F2EFE8"       // 菜单项 hover: 浅麦色
+    readonly property color modalScrim: "#66000000"      // 模态遮罩: 40% 黑
+
+    // 阴影色 (用于 MultiEffect shadowColor)
+    readonly property color shadowColor: "#26000000"     // 大阴影 (浮窗)
+    readonly property color shadowColorSoft: "#14000000" // 卡片阴影
+    readonly property color shadowColorHairline: "#0A000000"
 
     // 圆角令牌
     readonly property int smallRadius: 8
@@ -144,78 +146,34 @@ ApplicationWindow {
     readonly property int largeRadius: 16
     readonly property int xLargeRadius: 20
 
+    // ===== 向后兼容别名 (将在弹窗/菜单重构完成后逐步移除) =====
+    // 让之前用 glassBg / menuBg / glassBorder 的组件仍能编译,
+    // 实际值映射到新的纯色面板与极细描边
+    readonly property color glassBg: surface
+    readonly property color glassBgSoft: surface
+    readonly property color menuBg: surfaceMenu
+    readonly property color glassBorder: borderColor
+    readonly property color glassBorderDark: borderColor
+
     readonly property string fontFamily: "Microsoft YaHei UI"
 
     // MiniPlayer 玻璃背景使用此别名抓取动态背景做 backdrop blur
     property alias backdropItem: dynamicBg
 
-    // ===== 封面主色染窗：当前曲目主色驱动整窗渐变 (1.5s 平滑过渡) =====
-    // 主色：直接来自 C++ 端 (24×24 像素平均 + HSV 调整)；
-    // 辅色：QML 端从主色派生 (色相 +28°，饱和度微降，亮度微降)，形成同调对角渐变。
-    property color domColor1: playerVM.currentDominantColor || "#1E40AF"
-    property color domColor2: {
-        var h = domColor1.hslHue
-        if (h < 0) h = 0.6   // 无封面时给一个蓝紫
-        h = (h + 0.078) % 1.0
-        var s = Math.min(1.0, domColor1.hslSaturation * 0.85 + 0.1)
-        var l = Math.max(0.20, Math.min(0.55, domColor1.hslLightness - 0.06))
-        return Qt.hsla(h, s, l, 1.0)
-    }
+    // ===== 封面主色 (现仅用于 ColorImageProvider / 个别强调元素, 不再用于全屏背景) =====
+    property color domColor1: playerVM.currentDominantColor || window.brand
+    property color domColor2: window.brand
     Behavior on domColor1 { ColorAnimation { duration: 1500; easing.type: Easing.InOutQuad } }
-    Behavior on domColor2 { ColorAnimation { duration: 1500; easing.type: Easing.InOutQuad } }
 
-    // ===== 动态主色背景 =====
-    // 三层叠加：① 主色对角渐变  ② 白色雾化层(保证文字对比度)  ③ 极淡浮动光晕(保留呼吸感)
-    // 注: MiniPlayer 通过 window.dynamicBg 引用此项做 backdrop blur
+    // ===== 护眼纯色背景 =====
+    // 弃用先前的紫色对角渐变 + 白雾化 + 浮动光晕,
+    // 采用低饱和度米白纸张色作为主背景, 长时间观看更舒适
     Rectangle {
         id: dynamicBg
         anchors.fill: parent
         radius: 16
         antialiasing: true
-        gradient: Gradient {
-            orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: window.domColor1 }
-            GradientStop { position: 1.0; color: window.domColor2 }
-        }
-
-        // 白色雾化层 —— 上浓下淡的纵向白幕，叠出"被照亮"的对角感，
-        // 同时把主色饱和度压到适合长时间观看的水平，保证文字 4.5:1 对比度
-        Rectangle {
-            anchors.fill: parent
-            radius: parent.radius
-            antialiasing: true
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#A8FFFFFF" }
-                GradientStop { position: 1.0; color: "#55FFFFFF" }
-            }
-        }
-
-        // 浮动光晕 (保留呼吸感,变为极淡白色斑,不再抢主色风头)
-        Rectangle {
-            width: 800; height: 800; radius: 400
-            color: "#33FFFFFF"
-            x: -200; y: -200
-            SequentialAnimation on x {
-                loops: Animation.Infinite
-                NumberAnimation { to: 200; duration: 25000; easing.type: Easing.InOutSine }
-                NumberAnimation { to: -200; duration: 25000; easing.type: Easing.InOutSine }
-            }
-        }
-        Rectangle {
-            width: 700; height: 700; radius: 350
-            color: "#2BFFFFFF"
-            x: window.width - 400; y: window.height - 300
-            SequentialAnimation on y {
-                loops: Animation.Infinite
-                NumberAnimation { to: window.height - 500; duration: 20000; easing.type: Easing.InOutSine }
-                NumberAnimation { to: window.height - 300; duration: 20000; easing.type: Easing.InOutSine }
-            }
-            SequentialAnimation on x {
-                loops: Animation.Infinite
-                NumberAnimation { to: window.width - 600; duration: 22000; easing.type: Easing.InOutSine }
-                NumberAnimation { to: window.width - 400; duration: 22000; easing.type: Easing.InOutSine }
-            }
-        }
+        color: window.appBg
     }
 
     // 当前选中的侧栏菜单 (用于 active 高亮)
@@ -279,97 +237,115 @@ ApplicationWindow {
         }
     }
 
-    // ===== 主布局：左侧栏 + 右内容 (悬浮岛风格) =====
-    RowLayout {
+    // ===== 主布局: 仅主内容区 (导航移入 Drawer, 进一步释放横向空间) =====
+    Rectangle {
+        id: mainContent
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.topMargin: titleBar.height + 4
-        anchors.bottomMargin: 100  // 给底部悬浮播放器留位
-        anchors.leftMargin: 16
-        anchors.rightMargin: 16
-        spacing: 16
+        anchors.topMargin: titleBar.height
+        anchors.bottomMargin: 104        // 给浮岛 MiniPlayer 让出空间
+        color: "transparent"
 
-        // 左侧栏 (悬浮)
-        Sidebar {
-            id: sidebar
-            Layout.preferredWidth: 220
-            Layout.fillHeight: true
-            activeKey: window.currentNav
-            busy: stackView.busy
-            onNavClicked: function(key) {
-                window.navigateTo(key)
+        StackView {
+            id: stackView
+            anchors.fill: parent
+
+            // 不使用 initialItem (URL 方式在构造期加载会导致子组件绑定失败),
+            // 改为在 onCompleted 中推入首页,确保所有上下文属性已就绪
+            Component.onCompleted: {
+                stackView.push(Qt.resolvedUrl("views/HomeView.qml"), StackView.Immediate)
             }
-            onOpenPlaylistRequested: function(id) {
-                window.openPlaylist(id)
+
+            pushEnter: Transition {
+                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
+                PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
             }
-            onCreatePlaylistRequested: {
-                window.navigateTo("playlist")
-            }
-        }
-
-        // 主内容区 (悬浮)
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            color: "transparent"
-
-            StackView {
-                id: stackView
-                anchors.fill: parent
-
-                // 不使用 initialItem (URL 方式在构造期加载会导致子组件绑定失败),
-                // 改为在 onCompleted 中推入首页,确保所有上下文属性已就绪
-                Component.onCompleted: {
-                    stackView.push(Qt.resolvedUrl("views/HomeView.qml"), StackView.Immediate)
+            pushExit: Transition {
+                SequentialAnimation {
+                    PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
+                    PropertyAction { property: "visible"; value: false }
                 }
-
-                pushEnter: Transition {
-                    PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                    PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
-                }
-                pushExit: Transition {
-                    SequentialAnimation {
+            }
+            popEnter: Transition {
+                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
+            }
+            popExit: Transition {
+                SequentialAnimation {
+                    ParallelAnimation {
                         PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                        PropertyAction { property: "visible"; value: false }
+                        PropertyAnimation { property: "y"; from: 0; to: 16; duration: 150; easing.type: Easing.InQuart }
                     }
+                    PropertyAction { property: "visible"; value: false }
                 }
-                popEnter: Transition {
-                    PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                }
-                popExit: Transition {
-                    SequentialAnimation {
-                        ParallelAnimation {
-                            PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                            PropertyAnimation { property: "y"; from: 0; to: 16; duration: 150; easing.type: Easing.InQuart }
-                        }
-                        PropertyAction { property: "visible"; value: false }
-                    }
-                }
-                replaceEnter: Transition {
-                    PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                    PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
-                }
-                replaceExit: Transition {
-                    SequentialAnimation {
-                        PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                        PropertyAction { property: "visible"; value: false }
-                    }
+            }
+            replaceEnter: Transition {
+                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
+                PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
+            }
+            replaceExit: Transition {
+                SequentialAnimation {
+                    PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
+                    PropertyAction { property: "visible"; value: false }
                 }
             }
         }
     }
 
-    // 底部 MiniPlayer (悬浮岛) — 进入「正在播放」视图后自动隐藏，由页内控制栏接管
+    // ===== 抽屉式导航 (Hamburger 触发, 自左侧推入) =====
+    Drawer {
+        id: navDrawer
+        edge: Qt.LeftEdge
+        width: 280
+        height: window.height
+        modal: true
+        interactive: true
+        dragMargin: 0           // 不让左边缘的滑动手势误触发, 主内容里的列表/拖动不受干扰
+        dim: true
+
+        Overlay.modal: Rectangle {
+            color: window.modalScrim
+            Behavior on opacity { NumberAnimation { duration: 180 } }
+        }
+
+        background: Rectangle {
+            color: window.sidebarBg
+            border.color: window.borderColor
+            border.width: 1
+        }
+
+        Sidebar {
+            id: drawerSidebar
+            anchors.fill: parent
+            activeKey: window.currentNav
+            busy: stackView.busy
+            onNavClicked: function(key) {
+                window.navigateTo(key)
+                navDrawer.close()
+            }
+            onOpenPlaylistRequested: function(id) {
+                window.openPlaylist(id)
+                navDrawer.close()
+            }
+            onCreatePlaylistRequested: {
+                window.navigateTo("playlist")
+                navDrawer.close()
+            }
+        }
+    }
+
+    function openDrawer()  { navDrawer.open()  }
+    function closeDrawer() { navDrawer.close() }
+
+    // 底部 MiniPlayer (悬浮胶囊) — 进入「正在播放」视图后自动隐藏，由页内控制栏接管
     MiniPlayer {
         id: miniPlayer
         anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottomMargin: 16
-        anchors.leftMargin: 24
-        anchors.rightMargin: 24
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottomMargin: 18
+        // 居中, 留出两侧空间形成"悬浮"视觉
+        width: Math.min(parent.width - 96, 1280)
         height: 80
 
         // 进入「正在播放」沉浸视图时隐藏，避免与页内控制栏功能/视觉冗余

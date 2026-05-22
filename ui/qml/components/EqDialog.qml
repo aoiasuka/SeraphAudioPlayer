@@ -224,7 +224,7 @@ Dialog {
                             text: modelData
                             font.family: window.fontFamily
                             font.pixelSize: 13
-                            color: "#FFFFFF"
+                            color: window.textPrimary
                             verticalAlignment: Text.AlignVCenter
                             leftPadding: 8
                         }

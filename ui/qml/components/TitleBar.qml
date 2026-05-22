@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 
-// 一体化窗口控制条 — 透明拖拽区 + 右上角浮岛式系统按钮 (纯 Qt frameless, 不依赖 QWindowKit)
-// 设计语言:与应用的玻璃态/悬浮岛保持一致
+// 一体化窗口控制条 — 透明拖拽区 + 左上角汉堡 + 右上角浮岛式系统按钮
+// 极简风格: 左 = 抽屉触发, 中 = 拖拽区, 右 = 最小化/最大化/关闭
 Rectangle {
     id: root
     height: 36
@@ -17,12 +17,41 @@ Rectangle {
     property alias maximizeButton: btnMax
     property alias closeButton: btnClose
 
+    // 由外部连接, 点击触发打开导航抽屉
+    signal hamburgerClicked()
+
     readonly property bool isMaximized: targetWindow.visibility === Window.Maximized
 
-    // ===== 拖拽区 (除去按钮区域以外的整条 titleBar 都可拖窗 & 双击切最大化) =====
+    // ===== 左上角汉堡: 触发 Drawer =====
+    Rectangle {
+        id: btnHamburger
+        width: 46
+        height: parent.height
+        anchors.left: parent.left
+        anchors.top: parent.top
+        color: hamHover.containsPress
+               ? "#22000000"
+               : (hamHover.containsMouse ? "#11000000" : "transparent")
+        Behavior on color { ColorAnimation { duration: 120 } }
+
+        AppIcon {
+            anchors.centerIn: parent
+            name: "menu"
+            size: 16
+            color: window.textPrimary
+            strokeWidth: 1.8
+        }
+
+        HoverHandler { id: hamHover; cursorShape: Qt.PointingHandCursor }
+        TapHandler {
+            onTapped: root.hamburgerClicked()
+        }
+    }
+
+    // ===== 拖拽区 (除去汉堡和系统按钮以外的整条 titleBar 都可拖窗) =====
     MouseArea {
         id: dragArea
-        anchors.left: parent.left
+        anchors.left: btnHamburger.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.right: controls.left

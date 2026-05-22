@@ -26,20 +26,8 @@ Item {
     // 视图模式: "cover" | "lyrics"
     property string viewMode: "cover"
 
-    // 背景完全透明，融入主窗口的动态主色渐变 (避免出现生硬白底)
-    // 仅添加极轻微的浅色雾化层以保证文字 4.5:1 对比度
-    Rectangle {
-        anchors.fill: parent
-        color: "transparent"
-        Rectangle {
-            anchors.fill: parent
-            gradient: Gradient {
-                orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: "#22FFFFFF" }
-                GradientStop { position: 1.0; color: "#0AFFFFFF" }
-            }
-        }
-    }
+    // 背景透明, 主窗口的护眼米白背景自然透过
+    // (旧版叠加白雾化层是为压低紫色渐变的饱和度, 新版主背景已是浅色, 无需再加层)
 
     // 顶部栏
     RowLayout {

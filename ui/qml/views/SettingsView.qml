@@ -66,7 +66,7 @@ Item {
                 Layout.preferredHeight: deviceCol.implicitHeight + 32
                 radius: 16
                 color: window.sidebarBg
-                border.color: "#33FFFFFF"
+                border.color: window.borderColor
                 border.width: 1
 
                 ColumnLayout {
@@ -255,7 +255,7 @@ Item {
                 Layout.preferredHeight: prefCol.implicitHeight + 32
                 radius: 16
                 color: window.sidebarBg
-                border.color: "#33FFFFFF"
+                border.color: window.borderColor
                 border.width: 1
 
                 ColumnLayout {
@@ -439,7 +439,7 @@ Item {
                 Layout.preferredHeight: aboutCol.implicitHeight + 32
                 radius: 16
                 color: window.sidebarBg
-                border.color: "#33FFFFFF"
+                border.color: window.borderColor
                 border.width: 1
 
                 ColumnLayout {

@@ -62,7 +62,7 @@ Item {
                 Layout.alignment: Qt.AlignVCenter
                 radius: 22
                 color: searchBox.activeFocus ? window.surface : window.sidebarBg
-                border.color: searchBox.activeFocus ? window.brand : "#33FFFFFF"
+                border.color: searchBox.activeFocus ? window.brand : window.borderColor
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 150 } }
 

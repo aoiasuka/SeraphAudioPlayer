@@ -48,25 +48,33 @@ Item {
         }
     }
 
+    // 投影层 (在面板之下, 让面板看起来悬浮)
+    Rectangle {
+        id: queueShadowSrc
+        anchors.fill: parent
+        radius: window.largeRadius
+        color: window.surface
+        visible: false
+        layer.enabled: true
+        layer.smooth: true
+    }
+    MultiEffect {
+        anchors.fill: queueShadowSrc
+        source: queueShadowSrc
+        shadowEnabled: true
+        shadowColor: window.shadowColor
+        shadowBlur: 1.0
+        shadowVerticalOffset: 8
+        shadowHorizontalOffset: -2
+    }
+
     Rectangle {
         anchors.fill: parent
         radius: window.largeRadius
-        // 与左侧 Sidebar 一致的半透明毛玻璃材质，融入底部紫色渐变
-        color: window.sidebarBg
-        border.color: window.glassBorder
+        color: window.surface
+        border.color: window.borderColor
         border.width: 1
         antialiasing: true
-
-        // 柔和弥散阴影 (轻量实现: 四周淡黑色描边层)
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: -1
-            radius: parent.radius + 1
-            color: "transparent"
-            border.color: "#14000000"
-            border.width: 1
-            z: -1
-        }
 
         ColumnLayout {
             anchors.fill: parent

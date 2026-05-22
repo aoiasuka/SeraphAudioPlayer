@@ -3,89 +3,53 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Effects
 
-// 底部播放条 — iOS 风半透明玻璃悬浮岛
+// 底部播放条 — 极简纯色悬浮胶囊
 // 设计:
-//   - 真实 backdrop blur (抓取 window.backdropItem 做高斯模糊)
-//   - 半透明白色雾化叠加, 保证文字对比度
-//   - 1px 白色高光内边框, 玻璃边缘质感
-//   - 进度条 = 1.5px 极细线, 贴卡片顶边缘, handle 仅 hover 时显现
+//   - 纯白卡片 + 柔和投影, 在米色主背景上"悬空"
+//   - 1px 极细描边 (10% 黑), 让边缘清晰
+//   - 极简单色进度条 (深灰), handle 仅 hover 时显现
 //   - 左: 封面 + 歌名/格式 + 喜欢
 //   - 中: 5 个控制按钮
 //   - 右: 音量 + 队列
-Rectangle {
+Item {
     id: root
-    color: "transparent"                  // 由内部 glass 层负责着色
-    radius: 24
-    clip: false                           // handle 上溢卡片顶部需保留, 玻璃形状由 glassLayer 自己 mask
-    layer.enabled: true
+    clip: false
 
-    // ===== iOS 玻璃背景层 (backdrop blur + 雾化) =====
-    Item {
-        id: glassLayer
-        anchors.fill: parent
+    // 通过 alias 让外部继续用 .radius 调整
+    property real radius: 22
 
-        // ① 抓取窗口动态背景 (主色渐变 + 雾化 + 光晕)
-        ShaderEffectSource {
-            id: backdropSrc
-            anchors.fill: parent
-            sourceItem: window.backdropItem
-            sourceRect: Qt.rect(root.x, root.y, root.width, root.height)
-            textureSize: Qt.size(root.width * 0.5, root.height * 0.5)  // 半分辨率, blur 看不出差异
-            live: true
-            recursive: false
-            smooth: true
-            visible: false                // 仅供 effect 使用
-        }
+    signal clicked()
+    signal showQueueClicked()
 
-        // ② 高斯模糊 + 轻微提升饱和度 (iOS vibrancy 感)
-        MultiEffect {
-            anchors.fill: parent
-            source: backdropSrc
-            blurEnabled: true
-            blur: 1.0
-            blurMax: 64
-            blurMultiplier: 1.0
-            saturation: 0.3
-        }
-
-        // ③ 半透明白色雾化层 (material light) — 较透,让背景色透出更明显
-        Rectangle {
-            anchors.fill: parent
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#80FFFFFF" }
-                GradientStop { position: 1.0; color: "#55FFFFFF" }
-            }
-        }
-
-        // 圆角裁切: 用 MultiEffect mask 把玻璃层切成圆角
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            maskEnabled: true
-            maskSource: ShaderEffectSource {
-                sourceItem: glassMask
-                hideSource: true
-            }
-        }
-    }
-
-    // 用作 mask 的圆角矩形 (放在裁切目标外, 不参与显示)
+    // ===== 投影层 (放在面板之下) =====
     Rectangle {
-        id: glassMask
-        width: root.width
-        height: root.height
+        id: shadowSrc
+        anchors.fill: parent
         radius: root.radius
-        color: "black"
-        antialiasing: true
+        color: window.surface
         visible: false
+        layer.enabled: true
+        layer.smooth: true
+    }
+    MultiEffect {
+        anchors.fill: shadowSrc
+        source: shadowSrc
+        shadowEnabled: true
+        shadowColor: window.shadowColor
+        shadowBlur: 1.0
+        shadowVerticalOffset: 6
+        shadowHorizontalOffset: 0
     }
 
-    // ④ 玻璃边缘高光描边 (1px 半透明白)
+    // ===== 主面板: 纯白胶囊 + 极细描边 =====
     Rectangle {
+        id: panel
         anchors.fill: parent
         radius: root.radius
-        color: "transparent"
-        border.color: "#66FFFFFF"
+        color: window.surface
+        border.color: window.borderColor
         border.width: 1
+        antialiasing: true
     }
 
     // 启动时上移淡入
@@ -98,9 +62,6 @@ Rectangle {
         NumberAnimation { target: enterT; property: "y"; from: 24; to: 0; duration: 320; easing.type: Easing.OutQuart }
     }
 
-    signal clicked()
-    signal showQueueClicked()
-
     function formatTime(seconds) {
         if (!seconds || seconds < 0) return "00:00"
         var m = Math.floor(seconds / 60)
@@ -108,10 +69,7 @@ Rectangle {
         return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s)
     }
 
-    // ===== 进度条 =====
-    // background 真贴卡片顶边 y=0 (沿卡片顶部直线段)
-    // 左右 inset = root.radius, 两端正好对齐左上/右上圆角弧线端点
-    // handle 中心严格对齐 background 中心 (hover 时 handle 上溢卡片顶 ~4px 形成"探出"视觉)
+    // ===== 进度条 (极简单色细线) =====
     Slider {
         id: progressSlider
         anchors.top: parent.top
@@ -132,35 +90,29 @@ Rectangle {
         background: Rectangle {
             id: progressBg
             x: 0
-            y: 0                          // 真贴卡片顶边
+            y: 0
             width: progressSlider.availableWidth
-            height: progressSlider.barHovered ? 4 : 2.5
+            height: progressSlider.barHovered ? 3 : 2
             radius: height / 2
-            color: "#1F0F172A"
+            color: "#1A000000"          // 极细灰线
             Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
-            // 进度填充: 品牌色渐变 (蓝 → 紫, 呼应窗口主色)
+            // 进度填充: 单色深灰, 与"极简"基调一致
             Rectangle {
                 width: progressSlider.visualPosition * parent.width
                 height: parent.height
                 radius: parent.radius
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop { position: 0.0; color: window.brand }
-                    GradientStop { position: 1.0; color: window.heroBottom }
-                }
+                color: window.textPrimary
             }
         }
 
         handle: Rectangle {
             x: progressSlider.leftPadding + progressSlider.visualPosition * (progressSlider.availableWidth - width)
-            y: progressBg.height / 2 - height / 2    // 中心对齐 background 中心 (hover 时为负, 上溢卡片顶)
-            width: progressSlider.barHovered ? 12 : 0
+            y: progressBg.height / 2 - height / 2
+            width: progressSlider.barHovered ? 10 : 0
             height: width
             radius: width / 2
-            color: "#FFFFFF"
-            border.color: window.brand
-            border.width: 1.5
+            color: window.textPrimary
             Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutQuart } }
         }
 

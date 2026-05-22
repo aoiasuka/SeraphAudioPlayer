@@ -59,7 +59,7 @@ Item {
                 Layout.preferredHeight: 36
                 radius: 18
                 color: searchBox.activeFocus ? window.surface : window.sidebarBg
-                border.color: searchBox.activeFocus ? window.brand : "#33FFFFFF"
+                border.color: searchBox.activeFocus ? window.brand : window.borderColor
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 150 } }
 
@@ -119,7 +119,7 @@ Item {
                 visible: root.filteredArtists.length === 0
                 radius: 16
                 color: window.sidebarBg
-                border.color: "#33FFFFFF"
+                border.color: window.borderColor
                 border.width: 1
 
                 ColumnLayout {
@@ -149,7 +149,7 @@ Item {
                     Layout.preferredHeight: 72
                     radius: 14
                     color: rowArea.containsMouse ? window.cardHover : window.sidebarBg
-                    border.color: rowArea.containsMouse ? window.brandSoft : "#33FFFFFF"
+                    border.color: rowArea.containsMouse ? window.brandSoft : window.borderColor
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 150 } }
 

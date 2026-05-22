@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 
-// 曲目右键/更多菜单 (毛玻璃 + 大圆角 + 主题色 Hover)
+// 曲目右键/更多菜单 — 纯白卡片 + 圆角 + 浅色 Hover
 Menu {
     id: root
 
@@ -20,17 +20,17 @@ Menu {
     leftPadding: 6
     rightPadding: 6
 
-    // 背景：深色毛玻璃 + 大圆角 + 半透明白边
+    // 背景: 纯白卡片 + 1px 极细描边
     background: Rectangle {
         implicitWidth: 220
         radius: window.mediumRadius
-        color: window.menuBg
-        border.color: window.glassBorder
+        color: window.surfaceMenu
+        border.color: window.borderColor
         border.width: 1
         antialiasing: true
     }
 
-    // 自定义菜单项：圆角矩形 Hover、统一字体颜色、合适的内边距
+    // 自定义菜单项
     delegate: MenuItem {
         id: menuItem
         implicitHeight: 32
@@ -41,7 +41,7 @@ Menu {
             text: menuItem.text
             font.family: window.fontFamily
             font.pixelSize: 13
-            color: "#FFFFFF"
+            color: window.textPrimary
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
             opacity: menuItem.enabled ? 1.0 : 0.5
@@ -77,8 +77,8 @@ Menu {
         background: Rectangle {
             implicitWidth: 220
             radius: window.mediumRadius
-            color: window.menuBg
-            border.color: window.glassBorder
+            color: window.surfaceMenu
+            border.color: window.borderColor
             border.width: 1
             antialiasing: true
         }
@@ -92,7 +92,7 @@ Menu {
                 text: subMenuItem.text
                 font.family: window.fontFamily
                 font.pixelSize: 13
-                color: "#FFFFFF"
+                color: window.textPrimary
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
             }
@@ -122,7 +122,7 @@ Menu {
             contentItem: Rectangle {
                 implicitHeight: 1
                 implicitWidth: 180
-                color: window.glassBorder
+                color: window.hairline
             }
         }
         MenuItem {
@@ -138,7 +138,7 @@ Menu {
         contentItem: Rectangle {
             implicitHeight: 1
             implicitWidth: 180
-            color: window.glassBorder
+            color: window.hairline
         }
     }
     MenuItem {
@@ -149,7 +149,7 @@ Menu {
         contentItem: Rectangle {
             implicitHeight: 1
             implicitWidth: 180
-            color: window.glassBorder
+            color: window.hairline
         }
     }
     MenuItem {

@@ -170,7 +170,7 @@ Item {
                 visible: !playerVM.playlists || playerVM.playlists.length === 0
                 radius: 16
                 color: window.sidebarBg
-                border.color: "#33FFFFFF"
+                border.color: window.borderColor
                 border.width: 1
 
                 ColumnLayout {
@@ -214,7 +214,7 @@ Item {
                     Layout.preferredHeight: 80
                     radius: 14
                     color: rowArea.containsMouse ? window.cardHover : window.sidebarBg
-                    border.color: rowArea.containsMouse ? window.brandSoft : "#33FFFFFF"
+                    border.color: rowArea.containsMouse ? window.brandSoft : window.borderColor
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 150 } }
 

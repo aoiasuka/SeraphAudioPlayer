@@ -1,77 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Effects
 
-// 左侧导航栏 — iOS 风半透明玻璃悬浮岛 (与 MiniPlayer 同配方)
+// 左侧导航 — 极简纯色面板 (现作为 Drawer 内容使用)
 Rectangle {
     id: root
     objectName: "sidebarRoot"
-    color: "transparent"                  // 由内部 glass 层负责着色
-    radius: 20
+    color: window.sidebarBg
+    radius: 0
     clip: true
-    layer.enabled: true
-
-    // ===== iOS 玻璃背景层 (backdrop blur + 雾化) =====
-    Item {
-        id: glassLayer
-        anchors.fill: parent
-        z: -1                             // 在所有子项之下
-
-        // ① 抓取窗口动态背景
-        ShaderEffectSource {
-            id: backdropSrc
-            anchors.fill: parent
-            sourceItem: window.backdropItem
-            sourceRect: Qt.rect(root.x, root.y, root.width, root.height)
-            textureSize: Qt.size(root.width * 0.5, root.height * 0.5)
-            live: true
-            recursive: false
-            smooth: true
-            visible: false
-        }
-
-        // ② 高斯模糊
-        MultiEffect {
-            anchors.fill: parent
-            source: backdropSrc
-            blurEnabled: true
-            blur: 1.0
-            blurMax: 64
-            blurMultiplier: 1.0
-            saturation: 0.3
-        }
-
-        // ③ 半透明白色雾化层 (与 MiniPlayer 同色阶)
-        Rectangle {
-            anchors.fill: parent
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#80FFFFFF" }
-                GradientStop { position: 1.0; color: "#55FFFFFF" }
-            }
-        }
-
-        // 圆角裁切
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            maskEnabled: true
-            maskSource: ShaderEffectSource {
-                sourceItem: glassMask
-                hideSource: true
-            }
-        }
-    }
-
-    // mask 用的圆角矩形 (不参与显示)
-    Rectangle {
-        id: glassMask
-        width: root.width
-        height: root.height
-        radius: root.radius
-        color: "black"
-        antialiasing: true
-        visible: false
-    }
 
     property string activeKey: "home"
     property bool busy: false
@@ -387,14 +324,5 @@ Rectangle {
             active: root.activeKey === "settings"
             onClicked: root.navClicked("settings")
         }
-    }
-
-    // ④ 玻璃边缘高光描边 (1px 半透明白) — 放在最后以渲染在子项之上
-    Rectangle {
-        anchors.fill: parent
-        radius: root.radius
-        color: "transparent"
-        border.color: "#66FFFFFF"
-        border.width: 1
     }
 }
