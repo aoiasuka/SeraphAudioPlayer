@@ -632,11 +632,26 @@ QVariantList PlayerViewModel::currentLyrics() const
     out.reserve(static_cast<int>(m_lyrics.size()));
     for (const auto& ln : m_lyrics) {
         QVariantMap m;
-        m["time"] = ln.time_sec;
-        m["text"] = QString::fromStdWString(ln.text);
+        m["time"]        = ln.time_sec;
+        m["text"]        = QString::fromStdWString(ln.text);
+        m["translation"] = QString::fromStdWString(ln.translation);
+        m["hasTranslation"] = !ln.translation.empty();
         out.append(m);
     }
     return out;
+}
+
+QVariantMap PlayerViewModel::lyricsMeta() const
+{
+    QVariantMap m;
+    m["title"]      = QString::fromStdWString(m_lyricsMeta.title);
+    m["artist"]     = QString::fromStdWString(m_lyricsMeta.artist);
+    m["album"]      = QString::fromStdWString(m_lyricsMeta.album);
+    m["by"]         = QString::fromStdWString(m_lyricsMeta.by);
+    m["offset_ms"]  = m_lyricsMeta.offset_ms;
+    m["length_sec"] = m_lyricsMeta.length_sec;
+    m["source"]     = m_lyricsSource;
+    return m;
 }
 
 void PlayerViewModel::reloadLyricsForCurrent()
@@ -645,9 +660,68 @@ void PlayerViewModel::reloadLyricsForCurrent()
     if (cur == m_lyricsForPath) return;
     m_lyricsForPath = cur;
     m_lyrics.clear();
+    m_lyricsMeta   = {};
+    m_lyricsSource.clear();
     if (!cur.isEmpty()) {
-        m_lyrics = apx::LyricsLoader::loadFor(cur.toStdWString());
+        auto doc = apx::LyricsLoader::loadDocFor(cur.toStdWString());
+        if (!doc.empty()) {
+            m_lyrics       = std::move(doc.lines);
+            m_lyricsMeta   = std::move(doc.meta);
+            m_lyricsSource = QStringLiteral("external");
+        } else {
+            // 外部 .lrc 未命中 → 试内嵌歌词(ID3v2 USLT / FLAC VC LYRICS)
+            auto raw = apx::MetadataReader::readEmbeddedLyrics(cur.toStdWString());
+            if (raw.has_value() && !raw->empty()) {
+                auto edoc = apx::LyricsLoader::parseDoc(*raw);
+                if (!edoc.empty()) {
+                    m_lyrics       = std::move(edoc.lines);
+                    m_lyricsMeta   = std::move(edoc.meta);
+                    m_lyricsSource = QStringLiteral("embedded");
+                }
+            }
+        }
     }
+    m_lyricIndex = -1;
+    emit lyricsChanged();
+    emit currentLyricIndexChanged();
+}
+
+bool PlayerViewModel::loadExternalLyrics(const QString& path)
+{
+    QString local = toLocalPath(path);
+    if (local.isEmpty()) return false;
+    auto doc = apx::LyricsLoader::loadDoc(local.toStdWString());
+    if (doc.empty()) {
+        m_lastError = QStringLiteral("无法解析歌词文件: %1").arg(local);
+        emit errorOccurred(m_lastError);
+        return false;
+    }
+    m_lyrics       = std::move(doc.lines);
+    m_lyricsMeta   = std::move(doc.meta);
+    m_lyricsSource = QStringLiteral("manual");
+    m_lyricsForPath = currentPath();   // 阻止下一次自动 reload 覆盖
+    m_lyricIndex   = -1;
+    emit lyricsChanged();
+    emit currentLyricIndexChanged();
+    updateLyricIndex(m_position);
+    return true;
+}
+
+void PlayerViewModel::refreshLyrics()
+{
+    // 强制重扫:把缓存键清掉再调
+    m_lyricsForPath.clear();
+    reloadLyricsForCurrent();
+    updateLyricIndex(m_position);
+}
+
+void PlayerViewModel::clearLyrics()
+{
+    if (m_lyrics.empty() && m_lyricsSource.isEmpty()) return;
+    m_lyrics.clear();
+    m_lyricsMeta = {};
+    m_lyricsSource.clear();
+    m_lyricsForPath = currentPath();
     m_lyricIndex = -1;
     emit lyricsChanged();
     emit currentLyricIndexChanged();

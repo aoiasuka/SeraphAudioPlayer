@@ -51,11 +51,19 @@ public:
     // 单独读取封面二进制。如 has_cover=false 或不存在则返回 nullopt。
     static std::optional<CoverImage> readCover(const std::wstring& path);
 
+    // 读取内嵌歌词,返回 UTF-8 字节流(LRC 或纯文本)。
+    // - MP3:ID3v2 USLT frame(首选)、SYLT 不支持(留作后续)
+    // - FLAC:VORBIS_COMMENT 的 LYRICS / UNSYNCEDLYRICS 字段
+    // 没有就返回 nullopt。结果可直接喂给 apx::LyricsLoader::parseDoc()。
+    static std::optional<std::string> readEmbeddedLyrics(const std::wstring& path);
+
 private:
     static std::optional<TrackMetadata> readWav(const std::wstring& path);
     static std::optional<TrackMetadata> readFlac(const std::wstring& path);
     static std::optional<TrackMetadata> readMp3(const std::wstring& path);
     static std::optional<CoverImage>    readFlacCover(const std::wstring& path);
+    static std::optional<std::string>   readEmbeddedLyricsMp3(const std::wstring& path);
+    static std::optional<std::string>   readEmbeddedLyricsFlac(const std::wstring& path);
 };
 
 } // namespace apx

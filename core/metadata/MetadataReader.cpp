@@ -133,6 +133,41 @@ bool endsWith(const std::wstring& s, const std::wstring& suf)
     return lower(s.substr(s.size() - suf.size())) == suf;
 }
 
+// wstring(UTF-16) -> UTF-8 字节流
+std::string wToUtf8(const std::wstring& w)
+{
+    std::string out;
+    out.reserve(w.size());
+    size_t i = 0;
+    while (i < w.size()) {
+        uint32_t cp = static_cast<uint32_t>(static_cast<uint16_t>(w[i]));
+        ++i;
+        if (cp >= 0xD800 && cp <= 0xDBFF && i < w.size()) {
+            uint32_t lo = static_cast<uint32_t>(static_cast<uint16_t>(w[i]));
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                ++i;
+            }
+        }
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 // ============================================================================
@@ -629,6 +664,207 @@ std::optional<CoverImage> MetadataReader::readFlacCover(const std::wstring& path
     }
 
     close();
+    return std::nullopt;
+}
+
+// ============================================================================
+//  内嵌歌词
+// ============================================================================
+std::optional<std::string> MetadataReader::readEmbeddedLyrics(const std::wstring& path)
+{
+    if (endsWith(path, L".mp3"))  return readEmbeddedLyricsMp3(path);
+    if (endsWith(path, L".flac")) return readEmbeddedLyricsFlac(path);
+    return std::nullopt;
+}
+
+// ----------------------------------------------------------------------------
+// MP3 ID3v2 USLT(非同步歌词)
+//   payload = enc(1) lang(3) desc(enc-NUL) lyrics(enc, rest)
+//   enc: 0=ISO-8859-1, 1=UTF-16 BOM, 2=UTF-16BE, 3=UTF-8 (v2.4)
+// SYLT(同步歌词带时间戳)结构复杂(timestamp_format + content_type
+// + desc + (text + nul + time_ms)*),先按"未实现"处理 — USLT 是绝大多数
+// 标签编辑器写入 LRC 字符串的位置。
+// ----------------------------------------------------------------------------
+std::optional<std::string> MetadataReader::readEmbeddedLyricsMp3(const std::wstring& path)
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return std::nullopt;
+    auto close_f = [&]() { if (f) { std::fclose(f); f = nullptr; } };
+
+    uint8_t hdr[10];
+    if (!fread_n(f, hdr, 10)) { close_f(); return std::nullopt; }
+    if (std::memcmp(hdr, "ID3", 3) != 0) { close_f(); return std::nullopt; }
+
+    const int ver_major = hdr[3];
+    const uint8_t flags = hdr[5];
+    const uint32_t total =
+        (uint32_t(hdr[6] & 0x7F) << 21) |
+        (uint32_t(hdr[7] & 0x7F) << 14) |
+        (uint32_t(hdr[8] & 0x7F) << 7)  |
+        (uint32_t(hdr[9] & 0x7F));
+    if (total == 0 || total > 64 * 1024 * 1024) { close_f(); return std::nullopt; }
+
+    std::vector<uint8_t> tag(total);
+    if (std::fread(tag.data(), 1, total, f) != total) { close_f(); return std::nullopt; }
+    close_f();
+
+    size_t pos = 0;
+    if (flags & 0x40) {
+        if (pos + 4 > tag.size()) return std::nullopt;
+        uint32_t ext;
+        if (ver_major >= 4) {
+            ext = (uint32_t(tag[pos]&0x7F)<<21) | (uint32_t(tag[pos+1]&0x7F)<<14)
+                | (uint32_t(tag[pos+2]&0x7F)<<7)  |  uint32_t(tag[pos+3]&0x7F);
+        } else {
+            ext = (uint32_t(tag[pos])<<24)|(uint32_t(tag[pos+1])<<16)
+                | (uint32_t(tag[pos+2])<<8) | uint32_t(tag[pos+3]);
+        }
+        pos += ext;
+        if (pos >= tag.size()) return std::nullopt;
+    }
+
+    auto decodeBytes = [](const uint8_t* p, size_t n, uint8_t enc) -> std::wstring {
+        if (n == 0) return {};
+        std::string s(reinterpret_cast<const char*>(p), n);
+        while (!s.empty() && s.back() == '\0') s.pop_back();
+        switch (enc) {
+        case 0: return cp1252ToW(s);
+        case 3: return utf8ToW(s);
+        case 1: {
+            if (s.size() < 2) return {};
+            const uint8_t* b = reinterpret_cast<const uint8_t*>(s.data());
+            bool be = false; size_t start = 0;
+            if (b[0] == 0xFF && b[1] == 0xFE)      { be = false; start = 2; }
+            else if (b[0] == 0xFE && b[1] == 0xFF) { be = true;  start = 2; }
+            std::wstring w;
+            for (size_t i = start; i + 1 < s.size(); i += 2) {
+                uint16_t u = be ? (uint16_t(b[i])<<8) | b[i+1]
+                                : (uint16_t(b[i+1])<<8) | b[i];
+                w.push_back(static_cast<wchar_t>(u));
+            }
+            while (!w.empty() && w.back() == 0) w.pop_back();
+            return w;
+        }
+        case 2: {
+            std::wstring w;
+            for (size_t i = 0; i + 1 < s.size(); i += 2) {
+                uint16_t u = (uint16_t(static_cast<unsigned char>(s[i]))<<8)
+                           | static_cast<unsigned char>(s[i+1]);
+                w.push_back(static_cast<wchar_t>(u));
+            }
+            while (!w.empty() && w.back() == 0) w.pop_back();
+            return w;
+        }
+        }
+        return {};
+    };
+
+    while (pos + 10 <= tag.size()) {
+        char fid[5] = {0};
+        std::memcpy(fid, tag.data() + pos, 4);
+        if (fid[0] == 0) break;
+        uint32_t fsize;
+        if (ver_major >= 4) {
+            fsize = (uint32_t(tag[pos+4]&0x7F)<<21) | (uint32_t(tag[pos+5]&0x7F)<<14)
+                  | (uint32_t(tag[pos+6]&0x7F)<<7)  |  uint32_t(tag[pos+7]&0x7F);
+        } else {
+            fsize = (uint32_t(tag[pos+4])<<24)|(uint32_t(tag[pos+5])<<16)
+                  | (uint32_t(tag[pos+6])<<8) | uint32_t(tag[pos+7]);
+        }
+        const size_t pl = pos + 10;
+        if (pl + fsize > tag.size()) break;
+        if (fsize == 0) { pos = pl; continue; }
+
+        if (std::memcmp(fid, "USLT", 4) == 0 && fsize >= 5) {
+            const uint8_t enc = tag[pl];
+            const uint8_t* p   = tag.data() + pl + 4;   // 跳过 enc(1) + lang(3)
+            size_t          n   = fsize - 4;
+            // desc 由 enc 决定的 NUL 终止
+            size_t cut = std::string::npos;
+            if (enc == 1 || enc == 2) {
+                for (size_t i = 0; i + 1 < n; i += 2) {
+                    if (p[i] == 0 && p[i+1] == 0) { cut = i; break; }
+                }
+            } else {
+                for (size_t i = 0; i < n; ++i) {
+                    if (p[i] == 0) { cut = i; break; }
+                }
+            }
+            size_t vskip = (cut == std::string::npos)
+                            ? 0
+                            : ((enc == 1 || enc == 2) ? cut + 2 : cut + 1);
+            if (vskip > n) vskip = n;
+            std::wstring w = decodeBytes(p + vskip, n - vskip, enc);
+            if (w.empty()) { pos = pl + fsize; continue; }
+            return wToUtf8(w);
+        }
+        pos = pl + fsize;
+    }
+    return std::nullopt;
+}
+
+// ----------------------------------------------------------------------------
+// FLAC VORBIS_COMMENT 里 LYRICS / UNSYNCEDLYRICS / SYNCEDLYRICS
+// 值就是 UTF-8 原文,直接返回。
+// ----------------------------------------------------------------------------
+std::optional<std::string> MetadataReader::readEmbeddedLyricsFlac(const std::wstring& path)
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return std::nullopt;
+    auto close_f = [&]() { if (f) { std::fclose(f); f = nullptr; } };
+
+    uint8_t marker[4];
+    if (!fread_n(f, marker, 4)) { close_f(); return std::nullopt; }
+    if (std::memcmp(marker, "fLaC", 4) != 0) { close_f(); return std::nullopt; }
+
+    bool last = false;
+    int blocks = 0;
+    while (!last && blocks++ < 32) {
+        uint8_t bh[4];
+        if (!fread_n(f, bh, 4)) break;
+        last = (bh[0] & 0x80) != 0;
+        int type = bh[0] & 0x7F;
+        uint32_t len = (uint32_t(bh[1]) << 16) | (uint32_t(bh[2]) << 8) | uint32_t(bh[3]);
+
+        if (type == 4) {
+            std::vector<uint8_t> buf(len);
+            if (len > 0 && std::fread(buf.data(), 1, len, f) != len) break;
+            if (buf.size() < 4) continue;
+            uint32_t vlen = readU32LE(buf.data());
+            size_t off = 4;
+            if (off + vlen + 4 > buf.size()) continue;
+            off += vlen;
+            uint32_t n = readU32LE(buf.data() + off); off += 4;
+            std::string best;
+            int bestRank = 99;     // 越小越优先
+            for (uint32_t i = 0; i < n; ++i) {
+                if (off + 4 > buf.size()) break;
+                uint32_t clen = readU32LE(buf.data() + off); off += 4;
+                if (off + clen > buf.size()) break;
+                std::string entry(reinterpret_cast<const char*>(buf.data() + off), clen);
+                off += clen;
+                auto eq = entry.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = entry.substr(0, eq);
+                std::transform(key.begin(), key.end(), key.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::toupper(c)); });
+                int rank = 99;
+                if      (key == "SYNCEDLYRICS")   rank = 0;
+                else if (key == "LYRICS")          rank = 1;
+                else if (key == "UNSYNCEDLYRICS") rank = 2;
+                if (rank < bestRank) {
+                    best = entry.substr(eq + 1);
+                    bestRank = rank;
+                }
+            }
+            close_f();
+            if (best.empty()) return std::nullopt;
+            return best;
+        } else {
+            std::fseek(f, len, SEEK_CUR);
+        }
+    }
+    close_f();
     return std::nullopt;
 }
 

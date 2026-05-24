@@ -1,33 +1,99 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
-// 歌词面板 — 居中显示当前行,周围行渐淡
+// 歌词面板 — 居中显示当前行,周围行渐淡;有翻译时副行小字显示
 Item {
     id: root
 
     readonly property var lyrics: playerVM.currentLyrics || []
     readonly property int activeIndex: playerVM.currentLyricIndex
+    readonly property var meta: playerVM.lyricsMeta || ({})
 
-    // 当前行变化时滚到中间
     onActiveIndexChanged: scrollToActive()
     onWidthChanged: scrollToActive()
     onHeightChanged: scrollToActive()
 
     function scrollToActive() {
         if (activeIndex < 0 || activeIndex >= list.count) return
-        // SnapPosition.Center 让目标项滚到视口中央
         list.positionViewAtIndex(activeIndex, ListView.Center)
     }
-
     Component.onCompleted: scrollToActive()
+
+    // 顶部薄状态条:歌词来源 + 操作按钮
+    Rectangle {
+        id: topbar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 28
+        color: "transparent"
+        visible: true
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 8
+            spacing: 8
+
+            Text {
+                Layout.fillWidth: true
+                text: {
+                    if (!playerVM.hasLyrics) return ""
+                    var src = root.meta.source || ""
+                    var off = root.meta.offset_ms || 0
+                    var parts = []
+                    if (src === "manual") parts.push("手动加载")
+                    else if (src === "external") parts.push(".lrc")
+                    else if (src === "embedded") parts.push("内嵌")
+                    if (Math.abs(off) > 0.5) parts.push("offset " + off.toFixed(0) + "ms")
+                    if (root.meta.by) parts.push("by " + root.meta.by)
+                    return parts.join(" · ")
+                }
+                font.family: window.fontFamily
+                font.pixelSize: 11
+                color: window.textTertiary
+                elide: Text.ElideRight
+            }
+
+            ToolButton {
+                text: "刷新"
+                font.pixelSize: 11
+                ToolTip.text: "重新从磁盘扫描同名 .lrc"
+                ToolTip.visible: hovered
+                onClicked: playerVM.refreshLyrics()
+            }
+            ToolButton {
+                text: "加载..."
+                font.pixelSize: 11
+                ToolTip.text: "选一个 .lrc 文件覆盖当前歌词"
+                ToolTip.visible: hovered
+                onClicked: lrcDialog.open()
+            }
+            ToolButton {
+                text: "清空"
+                font.pixelSize: 11
+                visible: playerVM.hasLyrics
+                onClicked: playerVM.clearLyrics()
+            }
+        }
+    }
+
+    FileDialog {
+        id: lrcDialog
+        title: "选择歌词文件 (.lrc)"
+        nameFilters: ["LRC 歌词 (*.lrc *.LRC *.txt)"]
+        onAccepted: playerVM.loadExternalLyrics(selectedFile.toString())
+    }
 
     // 空态
     Item {
-        anchors.centerIn: parent
+        anchors.top: topbar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
         visible: !playerVM.hasLyrics
-        width: parent.width
-        height: 80
 
         ColumnLayout {
             anchors.centerIn: parent
@@ -41,7 +107,7 @@ Item {
             }
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "把同名 .lrc 文件放在音频旁边即可显示"
+                text: '把同名 .lrc 文件放在音频旁边,或点上方 "加载..." 选取'
                 font.family: window.fontFamily
                 font.pixelSize: 12
                 color: window.textTertiary
@@ -51,54 +117,84 @@ Item {
 
     ListView {
         id: list
-        anchors.fill: parent
+        anchors.top: topbar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
         visible: playerVM.hasLyrics
         clip: true
         model: root.lyrics
         spacing: 6
         boundsBehavior: Flickable.StopAtBounds
-        // 整体上下留白,让首末行也能滚到中间
         topMargin: height / 2 - 30
         bottomMargin: height / 2 - 30
 
-        // 平滑滚动
         highlightMoveVelocity: -1
         highlightMoveDuration: 350
 
         delegate: Item {
             width: list.width
-            height: 32
+            // 有翻译副行时多一行高度
+            height: (modelData.hasTranslation ? 50 : 32)
 
             readonly property bool isActive: index === root.activeIndex
-            readonly property int distance: Math.abs(index - root.activeIndex)
+            readonly property int  distance: Math.abs(index - root.activeIndex)
             readonly property real fadeOpacity:
                 root.activeIndex < 0 ? 0.85
                 : (isActive ? 1.0
                 : (distance === 1 ? 0.70
                 : (distance === 2 ? 0.45 : 0.28)))
 
-            Text {
+            Column {
                 anchors.fill: parent
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                text: modelData.text
-                font.family: window.fontFamily
-                font.pixelSize: isActive ? 16 : 14
-                font.weight: isActive ? Font.DemiBold : Font.Medium
-                color: isActive ? window.textPrimary : window.textSecondary
-                opacity: fadeOpacity
-                elide: Text.ElideRight
-                Behavior on font.pixelSize { NumberAnimation { duration: 200 } }
-                Behavior on opacity { NumberAnimation { duration: 250 } }
-                Behavior on color { ColorAnimation { duration: 200 } }
+                spacing: 2
+
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    text: modelData.text
+                    font.family: window.fontFamily
+                    font.pixelSize: isActive ? 16 : 14
+                    font.weight: isActive ? Font.DemiBold : Font.Medium
+                    color: isActive ? window.textPrimary : window.textSecondary
+                    opacity: fadeOpacity
+                    elide: Text.ElideRight
+                    Behavior on font.pixelSize { NumberAnimation { duration: 200 } }
+                    Behavior on opacity { NumberAnimation { duration: 250 } }
+                    Behavior on color { ColorAnimation { duration: 200 } }
+                }
+                Text {
+                    width: parent.width
+                    visible: modelData.hasTranslation
+                    horizontalAlignment: Text.AlignHCenter
+                    text: modelData.translation
+                    font.family: window.fontFamily
+                    font.pixelSize: isActive ? 12 : 11
+                    color: window.textTertiary
+                    opacity: fadeOpacity * 0.9
+                    elide: Text.ElideRight
+                }
             }
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    if (modelData.time !== undefined) playerVM.seek(modelData.time)
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                        ctxMenu.popup()
+                    } else {
+                        if (modelData.time !== undefined) playerVM.seek(modelData.time)
+                    }
                 }
+            }
+            Menu {
+                id: ctxMenu
+                MenuItem { text: "跳到此行"; onTriggered: playerVM.seek(modelData.time) }
+                MenuItem { text: "刷新歌词";   onTriggered: playerVM.refreshLyrics() }
+                MenuItem { text: "加载外部..."; onTriggered: lrcDialog.open() }
+                MenuItem { text: "清空歌词";   onTriggered: playerVM.clearLyrics() }
             }
         }
     }

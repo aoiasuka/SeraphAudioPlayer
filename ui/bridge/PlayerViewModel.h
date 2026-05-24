@@ -67,10 +67,13 @@ class PlayerViewModel : public QObject {
     // 当前曲目封面主色 (HSV 调整后);未播放时返回品牌默认色
     Q_PROPERTY(QColor currentDominantColor READ currentDominantColor NOTIFY currentCoverUrlChanged)
 
-    // 当前曲目的歌词 ([{time,text}, ...]) 与高亮索引
+    // 当前曲目的歌词 ([{time,text,translation}, ...]) 与高亮索引
     Q_PROPERTY(QVariantList currentLyrics READ currentLyrics NOTIFY lyricsChanged)
     Q_PROPERTY(int currentLyricIndex READ currentLyricIndex NOTIFY currentLyricIndexChanged)
     Q_PROPERTY(bool hasLyrics READ hasLyrics NOTIFY lyricsChanged)
+    // 歌词元数据 {title, artist, album, by, offset_ms, length_sec, source}
+    // source: "" 无, "external" 同目录 lrc, "manual" 用户手动加载, "embedded" 内嵌
+    Q_PROPERTY(QVariantMap lyricsMeta READ lyricsMeta NOTIFY lyricsChanged)
 
     // 可视化
     Q_PROPERTY(double vuLeft  READ vuLeft  NOTIFY visualUpdated)
@@ -152,6 +155,13 @@ public:
     QVariantList currentLyrics() const;
     int          currentLyricIndex() const { return m_lyricIndex; }
     bool         hasLyrics() const { return !m_lyrics.empty(); }
+    QVariantMap  lyricsMeta() const;
+    // 用户手动加载外部歌词(覆盖当前曲目)
+    Q_INVOKABLE bool loadExternalLyrics(const QString& path);
+    // 重新从磁盘扫一遍(用户刚把 .lrc 放进文件夹)
+    Q_INVOKABLE void refreshLyrics();
+    // 清空当前歌词
+    Q_INVOKABLE void clearLyrics();
 
     double vuLeft()   const { return m_vu_l; }
     double vuRight()  const { return m_vu_r; }
@@ -428,6 +438,8 @@ private:
 
     // 歌词
     std::vector<apx::LyricLine> m_lyrics;
+    apx::LyricMetadata          m_lyricsMeta;
+    QString                     m_lyricsSource;     // "" / "external" / "manual" / "embedded"
     int m_lyricIndex = -1;
     QString m_lyricsForPath;          // 当前歌词来自哪条 path,用于变更检测
 
