@@ -104,6 +104,13 @@ public:
 
     // 取近实时的渲染统计快照。默认实现返回全 0。
     virtual RenderStats renderStats() const { return RenderStats{}; }
+
+    // ---- 共享路径专属可选钩子 (独占模式实现可忽略) ----
+    // dither 默认开;Int16 dst 且源比 16-bit 宽时生效。
+    // 这两个 setter 在 open 之前/之后均可调;dither 立即生效,
+    // highQuality 仅在下次 open() 协商重采样时生效。
+    virtual void setDither(bool /*on*/)      {}
+    virtual void setHighQuality(bool /*on*/) {}
 };
 
 } // namespace apx

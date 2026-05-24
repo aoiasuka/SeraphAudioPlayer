@@ -264,7 +264,7 @@ void         AsioOutput::setDataCallback(DataCallback cb)
 
 } // namespace apx
 
-#else  // !APX_HAVE_ASIO_SDK  — 桩实现
+#else  // !APX_HAVE_ASIO_SDK  — 桩实现 (注册表枚举可用)
 
 namespace apx {
 
@@ -275,11 +275,66 @@ struct AsioOutput::Impl {
 AsioOutput::AsioOutput()  : d_(std::make_unique<Impl>()) {}
 AsioOutput::~AsioOutput() = default;
 
-bool                          AsioOutput::sdkAvailable() { return false; }
-std::vector<AsioDeviceInfo>   AsioOutput::enumerate()    { return {}; }
-void                          AsioOutput::setDeviceIndex(int)   {}
+bool AsioOutput::sdkAvailable() { return false; }
 
-bool AsioOutput::open(const AudioFormat&, const OpenOptions&, OpenResult*) { return false; }
+// 即使没有 SDK,我们仍能从 Windows 注册表枚举已安装的 ASIO 驱动。
+// 这让 UI 能展示"系统上有哪些 ASIO 驱动",并提示用户接入 SDK 才能用。
+// 注册表位置:HKLM\SOFTWARE\ASIO\<DriverName>\
+//   值 "CLSID"       - {GUID} 字符串
+//   值 "Description" - 可选友好名,缺失时用 key 名
+std::vector<AsioDeviceInfo> AsioOutput::enumerate()
+{
+    std::vector<AsioDeviceInfo> out;
+    HKEY hRoot = nullptr;
+    LONG r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0,
+                           KEY_READ | KEY_WOW64_64KEY, &hRoot);
+    if (r != ERROR_SUCCESS) {
+        // 32-bit 视图回退
+        r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0,
+                          KEY_READ | KEY_WOW64_32KEY, &hRoot);
+    }
+    if (r != ERROR_SUCCESS) return out;
+
+    DWORD subkeys = 0;
+    if (RegQueryInfoKeyW(hRoot, nullptr, nullptr, nullptr, &subkeys,
+                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)
+        != ERROR_SUCCESS) {
+        RegCloseKey(hRoot);
+        return out;
+    }
+    for (DWORD i = 0; i < subkeys; ++i) {
+        wchar_t name[256]; DWORD nameLen = 256;
+        if (RegEnumKeyExW(hRoot, i, name, &nameLen, nullptr,
+                          nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+            continue;
+        }
+        AsioDeviceInfo di;
+        di.index = static_cast<int>(i);
+        di.name  = std::wstring(name, nameLen);
+        // 尝试用 Description 替换显示名
+        HKEY hSub = nullptr;
+        if (RegOpenKeyExW(hRoot, name, 0, KEY_READ, &hSub) == ERROR_SUCCESS) {
+            wchar_t desc[256]; DWORD descLen = sizeof(desc);
+            DWORD type = 0;
+            if (RegQueryValueExW(hSub, L"Description", nullptr, &type,
+                                 reinterpret_cast<LPBYTE>(desc), &descLen) == ERROR_SUCCESS
+                && type == REG_SZ) {
+                di.name = std::wstring(desc, (descLen / sizeof(wchar_t)) - 1);
+            }
+            RegCloseKey(hSub);
+        }
+        out.push_back(std::move(di));
+    }
+    RegCloseKey(hRoot);
+    return out;
+}
+void AsioOutput::setDeviceIndex(int)   {}
+
+bool AsioOutput::open(const AudioFormat&, const OpenOptions&, OpenResult*)
+{
+    d_->lastErr = L"ASIO SDK not built in — install SDK and rebuild to use this driver";
+    return false;
+}
 void AsioOutput::close()                                   {}
 bool AsioOutput::start()                                   { return false; }
 void AsioOutput::stop()                                    {}

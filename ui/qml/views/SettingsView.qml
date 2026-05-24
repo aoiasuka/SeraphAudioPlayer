@@ -775,6 +775,63 @@ Item {
                         Item { Layout.fillWidth: true }
                     }
 
+                    // DSD 输出模式
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "DSD 输出模式"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: ["DoP (默认)", "Native (实验)", "Auto"][playerVM.dsdMode]
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        RowLayout {
+                            spacing: 0
+                            Repeater {
+                                model: [
+                                    { v: 0, label: "DoP" },
+                                    { v: 1, label: "Native" },
+                                    { v: 2, label: "Auto" }
+                                ]
+                                delegate: Rectangle {
+                                    Layout.preferredWidth: 64
+                                    Layout.preferredHeight: 30
+                                    color: playerVM.dsdMode === modelData.v ? window.brand
+                                         : (dsdArea.containsMouse ? window.hoverBg : "transparent")
+                                    border.color: window.borderColor
+                                    border.width: 1
+                                    radius: 0
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        font.family: window.fontFamily
+                                        font.pixelSize: 12
+                                        font.weight: Font.DemiBold
+                                        color: playerVM.dsdMode === modelData.v ? "#FFFFFF" : window.textPrimary
+                                    }
+                                    MouseArea {
+                                        id: dsdArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: playerVM.dsdMode = modelData.v
+                                    }
+                                }
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
                     // SIMD 路径展示 (只读)
                     RowLayout {
                         Layout.fillWidth: true

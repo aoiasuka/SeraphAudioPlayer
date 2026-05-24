@@ -1656,6 +1656,7 @@ void PlayerViewModel::loadSettings()
     m_allow_shared_fallback = s.value("allow_shared_fallback", m_allow_shared_fallback).toBool();
     m_dither                = s.value("dither", m_dither).toBool();
     m_dop_marker_mode       = std::clamp(s.value("dop_marker_mode", m_dop_marker_mode).toInt(), 0, 1);
+    m_dsd_mode              = std::clamp(s.value("dsd_mode", m_dsd_mode).toInt(), 0, 2);
     s.endGroup();
     applyReplayGainToPlayer();
     applyOutputPolicyToPlayer();
@@ -1663,6 +1664,7 @@ void PlayerViewModel::loadSettings()
     emit outputPolicyChanged();
     emit ditherChanged();
     emit dopMarkerModeChanged();
+    emit dsdModeChanged();
 
     // EQ
     s.beginGroup("eq");
@@ -1728,6 +1730,7 @@ void PlayerViewModel::saveSettings() const
     s.setValue("allow_shared_fallback", m_allow_shared_fallback);
     s.setValue("dither",                m_dither);
     s.setValue("dop_marker_mode",       m_dop_marker_mode);
+    s.setValue("dsd_mode",              m_dsd_mode);
     s.endGroup();
 
     // EQ
@@ -1810,9 +1813,7 @@ void PlayerViewModel::setDither(bool on)
 {
     if (on == m_dither) return;
     m_dither = on;
-    // 注:dither 在 FormatConverter 内部生效;此处持久化,共享回退路径
-    // 下次创建 WasapiSharedOutput 时读取(后续可加 PlayerController::setDither()
-    // 完整链路接入). 这里先做持久化与 UI 状态同步.
+    if (player_) player_->setSharedDither(on);
     emit ditherChanged();
     if (!m_loadingSettings) saveSettings();
 }
@@ -1822,8 +1823,26 @@ void PlayerViewModel::setDopMarkerMode(int m)
     m = std::clamp(m, 0, 1);
     if (m == m_dop_marker_mode) return;
     m_dop_marker_mode = m;
-    // 同 dither:持久化在此, 在下一次 DSD 文件加载时由 DsdDecoder 读取.
+    if (player_) {
+        player_->setDopMarkerMode(m == 1 ? apx::DopMarkerMode::PerSample
+                                         : apx::DopMarkerMode::PerFrame);
+    }
     emit dopMarkerModeChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+void PlayerViewModel::setDsdMode(int m)
+{
+    m = std::clamp(m, 0, 2);
+    if (m == m_dsd_mode) return;
+    m_dsd_mode = m;
+    if (player_) {
+        PlayerController::DsdMode mode = PlayerController::DsdMode::ForceDoP;
+        if (m == 1) mode = PlayerController::DsdMode::ForceNative;
+        else if (m == 2) mode = PlayerController::DsdMode::Auto;
+        player_->setDsdMode(mode);
+    }
+    emit dsdModeChanged();
     if (!m_loadingSettings) saveSettings();
 }
 
@@ -1844,6 +1863,13 @@ void PlayerViewModel::applyOutputPolicyToPlayer()
 {
     if (!player_) return;
     player_->setAllowSharedFallback(m_allow_shared_fallback);
+    player_->setSharedDither(m_dither);
+    player_->setDopMarkerMode(m_dop_marker_mode == 1 ? apx::DopMarkerMode::PerSample
+                                                     : apx::DopMarkerMode::PerFrame);
+    PlayerController::DsdMode dm = PlayerController::DsdMode::ForceDoP;
+    if (m_dsd_mode == 1) dm = PlayerController::DsdMode::ForceNative;
+    else if (m_dsd_mode == 2) dm = PlayerController::DsdMode::Auto;
+    player_->setDsdMode(dm);
 }
 
 namespace {

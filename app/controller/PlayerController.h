@@ -36,6 +36,7 @@
 
 #include "app/controller/PlayerState.h"
 #include "core/format/AudioFormat.h"
+#include "core/dsd/DopMode.h"
 
 #include <cstdint>
 #include <functional>
@@ -158,6 +159,32 @@ public:
     // 默认开启;Hi-Fi 用户可关闭以保证"要么 bit-perfect 要么失败"。
     void setAllowSharedFallback(bool on);
     bool allowSharedFallback() const;
+
+    // 共享路径专属设置 (独占模式不受影响)。Immediate:dither 切换立即生效,
+    // highQuality 仅在下次 open 协商时生效。这两个 setter 即可在 Playing 中调用。
+    void setSharedDither(bool on);
+    bool sharedDither() const;
+    void setSharedHighQuality(bool on);
+    bool sharedHighQuality() const;
+
+    // DSD → DoP 的 marker 模式。立即生效:有 DSF/DFF decoder 活动则同步给它,
+    // 同时记录为偏好,下次打开 DSD 文件时会沿用。
+    void setDopMarkerMode(DopMarkerMode mode);
+    DopMarkerMode dopMarkerMode() const;
+
+    // DSD 输出模式。
+    //   ForceDoP    (默认): DSD decoder 输出 DoP 24-bit PCM, WASAPI 协商普通 PCM
+    //   ForceNative      : DSD decoder 输出 raw LSB8 packed,WASAPI 协商 SUBTYPE_DSD
+    //   Auto             : 先试 Native,失败回退 DoP (新文件加载时探测)
+    // 实际能用 Native 取决于 DAC 在 WASAPI 端点是否暴露 DSD format;
+    // 多数 USB DAC 走 ASIO Native,WASAPI Native 主要在专业声卡上可用。
+    enum class DsdMode : std::uint8_t {
+        ForceDoP    = 0,
+        ForceNative = 1,
+        Auto        = 2,
+    };
+    void    setDsdMode(DsdMode m);
+    DsdMode dsdMode() const;
 
     // ---------- 渲染统计 ----------
     // 取实时快照;若无活动 output 则返回全 0。recovery_count 由 controller 维护,

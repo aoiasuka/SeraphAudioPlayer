@@ -102,9 +102,11 @@ void apply_volume(std::uint8_t* data, std::size_t bytes, const AudioFormat& fmt,
 
 // 先试独占,失败且 allow_shared_fallback 为真时回退共享。
 // 失败时 err 累积两段错误信息,result 内容未定义。
+// dither/high_quality 仅在走共享路径时应用。
 std::unique_ptr<IAudioOutput> open_with_fallback(
     const AudioFormat& fmt, const OpenOptions& opts,
-    OpenResult& result, std::wstring& err)
+    OpenResult& result, std::wstring& err,
+    bool shared_dither, bool shared_high_quality)
 {
     auto exc = std::make_unique<wasapi::WasapiExclusiveOutput>();
     if (exc->open(fmt, opts, &result)) return exc;
@@ -114,6 +116,8 @@ std::unique_ptr<IAudioOutput> open_with_fallback(
     if (!opts.allow_shared_fallback) return nullptr;
 
     auto sh = std::make_unique<wasapi::WasapiSharedOutput>();
+    sh->setDither(shared_dither);
+    sh->setHighQuality(shared_high_quality);
     if (sh->open(fmt, opts, &result)) return sh;
     err += L"\nshared: " + sh->lastError();
     return nullptr;
@@ -138,6 +142,10 @@ struct PlayerController::Impl : public IDeviceChangeListener {
 
     // ---- 输出策略 ----
     std::atomic<bool> allow_shared_fallback{true};
+    std::atomic<bool> shared_dither{true};
+    std::atomic<bool> shared_high_quality{true};
+    std::atomic<DopMarkerMode> dop_marker_mode{DopMarkerMode::PerFrame};
+    std::atomic<PlayerController::DsdMode> dsd_mode{PlayerController::DsdMode::ForceDoP};
 
     // ---- 当前媒体 ----
     std::wstring  current_path;
@@ -623,7 +631,9 @@ void PlayerController::Impl::try_recovery()
     opts.allow_shared_fallback = allow_shared_fallback.load();
     OpenResult result{};
     std::wstring open_err;
-    auto new_out = open_with_fallback(current_fmt, opts, result, open_err);
+    auto new_out = open_with_fallback(current_fmt, opts, result, open_err,
+                                      shared_dither.load(std::memory_order_acquire),
+                                      shared_high_quality.load(std::memory_order_acquire));
     if (!new_out) {
         recovery_failures += 1;
         set_error_msg(L"device recovery: WASAPI open failed:\n  " + open_err);
@@ -729,6 +739,38 @@ Visualizer& PlayerController::visualizer() { return d_->viz; }
 void PlayerController::setAllowSharedFallback(bool on) { d_->allow_shared_fallback.store(on); }
 bool PlayerController::allowSharedFallback() const     { return d_->allow_shared_fallback.load(); }
 
+void PlayerController::setSharedDither(bool on)
+{
+    d_->shared_dither.store(on, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(d_->ctrl_mutex);
+    if (d_->output) d_->output->setDither(on);
+}
+bool PlayerController::sharedDither() const { return d_->shared_dither.load(std::memory_order_acquire); }
+
+void PlayerController::setSharedHighQuality(bool on)
+{
+    d_->shared_high_quality.store(on, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(d_->ctrl_mutex);
+    if (d_->output) d_->output->setHighQuality(on);
+}
+bool PlayerController::sharedHighQuality() const { return d_->shared_high_quality.load(std::memory_order_acquire); }
+
+void PlayerController::setDopMarkerMode(DopMarkerMode mode)
+{
+    d_->dop_marker_mode.store(mode, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(d_->ctrl_mutex);
+    if (d_->decoder) d_->decoder->setDopMarkerMode(mode);
+}
+DopMarkerMode PlayerController::dopMarkerMode() const { return d_->dop_marker_mode.load(std::memory_order_acquire); }
+
+void PlayerController::setDsdMode(DsdMode m)
+{
+    d_->dsd_mode.store(m, std::memory_order_release);
+    // 不动正在播放的会话(切换 native/DoP 需要重新协商 WASAPI 端点,
+    // 下次 loadFile 时生效).
+}
+PlayerController::DsdMode PlayerController::dsdMode() const { return d_->dsd_mode.load(std::memory_order_acquire); }
+
 PlayerController::Stats PlayerController::stats() const
 {
     Stats s;
@@ -774,13 +816,27 @@ bool PlayerController::loadFile(const std::wstring& path)
         d_->set_state(PlayerState::Idle);
         return false;
     }
+    dec->setDopMarkerMode(d_->dop_marker_mode.load(std::memory_order_acquire));
     if (!dec->open(path)) {
         d_->set_error_msg(L"decoder open failed: " + dec->lastError());
         d_->set_state(PlayerState::Idle);
         return false;
     }
 
-    const AudioFormat fmt = dec->format();
+    // DSD 输出模式:如果开启 Native/Auto,让 decoder 切到 raw LSB8 packed。
+    // ForceDoP 不动 (decoder 默认 DoP).
+    const auto dsd_mode = d_->dsd_mode.load(std::memory_order_acquire);
+    bool want_native = (dsd_mode == DsdMode::ForceNative || dsd_mode == DsdMode::Auto);
+    if (want_native) {
+        if (!dec->setNativeDsd(true) && dsd_mode == DsdMode::ForceNative) {
+            d_->set_error_msg(L"ForceNative requested but decoder doesn't support raw DSD");
+            d_->set_state(PlayerState::Idle);
+            return false;
+        }
+        // Auto + decoder 不支持 raw → 静默回 DoP
+    }
+
+    AudioFormat fmt = dec->format();
     if (!fmt.valid()) {
         d_->set_error_msg(L"decoder returned invalid format");
         d_->set_state(PlayerState::Idle);
@@ -792,7 +848,21 @@ bool PlayerController::loadFile(const std::wstring& path)
     opts.allow_shared_fallback = d_->allow_shared_fallback.load();
     OpenResult result{};
     std::wstring open_err;
-    auto out = open_with_fallback(fmt, opts, result, open_err);
+    auto out = open_with_fallback(fmt, opts, result, open_err,
+                                  d_->shared_dither.load(std::memory_order_acquire),
+                                  d_->shared_high_quality.load(std::memory_order_acquire));
+
+    // Auto: native 协商失败时回 DoP 再试一次
+    if (!out && want_native && fmt.sample_type == SampleType::DsdLsb8
+        && dsd_mode == DsdMode::Auto) {
+        dec->setNativeDsd(false);
+        fmt = dec->format();
+        open_err.clear();
+        out = open_with_fallback(fmt, opts, result, open_err,
+                                 d_->shared_dither.load(std::memory_order_acquire),
+                                 d_->shared_high_quality.load(std::memory_order_acquire));
+    }
+
     if (!out) {
         std::wostringstream ss;
         ss << L"WASAPI open failed:\n  " << open_err;
@@ -1029,7 +1099,9 @@ bool PlayerController::setDevice(const std::wstring& device_id)
     opts.allow_shared_fallback = d_->allow_shared_fallback.load();
     OpenResult result{};
     std::wstring open_err;
-    auto new_out = open_with_fallback(d_->current_fmt, opts, result, open_err);
+    auto new_out = open_with_fallback(d_->current_fmt, opts, result, open_err,
+                                      d_->shared_dither.load(std::memory_order_acquire),
+                                      d_->shared_high_quality.load(std::memory_order_acquire));
     if (!new_out) {
         d_->set_error_msg(L"setDevice: WASAPI open failed:\n  " + open_err);
         d_->set_state(PlayerState::Error);
@@ -1102,6 +1174,7 @@ bool PlayerController::enqueueNext(const std::wstring& path)
         d_->set_error_msg(L"enqueueNext: no decoder for " + path);
         return false;
     }
+    dec->setDopMarkerMode(d_->dop_marker_mode.load(std::memory_order_acquire));
     if (!dec->open(path)) {
         d_->set_error_msg(L"enqueueNext: open failed: " + dec->lastError());
         return false;

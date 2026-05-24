@@ -114,6 +114,9 @@ struct WasapiSharedOutput::Impl {
 
     FormatConverter      conv;
     std::vector<std::uint8_t> src_scratch;   // 从 DataCallback 拉到的源格式数据
+    // 配置项 (open 之前/之后均可改;open 时把 dither 应用到 conv)
+    bool                 cfg_dither       = true;
+    bool                 cfg_high_quality = true;
 
     std::atomic<OutputState> state{OutputState::Closed};
     std::atomic<bool>        running{false};
@@ -185,6 +188,22 @@ RenderStats  WasapiSharedOutput::renderStats() const
     r.glitch_frames = d_->stat_glitch_frames.load(std::memory_order_acquire);
     return r;
 }
+
+void WasapiSharedOutput::setDither(bool on)
+{
+    d_->cfg_dither = on;
+    // 已 open 的会话也立即生效 (FormatConverter 内部仅切布尔)
+    d_->conv.setDither(on);
+}
+bool WasapiSharedOutput::dither() const { return d_->cfg_dither; }
+
+void WasapiSharedOutput::setHighQuality(bool on)
+{
+    d_->cfg_high_quality = on;
+    // 注:running 会话内不能切多相 FIR 重采样状态,这里只缓存,
+    // 下次 open() 时 configure 才会真正 reconfigure resampler.
+}
+bool WasapiSharedOutput::highQuality() const { return d_->cfg_high_quality; }
 
 bool WasapiSharedOutput::open(const AudioFormat& fmt, const OpenOptions& opts, OpenResult* result)
 {
@@ -260,6 +279,8 @@ bool WasapiSharedOutput::open(const AudioFormat& fmt, const OpenOptions& opts, O
     if (FAILED(hr)) { d_->set_error(L"GetService(IAudioRenderClient)", hr); goto Fail; }
 
     // 准备 FormatConverter:源 → 设备
+    d_->conv.setHighQuality(d_->cfg_high_quality);
+    d_->conv.setDither(d_->cfg_dither);
     if (!d_->conv.configure(fmt, d_->device_fmt)) {
         d_->set_error_msg(L"FormatConverter::configure failed (channels mismatch?)");
         goto Fail;

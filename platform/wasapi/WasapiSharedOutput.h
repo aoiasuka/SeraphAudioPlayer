@@ -39,6 +39,14 @@ public:
     void         setErrorCallback(ErrorCallback cb) override;
     RenderStats  renderStats() const override;
 
+    // 共享路径专属:Int16 dst 时 TPDF dither + 一阶 noise shaping 开关。
+    // 默认 true。open() 之前或之后都可设;open 后立即生效(下一次 callback)。
+    void         setDither(bool on) override;
+    bool         dither() const;
+    // 高质量重采样开关。默认 true。仅在下一次 open() 时生效。
+    void         setHighQuality(bool on) override;
+    bool         highQuality() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> d_;

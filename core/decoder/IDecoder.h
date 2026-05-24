@@ -15,6 +15,7 @@
 #pragma once
 
 #include "core/format/AudioFormat.h"
+#include "core/dsd/DopMode.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -51,6 +52,15 @@ public:
 
     // 最近一次错误的描述(供日志/UI 展示)
     virtual std::wstring lastError() const = 0;
+
+    // 可选 DSD 钩子。仅 DSD 解码器 (Dsd/Dff) 有意义,其它实现默认空操作。
+    // 调用时机不限,但实际生效时点是下一次 read。
+    virtual void setDopMarkerMode(DopMarkerMode /*mode*/) {}
+
+    // DSD 输出模式切换。默认 DoP (false);true = raw native LSB8 packed。
+    // 必须在 open 之后、首次 read 之前调用;返回 false 表示实现不支持。
+    // PCM 解码器默认返回 false (无意义)。
+    virtual bool setNativeDsd(bool /*native*/) { return false; }
 };
 
 } // namespace apx

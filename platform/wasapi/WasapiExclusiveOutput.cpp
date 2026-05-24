@@ -78,12 +78,27 @@ bool build_wfx(const AudioFormat& fmt, WAVEFORMATEXTENSIBLE& w) noexcept
     case SampleType::Int24Packed:
     case SampleType::Int32:    w.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;        break;
     case SampleType::Float32:  w.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; break;
-    case SampleType::DsdLsb8:
-        // KSDATAFORMAT_SUBTYPE_DSD = {0x00000003-0cea-0010-8000-00aa00389b71}
-        // Win10 1709+ 内核理论支持,实际可用度极依赖 DAC 驱动是否暴露 DSD 端点;
-        // 多数消费 USB DAC 走 ASIO Native DSD,而非 WASAPI。本播放器暂不构造
-        // 该 SubFormat — 留待真有兼容设备时启用。
-        return false;
+    case SampleType::DsdLsb8: {
+        // KSDATAFORMAT_SUBTYPE_DSD = {00000003-0cea-0010-8000-00aa00389b71}
+        // Win10 1709+ 内核支持;实际可用度依赖 DAC 在 WASAPI 端点是否暴露 DSD format.
+        // 多数 USB DAC 在 Windows 走 ASIO native;WASAPI native 主要在专业 RME/MQA 等
+        // 设备上可用。本路径用于让 IsFormatSupported 探测,失败由上层回退到 DoP。
+        //
+        // LSB8 约定: 每字节 8 个 DSD bits, LSB = 最早, 通道按 frame interleave.
+        //   nSamplesPerSec = DSD_rate (2822400 for DSD64)
+        //   wBitsPerSample = 8 (业界 LSB8 packed)
+        //   wValidBitsPerSample = 1
+        //   nBlockAlign = channels * 1 byte
+        const GUID KSDATAFORMAT_SUBTYPE_DSD = {
+            0x00000003, 0x0cea, 0x0010,
+            { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+        w.SubFormat                = KSDATAFORMAT_SUBTYPE_DSD;
+        w.Format.wBitsPerSample    = 8;
+        w.Format.nBlockAlign       = static_cast<WORD>(fmt.channels);
+        w.Format.nAvgBytesPerSec   = fmt.sample_rate * w.Format.nBlockAlign;
+        w.Samples.wValidBitsPerSample = 1;
+        break;
+    }
     }
     return true;
 }

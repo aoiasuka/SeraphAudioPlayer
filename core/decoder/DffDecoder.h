@@ -39,6 +39,8 @@ public:
 
     void          setMarkerMode(DopMarkerMode mode);
     DopMarkerMode markerMode() const;
+    void setDopMarkerMode(DopMarkerMode mode) override { setMarkerMode(mode); }
+    bool setNativeDsd(bool native) override;
 
 private:
     struct Impl;

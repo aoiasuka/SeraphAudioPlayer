@@ -43,6 +43,9 @@ public:
     // DoP marker 策略。运行时可在任何时刻调用 (新设定从下一次 read 起生效)。
     void          setMarkerMode(DopMarkerMode mode);
     DopMarkerMode markerMode() const;
+    void setDopMarkerMode(DopMarkerMode mode) override { setMarkerMode(mode); }
+    // Native DSD 输出 (LSB8 packed)。必须在 open 之后调用;返回 true 即生效。
+    bool setNativeDsd(bool native) override;
 
 private:
     struct Impl;

@@ -94,7 +94,7 @@ Item {
                     color: window.textPrimary
                 }
                 Text {
-                    text: "(" + (playerVM.queue ? playerVM.queue.length : 0) + ")"
+                    text: "(" + playerVM.playlistModel.count + ")"
                     font.family: window.fontFamily
                     font.pixelSize: 13
                     color: window.textSecondary
@@ -166,7 +166,7 @@ Item {
 
                 ListView {
                     id: list
-                    model: playerVM.queue
+                    model: playerVM.playlistModel
                     spacing: 2
 
                     // 空态
@@ -183,13 +183,21 @@ Item {
                         width: list.width
                         height: 64
 
+                        required property int    index
+                        required property string title
+                        required property string artist
+                        required property string suffix
+                        required property string duration
+                        required property bool   isCurrent
+                        required property string coverUrl
+
                         Rectangle {
                             anchors.fill: parent
                             anchors.margins: 2
                             radius: 10
-                            color: modelData.isCurrent ? window.activeBg
+                            color: isCurrent ? window.activeBg
                                  : (rowArea.containsMouse ? window.hoverBg : "transparent")
-                            border.color: modelData.isCurrent ? window.brand : "transparent"
+                            border.color: isCurrent ? window.brand : "transparent"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 120 } }
                         }
@@ -207,7 +215,7 @@ Item {
 
                                 Text {
                                     anchors.centerIn: parent
-                                    visible: !modelData.isCurrent
+                                    visible: !isCurrent
                                     text: (index + 1)
                                     font.family: window.fontFamily
                                     font.pixelSize: 12
@@ -216,7 +224,7 @@ Item {
 
                                 AppIcon {
                                     anchors.centerIn: parent
-                                    visible: modelData.isCurrent
+                                    visible: isCurrent
                                     name: "volume"
                                     size: 14
                                     color: window.brand
@@ -233,7 +241,7 @@ Item {
                                 Rectangle {
                                     anchors.fill: parent
                                     radius: 6
-                                    color: modelData.isCurrent ? window.brandSoft : "transparent"
+                                    color: isCurrent ? window.brandSoft : "transparent"
                                     border.color: window.borderColor
                                     border.width: 1
                                 }
@@ -250,7 +258,7 @@ Item {
                                 Image {
                                     id: qTn
                                     anchors.fill: parent
-                                    source: modelData.coverUrl || ""
+                                    source: coverUrl
                                     visible: source.toString().length > 0 && status === Image.Ready
                                     fillMode: Image.PreserveAspectCrop
                                     asynchronous: true
@@ -281,16 +289,16 @@ Item {
                                 spacing: 2
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.title
+                                    text: title
                                     font.family: window.fontFamily
                                     font.pixelSize: 13
-                                    font.weight: modelData.isCurrent ? Font.DemiBold : Font.Medium
-                                    color: modelData.isCurrent ? window.brand : window.textPrimary
+                                    font.weight: isCurrent ? Font.DemiBold : Font.Medium
+                                    color: isCurrent ? window.brand : window.textPrimary
                                     elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: (modelData.artist || modelData.suffix) + (modelData.duration ? " · " + modelData.duration : "")
+                                    text: (artist || suffix) + (duration ? " · " + duration : "")
                                     font.family: window.fontFamily
                                     font.pixelSize: 11
                                     color: window.textTertiary

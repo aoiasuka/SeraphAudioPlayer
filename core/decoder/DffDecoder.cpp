@@ -45,6 +45,13 @@ uint64_t readU64BE(const uint8_t* p) {
             (uint64_t(p[6]) << 8)  |  uint64_t(p[7]);
 }
 
+inline uint8_t reverseBits(uint8_t b) {
+    b = static_cast<uint8_t>(((b >> 1) & 0x55) | ((b & 0x55) << 1));
+    b = static_cast<uint8_t>(((b >> 2) & 0x33) | ((b & 0x33) << 2));
+    b = static_cast<uint8_t>(((b >> 4) & 0x0F) | ((b & 0x0F) << 4));
+    return b;
+}
+
 } // namespace
 
 struct DffDecoder::Impl {
@@ -66,6 +73,8 @@ struct DffDecoder::Impl {
 
     // marker 策略
     std::atomic<DopMarkerMode> marker_mode{DopMarkerMode::PerFrame};
+    // 输出模式
+    std::atomic<bool> native_dsd{false};
 
     std::wstring last_error;
 };
@@ -79,6 +88,26 @@ std::wstring DffDecoder::lastError()    const { return d_->last_error; }
 
 void          DffDecoder::setMarkerMode(DopMarkerMode m) { d_->marker_mode.store(m, std::memory_order_release); }
 DopMarkerMode DffDecoder::markerMode() const             { return d_->marker_mode.load(std::memory_order_acquire); }
+
+bool DffDecoder::setNativeDsd(bool native)
+{
+    if (!d_->fp) { d_->last_error = L"setNativeDsd: not open"; return false; }
+    if (d_->native_dsd.load() == native) return true;
+    d_->native_dsd.store(native, std::memory_order_release);
+    AudioFormat& afmt = d_->fmt;
+    if (native) {
+        afmt.sample_rate     = d_->dsd_rate;
+        afmt.bits_per_sample = 8;
+        afmt.valid_bits      = 1;
+        afmt.sample_type     = SampleType::DsdLsb8;
+    } else {
+        afmt.sample_rate     = d_->dsd_rate / 16;
+        afmt.bits_per_sample = 24;
+        afmt.valid_bits      = 24;
+        afmt.sample_type     = SampleType::Int24Packed;
+    }
+    return true;
+}
 
 std::int64_t DffDecoder::totalFrames()  const {
     return static_cast<std::int64_t>(d_->dsd_samples / 16);
@@ -263,6 +292,42 @@ std::size_t DffDecoder::read(std::uint8_t* dst, std::size_t bytes)
 {
     if (!d_->fp || !dst || bytes == 0 || d_->eof) return 0;
     const uint32_t channels   = d_->channels;
+    const bool native = d_->native_dsd.load(std::memory_order_acquire);
+
+    if (native) {
+        // Native LSB8: 每 PCM 帧 = channels 字节, 来源是 1 个 DFF frame (channels bytes)
+        // DFF 是 MSB-first 时间方向, 需 reverseBits 转 LSB-first
+        const uint32_t frameBytes = channels;
+        bytes -= (bytes % frameBytes);
+        if (bytes == 0) return 0;
+
+        std::size_t framesWanted = bytes / frameBytes;
+        const std::size_t needed = framesWanted * channels;
+        if (d_->read_buf.size() < needed) d_->read_buf.resize(needed);
+
+        std::size_t got = std::fread(d_->read_buf.data(), 1, needed, d_->fp);
+        if (got == 0) { d_->eof = true; return 0; }
+        if (got < needed) std::memset(d_->read_buf.data() + got, 0, needed - got);
+        const std::size_t framesAvailable = got / channels;
+        if (framesAvailable < framesWanted) framesWanted = framesAvailable;
+
+        std::uint8_t* out = dst;
+        const uint8_t* tmp = d_->read_buf.data();
+        for (std::size_t f = 0; f < framesWanted; ++f) {
+            for (uint32_t ch = 0; ch < channels; ++ch) {
+                out[ch] = reverseBits(tmp[f * channels + ch]);
+            }
+            out += channels;
+            d_->pcm_frame_count += 1;
+            d_->cur_byte_offset += channels;
+            if (d_->pcm_frame_count * 8 >= d_->dsd_samples) {
+                d_->eof = true;
+                return (f + 1) * frameBytes;
+            }
+        }
+        return framesWanted * frameBytes;
+    }
+
     const uint32_t frameBytes = channels * 3;
     bytes -= (bytes % frameBytes);
     if (bytes == 0) return 0;

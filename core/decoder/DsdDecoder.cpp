@@ -93,6 +93,9 @@ struct DsdDecoder::Impl {
     // marker 策略(可被 UI/控制线程动态切换)
     std::atomic<DopMarkerMode> marker_mode{DopMarkerMode::PerFrame};
 
+    // 输出模式:false = DoP 24-bit, true = native LSB8 packed
+    std::atomic<bool> native_dsd{false};
+
     std::wstring last_error;
 };
 
@@ -105,6 +108,27 @@ std::wstring DsdDecoder::lastError()    const { return d_->last_error; }
 
 void          DsdDecoder::setMarkerMode(DopMarkerMode m) { d_->marker_mode.store(m, std::memory_order_release); }
 DopMarkerMode DsdDecoder::markerMode() const             { return d_->marker_mode.load(std::memory_order_acquire); }
+
+bool DsdDecoder::setNativeDsd(bool native)
+{
+    if (!d_->fp) { d_->last_error = L"setNativeDsd: not open"; return false; }
+    if (d_->native_dsd.load() == native) return true;
+    d_->native_dsd.store(native, std::memory_order_release);
+    // 重写 fmt
+    AudioFormat& afmt = d_->fmt;
+    if (native) {
+        afmt.sample_rate     = d_->dsd_rate;     // DSD rate, 不除 16
+        afmt.bits_per_sample = 8;
+        afmt.valid_bits      = 1;
+        afmt.sample_type     = SampleType::DsdLsb8;
+    } else {
+        afmt.sample_rate     = d_->dsd_rate / 16;
+        afmt.bits_per_sample = 24;
+        afmt.valid_bits      = 24;
+        afmt.sample_type     = SampleType::Int24Packed;
+    }
+    return true;
+}
 
 // 总帧数 = 每通道 DSD 样本数 / 16
 std::int64_t DsdDecoder::totalFrames()  const {
@@ -258,7 +282,8 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
 {
     if (!d_->fp || !dst || bytes == 0) return 0;
     const uint32_t channels  = d_->channels;
-    const uint32_t frameBytes = channels * 3;
+    const bool native = d_->native_dsd.load(std::memory_order_acquire);
+    const uint32_t frameBytes = native ? channels : (channels * 3);
 
     bytes -= (bytes % frameBytes);
     if (bytes == 0 || d_->eof) return 0;
@@ -281,6 +306,35 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
             }
             d_->block_loaded = true;
             d_->cur_block_index += 1;
+        }
+
+        if (native) {
+            // Native LSB8 packed:每帧 channels 字节,从 block 当前 byte 取每通道一个 byte。
+            // DSF bits_per_sample==1 已是 LSB-first,直接拷贝;==8 是 MSB-first,需 reverseBits.
+            while (d_->cur_byte_in_block + 1 <= d_->block_size
+                   && framesProduced < framesWanted) {
+                for (uint32_t ch = 0; ch < channels; ++ch) {
+                    const uint8_t* chData =
+                        d_->block_buf.data() + static_cast<size_t>(ch) * d_->block_size;
+                    uint8_t b = chData[d_->cur_byte_in_block];
+                    if (d_->bits_per_sample == 8) b = reverseBits(b);
+                    out[ch] = b;
+                }
+                out += channels;
+                d_->cur_byte_in_block += 1;
+                d_->pcm_frame_count   += 1;
+                framesProduced        += 1;
+                // EOF: native 每帧 = 8 DSD samples
+                if (d_->pcm_frame_count * 8 >= d_->dsd_samples) {
+                    d_->eof = true;
+                    break;
+                }
+            }
+            if (d_->cur_byte_in_block >= d_->block_size) {
+                d_->block_loaded      = false;
+                d_->cur_byte_in_block = 0;
+            }
+            continue;
         }
 
         // 每帧消耗每通道 2 byte。从 cur_byte_in_block 开始

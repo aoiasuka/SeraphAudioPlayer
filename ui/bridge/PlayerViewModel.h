@@ -109,6 +109,10 @@ class PlayerViewModel : public QObject {
     Q_PROPERTY(bool   dither              READ dither              WRITE setDither              NOTIFY ditherChanged)
     // DSD over PCM marker 模式: 0=PerFrame (DoP 标准, 0x05/0xFA), 1=PerSample
     Q_PROPERTY(int    dopMarkerMode       READ dopMarkerMode       WRITE setDopMarkerMode       NOTIFY dopMarkerModeChanged)
+    // DSD 输出模式: 0=ForceDoP (默认) / 1=ForceNative / 2=Auto
+    // ForceNative/Auto 时 decoder 输出 raw LSB8, WASAPI 协商 SUBTYPE_DSD;
+    // 实际可用度取决于 DAC 在 WASAPI 端点是否暴露 DSD format.
+    Q_PROPERTY(int    dsdMode             READ dsdMode             WRITE setDsdMode             NOTIFY dsdModeChanged)
 
 public:
     explicit PlayerViewModel(QObject* parent = nullptr);
@@ -185,6 +189,8 @@ public:
     void   setDither(bool on);
     int    dopMarkerMode()       const { return m_dop_marker_mode; }
     void   setDopMarkerMode(int m);
+    int    dsdMode()             const { return m_dsd_mode; }
+    void   setDsdMode(int m);
 
     // ---- 播放控制 ----
     Q_INVOKABLE void play();
@@ -302,6 +308,7 @@ signals:
     void outputPolicyChanged();
     void ditherChanged();
     void dopMarkerModeChanged();
+    void dsdModeChanged();
 
     // 跨线程内部信号
     void _coreStateChanged(int s);
@@ -415,6 +422,7 @@ private:
     bool   m_allow_shared_fallback = true;
     bool   m_dither                = true;
     int    m_dop_marker_mode       = 0;   // 0=PerFrame, 1=PerSample
+    int    m_dsd_mode              = 0;   // 0=ForceDoP, 1=ForceNative, 2=Auto
     void   applyReplayGainToPlayer();
     void   applyOutputPolicyToPlayer();
 
