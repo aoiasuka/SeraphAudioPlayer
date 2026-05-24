@@ -4,7 +4,7 @@
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-当前版本:**v0.3.1-lyrics-ext** (本地 tag)
+当前版本:**v0.3.2-bugfix** (本地 tag)
 
 ## 编译产物
 
