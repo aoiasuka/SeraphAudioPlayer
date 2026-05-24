@@ -4,7 +4,7 @@
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-当前版本:**v0.3.0-hifi-complete** (本地 tag)
+当前版本:**v0.3.1-lyrics-ext** (本地 tag)
 
 ## 编译产物
 
@@ -100,8 +100,9 @@ DSD 解码默认走 **DoP v1.1**,输出格式 = `DSD_rate / 16` Hz,24-bit packed
 | **AAC / M4A / MP4** (Media Foundation) | ✅ |
 | DSF / DFF → DoP | ✅ |
 | 元数据读取 (WAV INFO / FLAC VC / MP3 ID3v2 + cover) | ✅ |
+| **嵌入歌词** (MP3 SYLT/USLT、FLAC VC SYNCEDLYRICS/LYRICS、MP4 ©lyr) | ✅ |
 | Cue Sheet 解析 (单文件多 track) | ✅ |
-| 歌词读取 (LRC) | ✅ |
+| **歌词读取** (LRC + offset + UTF-16/GBK 编码嗅探 + 翻译副行 + 词级 `<mm:ss.xx>` + ViewModel 缓存) | ✅ |
 
 ### 输出 / DSP
 
@@ -169,8 +170,9 @@ audio_player_x86/
 │   ├── dsd/                    #   DopMode (PerFrame / PerSample)
 │   ├── dsp/                    #   Equalizer / Visualizer / FormatConverter
 │   │                           #     + PolyphaseResampler (+ AVX2/SSE2)
-│   ├── metadata/               #   MetadataReader (WAV/FLAC/MP3 + ReplayGain)
-│   └── lyrics/                 #   LyricsLoader (LRC)
+│   ├── metadata/               #   MetadataReader (WAV/FLAC/MP3 + ReplayGain
+│   │                           #     + ID3v2 SYLT/USLT + FLAC VC + MP4 ©lyr 歌词)
+│   └── lyrics/                 #   LyricsLoader (LRC + offset + 翻译 + 词级)
 ├── platform/                   # Windows 平台
 │   ├── wasapi/                 #   WasapiExclusiveOutput + WasapiSharedOutput
 │   ├── mmdevice/               #   DeviceEnumerator (热插拔)
