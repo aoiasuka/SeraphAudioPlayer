@@ -4,7 +4,7 @@
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-当前版本:**v0.2.1-ui-batch** (本地 tag)
+当前版本:**v0.3.0-hifi-complete** (本地 tag)
 
 ## 编译产物
 
@@ -63,8 +63,9 @@ $env:APX_QT_PATH = "C:\Qt\6.5.3\msvc2019_64"
 |------|------|
 | **WASAPI 独占** | ✅ 默认,事件驱动 + AVRT "Pro Audio" |
 | **WASAPI 共享回退** | ✅ 独占失败时自动降级(多相 windowed-sinc 重采样 + TPDF dither + noise shaping) |
-| **ASIO** | ⏳ 桩,用户放入 ASIO SDK 后可启用 |
-| 原生 DSD(DSD-Native) | ⏳ 类型系统已就绪,需 DAC 驱动支持 |
+| **WASAPI Native DSD** | ✅ 协商 `KSDATAFORMAT_SUBTYPE_DSD`;decoder 输出 LSB8 raw,DAC 需在 WASAPI 端点暴露 DSD format |
+| **ASIO** | ⚙️ 框架完整 + 注册表枚举可用;真实 open/start 需要用户提供 Steinberg ASIO SDK |
+| 原生 DSD(DSD-Native, 独立后端) | ✅ 已并入 WASAPI 独占 (KSDATAFORMAT_SUBTYPE_DSD) |
 
 ### DoP 输出
 
@@ -73,7 +74,17 @@ DSD 解码默认走 **DoP v1.1**,输出格式 = `DSD_rate / 16` Hz,24-bit packed
 - DSD128 → 352800 Hz 24-bit
 - DSD256 → 705600 Hz 24-bit
 
-支持 `DopMarkerMode::PerFrame` (默认) 与 `PerSample` 两种 marker 策略,通过 `DsdDecoder::setMarkerMode` / `DffDecoder::setMarkerMode` 切换以适配不同 DAC。设置中心可直接配置。
+支持 `DopMarkerMode::PerFrame` (默认) 与 `PerSample` 两种 marker 策略,通过设置中心实时切换,无需重启。
+
+### DSD 输出模式
+
+`PlayerController::DsdMode` 三档,设置中心可改:
+
+| 模式 | 行为 |
+|------|------|
+| **ForceDoP** (默认) | DSD decoder 输出 DoP 24-bit, WASAPI 协商普通 PCM —— 最广兼容 |
+| **ForceNative** | DSD decoder 输出 raw LSB8, WASAPI 协商 `KSDATAFORMAT_SUBTYPE_DSD`;协商失败即报错 |
+| **Auto** | 先尝试 Native,任意一步失败静默回落到 DoP |
 
 ## 功能特性
 
@@ -97,10 +108,12 @@ DSD 解码默认走 **DoP v1.1**,输出格式 = `DSD_rate / 16` Hz,24-bit packed
 | 模块 | 状态 |
 |------|------|
 | WASAPI 独占 (事件驱动 + AVRT) | ✅ |
+| WASAPI Native DSD 协商 (SUBTYPE_DSD) | ✅ |
 | WASAPI 共享回退 + 高质量 SRC + dither | ✅ |
 | **Polyphase 重采样器** (windowed-sinc 32 tap × 64 phase) | ✅ |
 | **SIMD 派发** (AVX2 + SSE2 + scalar,运行时 CPUID) | ✅ |
-| **TPDF Dither + 一阶 noise shaping** (Int16 路径) | ✅ |
+| **TPDF Dither + 一阶 noise shaping** (Int16 路径,实时开关) | ✅ |
+| **DoP Marker / DSD 输出模式 实时切换** (无需重启) | ✅ |
 | 10 段 RBJ EQ (默认禁用,接入 producer 链) | ✅ |
 | Visualizer (VU + 16 段频谱) | ✅ |
 | ReplayGain (Track/Album + Pre-amp ±12dB + 防 clipping) | ✅ |
@@ -127,23 +140,21 @@ DSD 解码默认走 **DoP v1.1**,输出格式 = `DSD_rate / 16` Hz,24-bit packed
 | Qt 6 Quick QML + 极简护眼主题 | ✅ |
 | **PlaylistViewModel** (QAbstractListModel,12 个 role) | ✅ |
 | **PlaylistView** (搜索 + 模式切换 + 上下移 + 右键菜单 + Cue 拖入 + M3U/JSON 导入导出) | ✅ |
-| **设置中心 · Hi-Fi 高级** (ReplayGain / Dither / DoP / SIMD / 共享回退) | ✅ |
+| **QueueDrawer** (与 PlaylistView 共用同一 ListModel) | ✅ |
+| **设置中心 · Hi-Fi 高级** (ReplayGain / Dither / DoP / DSD Mode / SIMD / 共享回退) | ✅ |
 | **快捷键自定义** (23 action,录制式改键,QSettings 落盘) | ✅ |
-| 队列抽屉 (QueueDrawer,从右侧滑入) | ✅ |
 | 系统媒体控件 (SMTC) | ✅ |
 | 任务栏缩略图按钮 (canPrev/canNext 严格匹配模式) | ✅ |
 | Jump List | ✅ |
 | 设备热插拔事件订阅 | ✅ |
 | 实时统计面板 (1Hz 刷新) | ✅ |
 
-### 未完成
+### 真机验证须知
 
 | 模块 | 状态 |
 |------|------|
-| 原生 DSD 输出 | ⏳ |
-| ASIO 输出 | ⏳ 需用户放入 SDK |
-| Dither 设置实时切换 (现仅持久化 + 下次输出生效) | ⏳ |
-| QueueDrawer 与 PlaylistView 双向同步 (Drawer 仍用 QVariantList) | ⏳ |
+| WASAPI Native DSD | 代码完整。能用与否取决于 DAC 在 WASAPI 端点是否暴露 `KSDATAFORMAT_SUBTYPE_DSD`;多数 USB DAC 在 Windows 走 ASIO native,这条路径主要在 RME 等专业声卡上有意义。Auto 模式可自动回落到 DoP |
+| ASIO open/start | 注册表枚举已可用 (无 SDK 也能列驱动);真实 open/start/buffer-switch 需要用户把 Steinberg ASIO SDK 放进 `third_party/asiosdk/`,CMake 检测后自动编入 |
 
 ## 目录结构
 
@@ -266,6 +277,22 @@ if (md && !std::isnan(md->rg_track_gain_db)) {
     pc.setReplayGainMode(PlayerController::ReplayGainMode::Track);
     pc.setReplayGainPreampDb(+3.0);       // 在 RG 之上额外 +3 dB
 }
+```
+
+### Dither / 共享回退 (运行时切换)
+
+```cpp
+pc.setSharedDither(true);                 // Int16 dst 时 TPDF + noise shape, 立即生效
+pc.setSharedHighQuality(true);            // 多相 FIR vs 线性插值, 下次 open 时生效
+pc.setAllowSharedFallback(false);         // "要么 bit-perfect, 要么报错"
+```
+
+### DSD 输出模式
+
+```cpp
+pc.setDopMarkerMode(DopMarkerMode::PerFrame);  // 立即同步给当前 decoder
+pc.setDsdMode(PlayerController::DsdMode::Auto); // Native 失败回落 DoP
+// 下次 loadFile 才协商;运行中切 mode 不打断当前播放
 ```
 
 ### Gapless
