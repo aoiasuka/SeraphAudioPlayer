@@ -6,6 +6,7 @@
 #include "app/playlist/Playlist.h"
 #include "app/playlist/PlaylistIO.h"
 #include "app/playlist/CueSheet.h"
+#include "core/dsp/PolyphaseResampler.h"
 #include <QFileInfo>
 #include <QUrl>
 #include <QVariantMap>
@@ -36,6 +37,14 @@ PlayerViewModel::PlayerViewModel(QObject* parent)
     : QObject(parent)
 {
     player_ = std::make_unique<PlayerController>();
+    m_playlistModel = std::make_unique<PlaylistViewModel>(this);
+
+    // queue/currentIndex 任何变化 → 同步到 ListModel
+    auto refreshPlaylistModel = [this] {
+        if (m_playlistModel) m_playlistModel->setItems(itemsFromPaths(m_queue, m_currentIndex), m_currentIndex);
+    };
+    connect(this, &PlayerViewModel::queueChanged,        this, refreshPlaylistModel);
+    connect(this, &PlayerViewModel::currentIndexChanged, this, refreshPlaylistModel);
 
     // 跨线程信号连接
     connect(this, &PlayerViewModel::_coreStateChanged, this, &PlayerViewModel::onCoreStateChanged, Qt::QueuedConnection);
@@ -1640,6 +1649,21 @@ void PlayerViewModel::loadSettings()
     m_liked = s.value("liked").toStringList();
     s.endGroup();
 
+    // 高级 Hi-Fi
+    s.beginGroup("hifi");
+    m_rg_mode               = std::clamp(s.value("rg_mode", m_rg_mode).toInt(), 0, 2);
+    m_rg_preamp_db          = std::clamp(s.value("rg_preamp_db", m_rg_preamp_db).toDouble(), -12.0, 12.0);
+    m_allow_shared_fallback = s.value("allow_shared_fallback", m_allow_shared_fallback).toBool();
+    m_dither                = s.value("dither", m_dither).toBool();
+    m_dop_marker_mode       = std::clamp(s.value("dop_marker_mode", m_dop_marker_mode).toInt(), 0, 1);
+    s.endGroup();
+    applyReplayGainToPlayer();
+    applyOutputPolicyToPlayer();
+    emit replayGainChanged();
+    emit outputPolicyChanged();
+    emit ditherChanged();
+    emit dopMarkerModeChanged();
+
     // EQ
     s.beginGroup("eq");
     m_eq.setEnabled(s.value("enabled", false).toBool());
@@ -1698,6 +1722,14 @@ void PlayerViewModel::saveSettings() const
     s.setValue("liked", m_liked);
     s.endGroup();
 
+    s.beginGroup("hifi");
+    s.setValue("rg_mode",               m_rg_mode);
+    s.setValue("rg_preamp_db",          m_rg_preamp_db);
+    s.setValue("allow_shared_fallback", m_allow_shared_fallback);
+    s.setValue("dither",                m_dither);
+    s.setValue("dop_marker_mode",       m_dop_marker_mode);
+    s.endGroup();
+
     // EQ
     s.beginGroup("eq");
     s.setValue("enabled", m_eq.enabled());
@@ -1734,6 +1766,84 @@ void PlayerViewModel::onStatsTick()
     if (s.periods_total  != m_stats_periods)   { m_stats_periods   = s.periods_total;  changed = true; }
     if (s.frames_total   != m_stats_frames)    { m_stats_frames    = s.frames_total;   changed = true; }
     if (changed) emit statsUpdated();
+}
+
+// =============================================================================
+// 高级 Hi-Fi 设置
+// =============================================================================
+
+void PlayerViewModel::setReplayGainMode(int m)
+{
+    m = std::clamp(m, 0, 2);
+    if (m == m_rg_mode) return;
+    m_rg_mode = m;
+    applyReplayGainToPlayer();
+    emit replayGainChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+void PlayerViewModel::setReplayGainPreampDb(double db)
+{
+    db = std::clamp(db, -12.0, 12.0);
+    if (std::abs(db - m_rg_preamp_db) < 1e-6) return;
+    m_rg_preamp_db = db;
+    applyReplayGainToPlayer();
+    emit replayGainChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+void PlayerViewModel::setAllowSharedFallback(bool on)
+{
+    if (on == m_allow_shared_fallback) return;
+    m_allow_shared_fallback = on;
+    applyOutputPolicyToPlayer();
+    emit outputPolicyChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+QString PlayerViewModel::simdPath() const
+{
+    return QString::fromLatin1(apx::PolyphaseResampler::simdPath());
+}
+
+void PlayerViewModel::setDither(bool on)
+{
+    if (on == m_dither) return;
+    m_dither = on;
+    // 注:dither 在 FormatConverter 内部生效;此处持久化,共享回退路径
+    // 下次创建 WasapiSharedOutput 时读取(后续可加 PlayerController::setDither()
+    // 完整链路接入). 这里先做持久化与 UI 状态同步.
+    emit ditherChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+void PlayerViewModel::setDopMarkerMode(int m)
+{
+    m = std::clamp(m, 0, 1);
+    if (m == m_dop_marker_mode) return;
+    m_dop_marker_mode = m;
+    // 同 dither:持久化在此, 在下一次 DSD 文件加载时由 DsdDecoder 读取.
+    emit dopMarkerModeChanged();
+    if (!m_loadingSettings) saveSettings();
+}
+
+void PlayerViewModel::applyReplayGainToPlayer()
+{
+    if (!player_) return;
+    PlayerController::ReplayGainMode mode = PlayerController::ReplayGainMode::Off;
+    switch (m_rg_mode) {
+    case 1: mode = PlayerController::ReplayGainMode::Track; break;
+    case 2: mode = PlayerController::ReplayGainMode::Album; break;
+    default: mode = PlayerController::ReplayGainMode::Off;  break;
+    }
+    player_->setReplayGainMode(mode);
+    player_->setReplayGainPreampDb(m_rg_preamp_db);
+}
+
+void PlayerViewModel::applyOutputPolicyToPlayer()
+{
+    if (!player_) return;
+    player_->setAllowSharedFallback(m_allow_shared_fallback);
 }
 
 namespace {

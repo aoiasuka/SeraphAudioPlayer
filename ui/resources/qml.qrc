@@ -36,5 +36,6 @@
         <file alias="qml/views/AlbumDetailView.qml">../qml/views/AlbumDetailView.qml</file>
         <file alias="qml/views/SearchResultsView.qml">../qml/views/SearchResultsView.qml</file>
         <file alias="qml/views/VizSettingsView.qml">../qml/views/VizSettingsView.qml</file>
+        <file alias="qml/views/PlaylistView.qml">../qml/views/PlaylistView.qml</file>
     </qresource>
 </RCC>

@@ -238,6 +238,7 @@ ApplicationWindow {
         case "liked":    return Qt.resolvedUrl("views/LikedView.qml")
         case "settings": return Qt.resolvedUrl("views/SettingsView.qml")
         case "viz_settings": return Qt.resolvedUrl("views/VizSettingsView.qml")
+        case "queue":    return Qt.resolvedUrl("views/PlaylistView.qml")
         default:         return Qt.resolvedUrl("views/HomeView.qml")
         }
     }
@@ -441,52 +442,65 @@ ApplicationWindow {
     }
 
     // ===== 键盘快捷键 =====
-    // 播放控制
+    // 全部 sequence 都来自 shortcutsVM (可在设置中改键).
+    // Media Play / Ctrl+/ 等"次要绑定"保留为单独的 Shortcut, 不暴露给改键 UI.
+
     Shortcut {
-        sequences: ["Space", "Media Play"]
+        sequence: shortcutsVM.keymap["play_pause"] || "Space"
         onActivated: {
             if (playerVM.state === 2) playerVM.pause()
             else playerVM.play()
         }
     }
     Shortcut {
-        sequence: "Right"
+        sequence: "Media Play"
+        onActivated: {
+            if (playerVM.state === 2) playerVM.pause()
+            else playerVM.play()
+        }
+    }
+    Shortcut {
+        sequence: shortcutsVM.keymap["next"] || "Right"
         onActivated: playerVM.next()
     }
     Shortcut {
-        sequence: "Left"
+        sequence: shortcutsVM.keymap["prev"] || "Left"
         onActivated: playerVM.previous()
     }
     Shortcut {
-        sequence: "Up"
+        sequence: shortcutsVM.keymap["vol_up"] || "Up"
         onActivated: playerVM.volume = Math.min(100, playerVM.volume + 5)
     }
     Shortcut {
-        sequence: "Down"
+        sequence: shortcutsVM.keymap["vol_down"] || "Down"
         onActivated: playerVM.volume = Math.max(0,   playerVM.volume - 5)
     }
     Shortcut {
-        sequence: "M"
+        sequence: shortcutsVM.keymap["mute"] || "M"
         onActivated: playerVM.toggleMute()
     }
     Shortcut {
-        sequence: "Ctrl+L"
+        sequence: shortcutsVM.keymap["like_current"] || "Ctrl+L"
         onActivated: playerVM.toggleLikeCurrent()
     }
     Shortcut {
-        sequence: "Ctrl+R"
+        sequence: shortcutsVM.keymap["cycle_repeat"] || "Ctrl+R"
         onActivated: playerVM.cycleRepeatMode()
     }
     Shortcut {
-        sequence: "Ctrl+S"
+        sequence: shortcutsVM.keymap["toggle_shuffle"] || "Ctrl+S"
         onActivated: playerVM.toggleShuffle()
     }
     Shortcut {
-        sequence: "Ctrl+Q"
+        sequence: shortcutsVM.keymap["toggle_queue"] || "Ctrl+Q"
         onActivated: queueDrawer.toggle()
     }
     Shortcut {
-        sequence: "Escape"
+        sequence: shortcutsVM.keymap["open_queue_page"] || "Ctrl+Shift+Q"
+        onActivated: window.navigateTo("queue")
+    }
+    Shortcut {
+        sequence: shortcutsVM.keymap["escape"] || "Escape"
         onActivated: {
             if (queueDrawer.open) {
                 queueDrawer.hide()
@@ -498,32 +512,42 @@ ApplicationWindow {
         }
     }
     // 数字键切换主导航 (1=首页 ... 7=喜欢)
-    Shortcut { sequence: "1"; onActivated: window.navigateTo("home") }
-    Shortcut { sequence: "2"; onActivated: window.navigateTo("library") }
-    Shortcut { sequence: "3"; onActivated: window.navigateTo("playlist") }
-    Shortcut { sequence: "4"; onActivated: window.navigateTo("artist") }
-    Shortcut { sequence: "5"; onActivated: window.navigateTo("album") }
-    Shortcut { sequence: "6"; onActivated: window.navigateTo("history") }
-    Shortcut { sequence: "7"; onActivated: window.navigateTo("liked") }
-    Shortcut { sequence: "Ctrl+Comma"; onActivated: window.navigateTo("settings") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_home"]     || "1"; onActivated: window.navigateTo("home") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_library"]  || "2"; onActivated: window.navigateTo("library") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_playlist"] || "3"; onActivated: window.navigateTo("playlist") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_artist"]   || "4"; onActivated: window.navigateTo("artist") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_album"]    || "5"; onActivated: window.navigateTo("album") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_history"]  || "6"; onActivated: window.navigateTo("history") }
+    Shortcut { sequence: shortcutsVM.keymap["nav_liked"]    || "7"; onActivated: window.navigateTo("liked") }
     Shortcut {
-        sequence: "F11"
+        sequence: shortcutsVM.keymap["nav_settings"] || "Ctrl+,"
+        onActivated: window.navigateTo("settings")
+    }
+    Shortcut {
+        sequence: shortcutsVM.keymap["toggle_fullscreen"] || "F11"
         onActivated: {
             if (window.visibility === Window.FullScreen) window.visibility = Window.Windowed
             else window.visibility = Window.FullScreen
         }
     }
     Shortcut {
-        sequences: ["F1", "Ctrl+/"]
+        sequence: shortcutsVM.keymap["show_shortcuts"] || "F1"
         onActivated: shortcutsDialog.open()
     }
     Shortcut {
-        sequence: "Ctrl+E"
+        sequence: "Ctrl+/"
+        onActivated: shortcutsDialog.open()
+    }
+    Shortcut {
+        sequence: shortcutsVM.keymap["toggle_eq"] || "Ctrl+E"
         onActivated: eqDialog.open()
     }
-    // 全局搜索: 跳转到搜索结果视图 (空 query 也可, 让用户在新页输入)
     Shortcut {
-        sequences: ["Ctrl+F", "Ctrl+K"]
+        sequence: shortcutsVM.keymap["open_search"] || "Ctrl+F"
+        onActivated: window.openSearch("")
+    }
+    Shortcut {
+        sequence: "Ctrl+K"
         onActivated: window.openSearch("")
     }
 

@@ -6,6 +6,10 @@ set(APX_UI_SOURCES
     main.cpp
     bridge/PlayerViewModel.h
     bridge/PlayerViewModel.cpp
+    bridge/PlaylistViewModel.h
+    bridge/PlaylistViewModel.cpp
+    bridge/ShortcutsViewModel.h
+    bridge/ShortcutsViewModel.cpp
     bridge/DeviceBridge.h
     bridge/DeviceBridge.cpp
     bridge/CoverImageProvider.h

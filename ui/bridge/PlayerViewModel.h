@@ -5,6 +5,7 @@
 
 #include "app/controller/PlayerController.h"
 #include "DeviceBridge.h"
+#include "PlaylistViewModel.h"
 #include "core/metadata/MetadataReader.h"
 #include "core/lyrics/LyricsLoader.h"
 #include "core/dsp/Visualizer.h"
@@ -43,6 +44,8 @@ class PlayerViewModel : public QObject {
 
     // 当前播放队列(原始顺序)与最近播放
     Q_PROPERTY(QVariantList queue READ queue NOTIFY queueChanged)
+    // QAbstractListModel 形式的同一队列;新 PlaylistView 通过它绑定 ListView,避免 QVariantList 全量重发
+    Q_PROPERTY(apx::ui::PlaylistViewModel* playlistModel READ playlistModel CONSTANT)
     Q_PROPERTY(int currentIndex READ currentIndex NOTIFY currentIndexChanged)
     Q_PROPERTY(QVariantList recent READ recent NOTIFY recentChanged)
     // 喜欢的曲目
@@ -93,6 +96,20 @@ class PlayerViewModel : public QObject {
     Q_PROPERTY(quint64 statsPeriodsTotal  READ statsPeriodsTotal  NOTIFY statsUpdated)
     Q_PROPERTY(quint64 statsFramesTotal   READ statsFramesTotal   NOTIFY statsUpdated)
 
+    // ---- 高级 Hi-Fi 设置 ----
+    // ReplayGain: 0=Off / 1=Track / 2=Album, preamp 区间 -12..+12 dB
+    Q_PROPERTY(int    replayGainMode      READ replayGainMode      WRITE setReplayGainMode      NOTIFY replayGainChanged)
+    Q_PROPERTY(double replayGainPreampDb  READ replayGainPreampDb  WRITE setReplayGainPreampDb  NOTIFY replayGainChanged)
+    // 独占模式失败时是否允许回退到共享模式 (开 = "至少能听见", 关 = "Hi-Fi 严格")
+    Q_PROPERTY(bool   allowSharedFallback READ allowSharedFallback WRITE setAllowSharedFallback NOTIFY outputPolicyChanged)
+    // 重采样运行时实际选中的 SIMD 路径 ("avx2" / "sse2" / "scalar"). 只读, 启动后不变.
+    Q_PROPERTY(QString simdPath            READ simdPath           CONSTANT)
+    // Int16 输出量化 dither (TPDF + noise shaping). 持久化, 影响 WasapiSharedOutput
+    // 下一次格式协商后生效.
+    Q_PROPERTY(bool   dither              READ dither              WRITE setDither              NOTIFY ditherChanged)
+    // DSD over PCM marker 模式: 0=PerFrame (DoP 标准, 0x05/0xFA), 1=PerSample
+    Q_PROPERTY(int    dopMarkerMode       READ dopMarkerMode       WRITE setDopMarkerMode       NOTIFY dopMarkerModeChanged)
+
 public:
     explicit PlayerViewModel(QObject* parent = nullptr);
     ~PlayerViewModel() override;
@@ -116,6 +133,7 @@ public:
     void setShuffle(bool s);
 
     QVariantList queue() const;
+    PlaylistViewModel* playlistModel() const { return m_playlistModel.get(); }
     int currentIndex() const { return m_currentIndex; }
     QVariantList recent() const;
     QVariantList liked() const;
@@ -154,6 +172,19 @@ public:
     quint64 statsRecoveryCount() const { return m_stats_recovery; }
     quint64 statsPeriodsTotal()  const { return m_stats_periods; }
     quint64 statsFramesTotal()   const { return m_stats_frames; }
+
+    // ---- 高级 Hi-Fi 设置 ----
+    int    replayGainMode()      const { return m_rg_mode; }
+    void   setReplayGainMode(int m);
+    double replayGainPreampDb()  const { return m_rg_preamp_db; }
+    void   setReplayGainPreampDb(double db);
+    bool   allowSharedFallback() const { return m_allow_shared_fallback; }
+    void   setAllowSharedFallback(bool on);
+    QString simdPath() const;
+    bool   dither()              const { return m_dither; }
+    void   setDither(bool on);
+    int    dopMarkerMode()       const { return m_dop_marker_mode; }
+    void   setDopMarkerMode(int m);
 
     // ---- 播放控制 ----
     Q_INVOKABLE void play();
@@ -267,6 +298,10 @@ signals:
     void visualizerTypeChanged();
     void eqChanged();
     void statsUpdated();
+    void replayGainChanged();
+    void outputPolicyChanged();
+    void ditherChanged();
+    void dopMarkerModeChanged();
 
     // 跨线程内部信号
     void _coreStateChanged(int s);
@@ -284,6 +319,7 @@ private slots:
 private:
     std::unique_ptr<PlayerController> player_;
     std::unique_ptr<DeviceBridge> device_bridge_;
+    std::unique_ptr<PlaylistViewModel> m_playlistModel;
     std::unique_ptr<apx::SmtcController> smtc_;
     std::unique_ptr<apx::TaskbarButtons> taskbar_;
     void* m_hwnd = nullptr;
@@ -372,6 +408,15 @@ private:
     quint64 m_stats_frames    = 0;
     QTimer* m_statsTimer      = nullptr;
     void    onStatsTick();
+
+    // 高级 Hi-Fi 设置 (持久化到 QSettings)
+    int    m_rg_mode               = 0;   // 0=off, 1=track, 2=album
+    double m_rg_preamp_db          = 0.0;
+    bool   m_allow_shared_fallback = true;
+    bool   m_dither                = true;
+    int    m_dop_marker_mode       = 0;   // 0=PerFrame, 1=PerSample
+    void   applyReplayGainToPlayer();
+    void   applyOutputPolicyToPlayer();
 
     // 歌词
     std::vector<apx::LyricLine> m_lyrics;

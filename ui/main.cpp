@@ -6,6 +6,7 @@
 
 #include "bridge/PlayerViewModel.h"
 #include "bridge/CoverImageProvider.h"
+#include "bridge/ShortcutsViewModel.h"
 #include "platform/taskbar/TaskbarButtons.h"
 #include "platform/taskbar/JumpList.h"
 
@@ -152,6 +153,8 @@ int main(int argc, char* argv[])
 
     // 注册到 QML 上下文
     engine.rootContext()->setContextProperty("playerVM", &playerVM);
+    apx::ui::ShortcutsViewModel shortcutsVM;
+    engine.rootContext()->setContextProperty("shortcutsVM", &shortcutsVM);
 
     // 捕获 QML 加载警告
     QObject::connect(&engine, &QQmlApplicationEngine::warnings,

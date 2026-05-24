@@ -501,6 +501,320 @@ Item {
                 }
             }
 
+            // ---- Hi-Fi 高级 ----
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: hifiCol.implicitHeight + 32
+                radius: 16
+                color: window.sidebarBg
+                border.color: window.borderColor
+                border.width: 1
+
+                ColumnLayout {
+                    id: hifiCol
+                    anchors.fill: parent
+                    anchors.margins: 20
+                    spacing: 16
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        Rectangle {
+                            width: 36; height: 36; radius: 10
+                            color: "#FCE7F3"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                name: "music"; size: 18
+                                color: "#BE185D"; strokeWidth: 2
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: "Hi-Fi 高级"
+                                font.family: window.fontFamily
+                                font.pixelSize: 15
+                                font.weight: Font.DemiBold
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "ReplayGain、共享回退、SIMD 选路、Dither、DSD"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                    }
+
+                    // ReplayGain 模式
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "ReplayGain"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: ["关闭", "按曲目 (Track)", "按专辑 (Album)"][playerVM.replayGainMode]
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        RowLayout {
+                            spacing: 0
+                            Repeater {
+                                model: [
+                                    { v: 0, label: "关闭" },
+                                    { v: 1, label: "Track" },
+                                    { v: 2, label: "Album" }
+                                ]
+                                delegate: Rectangle {
+                                    Layout.preferredWidth: 64
+                                    Layout.preferredHeight: 30
+                                    color: playerVM.replayGainMode === modelData.v ? window.brand
+                                         : (rgArea.containsMouse ? window.hoverBg : "transparent")
+                                    border.color: window.borderColor
+                                    border.width: 1
+                                    radius: 0
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        font.family: window.fontFamily
+                                        font.pixelSize: 12
+                                        font.weight: Font.DemiBold
+                                        color: playerVM.replayGainMode === modelData.v ? "#FFFFFF" : window.textPrimary
+                                    }
+                                    MouseArea {
+                                        id: rgArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: playerVM.replayGainMode = modelData.v
+                                    }
+                                }
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // Pre-amp (-12..+12 dB)
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "Pre-amp"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "ReplayGain 之上额外增益,-12 .. +12 dB"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        Slider {
+                            id: preampSlider
+                            Layout.preferredWidth: 220
+                            from: -12; to: 12
+                            stepSize: 0.5
+                            value: playerVM.replayGainPreampDb
+                            onMoved: playerVM.replayGainPreampDb = value
+                            background: Rectangle {
+                                x: parent.leftPadding
+                                y: parent.topPadding + parent.availableHeight / 2 - height / 2
+                                width: parent.availableWidth
+                                height: 4
+                                radius: 2
+                                color: window.borderColor
+                                Rectangle {
+                                    width: parent.parent.visualPosition * parent.width
+                                    height: parent.height
+                                    radius: parent.radius
+                                    color: window.brand
+                                }
+                            }
+                            handle: Rectangle {
+                                x: parent.leftPadding + parent.visualPosition * (parent.availableWidth - width)
+                                y: parent.topPadding + parent.availableHeight / 2 - height / 2
+                                width: 14; height: 14; radius: 7
+                                color: window.brand
+                                border.color: "#FFFFFF"
+                                border.width: 2
+                            }
+                        }
+                        Text {
+                            Layout.preferredWidth: 56
+                            text: playerVM.replayGainPreampDb.toFixed(1) + " dB"
+                            font.family: window.fontFamily
+                            font.pixelSize: 12
+                            color: window.textSecondary
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // 共享模式回退
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "允许共享模式回退"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "独占失败时降级为共享 (启用 SRC + dither)"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        Switch {
+                            checked: playerVM.allowSharedFallback
+                            onToggled: playerVM.allowSharedFallback = checked
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // Dither
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "Int16 量化 Dither"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "TPDF + 一阶 noise shaping (仅共享回退路径)"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        Switch {
+                            checked: playerVM.dither
+                            onToggled: playerVM.dither = checked
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // DSD over PCM marker 模式
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "DoP Marker 模式"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: ["PerFrame (DoP 标准)", "PerSample"][playerVM.dopMarkerMode]
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        RowLayout {
+                            spacing: 0
+                            Repeater {
+                                model: [
+                                    { v: 0, label: "PerFrame" },
+                                    { v: 1, label: "PerSample" }
+                                ]
+                                delegate: Rectangle {
+                                    Layout.preferredWidth: 92
+                                    Layout.preferredHeight: 30
+                                    color: playerVM.dopMarkerMode === modelData.v ? window.brand
+                                         : (dopArea.containsMouse ? window.hoverBg : "transparent")
+                                    border.color: window.borderColor
+                                    border.width: 1
+                                    radius: 0
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        font.family: window.fontFamily
+                                        font.pixelSize: 12
+                                        font.weight: Font.DemiBold
+                                        color: playerVM.dopMarkerMode === modelData.v ? "#FFFFFF" : window.textPrimary
+                                    }
+                                    MouseArea {
+                                        id: dopArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: playerVM.dopMarkerMode = modelData.v
+                                    }
+                                }
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // SIMD 路径展示 (只读)
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "重采样 SIMD 路径"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "CPU 探测后的运行时选择"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+                        Rectangle {
+                            Layout.preferredHeight: 26
+                            Layout.preferredWidth: simdTag.implicitWidth + 16
+                            radius: 13
+                            color: window.brandSoft
+                            Text {
+                                id: simdTag
+                                anchors.centerIn: parent
+                                text: (playerVM.simdPath || "scalar").toUpperCase()
+                                font.family: window.fontFamily
+                                font.pixelSize: 11
+                                font.weight: Font.DemiBold
+                                color: window.brand
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+            }
+
             // ---- 关于 ----
             Rectangle {
                 Layout.fillWidth: true
