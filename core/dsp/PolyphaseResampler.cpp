@@ -234,7 +234,10 @@ std::size_t PolyphaseResampler::process(const float* src, std::size_t src_frames
     std::size_t produced = 0;
     std::size_t consumed = 0;
     // 每输出 sample 都要 combined coef = w_lo*f_lo + w_hi*f_hi;用 stack buffer 复用
-    alignas(16) float coef[kTaps];
+    // alignas(32): AVX2 内核用 _mm256_store_ps 要求 32 字节对齐,
+    // SSE2 内核 _mm_store_ps 要求 16 字节也顺带满足;
+    // 此前 alignas(16) 在 AVX2 路径上是真 bug(GP fault)。
+    alignas(32) float coef[kTaps];
 
     while (produced < dst_capacity_frames) {
         if (src_phase_ > 0.0) {

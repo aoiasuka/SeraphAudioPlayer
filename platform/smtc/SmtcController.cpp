@@ -49,9 +49,10 @@ bool SmtcController::initialize(void* hwndPtr)
 
     // 这里保证 COM(MTA 或 STA 由父线程决定) 已经初始化;
     // Qt 主线程通常已经初始化 STA。若未初始化,这里尝试初始化为 MTA。
+    // 只有 S_OK(我们是首次初始化的那个)才需要配对 CoUninitialize;
+    // S_FALSE(线程已经初始化过)和 RPC_E_CHANGED_MODE 都不应反初始化。
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    d_->comInitialized = SUCCEEDED(hr);   // RPC_E_CHANGED_MODE 也算"已就绪"
-    if (hr == RPC_E_CHANGED_MODE) d_->comInitialized = false;
+    d_->comInitialized = (hr == S_OK);
 
     try {
         // SystemMediaTransportControlsInterop 是必需的接口,通过

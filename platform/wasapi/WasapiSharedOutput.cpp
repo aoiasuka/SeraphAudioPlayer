@@ -382,6 +382,10 @@ void WasapiSharedOutput::Impl::render_proc()
             fire_error();
             break;
         }
+        // 防御:某些驱动在异常/状态切换瞬间可能返回 padding > buffer_frames,
+        // 直接相减会下溢成巨大 UINT32 → GetBuffer 必失败 → 拿到一次性错误。
+        // 这里识别为驱动竞态,跳过本轮等下次事件。
+        if (padding > buffer_frames) continue;
         const UINT32 frames_avail = buffer_frames - padding;
         if (frames_avail == 0) continue;
 
