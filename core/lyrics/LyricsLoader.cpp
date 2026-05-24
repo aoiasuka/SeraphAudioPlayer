@@ -389,8 +389,11 @@ LyricsDoc LyricsLoader::parseDoc(const std::string& raw_in)
 
     std::sort(doc.lines.begin(), doc.lines.end(),
               [](const LyricLine& a, const LyricLine& b) { return a.time_sec < b.time_sec; });
-    // 钳到 ≥ 0
-    for (auto& ln : doc.lines) if (ln.time_sec < 0) ln.time_sec = 0;
+    // 钳到 ≥ 0(行级 + 词级一起;否则负的词级会卡住高亮永远到不了)
+    for (auto& ln : doc.lines) {
+        if (ln.time_sec < 0) ln.time_sec = 0;
+        for (auto& w : ln.word_times) if (w.first < 0) w.first = 0;
+    }
 
     return doc;
 }
