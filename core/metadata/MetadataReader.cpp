@@ -678,12 +678,12 @@ std::optional<std::string> MetadataReader::readEmbeddedLyrics(const std::wstring
 }
 
 // ----------------------------------------------------------------------------
-// MP3 ID3v2 USLT(非同步歌词)
-//   payload = enc(1) lang(3) desc(enc-NUL) lyrics(enc, rest)
+// MP3 ID3v2 USLT(非同步歌词) + SYLT(同步歌词)
+//   USLT payload = enc(1) lang(3) desc(enc-NUL) lyrics(enc, rest)
+//   SYLT payload = enc(1) lang(3) ts_format(1) content_type(1)
+//                  + desc(enc-NUL) + (text(enc-NUL) + ts(4 BE uint32))*
 //   enc: 0=ISO-8859-1, 1=UTF-16 BOM, 2=UTF-16BE, 3=UTF-8 (v2.4)
-// SYLT(同步歌词带时间戳)结构复杂(timestamp_format + content_type
-// + desc + (text + nul + time_ms)*),先按"未实现"处理 — USLT 是绝大多数
-// 标签编辑器写入 LRC 字符串的位置。
+//   SYLT 优先(带时间戳),USLT 兜底;ts_format 只支持 2(毫秒)。
 // ----------------------------------------------------------------------------
 std::optional<std::string> MetadataReader::readEmbeddedLyricsMp3(const std::wstring& path)
 {
@@ -759,6 +759,10 @@ std::optional<std::string> MetadataReader::readEmbeddedLyricsMp3(const std::wstr
         return {};
     };
 
+    // 两个候选:SYLT 带时间戳更精确,优先返回;USLT 兜底。
+    std::optional<std::string> uslt_out;
+    std::optional<std::string> sylt_out;
+
     while (pos + 10 <= tag.size()) {
         char fid[5] = {0};
         std::memcpy(fid, tag.data() + pos, 4);
@@ -775,7 +779,7 @@ std::optional<std::string> MetadataReader::readEmbeddedLyricsMp3(const std::wstr
         if (pl + fsize > tag.size()) break;
         if (fsize == 0) { pos = pl; continue; }
 
-        if (std::memcmp(fid, "USLT", 4) == 0 && fsize >= 5) {
+        if (!uslt_out && std::memcmp(fid, "USLT", 4) == 0 && fsize >= 5) {
             const uint8_t enc = tag[pl];
             const uint8_t* p   = tag.data() + pl + 4;   // 跳过 enc(1) + lang(3)
             size_t          n   = fsize - 4;
@@ -795,11 +799,93 @@ std::optional<std::string> MetadataReader::readEmbeddedLyricsMp3(const std::wstr
                             : ((enc == 1 || enc == 2) ? cut + 2 : cut + 1);
             if (vskip > n) vskip = n;
             std::wstring w = decodeBytes(p + vskip, n - vskip, enc);
-            if (w.empty()) { pos = pl + fsize; continue; }
-            return wToUtf8(w);
+            if (!w.empty()) uslt_out = wToUtf8(w);
+        } else if (!sylt_out && std::memcmp(fid, "SYLT", 4) == 0 && fsize >= 7) {
+            const uint8_t enc        = tag[pl];
+            const uint8_t ts_format  = tag[pl + 4];
+            // tag[pl+5] = content_type;1=lyrics,这里宽松接受所有类型
+            const uint8_t* p = tag.data() + pl + 6;
+            size_t          n = fsize - 6;
+            if (ts_format == 2) {
+                // 跳过 desc
+                size_t dend = std::string::npos;
+                if (enc == 1 || enc == 2) {
+                    for (size_t i = 0; i + 1 < n; i += 2) {
+                        if (p[i] == 0 && p[i+1] == 0) { dend = i; break; }
+                    }
+                } else {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (p[i] == 0) { dend = i; break; }
+                    }
+                }
+                if (dend != std::string::npos) {
+                    size_t cur = (enc == 1 || enc == 2) ? dend + 2 : dend + 1;
+                    std::string lrc;
+                    char tbuf[24];
+                    while (cur < n) {
+                        size_t tend = std::string::npos;
+                        if (enc == 1 || enc == 2) {
+                            for (size_t i = cur; i + 1 < n; i += 2) {
+                                if (p[i] == 0 && p[i+1] == 0) { tend = i; break; }
+                            }
+                            if (tend == std::string::npos) break;
+                            std::wstring w = decodeBytes(p + cur, tend - cur, enc);
+                            size_t tsoff = tend + 2;
+                            if (tsoff + 4 > n) break;
+                            uint32_t ms = (uint32_t(p[tsoff])<<24)
+                                        | (uint32_t(p[tsoff+1])<<16)
+                                        | (uint32_t(p[tsoff+2])<<8)
+                                        |  uint32_t(p[tsoff+3]);
+                            cur = tsoff + 4;
+                            std::wstring line;
+                            line.reserve(w.size());
+                            for (wchar_t c : w) {
+                                if (c == 0x0A || c == 0x0D) line += L' ';
+                                else                         line += c;
+                            }
+                            int mm = static_cast<int>(ms / 60000);
+                            int ss = static_cast<int>((ms / 1000) % 60);
+                            int xx = static_cast<int>((ms % 1000) / 10);
+                            std::snprintf(tbuf, sizeof(tbuf), "[%02d:%02d.%02d]", mm, ss, xx);
+                            lrc += tbuf;
+                            lrc += wToUtf8(line);
+                            lrc += '\n';
+                        } else {
+                            for (size_t i = cur; i < n; ++i) {
+                                if (p[i] == 0) { tend = i; break; }
+                            }
+                            if (tend == std::string::npos) break;
+                            std::wstring w = decodeBytes(p + cur, tend - cur, enc);
+                            size_t tsoff = tend + 1;
+                            if (tsoff + 4 > n) break;
+                            uint32_t ms = (uint32_t(p[tsoff])<<24)
+                                        | (uint32_t(p[tsoff+1])<<16)
+                                        | (uint32_t(p[tsoff+2])<<8)
+                                        |  uint32_t(p[tsoff+3]);
+                            cur = tsoff + 4;
+                            std::wstring line;
+                            line.reserve(w.size());
+                            for (wchar_t c : w) {
+                                if (c == 0x0A || c == 0x0D) line += L' ';
+                                else                         line += c;
+                            }
+                            int mm = static_cast<int>(ms / 60000);
+                            int ss = static_cast<int>((ms / 1000) % 60);
+                            int xx = static_cast<int>((ms % 1000) / 10);
+                            std::snprintf(tbuf, sizeof(tbuf), "[%02d:%02d.%02d]", mm, ss, xx);
+                            lrc += tbuf;
+                            lrc += wToUtf8(line);
+                            lrc += '\n';
+                        }
+                    }
+                    if (!lrc.empty()) sylt_out = std::move(lrc);
+                }
+            }
         }
         pos = pl + fsize;
     }
+    if (sylt_out) return sylt_out;
+    if (uslt_out) return uslt_out;
     return std::nullopt;
 }
 
