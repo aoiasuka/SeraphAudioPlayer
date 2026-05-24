@@ -663,22 +663,35 @@ void PlayerViewModel::reloadLyricsForCurrent()
     m_lyricsMeta   = {};
     m_lyricsSource.clear();
     if (!cur.isEmpty()) {
-        auto doc = apx::LyricsLoader::loadDocFor(cur.toStdWString());
-        if (!doc.empty()) {
-            m_lyrics       = std::move(doc.lines);
-            m_lyricsMeta   = std::move(doc.meta);
-            m_lyricsSource = QStringLiteral("external");
+        auto it = m_lyricsCache.find(cur);
+        if (it != m_lyricsCache.end()) {
+            m_lyrics       = it->lines;
+            m_lyricsMeta   = it->meta;
+            m_lyricsSource = it->source;
         } else {
-            // 外部 .lrc 未命中 → 试内嵌歌词(ID3v2 USLT / FLAC VC LYRICS)
-            auto raw = apx::MetadataReader::readEmbeddedLyrics(cur.toStdWString());
-            if (raw.has_value() && !raw->empty()) {
-                auto edoc = apx::LyricsLoader::parseDoc(*raw);
-                if (!edoc.empty()) {
-                    m_lyrics       = std::move(edoc.lines);
-                    m_lyricsMeta   = std::move(edoc.meta);
-                    m_lyricsSource = QStringLiteral("embedded");
+            LyricsCacheEntry entry;
+            auto doc = apx::LyricsLoader::loadDocFor(cur.toStdWString());
+            if (!doc.empty()) {
+                entry.lines  = std::move(doc.lines);
+                entry.meta   = std::move(doc.meta);
+                entry.source = QStringLiteral("external");
+            } else {
+                // 外部 .lrc 未命中 → 试内嵌歌词(ID3v2 SYLT/USLT、FLAC VC、MP4 ©lyr)
+                auto raw = apx::MetadataReader::readEmbeddedLyrics(cur.toStdWString());
+                if (raw.has_value() && !raw->empty()) {
+                    auto edoc = apx::LyricsLoader::parseDoc(*raw);
+                    if (!edoc.empty()) {
+                        entry.lines  = std::move(edoc.lines);
+                        entry.meta   = std::move(edoc.meta);
+                        entry.source = QStringLiteral("embedded");
+                    }
                 }
             }
+            // 包括"未找到"(source 为空)也写缓存,下次同曲不再重扫
+            m_lyricsCache.insert(cur, entry);
+            m_lyrics       = std::move(entry.lines);
+            m_lyricsMeta   = std::move(entry.meta);
+            m_lyricsSource = std::move(entry.source);
         }
     }
     m_lyricIndex = -1;
@@ -709,7 +722,9 @@ bool PlayerViewModel::loadExternalLyrics(const QString& path)
 
 void PlayerViewModel::refreshLyrics()
 {
-    // 强制重扫:把缓存键清掉再调
+    // 用户主动刷新:把当前曲目缓存条目作废,再走一次磁盘扫描
+    QString cur = currentPath();
+    if (!cur.isEmpty()) m_lyricsCache.remove(cur);
     m_lyricsForPath.clear();
     reloadLyricsForCurrent();
     updateLyricIndex(m_position);

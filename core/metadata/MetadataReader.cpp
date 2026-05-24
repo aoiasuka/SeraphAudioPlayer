@@ -674,6 +674,8 @@ std::optional<std::string> MetadataReader::readEmbeddedLyrics(const std::wstring
 {
     if (endsWith(path, L".mp3"))  return readEmbeddedLyricsMp3(path);
     if (endsWith(path, L".flac")) return readEmbeddedLyricsFlac(path);
+    if (endsWith(path, L".m4a") || endsWith(path, L".mp4") || endsWith(path, L".aac"))
+        return readEmbeddedLyricsM4a(path);
     return std::nullopt;
 }
 
@@ -952,6 +954,95 @@ std::optional<std::string> MetadataReader::readEmbeddedLyricsFlac(const std::wst
     }
     close_f();
     return std::nullopt;
+}
+
+// ----------------------------------------------------------------------------
+// MP4/M4A iTunes ©lyr atom (UTF-8 lyrics)
+//   atom 树: moov → udta → meta(FullBox) → ilst → ©lyr → data
+//   ©lyr type 字节 = 0xA9 'l' 'y' 'r'
+//   data atom payload: type_flags(4 BE) + locale(4) + payload bytes
+//     type_flags=1 表示 UTF-8。其它编码(0 reserved / 2 UTF-16 等)罕见,统一按
+//     UTF-8 返回上层让 LyricsLoader::parseDoc 自己嗅探。
+// ----------------------------------------------------------------------------
+std::optional<std::string> MetadataReader::readEmbeddedLyricsM4a(const std::wstring& path)
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return std::nullopt;
+    auto close_f = [&]() { if (f) { std::fclose(f); f = nullptr; } };
+
+    if (_fseeki64(f, 0, SEEK_END) != 0) { close_f(); return std::nullopt; }
+    long long fileSize = _ftelli64(f);
+    if (fileSize <= 16) { close_f(); return std::nullopt; }
+    _fseeki64(f, 0, SEEK_SET);
+
+    // 在 [start, end) 范围内顺序遍历子 atom,匹配 want[0..3] 时返回 atom 内容区间。
+    // want 用 4 字节 memcmp,允许首字节 = 0xA9 这种非 ASCII 类型。
+    auto findChild = [&](long long start, long long end, const char want[4],
+                         long long& outStart, long long& outEnd) -> bool {
+        long long p = start;
+        while (p + 8 <= end) {
+            if (_fseeki64(f, p, SEEK_SET) != 0) return false;
+            uint8_t h[8];
+            if (std::fread(h, 1, 8, f) != 8) return false;
+            uint64_t sz = (uint64_t(h[0])<<24) | (uint64_t(h[1])<<16)
+                        | (uint64_t(h[2])<<8)  |  uint64_t(h[3]);
+            uint8_t hdrLen = 8;
+            if (sz == 1) {
+                uint8_t e[8];
+                if (std::fread(e, 1, 8, f) != 8) return false;
+                sz = (uint64_t(e[0])<<56) | (uint64_t(e[1])<<48)
+                   | (uint64_t(e[2])<<40) | (uint64_t(e[3])<<32)
+                   | (uint64_t(e[4])<<24) | (uint64_t(e[5])<<16)
+                   | (uint64_t(e[6])<<8)  |  uint64_t(e[7]);
+                hdrLen = 16;
+            } else if (sz == 0) {
+                sz = static_cast<uint64_t>(end - p);
+            }
+            if (sz < hdrLen) return false;
+            long long cs = p + hdrLen;
+            long long ce = p + static_cast<long long>(sz);
+            if (ce > end) ce = end;
+            if (std::memcmp(h + 4, want, 4) == 0) {
+                outStart = cs;
+                outEnd   = ce;
+                return true;
+            }
+            if (ce <= p) return false;       // 防止异常 size 死循环
+            p = ce;
+        }
+        return false;
+    };
+
+    long long moovS, moovE;
+    if (!findChild(0, fileSize, "moov", moovS, moovE)) { close_f(); return std::nullopt; }
+    long long udtaS, udtaE;
+    if (!findChild(moovS, moovE, "udta", udtaS, udtaE)) { close_f(); return std::nullopt; }
+    long long metaS, metaE;
+    if (!findChild(udtaS, udtaE, "meta", metaS, metaE)) { close_f(); return std::nullopt; }
+    // meta 是 FullBox,跳过 4 字节 version+flags
+    long long ilstS, ilstE;
+    if (!findChild(metaS + 4, metaE, "ilst", ilstS, ilstE)) { close_f(); return std::nullopt; }
+
+    const char lyrType[4] = { static_cast<char>(0xA9), 'l', 'y', 'r' };
+    long long lyrS, lyrE;
+    if (!findChild(ilstS, ilstE, lyrType, lyrS, lyrE)) { close_f(); return std::nullopt; }
+
+    long long dataS, dataE;
+    if (!findChild(lyrS, lyrE, "data", dataS, dataE)) { close_f(); return std::nullopt; }
+
+    if (dataE - dataS < 8) { close_f(); return std::nullopt; }
+    if (_fseeki64(f, dataS + 8, SEEK_SET) != 0) { close_f(); return std::nullopt; }
+    long long payloadLen = dataE - dataS - 8;
+    if (payloadLen <= 0 || payloadLen > 4 * 1024 * 1024) { close_f(); return std::nullopt; }
+
+    std::string out(static_cast<size_t>(payloadLen), '\0');
+    if (static_cast<long long>(std::fread(out.data(), 1, payloadLen, f)) != payloadLen) {
+        close_f();
+        return std::nullopt;
+    }
+    close_f();
+    if (out.empty()) return std::nullopt;
+    return out;
 }
 
 } // namespace apx

@@ -443,6 +443,15 @@ private:
     int m_lyricIndex = -1;
     QString m_lyricsForPath;          // 当前歌词来自哪条 path,用于变更检测
 
+    // 歌词解析缓存:避免每次切歌都重读磁盘 .lrc / 重扫 ID3v2 / MP4 atom
+    // source 为空表示"扫过没找到",同样写入缓存避免反复 IO
+    struct LyricsCacheEntry {
+        std::vector<apx::LyricLine> lines;
+        apx::LyricMetadata          meta;
+        QString                     source;
+    };
+    mutable QMap<QString, LyricsCacheEntry> m_lyricsCache;
+
     void reloadLyricsForCurrent();
     void updateLyricIndex(double pos);
 

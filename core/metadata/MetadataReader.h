@@ -52,8 +52,9 @@ public:
     static std::optional<CoverImage> readCover(const std::wstring& path);
 
     // 读取内嵌歌词,返回 UTF-8 字节流(LRC 或纯文本)。
-    // - MP3:ID3v2 USLT frame(首选)、SYLT 不支持(留作后续)
-    // - FLAC:VORBIS_COMMENT 的 LYRICS / UNSYNCEDLYRICS 字段
+    // - MP3:ID3v2 SYLT(同步歌词,转伪 LRC)优先,USLT 兜底
+    // - FLAC:VORBIS_COMMENT 的 SYNCEDLYRICS / LYRICS / UNSYNCEDLYRICS
+    // - M4A/MP4:iTunes ©lyr atom (UTF-8 文本)
     // 没有就返回 nullopt。结果可直接喂给 apx::LyricsLoader::parseDoc()。
     static std::optional<std::string> readEmbeddedLyrics(const std::wstring& path);
 
@@ -64,6 +65,7 @@ private:
     static std::optional<CoverImage>    readFlacCover(const std::wstring& path);
     static std::optional<std::string>   readEmbeddedLyricsMp3(const std::wstring& path);
     static std::optional<std::string>   readEmbeddedLyricsFlac(const std::wstring& path);
+    static std::optional<std::string>   readEmbeddedLyricsM4a(const std::wstring& path);
 };
 
 } // namespace apx
