@@ -923,7 +923,7 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         Layout.topMargin: 4
-                        text: "支持 WAV(PCM/FLOAT) / FLAC,DSD 与 MP3 在后续版本中支持"
+                        text: "支持 WAV / RF64 / Wave64 / FLAC / MP3 / OGG / Opus / AAC·M4A / DSD(DSF·DFF)"
                         font.family: window.fontFamily
                         font.pixelSize: 11
                         color: window.textTertiary
