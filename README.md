@@ -4,6 +4,8 @@
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
+当前版本:**v0.2.1-ui-batch** (本地 tag)
+
 ## 编译产物
 
 | 产物 | 路径 | 说明 |
@@ -19,6 +21,7 @@
 - **CMake 3.20+**
 - **Qt 6.5 LTS 或以上**,可用 `msvc2019_64` 或 `msvc2019_32`
   - 官方下载:<https://www.qt.io/download-open-source>
+- **vcpkg**(可选):用于真实 Opus 解码,装 `opusfile`
 
 ### 2. 一键构建
 
@@ -44,13 +47,13 @@ $env:APX_QT_PATH = "C:\Qt\6.5.3\msvc2019_64"
 | **RIFF/WAVE** | `.wav` `.wave` | 内置 | PCM 16/24-packed/32、IEEE float32、WAVE_FORMAT_EXTENSIBLE |
 | **RF64 (BWF)** | `.wav` | 内置 | 大于 4GB 的 WAV,含 `ds64` chunk |
 | **Sony Wave64** | `.w64` | 内置 | 16-byte GUID chunk + 64-bit size,8-byte 对齐 |
-| **FLAC** | `.flac` | dr_flac | 16 / 20 / 24 / 32 bit |
-| **MP3** | `.mp3` | dr_mp3 | Int16 默认,可切 Float32 输出 |
+| **FLAC** | `.flac` | dr_flac | 16 / 20 / 24 / 32 bit + VORBIS_COMMENT + ReplayGain |
+| **MP3** | `.mp3` | dr_mp3 | Int16 默认,可切 Float32 输出;ID3v2.2/3/4 + TXXX ReplayGain |
 | **OGG Vorbis** | `.ogg` `.oga` | stb_vorbis | 16-bit |
+| **Opus** | `.opus` | opusfile (vcpkg `opusfile`) | 装了即真实解码,未装则桩;通过 `APX_HAVE_OPUS` 条件编译 |
+| **AAC / M4A / MP4** | `.aac` `.m4a` `.mp4` | Media Foundation Source Reader | Windows 原生,零外部依赖 |
 | **DSD (DSF)** | `.dsf` | 内置 | Sony 格式 → DoP 24-bit PCM |
 | **DSD (DFF)** | `.dff` | 内置 | DSDIFF raw DSD(不含 DST 压缩) |
-| AAC / M4A | `.aac` `.m4a` `.mp4` | 骨架 | 真实解码待接入 (fdk-aac / Media Foundation) |
-| Opus | `.opus` | 骨架 | 真实解码待接入 (opusfile + libopus) |
 
 文件识别同时使用扩展名和 magic-number 嗅探,扩展名错也能识别。
 
@@ -59,7 +62,7 @@ $env:APX_QT_PATH = "C:\Qt\6.5.3\msvc2019_64"
 | 后端 | 状态 |
 |------|------|
 | **WASAPI 独占** | ✅ 默认,事件驱动 + AVRT "Pro Audio" |
-| **WASAPI 共享** | ✅ 独占失败时自动回退(线性插值重采样 + 位深转换) |
+| **WASAPI 共享回退** | ✅ 独占失败时自动降级(多相 windowed-sinc 重采样 + TPDF dither + noise shaping) |
 | **ASIO** | ⏳ 桩,用户放入 ASIO SDK 后可启用 |
 | 原生 DSD(DSD-Native) | ⏳ 类型系统已就绪,需 DAC 驱动支持 |
 
@@ -70,38 +73,77 @@ DSD 解码默认走 **DoP v1.1**,输出格式 = `DSD_rate / 16` Hz,24-bit packed
 - DSD128 → 352800 Hz 24-bit
 - DSD256 → 705600 Hz 24-bit
 
-支持 `DopMarkerMode::PerFrame` (默认) 与 `PerSample` 两种 marker 策略,通过 `DsdDecoder::setMarkerMode` / `DffDecoder::setMarkerMode` 切换以适配不同 DAC。
+支持 `DopMarkerMode::PerFrame` (默认) 与 `PerSample` 两种 marker 策略,通过 `DsdDecoder::setMarkerMode` / `DffDecoder::setMarkerMode` 切换以适配不同 DAC。设置中心可直接配置。
 
 ## 功能特性
 
+### 解码 / 元数据
+
 | 模块 | 状态 |
 |------|------|
-| 项目骨架 (CMake + vcpkg + Qt) | ✅ |
-| WASAPI 独占模式(事件驱动 + AVRT) | ✅ |
-| WASAPI 共享模式回退 + 线性重采样 | ✅ |
-| 设备枚举 + 热插拔事件回调 + 自动会话恢复 | ✅ |
-| RingBuffer(SPSC 无锁) | ✅ |
-| PlayerController 状态机 | ✅ |
-| 渲染线程错误回调(Error → 立即恢复) | ✅ |
-| 预填充等待 ring 就绪(消除首段静音) | ✅ |
-| MP3 / Vorbis 大文件 totalFrames 后台异步计算 | ✅ |
-| MP3 可选 Float32 输出 | ✅ |
-| FLAC / DSF / DFF 解码器 | ✅ |
-| RF64 / Wave64 容器 | ✅ |
-| **10 段 RBJ EQ** (默认禁用,接入 producer 链) | ✅ |
-| **Visualizer** (VU + 16 段频谱) | ✅ |
-| **ReplayGain** (Track/Album 模式 + 防 clipping) | ✅ FLAC 标签 |
-| **Gapless** (预载下一首,格式一致时无缝衔接) | ✅ |
-| **Playlist** 模型 (顺序/列表循环/单曲循环/随机) | ✅ |
-| **CUE Sheet** 解析 (单文件多 track) | ✅ |
-| Qt 6 Quick QML UI + 深色主题 | ✅ |
-| 元数据读取 (WAV INFO / FLAC VORBIS_COMMENT + cover) | ✅ |
+| WAV (含 RF64 / Wave64) | ✅ |
+| FLAC + VORBIS_COMMENT + ReplayGain | ✅ |
+| MP3 + ID3v2.2/3/4 + TXXX ReplayGain | ✅ |
+| OGG Vorbis | ✅ |
+| **Opus** (opusfile,条件编译) | ✅ |
+| **AAC / M4A / MP4** (Media Foundation) | ✅ |
+| DSF / DFF → DoP | ✅ |
+| 元数据读取 (WAV INFO / FLAC VC / MP3 ID3v2 + cover) | ✅ |
+| Cue Sheet 解析 (单文件多 track) | ✅ |
 | 歌词读取 (LRC) | ✅ |
+
+### 输出 / DSP
+
+| 模块 | 状态 |
+|------|------|
+| WASAPI 独占 (事件驱动 + AVRT) | ✅ |
+| WASAPI 共享回退 + 高质量 SRC + dither | ✅ |
+| **Polyphase 重采样器** (windowed-sinc 32 tap × 64 phase) | ✅ |
+| **SIMD 派发** (AVX2 + SSE2 + scalar,运行时 CPUID) | ✅ |
+| **TPDF Dither + 一阶 noise shaping** (Int16 路径) | ✅ |
+| 10 段 RBJ EQ (默认禁用,接入 producer 链) | ✅ |
+| Visualizer (VU + 16 段频谱) | ✅ |
+| ReplayGain (Track/Album + Pre-amp ±12dB + 防 clipping) | ✅ |
+
+### 播放器 / 应用层
+
+| 模块 | 状态 |
+|------|------|
+| PlayerController 状态机 | ✅ |
+| RingBuffer (SPSC 无锁) | ✅ |
+| 预填充等待 ring 就绪(消除首段静音) | ✅ |
+| Gapless (预载下一首,格式一致时无缝衔接) | ✅ |
+| Playlist 模型 (顺序 / 列表循环 / 单曲循环 / 随机) | ✅ |
+| **Playlist M3U / JSON 序列化** (PlaylistIO) | ✅ |
+| 设备枚举 + 热插拔事件 + 自动会话恢复 | ✅ |
+| 渲染统计 (periods / frames / underruns / glitch / recovery) | ✅ |
+| MP3 / Vorbis 大文件 totalFrames 后台异步计算 | ✅ |
+| 错误回调 (Error → 立即恢复) | ✅ |
+
+### UI
+
+| 模块 | 状态 |
+|------|------|
+| Qt 6 Quick QML + 极简护眼主题 | ✅ |
+| **PlaylistViewModel** (QAbstractListModel,12 个 role) | ✅ |
+| **PlaylistView** (搜索 + 模式切换 + 上下移 + 右键菜单 + Cue 拖入 + M3U/JSON 导入导出) | ✅ |
+| **设置中心 · Hi-Fi 高级** (ReplayGain / Dither / DoP / SIMD / 共享回退) | ✅ |
+| **快捷键自定义** (23 action,录制式改键,QSettings 落盘) | ✅ |
+| 队列抽屉 (QueueDrawer,从右侧滑入) | ✅ |
 | 系统媒体控件 (SMTC) | ✅ |
-| 任务栏缩略图按钮 | ✅ |
-| AAC / Opus 真实解码 | ⏳ 骨架就绪 |
-| 高质量重采样器 (SoXR / Speex) | ⏳ |
+| 任务栏缩略图按钮 (canPrev/canNext 严格匹配模式) | ✅ |
+| Jump List | ✅ |
+| 设备热插拔事件订阅 | ✅ |
+| 实时统计面板 (1Hz 刷新) | ✅ |
+
+### 未完成
+
+| 模块 | 状态 |
+|------|------|
 | 原生 DSD 输出 | ⏳ |
+| ASIO 输出 | ⏳ 需用户放入 SDK |
+| Dither 设置实时切换 (现仅持久化 + 下次输出生效) | ⏳ |
+| QueueDrawer 与 PlaylistView 双向同步 (Drawer 仍用 QVariantList) | ⏳ |
 
 ## 目录结构
 
@@ -111,10 +153,12 @@ audio_player_x86/
 │   ├── format/                 #   AudioFormat (含 DsdLsb8 类型)
 │   ├── buffer/                 #   RingBuffer (SPSC)
 │   ├── output/                 #   IAudioOutput (+ ErrorCallback)
-│   ├── decoder/                #   IDecoder + 各格式 decoder + DecoderFactory
+│   ├── decoder/                #   IDecoder + WAV/FLAC/MP3/Vorbis/DSF/DFF
+│   │                           #     + Opus + AAC/M4A/MfMedia + Factory
 │   ├── dsd/                    #   DopMode (PerFrame / PerSample)
 │   ├── dsp/                    #   Equalizer / Visualizer / FormatConverter
-│   ├── metadata/               #   MetadataReader (含 ReplayGain 字段)
+│   │                           #     + PolyphaseResampler (+ AVX2/SSE2)
+│   ├── metadata/               #   MetadataReader (WAV/FLAC/MP3 + ReplayGain)
 │   └── lyrics/                 #   LyricsLoader (LRC)
 ├── platform/                   # Windows 平台
 │   ├── wasapi/                 #   WasapiExclusiveOutput + WasapiSharedOutput
@@ -124,13 +168,18 @@ audio_player_x86/
 │   └── taskbar/                #   Windows 任务栏 / Jump List
 ├── app/                        # 应用层
 │   ├── controller/             #   PlayerController + PlayerState
-│   ├── playlist/               #   Playlist + CueSheet
+│   ├── playlist/               #   Playlist + CueSheet + PlaylistIO (M3U/JSON)
 │   ├── metadata/               #   元数据缓存
 │   └── settings/               #   持久化设置
 ├── ui/                         # Qt 6 Quick / QML
 │   ├── main.cpp
-│   ├── bridge/                 #   PlayerViewModel (C++ <-> QML)
-│   ├── qml/                    #   QML 界面
+│   ├── bridge/                 #   PlayerViewModel + PlaylistViewModel
+│   │                           #     + ShortcutsViewModel + DeviceBridge
+│   │                           #     + CoverImageProvider
+│   ├── qml/
+│   │   ├── views/              #     HomeView / PlaylistView / SettingsView ...
+│   │   └── components/         #     MiniPlayer / QueueDrawer / EqDialog
+│   │                           #       / ShortcutsDialog ...
 │   └── resources/
 ├── examples/                   # 后端 demo (默认不编)
 ├── scripts/
@@ -150,6 +199,7 @@ audio_player_x86/
 | `APX_BUILD_APP` | ON | app 层(controller / playlist / metadata 等) |
 | `APX_BUILD_EXAMPLES` | ON | 各 demo;主程序构建脚本中默认 OFF |
 | `APX_BUILD_TESTS` | OFF | 单元测试 |
+| `APX_HAVE_OPUS` | 探测 | 检测到 vcpkg `opusfile` 时自动定义,启用真实 Opus 解码 |
 
 只想构建主程序、跳过 demos:`build_app.ps1` 已经这么做。
 
@@ -157,6 +207,29 @@ audio_player_x86/
 ```powershell
 .\scripts\build_demo.ps1 -Target cli_player_demo -Run
 ```
+
+## 键盘快捷键(默认)
+
+| 类别 | 键 | 动作 |
+|------|----|------|
+| 播放 | `Space` / `Media Play` | 播放 / 暂停 |
+| 播放 | `Left` / `Right` | 上一首 / 下一首 |
+| 播放 | `Up` / `Down` | 音量 ±5 |
+| 播放 | `M` | 静音切换 |
+| 播放 | `Ctrl+L` | 喜欢 / 取消喜欢当前曲目 |
+| 播放 | `Ctrl+R` | 循环模式切换 |
+| 播放 | `Ctrl+S` | 随机切换 |
+| 界面 | `Ctrl+Q` | 打开 / 收起队列抽屉 |
+| 界面 | `Ctrl+Shift+Q` | 打开队列视图 (PlaylistView) |
+| 界面 | `Ctrl+E` | 均衡器 |
+| 界面 | `Ctrl+F` / `Ctrl+K` | 全局搜索 |
+| 界面 | `F1` / `Ctrl+/` | 显示快捷键帮助 |
+| 界面 | `F11` | 切换全屏 |
+| 界面 | `Esc` | 返回 / 关闭抽屉 / 退出全屏 |
+| 导航 | `1`..`7` | 首页 / 库 / 歌单 / 歌手 / 专辑 / 历史 / 喜欢 |
+| 导航 | `Ctrl+,` | 设置 |
+
+**全部可在 `F1` 弹窗里点击 chip 录制改键,改键即时生效,QSettings 落盘。**
 
 ## 关键 API 速查
 
@@ -171,7 +244,7 @@ pc.play();
 ### 切换设备(独占失败自动回退共享)
 
 ```cpp
-pc.setAllowSharedFallback(true);        // 默认 true
+pc.setAllowSharedFallback(true);          // 默认 true
 pc.setDevice(L"{0.0.0.00000000}.{...}");  // 来自 DeviceEnumerator
 ```
 
@@ -179,18 +252,19 @@ pc.setDevice(L"{0.0.0.00000000}.{...}");  // 来自 DeviceEnumerator
 
 ```cpp
 pc.equalizer().setEnabled(true);
-pc.equalizer().setGain(0, +6.0);         // 31 Hz +6 dB
+pc.equalizer().setGain(0, +6.0);          // 31 Hz +6 dB
 
 auto snap = pc.visualizer().snapshot();   // {vu_left, vu_right, peak_*, bands[16]}
 ```
 
-### ReplayGain
+### ReplayGain + Pre-amp
 
 ```cpp
 auto md = MetadataReader::read(path);
 if (md && !std::isnan(md->rg_track_gain_db)) {
     pc.setTrackReplayGain(md->rg_track_gain_db, md->rg_track_peak);
     pc.setReplayGainMode(PlayerController::ReplayGainMode::Track);
+    pc.setReplayGainPreampDb(+3.0);       // 在 RG 之上额外 +3 dB
 }
 ```
 
@@ -199,18 +273,38 @@ if (md && !std::isnan(md->rg_track_gain_db)) {
 ```cpp
 pc.loadFile(L"track1.flac");
 pc.play();
-pc.enqueueNext(L"track2.flac");   // 必须与当前格式一致,否则失败
+pc.enqueueNext(L"track2.flac");           // 必须与当前格式一致,否则失败
 pc.setOnTrackChanged([](const std::wstring& p){ /* UI 更新 */ });
 ```
 
-### Playlist + CUE
+### Playlist + CUE + 导入导出
 
 ```cpp
 Playlist pl;
 auto tracks = CueSheet::parse(L"album.cue");
 for (auto& t : tracks) pl.append(std::move(t));
 pl.setMode(PlaybackMode::Sequential);
-pc.loadFile(pl.itemAt(pl.currentIndex()).path);
+
+// M3U / JSON 序列化
+PlaylistIO::saveM3U(pl,  L"D:/my.m3u8");
+PlaylistIO::saveJson(pl, L"D:/my.json");
+
+apx::Playlist loaded;
+PlaylistIO::loadM3U(L"D:/my.m3u8", loaded);
+```
+
+### 渲染统计
+
+```cpp
+auto s = pc.stats();   // periods_total / frames_total / underruns
+                       // glitch_frames / recovery_count
+```
+
+### 重采样 SIMD 路径
+
+```cpp
+// 启动后 CPUID 决定;只读,通常是 "avx2" / "sse2" / "scalar"
+const char* path = PolyphaseResampler::simdPath();
 ```
 
 ## License
