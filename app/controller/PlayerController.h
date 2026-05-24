@@ -44,6 +44,10 @@
 
 namespace apx {
 
+class Equalizer;
+class Visualizer;
+struct PlaylistItem;
+
 class PlayerController {
 public:
     PlayerController();
@@ -57,12 +61,44 @@ public:
     bool loadFile(const std::wstring& path);
     void unloadFile();
 
+    // 加载一个 PlaylistItem。与 loadFile(item.path) 等效,但额外应用 Cue 区段:
+    //   item.cue_start_sec > 0 → 自动 seek 到起点
+    //   item.cue_end_sec   > cue_start → 到达 end 时 producer 视作 EOF
+    // position()/duration()/seek() 之后都按"track 内坐标"工作 (从 0 计起)。
+    bool loadItem(const PlaylistItem& item);
+
+    // 预载下一首,实现无缝衔接。要求下一首的 AudioFormat 与当前完全一致,
+    // 否则函数失败,gapless 不可达 (此时应在 onEnded 回调里走 load+play 的常规路径)。
+    //  - 必须在当前会话 Playing/Paused/Stopped 状态调用
+    //  - path 为空 → 清除已排队的下一首
+    //  - 当前轨道 EOF 时,producer 自动切换到下一首,不停止 output,触发 onTrackChanged
+    bool enqueueNext(const std::wstring& path);
+    std::wstring queuedNext() const;
+
     // ---------- 播放控制 ----------
     bool play();    // Stopped/Paused/Ended → Playing
     bool pause();   // Playing → Paused
     bool stop();    // 任何活动状态 → Stopped(位置归零)
     void setVolume(double volume); // 0.0 - 1.0, 在输出回调中做 PCM 缩放
     double volume() const;
+
+    // ---------- ReplayGain ----------
+    enum class ReplayGainMode : std::uint8_t {
+        Off    = 0,  // 不应用
+        Track  = 1,  // 用 REPLAYGAIN_TRACK_GAIN
+        Album  = 2,  // 用 REPLAYGAIN_ALBUM_GAIN
+    };
+    // 模式与 pre-amp (dB);Off 模式下 pre-amp 仍可作为基础增益使用,但不推荐。
+    void           setReplayGainMode(ReplayGainMode m);
+    ReplayGainMode replayGainMode() const;
+    void           setReplayGainPreampDb(double db);
+    double         replayGainPreampDb() const;
+
+    // 应用当前轨道的 ReplayGain 标签值;loadFile 后由 UI 读 MetadataReader
+    // 拿到 rg_*_gain_db / rg_*_peak,再调本方法。NaN 表示该字段不可用。
+    // peak <= 0 视为 1.0 (无 clipping 保护)。
+    void setTrackReplayGain(double gain_db, double peak);
+    void setAlbumReplayGain(double gain_db, double peak);
 
     // 秒级 seek。当前为软 seek:清空 RingBuffer + decoder->seek,
     // 设备 buffer 内残留(~10ms)会先出声再听到新位置。
@@ -88,6 +124,8 @@ public:
     using PositionChangedCb = std::function<void(double /*seconds*/)>;
     using EndedCb           = std::function<void()>;
     using ErrorCb           = std::function<void(const std::wstring&)>;
+    // Gapless 衔接到下一首时触发,参数是新轨道的 file path
+    using TrackChangedCb    = std::function<void(const std::wstring& /*new_path*/)>;
     // producer 线程 tap:每次从 decoder 拿到新 PCM 块时回调(在写入 RingBuffer 之前)。
     // 注意:在 producer 线程调用,实现需自行同步,且不可阻塞。
     using PcmTapCb          = std::function<void(const std::uint8_t* data,
@@ -103,8 +141,35 @@ public:
     void setOnPositionChanged(PositionChangedCb cb);
     void setOnEnded          (EndedCb           cb);
     void setOnError          (ErrorCb           cb);
+    void setOnTrackChanged   (TrackChangedCb    cb);
     void setOnPcmTap         (PcmTapCb          cb);
     void setPcmProcessor     (PcmProcessorCb    cb);
+
+    // ---------- 内置 DSP ----------
+    // 10 段 EQ,默认禁用。返回的引用与本控制器同生命周期,UI 用 setGain/setEnabled
+    // 配置即可,无需关心调用线程
+    Equalizer& equalizer();
+
+    // 内置可视化:producer 自动 push,UI 调 snapshot 即可
+    Visualizer& visualizer();
+
+    // ---------- 输出策略 ----------
+    // 独占模式不支持源格式时,是否尝试共享模式 (低保真,但能出声)。
+    // 默认开启;Hi-Fi 用户可关闭以保证"要么 bit-perfect 要么失败"。
+    void setAllowSharedFallback(bool on);
+    bool allowSharedFallback() const;
+
+    // ---------- 渲染统计 ----------
+    // 取实时快照;若无活动 output 则返回全 0。recovery_count 由 controller 维护,
+    // 反映自加载以来发生过几次自动会话恢复。
+    struct Stats {
+        std::uint64_t periods_total  = 0;
+        std::uint64_t frames_total   = 0;
+        std::uint64_t underruns      = 0;
+        std::uint64_t glitch_frames  = 0;
+        std::uint64_t recovery_count = 0;
+    };
+    Stats stats() const;
 
 private:
     struct Impl;

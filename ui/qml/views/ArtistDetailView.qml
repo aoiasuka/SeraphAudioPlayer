@@ -40,7 +40,10 @@ Item {
             iconColor: window.textPrimary
             implicitWidth: 32
             implicitHeight: 32
-            onClicked: window.navigateTo("artist")
+            onClicked: {
+                window.currentNav = ""
+                window.navigateTo("artist")
+            }
         }
 
         RowLayout {
@@ -155,7 +158,7 @@ Item {
                     path: modelData.path
                     onClicked: playerVM.openFile(modelData.path)
                     onLikeClicked: playerVM.toggleLike(modelData.path)
-                    onEnqueueClicked: playerVM.enqueue(modelData.path)
+                    onEnqueueClicked: ctxMenu.openPlaylistMenuFor(modelData.path)
                     onMoreClicked: ctxMenu.openFor(modelData.path)
                 }
             }

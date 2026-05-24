@@ -21,6 +21,7 @@
 // =============================================================================
 #include "DffDecoder.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -60,6 +61,12 @@ struct DffDecoder::Impl {
     uint64_t     pcm_frame_count = 0;
     bool         eof = false;
 
+    // 复用 read() 内的 DSD 字节缓冲;按需 resize,不缩,避免实时路径分配
+    std::vector<uint8_t> read_buf;
+
+    // marker 策略
+    std::atomic<DopMarkerMode> marker_mode{DopMarkerMode::PerFrame};
+
     std::wstring last_error;
 };
 
@@ -69,6 +76,9 @@ DffDecoder::~DffDecoder() { close(); }
 bool         DffDecoder::isOpen()       const { return d_->fp != nullptr; }
 AudioFormat  DffDecoder::format()       const { return d_->fmt; }
 std::wstring DffDecoder::lastError()    const { return d_->last_error; }
+
+void          DffDecoder::setMarkerMode(DopMarkerMode m) { d_->marker_mode.store(m, std::memory_order_release); }
+DopMarkerMode DffDecoder::markerMode() const             { return d_->marker_mode.load(std::memory_order_acquire); }
 
 std::int64_t DffDecoder::totalFrames()  const {
     return static_cast<std::int64_t>(d_->dsd_samples / 16);
@@ -89,6 +99,8 @@ void DffDecoder::close()
     d_->cur_byte_offset = 0;
     d_->pcm_frame_count = 0;
     d_->eof = false;
+    d_->read_buf.clear();
+    d_->read_buf.shrink_to_fit();
 }
 
 bool DffDecoder::open(const std::wstring& path)
@@ -124,7 +136,7 @@ bool DffDecoder::open(const std::wstring& path)
     // 扫描内部 chunks
     auto seekPad = [&](uint64_t sz) {
         // DSDIFF chunk 数据后补齐到偶数
-        if (sz & 1ULL) std::fseek(f, 1, SEEK_CUR);
+        if (sz & 1ULL) _fseeki64(f, 1, SEEK_CUR);
     };
 
     while (!std::feof(f)) {
@@ -168,13 +180,19 @@ bool DffDecoder::open(const std::wstring& path)
             }
         } else if (std::memcmp(id, "DSD ", 4) == 0) {
             // 真正的 DSD raw 数据
-            dsdDataOff  = static_cast<uint64_t>(std::ftell(f));
+            const __int64 here = _ftelli64(f);
+            if (here < 0) return fail(L"DFF: ftelli64 failed");
+            dsdDataOff  = static_cast<uint64_t>(here);
             dsdDataSize = sz;
-            std::fseek(f, static_cast<long>(sz), SEEK_CUR);
+            if (_fseeki64(f, static_cast<__int64>(sz), SEEK_CUR) != 0) {
+                return fail(L"DFF: fseek over DSD chunk failed");
+            }
             seekPad(sz);
         } else {
             // 跳过未识别 chunk (FVER / ID3 / DIIN / ...)
-            std::fseek(f, static_cast<long>(sz), SEEK_CUR);
+            if (_fseeki64(f, static_cast<__int64>(sz), SEEK_CUR) != 0) {
+                return fail(L"DFF: fseek over unknown chunk failed");
+            }
             seekPad(sz);
         }
     }
@@ -253,24 +271,36 @@ std::size_t DffDecoder::read(std::uint8_t* dst, std::size_t bytes)
     std::size_t framesProduced = 0;
     std::uint8_t* out = dst;
 
-    // 一次最多读 2 * channels 字节(1 PCM 帧),为了性能批量读 N 帧到本地 buf
-    std::vector<uint8_t> tmp(framesWanted * 2 * channels);
-    size_t got = std::fread(tmp.data(), 1, tmp.size(), d_->fp);
+    // 一次读 framesWanted 个 PCM 帧需要的 DSD 字节(每帧 2 byte/channel)。
+    // read_buf 是 Impl 成员,resize 不缩,避免在实时路径反复分配
+    const std::size_t needed = framesWanted * 2 * channels;
+    if (d_->read_buf.size() < needed) d_->read_buf.resize(needed);
+
+    std::size_t got = std::fread(d_->read_buf.data(), 1, needed, d_->fp);
     if (got == 0) { d_->eof = true; return 0; }
-    if (got < tmp.size()) {
-        std::memset(tmp.data() + got, 0, tmp.size() - got);
+    if (got < needed) {
+        std::memset(d_->read_buf.data() + got, 0, needed - got);
     }
 
     std::size_t framesAvailable = got / (2 * channels);
     if (framesAvailable < framesWanted) framesWanted = framesAvailable;
 
+    const uint8_t* tmp = d_->read_buf.data();
+    const DopMarkerMode mmode = d_->marker_mode.load(std::memory_order_acquire);
     for (std::size_t f = 0; f < framesWanted; ++f) {
-        uint8_t marker = (d_->pcm_frame_count & 1ULL) ? 0x05 : 0xFA;
+        const uint64_t base_sample =
+            (mmode == DopMarkerMode::PerSample)
+                ? d_->pcm_frame_count * channels
+                : 0;
+        const uint8_t frame_marker = (d_->pcm_frame_count & 1ULL) ? 0x05 : 0xFA;
         for (uint32_t ch = 0; ch < channels; ++ch) {
             // DFF frame-interleave:第 i 个 channel 在每 frame 的 byte i
             // PCM 帧需要 2 个 DFF frame 的同一 channel 字节
             uint8_t b0 = tmp[(f * 2 + 0) * channels + ch];
             uint8_t b1 = tmp[(f * 2 + 1) * channels + ch];
+            const uint8_t marker = (mmode == DopMarkerMode::PerSample)
+                ? (((base_sample + ch) & 1ULL) ? 0x05 : 0xFA)
+                : frame_marker;
             // DFF 已是 MSB-first 时间方向,不翻转
             out[0] = b1;
             out[1] = b0;

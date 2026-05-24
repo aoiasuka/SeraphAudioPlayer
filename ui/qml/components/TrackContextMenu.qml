@@ -14,6 +14,89 @@ Menu {
         root.popup()
     }
 
+    function openPlaylistMenuFor(filePath) {
+        var m = standalonePlaylistMenuComp.createObject(root.parent)
+        m.path = filePath
+        m.popup()
+    }
+
+    Component {
+        id: standalonePlaylistMenuComp
+        Menu {
+            id: sMenu
+            property string path: ""
+
+            padding: 6
+            topPadding: 8
+            bottomPadding: 8
+            leftPadding: 6
+            rightPadding: 6
+
+            background: Rectangle {
+                implicitWidth: 220
+                radius: window.mediumRadius
+                color: window.surfaceMenu
+                border.color: window.borderColor
+                border.width: 1
+                antialiasing: true
+            }
+
+            delegate: MenuItem {
+                id: subMenuItem
+                implicitHeight: 32
+                leftPadding: 12
+                rightPadding: 12
+                contentItem: Text {
+                    text: subMenuItem.text
+                    font.family: window.fontFamily
+                    font.pixelSize: 13
+                    color: window.textPrimary
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+                background: Rectangle {
+                    implicitHeight: 32
+                    radius: window.smallRadius
+                    color: subMenuItem.highlighted ? window.menuHoverBg : "transparent"
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                }
+            }
+
+            Instantiator {
+                model: playerVM.playlists
+                delegate: MenuItem {
+                    text: modelData.name + " (" + modelData.count + ")"
+                    onTriggered: playerVM.addToPlaylist(modelData.id, sMenu.path)
+                }
+                onObjectAdded: function(index, object) {
+                    sMenu.insertItem(index, object)
+                }
+                onObjectRemoved: function(index, object) {
+                    sMenu.removeItem(object)
+                }
+            }
+
+            MenuSeparator {
+                contentItem: Rectangle {
+                    implicitHeight: 1
+                    implicitWidth: 180
+                    color: window.hairline
+                }
+            }
+            MenuItem {
+                text: "新建歌单..."
+                onTriggered: {
+                    var id = playerVM.createPlaylist("新建歌单")
+                    playerVM.addToPlaylist(id, sMenu.path)
+                }
+            }
+
+            onClosed: {
+                sMenu.destroy(100)
+            }
+        }
+    }
+
     padding: 6
     topPadding: 8
     bottomPadding: 8

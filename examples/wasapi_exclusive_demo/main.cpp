@@ -26,7 +26,9 @@
 //  控制台会打印协商出的格式、缓冲区大小、设备周期等关键信息。
 // =============================================================================
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -34,9 +36,11 @@
 #include <ksmedia.h>
 #include <functiondiscoverykeys_devpkey.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <cwchar>
 
 // 部分 SDK / 编译器组合下,CLSID/IID 常量需要显式实例化
 #include <initguid.h>
@@ -80,10 +84,10 @@ const wchar_t* hr_brief(HRESULT hr)
     }
 }
 
-void log_ok  (const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); std::fputws(L"[ OK ] ", stdout); std::vfwprintf(stdout, fmt, a); std::fputwc(L'\n', stdout); va_end(a); }
-void log_info(const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); std::fputws(L"[INFO] ", stdout); std::vfwprintf(stdout, fmt, a); std::fputwc(L'\n', stdout); va_end(a); }
-void log_warn(const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); std::fputws(L"[WARN] ", stdout); std::vfwprintf(stdout, fmt, a); std::fputwc(L'\n', stdout); va_end(a); }
-void log_err (const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); std::fputws(L"[FAIL] ", stderr); std::vfwprintf(stderr, fmt, a); std::fputwc(L'\n', stderr); va_end(a); }
+void log_ok  (const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); fputws(L"[ OK ] ", stdout); vfwprintf(stdout, fmt, a); fputwc(L'\n', stdout); va_end(a); }
+void log_info(const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); fputws(L"[INFO] ", stdout); vfwprintf(stdout, fmt, a); fputwc(L'\n', stdout); va_end(a); }
+void log_warn(const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); fputws(L"[WARN] ", stdout); vfwprintf(stdout, fmt, a); fputwc(L'\n', stdout); va_end(a); }
+void log_err (const wchar_t* fmt, ...) { va_list a; va_start(a,fmt); fputws(L"[FAIL] ", stderr); vfwprintf(stderr, fmt, a); fputwc(L'\n', stderr); va_end(a); }
 
 #define HR_FAIL(hr, what) do { \
     log_err(L"%s failed: hr=0x%08lX (%s)", L##what, (unsigned long)(hr), hr_brief(hr)); \

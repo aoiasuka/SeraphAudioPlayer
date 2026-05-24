@@ -100,7 +100,14 @@ bool FlacDecoder::open(const std::wstring& path)
         fmt.sample_type     = SampleType::Int24Packed;
         d_->pack_24         = true;
         break;
-    case 20:                                  // 罕见,按 32-bit 容器处理(精度损失极小)
+    case 20:
+        // 罕见:20-bit FLAC 用 32-bit 容器承载,但保留 valid_bits=20 给下游
+        // (DSP / WASAPI WAVEFORMATEXTENSIBLE.Samples.wValidBitsPerSample)
+        fmt.bits_per_sample = 32;
+        fmt.valid_bits      = 20;
+        fmt.sample_type     = SampleType::Int32;
+        d_->pack_24         = false;
+        break;
     case 32:
         fmt.bits_per_sample = 32;
         fmt.valid_bits      = 32;

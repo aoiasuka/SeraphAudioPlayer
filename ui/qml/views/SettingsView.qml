@@ -294,7 +294,7 @@ Item {
                         spacing: 12
 
                         ColumnLayout {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: 200
                             spacing: 2
                             Text {
                                 text: "随机播放"
@@ -314,6 +314,8 @@ Item {
                             checked: playerVM.shuffle
                             onToggled: playerVM.shuffle = checked
                         }
+
+                        Item { Layout.fillWidth: true }
                     }
 
                     // repeat
@@ -322,7 +324,7 @@ Item {
                         spacing: 12
 
                         ColumnLayout {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: 200
                             spacing: 2
                             Text {
                                 text: "循环模式"
@@ -374,6 +376,8 @@ Item {
                                 }
                             }
                         }
+
+                        Item { Layout.fillWidth: true }
                     }
 
                     // 音量
@@ -382,7 +386,7 @@ Item {
                         spacing: 12
 
                         ColumnLayout {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: 200
                             spacing: 2
                             Text {
                                 text: "默认音量"
@@ -391,7 +395,7 @@ Item {
                                 color: window.textPrimary
                             }
                             Text {
-                                text: "应用启动时使用的音量 (" + playerVM.volume + "%)"
+                                text: "应用启动时使用的音量"
                                 font.family: window.fontFamily
                                 font.pixelSize: 12
                                 color: window.textSecondary
@@ -401,8 +405,9 @@ Item {
                         Slider {
                             Layout.preferredWidth: 220
                             from: 0; to: 100
+                            stepSize: 1
                             value: playerVM.volume
-                            onMoved: playerVM.volume = Math.round(value)
+                            onMoved: playerVM.volume = value
 
                             background: Rectangle {
                                 x: parent.leftPadding
@@ -429,6 +434,69 @@ Item {
                                 border.width: 2
                             }
                         }
+
+                        Text {
+                            Layout.preferredWidth: 40
+                            text: playerVM.volume + "%"
+                            font.family: window.fontFamily
+                            font.pixelSize: 12
+                            color: window.textSecondary
+                            horizontalAlignment: Text.AlignRight
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // 频谱效果设置
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        Layout.topMargin: 8
+
+                        ColumnLayout {
+                            Layout.preferredWidth: 200
+                            spacing: 2
+                            Text {
+                                text: "频谱效果"
+                                font.family: window.fontFamily
+                                font.pixelSize: 14
+                                color: window.textPrimary
+                            }
+                            Text {
+                                text: "选择播放时的可视化动画"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textSecondary
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.preferredWidth: 100
+                            Layout.preferredHeight: 32
+                            radius: 16
+                            color: vizArea.containsMouse ? window.cardHover : "transparent"
+                            border.color: window.borderColor
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "去预览 →"
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                color: window.textPrimary
+                            }
+
+                            MouseArea {
+                                id: vizArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: window.navigateTo("viz_settings")
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
                     }
                 }
             }

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,13 @@ struct TrackMetadata {
     int          track_no = 0;
     double       duration_sec = 0.0;  // 时长(秒);未知为 0
     bool         has_cover = false;   // 是否含内嵌封面(细节通过 readCover 单独取)
+
+    // ---- ReplayGain (Vorbis comment 形式) ----
+    // 值 = NaN 表示标签里没有该字段。单位 dB / 线性 peak。
+    double       rg_track_gain_db = std::numeric_limits<double>::quiet_NaN();
+    double       rg_track_peak    = std::numeric_limits<double>::quiet_NaN();
+    double       rg_album_gain_db = std::numeric_limits<double>::quiet_NaN();
+    double       rg_album_peak    = std::numeric_limits<double>::quiet_NaN();
 };
 
 // 单独的封面数据(可能很大,几百 KB ~ 几 MB),不放进 TrackMetadata
@@ -46,6 +54,7 @@ public:
 private:
     static std::optional<TrackMetadata> readWav(const std::wstring& path);
     static std::optional<TrackMetadata> readFlac(const std::wstring& path);
+    static std::optional<TrackMetadata> readMp3(const std::wstring& path);
     static std::optional<CoverImage>    readFlacCover(const std::wstring& path);
 };
 

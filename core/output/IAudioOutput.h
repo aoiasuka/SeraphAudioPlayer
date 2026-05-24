@@ -40,6 +40,9 @@ enum class OutputState : std::uint8_t {
 // 未来可扩展:event_driven、buffer_ms、exclusive 等。
 struct OpenOptions {
     std::wstring device_id;     // 来自 DeviceEnumerator::findById/...
+    // 共享模式回退开关:仅 WasapiSharedOutput 解读;
+    // WasapiExclusiveOutput 忽略。设为 true 时,Player 在独占失败后会尝试共享。
+    bool         allow_shared_fallback = false;
 };
 
 // 设备打开成功后,实现填充本结构告知调用方实际协商参数。
@@ -50,6 +53,16 @@ struct OpenResult {
     double         period_ms     = 0.0;     // 设备默认周期
     std::wstring   device_name;
     std::wstring   device_id;
+    bool           shared_mode  = false;    // 共享模式时置位
+};
+
+// 渲染统计 (运行中累计,close/open 时归零)
+struct RenderStats {
+    std::uint64_t periods_total    = 0;   // 渲染线程喂过的"周期"数 (近似 buffer 次)
+    std::uint64_t frames_total     = 0;   // 累计帧数
+    std::uint64_t underruns        = 0;   // 一次 callback 返回 < bytes 即记一次
+    std::uint64_t glitch_frames    = 0;   // 静音补齐的帧数累计
+    std::uint64_t recovery_count   = 0;   // 由 controller 端记录,output 不填
 };
 
 class IAudioOutput {
@@ -57,6 +70,10 @@ public:
     // 渲染线程会反复调用此回调,要求最多写 dst[0..bytes) 字节。
     // 返回实际写入的字节数;< bytes 时由输出端静音补齐。
     using DataCallback = std::function<std::size_t(std::uint8_t* dst, std::size_t bytes)>;
+
+    // 渲染线程在进入 Error 状态时回调一次,带最后一次错误描述。
+    // 在内部渲染线程上下文调用,实现需自行投递到主线程。可不设置。
+    using ErrorCallback = std::function<void(const std::wstring& msg)>;
 
     virtual ~IAudioOutput() = default;
 
@@ -81,6 +98,12 @@ public:
 
     // 必须在 start() 之前设置。设备运行中替换回调的行为未定义。
     virtual void setDataCallback(DataCallback cb) = 0;
+
+    // 可选;在 start() 之前设置。渲染线程进入 Error 时回调一次。
+    virtual void setErrorCallback(ErrorCallback /*cb*/) {}
+
+    // 取近实时的渲染统计快照。默认实现返回全 0。
+    virtual RenderStats renderStats() const { return RenderStats{}; }
 };
 
 } // namespace apx

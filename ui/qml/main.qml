@@ -2,12 +2,13 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Window
 import QtQuick.Layouts
+import QtQuick.Effects
 import "views"
 import "components"
 
 ApplicationWindow {
     id: window
-    flags: Qt.Window | Qt.FramelessWindowHint | Qt.CustomizeWindowHint
+    flags: Qt.Window | Qt.FramelessWindowHint | Qt.CustomizeWindowHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowSystemMenuHint
     width: 1280
     height: 800
     minimumWidth: 1024
@@ -16,6 +17,9 @@ ApplicationWindow {
     title: qsTr("Audio Player X86")
     color: "transparent"
 
+    property bool sidebarExpanded: true
+    function toggleSidebar() { sidebarExpanded = !sidebarExpanded }
+
     TitleBar {
         id: titleBar
         anchors.top: parent.top
@@ -23,7 +27,7 @@ ApplicationWindow {
         anchors.right: parent.right
         targetWindow: window
         z: 9999
-        onHamburgerClicked: window.openDrawer()
+        onHamburgerClicked: window.toggleSidebar()
     }
 
     // ===== 边缘 / 四角 resize 热区 (frameless 模式自管) =====
@@ -171,7 +175,7 @@ ApplicationWindow {
     Rectangle {
         id: dynamicBg
         anchors.fill: parent
-        radius: 16
+        radius: 0
         antialiasing: true
         color: window.appBg
     }
@@ -233,19 +237,43 @@ ApplicationWindow {
         case "history":  return Qt.resolvedUrl("views/HistoryView.qml")
         case "liked":    return Qt.resolvedUrl("views/LikedView.qml")
         case "settings": return Qt.resolvedUrl("views/SettingsView.qml")
+        case "viz_settings": return Qt.resolvedUrl("views/VizSettingsView.qml")
         default:         return Qt.resolvedUrl("views/HomeView.qml")
         }
     }
 
-    // ===== 主布局: 仅主内容区 (导航移入 Drawer, 进一步释放横向空间) =====
+    // ===== 主布局: 左侧侧边栏 + 右侧主内容区 =====
+    Sidebar {
+        id: drawerSidebar
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.topMargin: titleBar.height
+        anchors.bottomMargin: 80
+        width: window.sidebarExpanded ? 260 : 72
+        Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutQuart } }
+
+        activeKey: window.currentNav
+        busy: stackView.busy
+        onNavClicked: function(key) {
+            window.navigateTo(key)
+        }
+        onOpenPlaylistRequested: function(id) {
+            window.openPlaylist(id)
+        }
+        onCreatePlaylistRequested: {
+            window.navigateTo("playlist")
+        }
+    }
+
     Rectangle {
         id: mainContent
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        anchors.left: parent.left
+        anchors.left: drawerSidebar.right
         anchors.right: parent.right
         anchors.topMargin: titleBar.height
-        anchors.bottomMargin: 104        // 给浮岛 MiniPlayer 让出空间
+        anchors.bottomMargin: 80        // 给底栏让出空间
         color: "transparent"
 
         StackView {
@@ -259,93 +287,54 @@ ApplicationWindow {
             }
 
             pushEnter: Transition {
-                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 250; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; from: 30; to: 0; duration: 400; easing.type: Easing.OutExpo }
+                }
             }
             pushExit: Transition {
-                SequentialAnimation {
-                    PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                    PropertyAction { property: "visible"; value: false }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 200; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: 1; to: 0.96; duration: 300; easing.type: Easing.OutCubic }
                 }
             }
             popEnter: Transition {
-                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 250; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: 400; easing.type: Easing.OutExpo }
+                }
             }
             popExit: Transition {
-                SequentialAnimation {
-                    ParallelAnimation {
-                        PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                        PropertyAnimation { property: "y"; from: 0; to: 16; duration: 150; easing.type: Easing.InQuart }
-                    }
-                    PropertyAction { property: "visible"; value: false }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 200; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; from: 0; to: 30; duration: 300; easing.type: Easing.InCubic }
                 }
             }
             replaceEnter: Transition {
-                PropertyAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                PropertyAnimation { property: "y"; from: 16; to: 0; duration: 250; easing.type: Easing.OutQuart }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 250; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; from: 15; to: 0; duration: 350; easing.type: Easing.OutExpo }
+                    NumberAnimation { property: "scale"; from: 0.98; to: 1; duration: 350; easing.type: Easing.OutExpo }
+                }
             }
             replaceExit: Transition {
-                SequentialAnimation {
-                    PropertyAnimation { property: "opacity"; from: 1; to: 0; duration: 150 }
-                    PropertyAction { property: "visible"; value: false }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 200; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: 1; to: 0.98; duration: 250; easing.type: Easing.OutCubic }
                 }
             }
         }
     }
 
-    // ===== 抽屉式导航 (Hamburger 触发, 自左侧推入) =====
-    Drawer {
-        id: navDrawer
-        edge: Qt.LeftEdge
-        width: 280
-        height: window.height
-        modal: true
-        interactive: true
-        dragMargin: 0           // 不让左边缘的滑动手势误触发, 主内容里的列表/拖动不受干扰
-        dim: true
-
-        Overlay.modal: Rectangle {
-            color: window.modalScrim
-            Behavior on opacity { NumberAnimation { duration: 180 } }
-        }
-
-        background: Rectangle {
-            color: window.sidebarBg
-            border.color: window.borderColor
-            border.width: 1
-        }
-
-        Sidebar {
-            id: drawerSidebar
-            anchors.fill: parent
-            activeKey: window.currentNav
-            busy: stackView.busy
-            onNavClicked: function(key) {
-                window.navigateTo(key)
-                navDrawer.close()
-            }
-            onOpenPlaylistRequested: function(id) {
-                window.openPlaylist(id)
-                navDrawer.close()
-            }
-            onCreatePlaylistRequested: {
-                window.navigateTo("playlist")
-                navDrawer.close()
-            }
-        }
-    }
-
-    function openDrawer()  { navDrawer.open()  }
-    function closeDrawer() { navDrawer.close() }
+    // 移除了抽屉导航和 scrim
 
     // 底部 MiniPlayer (悬浮胶囊) — 进入「正在播放」视图后自动隐藏，由页内控制栏接管
     MiniPlayer {
         id: miniPlayer
         anchors.bottom: parent.bottom
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottomMargin: 18
-        // 居中, 留出两侧空间形成"悬浮"视觉
-        width: Math.min(parent.width - 96, 1280)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottomMargin: 0
         height: 80
 
         // 进入「正在播放」沉浸视图时隐藏，避免与页内控制栏功能/视觉冗余

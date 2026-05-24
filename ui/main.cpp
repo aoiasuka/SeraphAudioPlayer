@@ -115,6 +115,7 @@ int main(int argc, char* argv[])
 #endif
 
     QGuiApplication app(argc, argv);
+    app.setWindowIcon(QIcon(":/app_icon.svg"));
 
     qInfo() << "AudioPlayerX86 startup";
     qInfo() << "app dir:" << QCoreApplication::applicationDirPath();

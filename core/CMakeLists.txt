@@ -23,9 +23,18 @@ file(GLOB_RECURSE APX_CORE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/lyrics/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/dsp/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dsp/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dsd/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dsd/*.cpp"
 )
 
 add_library(apx_core STATIC ${APX_CORE_SOURCES})
+
+# AVX2 内核单独编译 (其余文件仍按全局 /arch 默认 — x64 是 SSE2 baseline)
+set(_AVX2_FILE "${CMAKE_CURRENT_SOURCE_DIR}/dsp/PolyphaseResampler_avx2.cpp")
+if(EXISTS "${_AVX2_FILE}" AND MSVC AND (CMAKE_SIZEOF_VOID_P EQUAL 8))
+    set_source_files_properties("${_AVX2_FILE}"
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+endif()
 
 # 项目根作为 include 根,允许 #include "core/buffer/RingBuffer.h" 等绝对感的路径
 target_include_directories(apx_core
@@ -36,6 +45,21 @@ target_include_directories(apx_core
 )
 
 target_compile_features(apx_core PUBLIC cxx_std_17)
+
+# Opus 解码可选依赖
+if(APX_HAVE_OPUS)
+    # 按 vcpkg / 系统提供的 target 名称依次尝试
+    foreach(_tgt OpusFile::opusfile Opusfile::opusfile opusfile::opusfile PkgConfig::OPUSFILE)
+        if(TARGET ${_tgt})
+            target_link_libraries(apx_core PRIVATE ${_tgt})
+            message(STATUS "  apx_core linking against ${_tgt}")
+            break()
+        endif()
+    endforeach()
+    if(OPUSFILE_INCLUDE_DIRS)
+        target_include_directories(apx_core PRIVATE ${OPUSFILE_INCLUDE_DIRS})
+    endif()
+endif()
 
 list(LENGTH APX_CORE_SOURCES _n)
 message(STATUS "  [core]     STATIC library, sources=${_n}")

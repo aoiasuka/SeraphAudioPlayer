@@ -75,6 +75,7 @@ class PlayerViewModel : public QObject {
     Q_PROPERTY(double peakLeft  READ peakLeft  NOTIFY visualUpdated)
     Q_PROPERTY(double peakRight READ peakRight NOTIFY visualUpdated)
     Q_PROPERTY(QVariantList spectrum READ spectrum NOTIFY visualUpdated)
+    Q_PROPERTY(int visualizerType READ visualizerType WRITE setVisualizerType NOTIFY visualizerTypeChanged)
 
     // EQ
     Q_PROPERTY(bool eqEnabled READ eqEnabled WRITE setEqEnabled NOTIFY eqChanged)
@@ -84,6 +85,13 @@ class PlayerViewModel : public QObject {
     Q_PROPERTY(QVariantList devices READ devices NOTIFY devicesListChanged)
     Q_PROPERTY(QString currentDeviceId READ currentDeviceId NOTIFY currentDeviceChanged)
     Q_PROPERTY(QString currentDeviceName READ currentDeviceNameProp NOTIFY currentDeviceChanged)
+
+    // 渲染统计 (1Hz 刷新);UI 在诊断面板里显示
+    Q_PROPERTY(quint64 statsUnderruns     READ statsUnderruns     NOTIFY statsUpdated)
+    Q_PROPERTY(quint64 statsGlitchFrames  READ statsGlitchFrames  NOTIFY statsUpdated)
+    Q_PROPERTY(quint64 statsRecoveryCount READ statsRecoveryCount NOTIFY statsUpdated)
+    Q_PROPERTY(quint64 statsPeriodsTotal  READ statsPeriodsTotal  NOTIFY statsUpdated)
+    Q_PROPERTY(quint64 statsFramesTotal   READ statsFramesTotal   NOTIFY statsUpdated)
 
 public:
     explicit PlayerViewModel(QObject* parent = nullptr);
@@ -128,6 +136,8 @@ public:
     double peakLeft() const { return m_peak_l; }
     double peakRight()const { return m_peak_r; }
     QVariantList spectrum() const;
+    int visualizerType() const { return m_visualizerType; }
+    void setVisualizerType(int type);
 
     bool eqEnabled() const { return m_eq.enabled(); }
     void setEqEnabled(bool on);
@@ -138,6 +148,12 @@ public:
     QVariantList devices() const;
     QString currentDeviceId() const { return m_currentDeviceId; }
     QString currentDeviceNameProp() const;
+
+    quint64 statsUnderruns()     const { return m_stats_underruns; }
+    quint64 statsGlitchFrames()  const { return m_stats_glitch; }
+    quint64 statsRecoveryCount() const { return m_stats_recovery; }
+    quint64 statsPeriodsTotal()  const { return m_stats_periods; }
+    quint64 statsFramesTotal()   const { return m_stats_frames; }
 
     // ---- 播放控制 ----
     Q_INVOKABLE void play();
@@ -207,6 +223,16 @@ public:
     Q_INVOKABLE void setDevice(const QString& deviceId);
     Q_INVOKABLE void refreshDevices();
 
+    // ---- Playlist 文件导入导出 (基于 PlaylistIO,使用当前 m_queue) ----
+    // 成功返回空字符串;失败返回错误消息
+    Q_INVOKABLE QString exportPlaylistM3U(const QString& path) const;
+    Q_INVOKABLE QString importPlaylistM3U(const QString& path);
+    Q_INVOKABLE QString exportPlaylistJson(const QString& path) const;
+    Q_INVOKABLE QString importPlaylistJson(const QString& path);
+
+    // 拖入 .cue 文件时调用,展开为多条目并加入队列。返回拆出的条目数
+    Q_INVOKABLE int     importCueSheet(const QString& cuePath);
+
     // 在窗口创建之后由 main.cpp 调用,把 HWND 绑给 SMTC / 任务栏按钮
     void attachWindow(void* hwnd);
 
@@ -238,7 +264,9 @@ signals:
     void lyricsChanged();
     void currentLyricIndexChanged();
     void visualUpdated();
+    void visualizerTypeChanged();
     void eqChanged();
+    void statsUpdated();
 
     // 跨线程内部信号
     void _coreStateChanged(int s);
@@ -330,10 +358,20 @@ private:
     QTimer*         m_visTimer = nullptr;
     double          m_vu_l = 0, m_vu_r = 0, m_peak_l = 0, m_peak_r = 0;
     QVariantList    m_spectrum;
+    int             m_visualizerType = 0;
     void            onVisTick();
 
     // EQ
     apx::Equalizer  m_eq;
+
+    // 渲染统计 (1Hz 刷新)
+    quint64 m_stats_underruns = 0;
+    quint64 m_stats_glitch    = 0;
+    quint64 m_stats_recovery  = 0;
+    quint64 m_stats_periods   = 0;
+    quint64 m_stats_frames    = 0;
+    QTimer* m_statsTimer      = nullptr;
+    void    onStatsTick();
 
     // 歌词
     std::vector<apx::LyricLine> m_lyrics;

@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/">
+        <file alias="app_icon.svg">app_icon.svg</file>
         <file alias="qml/main.qml">../qml/main.qml</file>
         <file alias="qml/components/MiniPlayer.qml">../qml/components/MiniPlayer.qml</file>
         <file alias="qml/components/Sidebar.qml">../qml/components/Sidebar.qml</file>
@@ -34,5 +35,6 @@
         <file alias="qml/views/AlbumView.qml">../qml/views/AlbumView.qml</file>
         <file alias="qml/views/AlbumDetailView.qml">../qml/views/AlbumDetailView.qml</file>
         <file alias="qml/views/SearchResultsView.qml">../qml/views/SearchResultsView.qml</file>
+        <file alias="qml/views/VizSettingsView.qml">../qml/views/VizSettingsView.qml</file>
     </qresource>
 </RCC>

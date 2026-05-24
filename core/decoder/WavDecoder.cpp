@@ -29,10 +29,22 @@ inline std::uint32_t rd_u32le(const std::uint8_t* p) {
          | (static_cast<std::uint32_t>(p[2]) << 16)
          | (static_cast<std::uint32_t>(p[3]) << 24);
 }
+inline std::uint64_t rd_u64le(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= (static_cast<std::uint64_t>(p[i]) << (i * 8));
+    return v;
+}
 
 constexpr std::uint16_t WF_PCM    = 0x0001;
 constexpr std::uint16_t WF_FLOAT  = 0x0003;
 constexpr std::uint16_t WF_EXTBL  = 0xFFFE;
+
+// Wave64: chunk ID 是 16-byte GUID,GUID 前 4 字节通常是 ASCII "riff"/"wave"/
+// "fmt "/"data" 等(全小写,与 RIFF 的大小写不同);后 12 字节是 spec 规定的固定 tail。
+// 我们只校验前 4 字节,在已经走 Wave64 路径(顶层 GUID 命中)的前提下足够。
+inline bool guid_id_is(const std::uint8_t* g, const char* fourcc) {
+    return std::memcmp(g, fourcc, 4) == 0;
+}
 
 } // namespace
 
@@ -146,59 +158,153 @@ bool WavDecoder::open(const std::wstring& path)
     }
     d_->fp = fp;
 
-    // 取真实文件大小,用于截断 data chunk size(防止部分 WAV 工具写错 size)
+    // 取真实文件大小,用于截断 data chunk size(防止部分工具写错 size)
     APX_FSEEK64(d_->fp, 0, SEEK_END);
     const std::int64_t file_size = APX_FTELL64(d_->fp);
     APX_FSEEK64(d_->fp, 0, SEEK_SET);
 
-    // RIFF header (12 bytes)
-    std::uint8_t hdr[12];
-    if (std::fread(hdr, 1, 12, d_->fp) != 12) {
-        d_->set_error(L"short file (no RIFF header)"); close(); return false;
-    }
-    if (std::memcmp(hdr, "RIFF", 4) != 0 || std::memcmp(hdr + 8, "WAVE", 4) != 0) {
-        d_->set_error(L"not RIFF/WAVE"); close(); return false;
+    // 读首部 16 字节用于分发 RIFF / RF64 / Wave64
+    std::uint8_t hdr[16];
+    if (std::fread(hdr, 1, 16, d_->fp) != 16) {
+        d_->set_error(L"short file (no container header)"); close(); return false;
     }
 
     bool fmt_done = false;
     bool data_done = false;
 
-    while (!fmt_done || !data_done) {
-        std::uint8_t ch_hdr[8];
-        const std::size_t r = std::fread(ch_hdr, 1, 8, d_->fp);
-        if (r != 8) break;
-        const std::uint32_t ch_size = rd_u32le(ch_hdr + 4);
-        const std::int64_t  after   = APX_FTELL64(d_->fp) + ch_size + (ch_size & 1);
+    // -------- 分支 1: 标准 RIFF/WAVE --------
+    // -------- 分支 2: RF64/WAVE (BWF >4GB) --------
+    const bool is_riff = (std::memcmp(hdr, "RIFF", 4) == 0
+                          && std::memcmp(hdr + 8, "WAVE", 4) == 0);
+    const bool is_rf64 = (std::memcmp(hdr, "RF64", 4) == 0
+                          && std::memcmp(hdr + 8, "WAVE", 4) == 0);
 
-        if (std::memcmp(ch_hdr, "fmt ", 4) == 0) {
-            std::vector<std::uint8_t> buf(ch_size);
-            if (ch_size && std::fread(buf.data(), 1, ch_size, d_->fp) != ch_size) {
-                d_->set_error(L"fmt chunk truncated"); close(); return false;
+    if (is_riff || is_rf64) {
+        // RF64 时,下一个 chunk 必须是 "ds64",含真实 64-bit data_size 等
+        std::int64_t rf64_data_size_override = -1;
+        if (is_rf64) {
+            APX_FSEEK64(d_->fp, 12, SEEK_SET);
+            std::uint8_t ds64_hdr[8];
+            if (std::fread(ds64_hdr, 1, 8, d_->fp) != 8
+                || std::memcmp(ds64_hdr, "ds64", 4) != 0) {
+                d_->set_error(L"RF64: missing ds64 chunk"); close(); return false;
             }
-            std::wstring err;
-            if (!parse_fmt_chunk(buf, d_->fmt, err)) {
-                d_->set_error(err); close(); return false;
+            const std::uint32_t ds64_size = rd_u32le(ds64_hdr + 4);
+            if (ds64_size < 28) {
+                d_->set_error(L"RF64: ds64 chunk too small"); close(); return false;
             }
-            fmt_done = true;
-            APX_FSEEK64(d_->fp, after, SEEK_SET);
-        } else if (std::memcmp(ch_hdr, "data", 4) == 0) {
-            d_->data_offset = APX_FTELL64(d_->fp);
-            std::int64_t reported = static_cast<std::int64_t>(ch_size);
-            const std::int64_t actual = file_size - d_->data_offset;
-            d_->data_size = (reported > actual && actual >= 0) ? actual : reported;
-            data_done = true;
-            // 不读 data,跳过(下次 read 时再回到 data_offset)
-            APX_FSEEK64(d_->fp, after, SEEK_SET);
-            // 一旦同时拿到 fmt + data 即可退出
-            if (fmt_done) break;
-        } else {
-            // 跳过未知 chunk(含 LIST/bext/cue 等)
-            APX_FSEEK64(d_->fp, after, SEEK_SET);
+            std::vector<std::uint8_t> ds64(ds64_size);
+            if (std::fread(ds64.data(), 1, ds64_size, d_->fp) != ds64_size) {
+                d_->set_error(L"RF64: ds64 truncated"); close(); return false;
+            }
+            // u64 riffSize, u64 dataSize, u64 sampleCount, u32 tableLen, ...
+            rf64_data_size_override = static_cast<std::int64_t>(rd_u64le(ds64.data() + 8));
+            // 跳过 padding 到偶字节
+            if (ds64_size & 1u) APX_FSEEK64(d_->fp, 1, SEEK_CUR);
         }
+
+        while (!fmt_done || !data_done) {
+            std::uint8_t ch_hdr[8];
+            const std::size_t r = std::fread(ch_hdr, 1, 8, d_->fp);
+            if (r != 8) break;
+            const std::uint32_t ch_size = rd_u32le(ch_hdr + 4);
+            const std::int64_t  payload_start = APX_FTELL64(d_->fp);
+            // RF64: data chunk 的 32-bit size 字段 = 0xFFFFFFFF 时,真实大小来自 ds64;
+            // 跳过此 chunk 时也应用真实大小,否则 fmt 在 data 之后这种罕见排列会跑偏
+            std::int64_t real_size = static_cast<std::int64_t>(ch_size);
+            if (is_rf64 && ch_size == 0xFFFFFFFFu
+                && std::memcmp(ch_hdr, "data", 4) == 0
+                && rf64_data_size_override >= 0) {
+                real_size = rf64_data_size_override;
+            }
+            const std::int64_t after = payload_start + real_size + (real_size & 1);
+
+            if (std::memcmp(ch_hdr, "fmt ", 4) == 0) {
+                std::vector<std::uint8_t> buf(ch_size);
+                if (ch_size && std::fread(buf.data(), 1, ch_size, d_->fp) != ch_size) {
+                    d_->set_error(L"fmt chunk truncated"); close(); return false;
+                }
+                std::wstring err;
+                if (!parse_fmt_chunk(buf, d_->fmt, err)) {
+                    d_->set_error(err); close(); return false;
+                }
+                fmt_done = true;
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            } else if (std::memcmp(ch_hdr, "data", 4) == 0) {
+                d_->data_offset = payload_start;
+                const std::int64_t actual = file_size - d_->data_offset;
+                d_->data_size = (real_size > actual && actual >= 0) ? actual : real_size;
+                data_done = true;
+                // 不再用 "if (fmt_done) break;" 显式退出 —— 循环条件本身已包含
+                // "两件都齐了就停",这种写法也允许 fmt 在 data 之后 (spec 允许但罕见)
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            } else {
+                // 跳过未知 chunk
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            }
+        }
+    } else if (std::memcmp(hdr, "riff", 4) == 0) {
+        // -------- 分支 3: Sony Wave64 --------
+        // 文件首部:16-byte GUID("riff" + tail) + 8-byte u64 totalSize +
+        //          16-byte GUID("wave" + tail);共 40 字节
+        // 我们已经读了 16 字节(到 hdr),需要再读 24 字节补齐
+        std::uint8_t hdr2[24];
+        if (std::fread(hdr2, 1, 24, d_->fp) != 24) {
+            d_->set_error(L"Wave64: short header"); close(); return false;
+        }
+        // hdr2[0..8) = totalSize (含本头),hdr2[8..24) = "wave" GUID
+        if (!guid_id_is(hdr2 + 8, "wave")) {
+            d_->set_error(L"Wave64: missing wave form GUID"); close(); return false;
+        }
+        // 此后 chunk 格式: 16-byte GUID + 8-byte u64 chunkSize(含头) + payload,8-byte 对齐 pad
+        while (!fmt_done || !data_done) {
+            std::uint8_t ck[24];
+            const std::size_t r = std::fread(ck, 1, 24, d_->fp);
+            if (r != 24) break;
+            const std::uint64_t ck_size = rd_u64le(ck + 16);  // 含本头 24 字节
+            if (ck_size < 24) { d_->set_error(L"Wave64: bad chunk size"); close(); return false; }
+            const std::uint64_t payload_size = ck_size - 24;
+            const std::int64_t  payload_start = APX_FTELL64(d_->fp);
+            const std::uint64_t pad = (8 - (ck_size & 7)) & 7;   // 8-byte 对齐
+            const std::int64_t  after = payload_start
+                                      + static_cast<std::int64_t>(payload_size + pad);
+
+            if (guid_id_is(ck, "fmt ")) {
+                if (payload_size > 4096) {
+                    d_->set_error(L"Wave64: fmt chunk implausibly large"); close(); return false;
+                }
+                std::vector<std::uint8_t> buf(static_cast<std::size_t>(payload_size));
+                if (payload_size
+                    && std::fread(buf.data(), 1, static_cast<std::size_t>(payload_size), d_->fp)
+                       != payload_size) {
+                    d_->set_error(L"Wave64: fmt chunk truncated"); close(); return false;
+                }
+                std::wstring err;
+                if (!parse_fmt_chunk(buf, d_->fmt, err)) {
+                    d_->set_error(err); close(); return false;
+                }
+                fmt_done = true;
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            } else if (guid_id_is(ck, "data")) {
+                d_->data_offset = payload_start;
+                const std::int64_t reported = static_cast<std::int64_t>(payload_size);
+                const std::int64_t actual   = file_size - d_->data_offset;
+                d_->data_size = (reported > actual && actual >= 0) ? actual : reported;
+                data_done = true;
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            } else {
+                APX_FSEEK64(d_->fp, after, SEEK_SET);
+            }
+        }
+    } else {
+        d_->set_error(L"not RIFF/RF64/Wave64"); close(); return false;
     }
 
     if (!fmt_done)  { d_->set_error(L"fmt chunk not found");  close(); return false; }
     if (!data_done) { d_->set_error(L"data chunk not found"); close(); return false; }
+    if (d_->data_size <= 0) {
+        d_->set_error(L"data chunk has zero/negative size"); close(); return false;
+    }
 
     d_->frame_bytes  = d_->fmt.frame_bytes();
     if (d_->frame_bytes == 0) {

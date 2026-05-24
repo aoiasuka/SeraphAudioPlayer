@@ -142,6 +142,34 @@ else()
     message(STATUS "ASIO SDK not present (stub backend used). See docs/ASIO.md")
 endif()
 
+# Opus 解码 (opusfile + libopus + libogg)。可通过 vcpkg / 系统包提供。
+# 找到则启用 OpusDecoder 真实实现;找不到留桩,不影响构建。
+find_package(OpusFile  CONFIG QUIET)
+find_package(Opusfile  CONFIG QUIET)
+find_package(opusfile  CONFIG QUIET)
+if(TARGET OpusFile::opusfile OR TARGET Opusfile::opusfile OR TARGET opusfile::opusfile
+        OR TARGET PkgConfig::OpusFile)
+    set(APX_HAVE_OPUS ON)
+    add_compile_definitions(APX_HAVE_OPUS=1)
+    message(STATUS "opusfile found, enabling Opus decoder")
+else()
+    # 尝试 pkg-config (vcpkg/MSYS)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(OPUSFILE QUIET opusfile)
+        if(OPUSFILE_FOUND)
+            set(APX_HAVE_OPUS ON)
+            add_compile_definitions(APX_HAVE_OPUS=1)
+            message(STATUS "opusfile found via pkg-config, enabling Opus decoder")
+        endif()
+    endif()
+endif()
+if(NOT APX_HAVE_OPUS)
+    set(APX_HAVE_OPUS OFF)
+    message(STATUS "opusfile not found, OpusDecoder will be a stub. "
+                   "Install via vcpkg (\"opusfile\") to enable.")
+endif()
+
 # -------- 子模块 --------
 add_subdirectory(core)
 add_subdirectory(platform)

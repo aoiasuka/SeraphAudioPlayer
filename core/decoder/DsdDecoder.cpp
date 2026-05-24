@@ -37,6 +37,7 @@
 // =============================================================================
 #include "DsdDecoder.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -89,6 +90,9 @@ struct DsdDecoder::Impl {
     // DoP marker 在每 PCM 帧交替;按帧累计计数,取 [0xFA, 0x05] 的索引
     uint64_t     pcm_frame_count = 0;
 
+    // marker 策略(可被 UI/控制线程动态切换)
+    std::atomic<DopMarkerMode> marker_mode{DopMarkerMode::PerFrame};
+
     std::wstring last_error;
 };
 
@@ -98,6 +102,9 @@ DsdDecoder::~DsdDecoder() { close(); }
 bool         DsdDecoder::isOpen()       const { return d_->fp != nullptr; }
 AudioFormat  DsdDecoder::format()       const { return d_->fmt; }
 std::wstring DsdDecoder::lastError()    const { return d_->last_error; }
+
+void          DsdDecoder::setMarkerMode(DopMarkerMode m) { d_->marker_mode.store(m, std::memory_order_release); }
+DopMarkerMode DsdDecoder::markerMode() const             { return d_->marker_mode.load(std::memory_order_acquire); }
 
 // 总帧数 = 每通道 DSD 样本数 / 16
 std::int64_t DsdDecoder::totalFrames()  const {
@@ -184,8 +191,8 @@ bool DsdDecoder::open(const std::wstring& path)
     if (std::memcmp(dataHdr, "data", 4) != 0) return fail(L"DSF: missing data chunk");
     uint64_t dataSize = readU64LE(dataHdr + 4) - 12; // chunk size 含头本身
 
-    long dataOffset = std::ftell(f);
-    if (dataOffset < 0) return fail(L"DSF: ftell failed");
+    long long dataOffset = _ftelli64(f);
+    if (dataOffset < 0) return fail(L"DSF: ftelli64 failed");
 
     d_->fp              = f;
     d_->channels        = channels;
@@ -251,7 +258,6 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
 {
     if (!d_->fp || !dst || bytes == 0) return 0;
     const uint32_t channels  = d_->channels;
-    const uint32_t framesPerBlk = d_->block_size / 2;
     const uint32_t frameBytes = channels * 3;
 
     bytes -= (bytes % frameBytes);
@@ -260,6 +266,8 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
     std::size_t framesWanted = bytes / frameBytes;
     std::size_t framesProduced = 0;
     std::uint8_t* out = dst;
+
+    const DopMarkerMode mmode = d_->marker_mode.load(std::memory_order_acquire);
 
     while (framesProduced < framesWanted && !d_->eof) {
         if (!d_->block_loaded) {
@@ -278,8 +286,14 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
         // 每帧消耗每通道 2 byte。从 cur_byte_in_block 开始
         while (d_->cur_byte_in_block + 2 <= d_->block_size
                && framesProduced < framesWanted) {
-            // marker 字节: 偶帧 0xFA,奇帧 0x05
-            uint8_t marker = (d_->pcm_frame_count & 1ULL) ? 0x05 : 0xFA;
+            // marker 字节策略:
+            //   PerFrame  → 整帧用一个 marker,帧间 0xFA<->0x05 交替
+            //   PerSample → 每个 (frame, ch) 各自交替,粒度更细
+            const uint64_t base_sample =
+                (mmode == DopMarkerMode::PerSample)
+                    ? d_->pcm_frame_count * channels
+                    : 0;
+            const uint8_t frame_marker = (d_->pcm_frame_count & 1ULL) ? 0x05 : 0xFA;
             for (uint32_t ch = 0; ch < channels; ++ch) {
                 const uint8_t* chData =
                     d_->block_buf.data() + static_cast<size_t>(ch) * d_->block_size;
@@ -291,8 +305,10 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
                     b0 = reverseBits(b0);
                     b1 = reverseBits(b1);
                 }
+                const uint8_t marker = (mmode == DopMarkerMode::PerSample)
+                    ? (((base_sample + ch) & 1ULL) ? 0x05 : 0xFA)
+                    : frame_marker;
                 // PCM-24 packed LE:offset 0 = LSB ... offset 2 = MSB
-                // 我们让 b1 (时间靠后的 8 bits) 在低位,b0 在中间,marker 在 MSB
                 out[0] = b1;
                 out[1] = b0;
                 out[2] = marker;
@@ -314,7 +330,6 @@ std::size_t DsdDecoder::read(std::uint8_t* dst, std::size_t bytes)
             d_->cur_byte_in_block = 0;
         }
     }
-    (void)framesPerBlk;
     return framesProduced * frameBytes;
 }
 

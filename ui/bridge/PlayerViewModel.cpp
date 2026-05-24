@@ -3,6 +3,9 @@
 // =============================================================================
 #include "PlayerViewModel.h"
 #include "platform/taskbar/JumpList.h"
+#include "app/playlist/Playlist.h"
+#include "app/playlist/PlaylistIO.h"
+#include "app/playlist/CueSheet.h"
 #include <QFileInfo>
 #include <QUrl>
 #include <QVariantMap>
@@ -58,6 +61,12 @@ PlayerViewModel::PlayerViewModel(QObject* parent)
     m_visTimer->setInterval(33);
     connect(m_visTimer, &QTimer::timeout, this, &PlayerViewModel::onVisTick);
     m_visTimer->start();
+
+    // 渲染统计 1Hz 刷新 (诊断面板用,频率低不耗 CPU)
+    m_statsTimer = new QTimer(this);
+    m_statsTimer->setInterval(1000);
+    connect(m_statsTimer, &QTimer::timeout, this, &PlayerViewModel::onStatsTick);
+    m_statsTimer->start();
 
     // 设备热插拔
     device_bridge_ = std::make_unique<DeviceBridge>();
@@ -208,9 +217,19 @@ void PlayerViewModel::syncTaskbar()
 {
     if (!taskbar_) return;
     taskbar_->setPlaying(m_state == 2);
-    bool canPrev = (m_currentIndex > 0) || m_repeatMode == 1;
-    bool canNext = (m_currentIndex >= 0 && m_currentIndex < m_queue.size() - 1)
-                || m_repeatMode == 1 || m_shuffle;
+    // canPrev / canNext 必须与 repeatMode / shuffle 一致:
+    //   - LoopList (repeatMode == 1) 或 Shuffle:总是允许两边
+    //   - LoopOne (repeatMode == 2):允许两边(重新加载当前)
+    //   - Sequential (0):头/尾时禁用
+    bool canPrev = false, canNext = false;
+    if (m_queue.isEmpty()) {
+        canPrev = canNext = false;
+    } else if (m_repeatMode == 1 || m_shuffle || m_repeatMode == 2) {
+        canPrev = canNext = true;
+    } else {
+        canPrev = m_currentIndex > 0;
+        canNext = m_currentIndex >= 0 && m_currentIndex < m_queue.size() - 1;
+    }
     taskbar_->setNavEnabled(canPrev, canNext);
 }
 
@@ -414,6 +433,8 @@ void PlayerViewModel::clearQueue()
     emit currentCoverUrlChanged();
     emit libraryChanged();
     reloadLyricsForCurrent();
+    syncTaskbar();
+    syncSmtcMetadata();
 }
 
 void PlayerViewModel::removeAt(int index)
@@ -439,6 +460,7 @@ void PlayerViewModel::removeAt(int index)
     if (m_shuffle) rebuildShuffleOrder(std::max(0, m_currentIndex));
     emit queueChanged();
     emit libraryChanged();
+    syncTaskbar();
 }
 
 void PlayerViewModel::moveQueueItem(int from, int to)
@@ -465,6 +487,7 @@ void PlayerViewModel::moveQueueItem(int from, int to)
 
     if (m_shuffle) rebuildShuffleOrder(std::max(0, m_currentIndex));
     emit queueChanged();
+    syncTaskbar();
 }
 
 // ---- 喜欢 ----
@@ -586,6 +609,14 @@ QColor PlayerViewModel::currentDominantColor() const
     return out;
 }
 
+void PlayerViewModel::setVisualizerType(int type)
+{
+    if (m_visualizerType == type) return;
+    m_visualizerType = type;
+    emit visualizerTypeChanged();
+    saveSettings();
+}
+
 QVariantList PlayerViewModel::currentLyrics() const
 {
     QVariantList out;
@@ -691,6 +722,7 @@ void PlayerViewModel::setRepeatMode(int m)
     if (m_repeatMode == m) return;
     m_repeatMode = m;
     emit repeatModeChanged();
+    syncTaskbar();
     if (!m_loadingSettings) saveSettings();
 }
 
@@ -701,6 +733,7 @@ void PlayerViewModel::setShuffle(bool s)
     if (m_shuffle) rebuildShuffleOrder(std::max(0, m_currentIndex));
     else { m_shuffleOrder.clear(); m_shufflePos = -1; }
     emit shuffleChanged();
+    syncTaskbar();
     if (!m_loadingSettings) saveSettings();
 }
 
@@ -1589,12 +1622,14 @@ void PlayerViewModel::loadSettings()
     int  rm  = s.value("repeatMode", m_repeatMode).toInt();
     bool sh  = s.value("shuffle", m_shuffle).toBool();
     m_preferredDeviceId = s.value("deviceId").toString();
+    m_visualizerType = s.value("visualizerType", m_visualizerType).toInt();
     s.endGroup();
 
     setVolume(vol);
     setMuted(mut);
     setRepeatMode(rm);
     setShuffle(sh);
+    emit visualizerTypeChanged();
 
     s.beginGroup("history");
     m_recent = s.value("recent").toStringList();
@@ -1652,6 +1687,7 @@ void PlayerViewModel::saveSettings() const
     s.setValue("repeatMode", m_repeatMode);
     s.setValue("shuffle", m_shuffle);
     s.setValue("deviceId", m_preferredDeviceId);
+    s.setValue("visualizerType", m_visualizerType);
     s.endGroup();
 
     s.beginGroup("history");
@@ -1681,6 +1717,120 @@ void PlayerViewModel::saveSettings() const
         s.setValue("tracks", m_playlists[i].paths);
     }
     s.endArray();
+}
+
+// =============================================================================
+// 渲染统计与 Playlist 文件 IO
+// =============================================================================
+
+void PlayerViewModel::onStatsTick()
+{
+    if (!player_) return;
+    const auto s = player_->stats();
+    bool changed = false;
+    if (s.underruns      != m_stats_underruns) { m_stats_underruns = s.underruns;      changed = true; }
+    if (s.glitch_frames  != m_stats_glitch)    { m_stats_glitch    = s.glitch_frames;  changed = true; }
+    if (s.recovery_count != m_stats_recovery)  { m_stats_recovery  = s.recovery_count; changed = true; }
+    if (s.periods_total  != m_stats_periods)   { m_stats_periods   = s.periods_total;  changed = true; }
+    if (s.frames_total   != m_stats_frames)    { m_stats_frames    = s.frames_total;   changed = true; }
+    if (changed) emit statsUpdated();
+}
+
+namespace {
+
+// 把 VM 的 QStringList m_queue 转成 apx::Playlist (附上能在缓存里找到的元数据)
+apx::Playlist makePlaylistFromQueue(
+    const QStringList& queue, int current,
+    const QMap<QString, apx::TrackMetadata>& meta)
+{
+    apx::Playlist pl;
+    for (const QString& p : queue) {
+        apx::PlaylistItem it;
+        it.path = p.toStdWString();
+        auto m = meta.find(p);
+        if (m != meta.end()) {
+            it.title  = m->title;
+            it.artist = m->artist;
+            it.album  = m->album;
+            it.track_index = static_cast<std::uint32_t>(m->track_no);
+            it.duration_sec = m->duration_sec;
+        }
+        pl.append(std::move(it));
+    }
+    pl.setCurrentIndex(current);
+    return pl;
+}
+
+} // namespace
+
+QString PlayerViewModel::exportPlaylistM3U(const QString& path) const
+{
+    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, m_metaCache);
+    std::wstring err;
+    if (!apx::PlaylistIO::saveM3U(pl, path.toStdWString(), &err)) {
+        return QString::fromStdWString(err);
+    }
+    return {};
+}
+
+QString PlayerViewModel::exportPlaylistJson(const QString& path) const
+{
+    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, m_metaCache);
+    std::wstring err;
+    if (!apx::PlaylistIO::saveJson(pl, path.toStdWString(), &err)) {
+        return QString::fromStdWString(err);
+    }
+    return {};
+}
+
+QString PlayerViewModel::importPlaylistM3U(const QString& path)
+{
+    apx::Playlist pl;
+    std::wstring err;
+    if (!apx::PlaylistIO::loadM3U(path.toStdWString(), pl, &err)) {
+        return QString::fromStdWString(err);
+    }
+    QStringList paths;
+    for (const auto& it : pl.items()) paths << QString::fromStdWString(it.path);
+    enqueueMany(paths);
+    return {};
+}
+
+QString PlayerViewModel::importPlaylistJson(const QString& path)
+{
+    apx::Playlist pl;
+    std::wstring err;
+    if (!apx::PlaylistIO::loadJson(path.toStdWString(), pl, &err)) {
+        return QString::fromStdWString(err);
+    }
+    QStringList paths;
+    for (const auto& it : pl.items()) paths << QString::fromStdWString(it.path);
+    enqueueMany(paths);
+    return {};
+}
+
+int PlayerViewModel::importCueSheet(const QString& cuePath)
+{
+    std::wstring err;
+    auto tracks = apx::CueSheet::parse(cuePath.toStdWString(), &err);
+    if (tracks.empty()) return 0;
+    // 把 Cue 元数据塞进 m_metaCache,UI 就能展示标题/艺人
+    QStringList paths;
+    for (auto& it : tracks) {
+        const QString p = QString::fromStdWString(it.path);
+        apx::TrackMetadata md;
+        md.title  = it.title;
+        md.artist = it.artist;
+        md.album  = it.album;
+        md.track_no = static_cast<int>(it.track_index);
+        if (it.cue_end_sec > it.cue_start_sec) {
+            md.duration_sec = it.cue_end_sec - it.cue_start_sec;
+        }
+        m_metaCache[p] = std::move(md);
+        paths << p;
+    }
+    enqueueMany(paths);
+    return static_cast<int>(tracks.size());
 }
 
 } // namespace apx::ui

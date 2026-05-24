@@ -9,12 +9,17 @@
 
 namespace apx {
 
-// 解析标准 RIFF/WAVE。支持:
+// 解析 RIFF/WAVE、RF64/BWF 和 Sony Wave64 容器。支持:
 //   - WAVE_FORMAT_PCM       (0x0001) : 16 / 24-packed / 32 bit
 //   - WAVE_FORMAT_IEEE_FLOAT(0x0003) : 32 bit float
 //   - WAVE_FORMAT_EXTENSIBLE(0xFFFE) : 通过 SubFormat GUID 区分上面两种
 //
-// 暂不支持: RF64(> 4GB)、A-law/μ-law、ADPCM、Wave64。
+// 容器形式:
+//   - 标准 RIFF/WAVE (32-bit chunk size, 上限 4GB)
+//   - RF64 (BWF):    包含 ds64 chunk,真实 64-bit size 写入此处
+//   - Wave64 (Sony): 16-byte GUID chunk ID + 64-bit size, 8-byte 对齐
+//
+// 暂不支持: A-law/μ-law、ADPCM。
 class WavDecoder final : public IDecoder {
 public:
     WavDecoder();

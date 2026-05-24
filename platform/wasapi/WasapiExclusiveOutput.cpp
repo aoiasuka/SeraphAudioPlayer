@@ -78,6 +78,12 @@ bool build_wfx(const AudioFormat& fmt, WAVEFORMATEXTENSIBLE& w) noexcept
     case SampleType::Int24Packed:
     case SampleType::Int32:    w.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;        break;
     case SampleType::Float32:  w.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; break;
+    case SampleType::DsdLsb8:
+        // KSDATAFORMAT_SUBTYPE_DSD = {0x00000003-0cea-0010-8000-00aa00389b71}
+        // Win10 1709+ 内核理论支持,实际可用度极依赖 DAC 驱动是否暴露 DSD 端点;
+        // 多数消费 USB DAC 走 ASIO Native DSD,而非 WASAPI。本播放器暂不构造
+        // 该 SubFormat — 留待真有兼容设备时启用。
+        return false;
     }
     return true;
 }
@@ -124,6 +130,13 @@ struct WasapiExclusiveOutput::Impl {
     std::atomic<bool>        running{false};
     std::thread              render_thread;
     DataCallback             callback;
+    ErrorCallback            err_callback;
+
+    // ---- 渲染统计(原子,monitor / UI 可读) ----
+    std::atomic<std::uint64_t> stat_periods{0};
+    std::atomic<std::uint64_t> stat_frames{0};
+    std::atomic<std::uint64_t> stat_underruns{0};
+    std::atomic<std::uint64_t> stat_glitch_frames{0};
 
     mutable std::mutex   err_mutex;
     std::wstring         last_error;
@@ -189,6 +202,21 @@ std::wstring WasapiExclusiveOutput::lastError() const
 void WasapiExclusiveOutput::setDataCallback(DataCallback cb)
 {
     d_->callback = std::move(cb);
+}
+
+void WasapiExclusiveOutput::setErrorCallback(ErrorCallback cb)
+{
+    d_->err_callback = std::move(cb);
+}
+
+RenderStats WasapiExclusiveOutput::renderStats() const
+{
+    RenderStats r;
+    r.periods_total = d_->stat_periods.load(std::memory_order_acquire);
+    r.frames_total  = d_->stat_frames.load(std::memory_order_acquire);
+    r.underruns     = d_->stat_underruns.load(std::memory_order_acquire);
+    r.glitch_frames = d_->stat_glitch_frames.load(std::memory_order_acquire);
+    return r;
 }
 
 // -----------------------------------------------------------------------------
@@ -310,6 +338,11 @@ bool WasapiExclusiveOutput::open(const AudioFormat& fmt, const OpenOptions& opts
     // ---------- 完成 ----------
     d_->frame_bytes = d_->wfx.Format.nBlockAlign;
     d_->state.store(OutputState::Stopped, std::memory_order_release);
+    // 统计清零(独占会话开始)
+    d_->stat_periods.store(0);
+    d_->stat_frames.store(0);
+    d_->stat_underruns.store(0);
+    d_->stat_glitch_frames.store(0);
 
     if (result) {
         result->actual_format  = fmt;
@@ -396,6 +429,10 @@ void WasapiExclusiveOutput::Impl::render_proc()
     const std::size_t bytes_per_period =
         static_cast<std::size_t>(buffer_frames) * frame_bytes;
 
+    auto fire_error = [this]() {
+        if (err_callback) err_callback(get_error());
+    };
+
     while (running.load(std::memory_order_acquire)) {
         const DWORD wr = WaitForSingleObject(event, 2000);
         if (!running.load(std::memory_order_acquire)) break;
@@ -403,6 +440,7 @@ void WasapiExclusiveOutput::Impl::render_proc()
             // 超时通常意味着设备掉线;退出并标记 Error
             set_error_msg(L"WASAPI render-thread wait timeout");
             state.store(OutputState::Error, std::memory_order_release);
+            fire_error();
             break;
         }
 
@@ -411,6 +449,7 @@ void WasapiExclusiveOutput::Impl::render_proc()
         if (FAILED(hr)) {
             set_error(L"GetBuffer (render)", hr);
             state.store(OutputState::Error, std::memory_order_release);
+            fire_error();
             break;
         }
 
@@ -420,12 +459,18 @@ void WasapiExclusiveOutput::Impl::render_proc()
         if (got < bytes_per_period) {
             // 欠载:静音补齐,避免脏数据噪声
             std::memset(p + got, 0, bytes_per_period - got);
+            stat_underruns.fetch_add(1, std::memory_order_release);
+            stat_glitch_frames.fetch_add((bytes_per_period - got) / frame_bytes,
+                                         std::memory_order_release);
         }
+        stat_periods.fetch_add(1, std::memory_order_release);
+        stat_frames.fetch_add(buffer_frames, std::memory_order_release);
 
         hr = render->ReleaseBuffer(buffer_frames, 0);
         if (FAILED(hr)) {
             set_error(L"ReleaseBuffer (render)", hr);
             state.store(OutputState::Error, std::memory_order_release);
+            fire_error();
             break;
         }
     }

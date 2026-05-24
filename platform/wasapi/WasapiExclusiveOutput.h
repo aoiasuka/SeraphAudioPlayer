@@ -31,6 +31,8 @@ public:
     OutputState  state()     const override;
     std::wstring lastError() const override;
     void         setDataCallback(DataCallback cb) override;
+    void         setErrorCallback(ErrorCallback cb) override;
+    RenderStats  renderStats() const override;
 
 private:
     struct Impl;

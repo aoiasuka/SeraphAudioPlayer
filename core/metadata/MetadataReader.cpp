@@ -328,6 +328,19 @@ std::optional<TrackMetadata> MetadataReader::readFlac(const std::wstring& path)
                 else if (key == "TRACKNUMBER")  {
                     try { md.track_no = std::stoi(val); found = true; seenComment = true; } catch (...) {}
                 }
+                else if (key == "REPLAYGAIN_TRACK_GAIN") {
+                    // 形如 "-6.55 dB" / "-6.55dB" / "-6.55"
+                    try { md.rg_track_gain_db = std::stod(val); found = true; } catch (...) {}
+                }
+                else if (key == "REPLAYGAIN_TRACK_PEAK") {
+                    try { md.rg_track_peak = std::stod(val); found = true; } catch (...) {}
+                }
+                else if (key == "REPLAYGAIN_ALBUM_GAIN") {
+                    try { md.rg_album_gain_db = std::stod(val); found = true; } catch (...) {}
+                }
+                else if (key == "REPLAYGAIN_ALBUM_PEAK") {
+                    try { md.rg_album_peak = std::stod(val); found = true; } catch (...) {}
+                }
             }
         } else {
             // 跳过其他 block
@@ -342,12 +355,199 @@ std::optional<TrackMetadata> MetadataReader::readFlac(const std::wstring& path)
 }
 
 // ============================================================================
+//  MP3 — ID3v2 (TXXX:REPLAYGAIN_* / TIT2 / TPE1 / TALB / TYER / TDRC / TRCK)
+// ============================================================================
+//
+//  ID3v2 头(10 字节):
+//    'I' 'D' '3' <ver_hi> <ver_lo> <flags> <size:4 sync-safe>
+//  size 是 "synchsafe" 7-bit-per-byte 编码,实际 = byte0<<21 | byte1<<14 | byte2<<7 | byte3
+//
+//  各 frame:
+//    ID(4) Size(4) Flags(2) [encoding(1)] payload...
+//    ID3v2.4 frame size 是 synchsafe;ID3v2.3 是普通 big-endian。
+//    encoding: 0=ISO-8859-1, 1=UTF-16 BOM, 2=UTF-16BE, 3=UTF-8(只在 v2.4)
+//
+//  TXXX frame 是 "用户自定义文本":payload = enc(1) + description(NUL) + value
+//    description 例:"REPLAYGAIN_TRACK_GAIN" → value "-6.55 dB"
+std::optional<TrackMetadata> MetadataReader::readMp3(const std::wstring& path)
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return std::nullopt;
+    auto close = [&]() { if (f) { std::fclose(f); f = nullptr; } };
+
+    uint8_t hdr[10];
+    if (!fread_n(f, hdr, 10)) { close(); return std::nullopt; }
+    if (std::memcmp(hdr, "ID3", 3) != 0) { close(); return std::nullopt; }
+
+    const int ver_major = hdr[3];      // 2/3/4
+    // const int ver_minor = hdr[4];
+    const uint8_t flags = hdr[5];
+    // synchsafe size
+    const uint32_t total =
+        (uint32_t(hdr[6] & 0x7F) << 21) |
+        (uint32_t(hdr[7] & 0x7F) << 14) |
+        (uint32_t(hdr[8] & 0x7F) << 7)  |
+        (uint32_t(hdr[9] & 0x7F));
+    if (total == 0 || total > 64 * 1024 * 1024) { close(); return std::nullopt; }
+
+    std::vector<uint8_t> tag(total);
+    if (std::fread(tag.data(), 1, total, f) != total) { close(); return std::nullopt; }
+    close();
+
+    // 跳过 extended header (v2.3/v2.4)
+    size_t pos = 0;
+    if (flags & 0x40) {
+        if (pos + 4 > tag.size()) return std::nullopt;
+        uint32_t ext;
+        if (ver_major >= 4) {
+            ext = (uint32_t(tag[pos]&0x7F)<<21) | (uint32_t(tag[pos+1]&0x7F)<<14)
+                | (uint32_t(tag[pos+2]&0x7F)<<7)  |  uint32_t(tag[pos+3]&0x7F);
+        } else {
+            ext = (uint32_t(tag[pos])<<24)|(uint32_t(tag[pos+1])<<16)
+                | (uint32_t(tag[pos+2])<<8) | uint32_t(tag[pos+3]);
+        }
+        pos += ext;
+        if (pos >= tag.size()) return std::nullopt;
+    }
+
+    auto decode_text = [](const uint8_t* p, size_t n, uint8_t enc) -> std::wstring {
+        if (n == 0) return {};
+        std::string s(reinterpret_cast<const char*>(p), n);
+        // 去掉尾 NUL
+        while (!s.empty() && s.back() == '\0') s.pop_back();
+        switch (enc) {
+        case 0: return cp1252ToW(s);    // ISO-8859-1 ≈ CP1252
+        case 3: return utf8ToW(s);      // UTF-8 (only v2.4)
+        case 1: {
+            // UTF-16 with BOM
+            if (s.size() < 2) return {};
+            const uint8_t* b = reinterpret_cast<const uint8_t*>(s.data());
+            bool be = false;
+            size_t start = 0;
+            if (b[0] == 0xFF && b[1] == 0xFE)      { be = false; start = 2; }
+            else if (b[0] == 0xFE && b[1] == 0xFF) { be = true;  start = 2; }
+            std::wstring w;
+            for (size_t i = start; i + 1 < s.size(); i += 2) {
+                uint16_t u = be ? (uint16_t(b[i])<<8) | b[i+1]
+                                : (uint16_t(b[i+1])<<8) | b[i];
+                w.push_back(static_cast<wchar_t>(u));
+            }
+            // 去尾
+            while (!w.empty() && w.back() == 0) w.pop_back();
+            return w;
+        }
+        case 2: {
+            // UTF-16BE no BOM
+            std::wstring w;
+            for (size_t i = 0; i + 1 < s.size(); i += 2) {
+                uint16_t u = (uint16_t(static_cast<unsigned char>(s[i]))<<8)
+                           | static_cast<unsigned char>(s[i+1]);
+                w.push_back(static_cast<wchar_t>(u));
+            }
+            while (!w.empty() && w.back() == 0) w.pop_back();
+            return w;
+        }
+        }
+        return {};
+    };
+
+    TrackMetadata md;
+    bool found = false;
+
+    while (pos + 10 <= tag.size()) {
+        char fid[5] = {0};
+        std::memcpy(fid, tag.data() + pos, 4);
+        if (fid[0] == 0) break;     // padding
+        uint32_t fsize;
+        if (ver_major >= 4) {
+            fsize = (uint32_t(tag[pos+4]&0x7F)<<21) | (uint32_t(tag[pos+5]&0x7F)<<14)
+                  | (uint32_t(tag[pos+6]&0x7F)<<7)  |  uint32_t(tag[pos+7]&0x7F);
+        } else {
+            fsize = (uint32_t(tag[pos+4])<<24)|(uint32_t(tag[pos+5])<<16)
+                  | (uint32_t(tag[pos+6])<<8) | uint32_t(tag[pos+7]);
+        }
+        // flags v2.3/2.4: [10..11]
+        const size_t pl = pos + 10;
+        if (pl + fsize > tag.size()) break;
+        if (fsize == 0) { pos = pl; continue; }
+        const uint8_t enc = tag[pl];     // 第一字节通常是 encoding(对 T*** frame 始终如此)
+
+        auto read_text_frame = [&]() {
+            return decode_text(tag.data() + pl + 1, fsize - 1, enc);
+        };
+
+        if (std::memcmp(fid, "TIT2", 4) == 0) {
+            md.title = read_text_frame(); found = true;
+        } else if (std::memcmp(fid, "TPE1", 4) == 0) {
+            md.artist = read_text_frame(); found = true;
+        } else if (std::memcmp(fid, "TALB", 4) == 0) {
+            md.album = read_text_frame(); found = true;
+        } else if (std::memcmp(fid, "TYER", 4) == 0 || std::memcmp(fid, "TDRC", 4) == 0) {
+            md.date = read_text_frame(); found = true;
+        } else if (std::memcmp(fid, "TRCK", 4) == 0) {
+            const auto w = read_text_frame();
+            try { md.track_no = std::stoi(std::wstring(w.begin(), w.end())); found = true; }
+            catch (...) {}
+        } else if (std::memcmp(fid, "TXXX", 4) == 0) {
+            // TXXX: enc(1) desc(NUL-term in encoding) value
+            // desc 的 NUL 终止符宽度依赖于 enc:UTF-16 是双字节 NUL
+            const uint8_t* payload = tag.data() + pl + 1;
+            const size_t   plen    = fsize - 1;
+            std::string desc;
+            std::string value;
+            size_t cut = 0;
+            if (enc == 1 || enc == 2) {
+                // UTF-16:寻找 [0,0] 终止
+                for (size_t i = 0; i + 1 < plen; i += 2) {
+                    if (payload[i] == 0 && payload[i+1] == 0) { cut = i; break; }
+                }
+            } else {
+                for (size_t i = 0; i < plen; ++i) {
+                    if (payload[i] == 0) { cut = i; break; }
+                }
+            }
+            if (cut > 0 && cut < plen) {
+                const std::wstring wdesc = decode_text(payload, cut, enc);
+                std::string ascii_desc;
+                ascii_desc.reserve(wdesc.size());
+                for (wchar_t c : wdesc) {
+                    ascii_desc.push_back((c < 0x80) ? static_cast<char>(c) : '?');
+                }
+                std::transform(ascii_desc.begin(), ascii_desc.end(), ascii_desc.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::toupper(c)); });
+
+                const size_t vskip = (enc == 1 || enc == 2) ? cut + 2 : cut + 1;
+                const std::wstring wval = (vskip < plen)
+                    ? decode_text(payload + vskip, plen - vskip, enc)
+                    : std::wstring{};
+                // 把 wval 转 ASCII 用于 stod
+                std::string sval; sval.reserve(wval.size());
+                for (wchar_t c : wval) if (c < 0x80) sval.push_back(static_cast<char>(c));
+
+                if      (ascii_desc == "REPLAYGAIN_TRACK_GAIN") { try { md.rg_track_gain_db = std::stod(sval); found = true; } catch (...) {} }
+                else if (ascii_desc == "REPLAYGAIN_TRACK_PEAK") { try { md.rg_track_peak    = std::stod(sval); found = true; } catch (...) {} }
+                else if (ascii_desc == "REPLAYGAIN_ALBUM_GAIN") { try { md.rg_album_gain_db = std::stod(sval); found = true; } catch (...) {} }
+                else if (ascii_desc == "REPLAYGAIN_ALBUM_PEAK") { try { md.rg_album_peak    = std::stod(sval); found = true; } catch (...) {} }
+            }
+        } else if (std::memcmp(fid, "APIC", 4) == 0) {
+            md.has_cover = true; found = true;
+        }
+
+        pos = pl + fsize;
+    }
+
+    if (!found) return std::nullopt;
+    return md;
+}
+
+// ============================================================================
 //  dispatch by extension
 // ============================================================================
 std::optional<TrackMetadata> MetadataReader::read(const std::wstring& path)
 {
     if (endsWith(path, L".wav"))  return readWav(path);
     if (endsWith(path, L".flac")) return readFlac(path);
+    if (endsWith(path, L".mp3"))  return readMp3(path);
     return std::nullopt;
 }
 

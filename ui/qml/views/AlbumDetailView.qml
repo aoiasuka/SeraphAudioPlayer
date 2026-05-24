@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 import "../components"
 
 // 专辑详情
@@ -40,7 +41,10 @@ Item {
             iconColor: window.textPrimary
             implicitWidth: 32
             implicitHeight: 32
-            onClicked: window.navigateTo("album")
+            onClicked: {
+                window.currentNav = ""
+                window.navigateTo("album")
+            }
         }
 
         RowLayout {
@@ -51,19 +55,52 @@ Item {
             anchors.rightMargin: 32
             spacing: 20
 
-            Rectangle {
+            Item {
                 Layout.preferredWidth: 100
                 Layout.preferredHeight: 100
-                radius: 16
-                gradient: Gradient {
-                    orientation: Gradient.Vertical
-                    GradientStop { position: 0; color: window.brand }
-                    GradientStop { position: 1; color: "#6366F1" }
+                clip: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 16
+                    gradient: Gradient {
+                        orientation: Gradient.Vertical
+                        GradientStop { position: 0; color: window.brand }
+                        GradientStop { position: 1; color: "#6366F1" }
+                    }
+                    AppIcon {
+                        anchors.centerIn: parent
+                        name: "album"; size: 44
+                        color: "#FFFFFF"; strokeWidth: 1.6
+                    }
                 }
-                AppIcon {
-                    anchors.centerIn: parent
-                    name: "album"; size: 44
-                    color: "#FFFFFF"; strokeWidth: 1.6
+
+                Rectangle {
+                    id: albumCoverMask
+                    width: albumCover.width
+                    height: albumCover.height
+                    radius: 16
+                    color: "black"
+                    antialiasing: true
+                }
+
+                Image {
+                    id: albumCover
+                    anchors.fill: parent
+                    source: root._tracks && root._tracks.length > 0 ? (root._tracks[0].coverUrl || "") : ""
+                    visible: source.toString().length > 0 && status === Image.Ready
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    cache: true
+
+                    layer.enabled: true
+                    layer.effect: MultiEffect {
+                        maskEnabled: true
+                        maskSource: ShaderEffectSource {
+                            sourceItem: albumCoverMask
+                            hideSource: true
+                        }
+                    }
                 }
             }
 
@@ -161,7 +198,7 @@ Item {
                     path: modelData.path
                     onClicked: playerVM.openFile(modelData.path)
                     onLikeClicked: playerVM.toggleLike(modelData.path)
-                    onEnqueueClicked: playerVM.enqueue(modelData.path)
+                    onEnqueueClicked: ctxMenu.openPlaylistMenuFor(modelData.path)
                     onMoreClicked: ctxMenu.openFor(modelData.path)
                 }
             }

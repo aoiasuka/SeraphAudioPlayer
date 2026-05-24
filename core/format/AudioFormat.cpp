@@ -26,6 +26,7 @@ bool AudioFormat::valid() const noexcept
     case SampleType::Int24Packed: return bits_per_sample == 24 && valid_bits == 24;
     case SampleType::Int32:       return bits_per_sample == 32;       // valid_bits 可以是 24 或 32
     case SampleType::Float32:     return bits_per_sample == 32 && valid_bits == 32;
+    case SampleType::DsdLsb8:     return bits_per_sample == 8  && valid_bits == 1;
     }
     return false;
 }
@@ -48,6 +49,7 @@ std::wstring AudioFormat::to_wstring() const
     case SampleType::Int24Packed: tname = L"int24packed"; break;
     case SampleType::Int32:       tname = L"int32";       break;
     case SampleType::Float32:     tname = L"float32";     break;
+    case SampleType::DsdLsb8:     tname = L"dsd-lsb8";    break;
     }
     std::wostringstream ss;
     ss << sample_rate << L" Hz, "

@@ -28,6 +28,10 @@
                 "taglib"
             ]
         },
+        "opus": {
+            "description": "Opus codec via opusfile + libopus",
+            "dependencies": ["opusfile"]
+        },
         "tests": {
             "description": "Unit tests via GoogleTest",
             "dependencies": ["gtest"]
@@ -35,3 +39,4 @@
     },
     "default-features": []
 }
+

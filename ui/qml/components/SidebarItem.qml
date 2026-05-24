@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
 
 // 侧栏导航项 (icon + label + active 指示条)
 Item {
@@ -27,11 +28,11 @@ Item {
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 16  // 稍微加宽边距，呼应气泡悬浮感
-        anchors.rightMargin: 12
         spacing: 12
 
         AppIcon {
+            Layout.alignment: Qt.AlignVCenter
+            Layout.leftMargin: window.sidebarExpanded ? 16 : (root.width - 18) / 2
             name: root.iconName
             size: 18
             // 悬浮时 icon 也会有渐变品牌色反馈，体验更精致
@@ -51,6 +52,8 @@ Item {
 
         Text {
             Layout.fillWidth: true
+            Layout.rightMargin: 12
+            visible: window.sidebarExpanded
             text: root.label
             font.family: window.fontFamily
             font.pixelSize: 13
@@ -68,5 +71,8 @@ Item {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: root.clicked()
+        
+        ToolTip.visible: !window.sidebarExpanded && containsMouse
+        ToolTip.text: root.label
     }
 }

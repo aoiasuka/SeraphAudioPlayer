@@ -7,6 +7,11 @@ param(
     # Qt 6.5+ 安装路径(必须含 lib\cmake\Qt6),如 C:\Qt\6.5.3\msvc2019_64
     [string]$QtPath = $env:APX_QT_PATH,
 
+    # vcpkg 根目录(可选)。设置后会自动注入 toolchain,让 opusfile 等可选依赖
+    # 直接被 find_package 找到。
+    # 优先级:参数 > $env:VCPKG_ROOT > 自动嗅探
+    [string]$VcpkgRoot = $env:VCPKG_ROOT,
+
     [ValidateSet('Win32','x64')]
     [string]$Arch = 'x64',                  # Qt 6 官方仅提供 x64 二进制
 
@@ -50,6 +55,29 @@ if (-not $QtPath -or -not (Test-Path "$QtPath\lib\cmake\Qt6")) {
     exit 1
 }
 
+# ---------- 1b. 解析 vcpkg 工具链(可选) ----------
+$VcpkgToolchain = $null
+if (-not $VcpkgRoot) {
+    # 嗅探常见路径
+    $candidatesVcpkg = @(
+        "C:\vcpkg",
+        "C:\dev\vcpkg",
+        "$env:USERPROFILE\vcpkg",
+        "$env:USERPROFILE\source\repos\vcpkg"
+    )
+    foreach ($c in $candidatesVcpkg) {
+        if (Test-Path "$c\scripts\buildsystems\vcpkg.cmake") { $VcpkgRoot = $c; break }
+    }
+}
+if ($VcpkgRoot) {
+    $tc = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+    if (Test-Path $tc) {
+        $VcpkgToolchain = $tc
+    } else {
+        Write-Warning "VCPKG_ROOT='$VcpkgRoot' 不含 scripts\buildsystems\vcpkg.cmake,忽略"
+    }
+}
+
 Write-Host ""
 Write-Host "AudioPlayerX86 — build main application" -ForegroundColor Cyan
 Write-Host "  Root     : $root"
@@ -58,6 +86,11 @@ Write-Host "  Config   : $Config"
 Write-Host "  QtPath   : $QtPath"
 Write-Host "  BuildDir : $BuildDir"
 Write-Host "  Examples : $(if ($WithExamples) {'ON'} else {'OFF'})"
+if ($VcpkgToolchain) {
+    Write-Host "  vcpkg    : $VcpkgRoot"
+} else {
+    Write-Host "  vcpkg    : (none — set `$env:VCPKG_ROOT or -VcpkgRoot to enable opusfile etc.)"
+}
 Write-Host ""
 
 # ---------- 2. CMake 配置 ----------
@@ -65,12 +98,21 @@ $examplesFlag = if ($WithExamples) { 'ON' } else { 'OFF' }
 
 Push-Location $root
 try {
-    & cmake -S . -B $BuildDir -A $Arch `
-            -DCMAKE_PREFIX_PATH="$QtPath" `
-            -DAPX_BUILD_UI=ON `
-            -DAPX_BUILD_APP=ON `
-            -DAPX_BUILD_EXAMPLES=$examplesFlag `
-            -DAPX_BUILD_TESTS=OFF
+    $cmakeArgs = @(
+        '-S', '.', '-B', $BuildDir, '-A', $Arch,
+        "-DCMAKE_PREFIX_PATH=$QtPath",
+        '-DAPX_BUILD_UI=ON',
+        '-DAPX_BUILD_APP=ON',
+        "-DAPX_BUILD_EXAMPLES=$examplesFlag",
+        '-DAPX_BUILD_TESTS=OFF'
+    )
+    if ($VcpkgToolchain) {
+        $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain"
+        # 让 vcpkg 选 triplet 与 Arch 匹配
+        $triplet = if ($Arch -eq 'x64') { 'x64-windows' } else { 'x86-windows' }
+        $cmakeArgs += "-DVCPKG_TARGET_TRIPLET=$triplet"
+    }
+    & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
 
     # ---------- 3. 构建 ----------

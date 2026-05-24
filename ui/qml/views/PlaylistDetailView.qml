@@ -82,7 +82,10 @@ Item {
             iconColor: window.textPrimary
             implicitWidth: 32
             implicitHeight: 32
-            onClicked: window.navigateTo("playlist")
+            onClicked: {
+                window.currentNav = ""
+                window.navigateTo("playlist")
+            }
         }
 
         RowLayout {

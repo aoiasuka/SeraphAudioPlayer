@@ -16,7 +16,7 @@ Item {
     clip: false
 
     // 通过 alias 让外部继续用 .radius 调整
-    property real radius: 22
+    property real radius: 0
 
     signal clicked()
     signal showQueueClicked()
@@ -81,9 +81,16 @@ Item {
         height: 14
         from: 0
         to: playerVM.duration > 0 ? playerVM.duration : 1
-        value: playerVM.position
+        Binding {
+            target: progressSlider
+            property: "value"
+            value: playerVM.position
+            when: !progressSlider.pressed
+        }
 
-        onMoved: playerVM.seek(value)
+        onPressedChanged: {
+            if (!pressed) playerVM.seek(value)
+        }
 
         property bool barHovered: progressHover.hovered || pressed
 

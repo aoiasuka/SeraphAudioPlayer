@@ -3,11 +3,13 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // 左侧导航 — 极简纯色面板 (现作为 Drawer 内容使用)
+// 注: 自身透明 + radius+clip; Drawer 的 background 负责底色和边框, 圆角由二者共同维持
 Rectangle {
     id: root
     objectName: "sidebarRoot"
-    color: window.sidebarBg
-    radius: 0
+    color: "transparent"
+    radius: window.largeRadius
+    antialiasing: true
     clip: true
 
     property string activeKey: "home"
@@ -33,11 +35,11 @@ Rectangle {
     signal openPlaylistRequested(string id)
     signal createPlaylistRequested()
 
-    // 独占式高亮滑动指示滑块 (毛玻璃悬浮风，保证全侧栏只有一个高亮，完美避免重叠或闪态，极大优化视觉效果)
+    // 独占式高亮滑动指示滑块
     Rectangle {
         id: sharedHighlight
-        x: 12
-        width: parent.width - 24
+        x: window.sidebarExpanded ? 12 : (root.width - 40) / 2
+        width: window.sidebarExpanded ? parent.width - 24 : 40
         height: 40
         radius: 20
         color: window.activeBg
@@ -57,16 +59,7 @@ Rectangle {
             NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
         }
 
-        // 左侧 active 品牌色指示条 (跟随滑块一起平滑移动，从根本上解决切换时多个指示条并存的 bug)
-        Rectangle {
-            anchors.left: parent.left
-            anchors.leftMargin: 6
-            anchors.verticalCenter: parent.verticalCenter
-            width: 4
-            height: parent.height - 16
-            radius: 2
-            color: window.brand
-        }
+        // 移除了左侧竖向品牌色指示条，改为纯粹的背景高亮
     }
 
     // 动态同步高亮滑块坐标
@@ -96,7 +89,6 @@ Rectangle {
         }
         var pos = activeItem.mapToItem(root, 0, 0)
         sharedHighlight.y = pos.y
-        sharedHighlight.width = activeItem.width
         sharedHighlight.height = activeItem.height
         sharedHighlight.visible = true
     }
@@ -122,20 +114,21 @@ Rectangle {
         anchors.margins: 12
         spacing: 4
 
-        // Logo + 折叠
+        // Logo 区域
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 48
-            spacing: 10
+            spacing: 12
 
             Rectangle {
-                width: 32; height: 32; radius: 8
+                Layout.alignment: Qt.AlignVCenter
+                Layout.leftMargin: window.sidebarExpanded ? 4 : (parent.width - 32) / 2
+                width: 32; height: 32; radius: 16
                 color: window.brand
-
                 AppIcon {
                     anchors.centerIn: parent
                     name: "music"
-                    size: 18
+                    size: 16
                     color: "#FFFFFF"
                     strokeWidth: 2
                 }
@@ -143,12 +136,60 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "音乐播放器"
+                text: "AudioPlayer"
                 font.family: window.fontFamily
-                font.pixelSize: 16
+                font.pixelSize: 18
                 font.weight: Font.DemiBold
                 color: window.textPrimary
                 elide: Text.ElideRight
+                visible: window.sidebarExpanded
+            }
+        }
+
+        Item { Layout.preferredHeight: 12 }
+
+        // 醒目的“新建歌单”按钮 (类似 Gemini 的发起新对话)
+        Rectangle {
+            Layout.preferredWidth: window.sidebarExpanded ? parent.width : 44
+            Layout.alignment: window.sidebarExpanded ? Qt.AlignLeft : Qt.AlignHCenter
+            Layout.preferredHeight: 44
+            radius: 22
+            color: newBtnArea.containsMouse ? window.cardHover : window.surfaceAlt
+            Behavior on color { ColorAnimation { duration: 150 } }
+
+            RowLayout {
+                anchors.fill: parent
+                spacing: 12
+                
+                Item {
+                    Layout.preferredWidth: 44
+                    Layout.preferredHeight: 44
+                    AppIcon {
+                        anchors.centerIn: parent
+                        name: "plus"
+                        size: 18
+                        color: window.textPrimary
+                        strokeWidth: 2
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "新建歌单"
+                    font.family: window.fontFamily
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
+                    color: window.textPrimary
+                    visible: window.sidebarExpanded
+                }
+            }
+
+            MouseArea {
+                id: newBtnArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.createPlaylistRequested()
             }
         }
 
@@ -170,43 +211,22 @@ Rectangle {
 
         Item { Layout.preferredHeight: 16 }
 
-        // 创建的歌单 区域标题
+        // 创建的歌单 区域标题 (仅展开时显示)
         RowLayout {
             Layout.fillWidth: true
             Layout.leftMargin: 12
             Layout.rightMargin: 8
             Layout.preferredHeight: 32
             spacing: 6
+            visible: window.sidebarExpanded
 
             Text {
                 Layout.fillWidth: true
-                text: "创建的歌单"
-                font.family: "Microsoft YaHei UI"
+                text: "我的歌单"
+                font.family: window.fontFamily
                 font.pixelSize: 12
                 font.weight: Font.Medium
                 color: window.textSecondary
-            }
-
-            Rectangle {
-                width: 24; height: 24
-                radius: 12
-                color: addArea.containsMouse ? window.hoverBg : "transparent"
-
-                AppIcon {
-                    anchors.centerIn: parent
-                    name: "plus"
-                    size: 14
-                    color: window.textSecondary
-                    strokeWidth: 2
-                }
-
-                MouseArea {
-                    id: addArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.createPlaylistRequested()
-                }
             }
         }
 
@@ -225,12 +245,12 @@ Rectangle {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 8
-                    spacing: 10
+                    spacing: 12
 
                     // 封面渐变小块
                     Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.leftMargin: window.sidebarExpanded ? 12 : (parent.width - 28) / 2
                         width: 28; height: 28; radius: 6
                         gradient: Gradient {
                             orientation: Gradient.Vertical
@@ -249,10 +269,11 @@ Rectangle {
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 0
+                        visible: window.sidebarExpanded
                         Text {
                             Layout.fillWidth: true
                             text: modelData.name
-                            font.family: "Microsoft YaHei UI"
+                            font.family: window.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.Medium
                             color: window.textPrimary
@@ -261,7 +282,7 @@ Rectangle {
                         Text {
                             Layout.fillWidth: true
                             text: dropTarget.containsDrag ? "松开以添加" : (modelData.count + " 首")
-                            font.family: "Microsoft YaHei UI"
+                            font.family: window.fontFamily
                             font.pixelSize: 10
                             color: dropTarget.containsDrag ? window.brand : window.textTertiary
                             Behavior on color { ColorAnimation { duration: 120 } }
@@ -292,6 +313,9 @@ Rectangle {
                     // 不要阻塞 DropArea
                     propagateComposedEvents: true
                     z: -1
+                    
+                    ToolTip.visible: !window.sidebarExpanded && containsMouse
+                    ToolTip.text: modelData.name
                 }
             }
         }

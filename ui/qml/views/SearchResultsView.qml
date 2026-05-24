@@ -504,7 +504,7 @@ Item {
                         path:     modelData.path
                         onClicked:        playerVM.openFile(modelData.path)
                         onLikeClicked:    playerVM.toggleLike(modelData.path)
-                        onEnqueueClicked: playerVM.enqueue(modelData.path)
+                        onEnqueueClicked: ctxMenu.openPlaylistMenuFor(modelData.path)
                         onMoreClicked:    ctxMenu.openFor(modelData.path)
                     }
                 }

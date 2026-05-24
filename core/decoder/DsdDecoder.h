@@ -16,6 +16,7 @@
 #pragma once
 
 #include "core/decoder/IDecoder.h"
+#include "core/dsd/DopMode.h"
 
 #include <memory>
 
@@ -38,6 +39,10 @@ public:
     bool         seek(std::int64_t frame) override;
     std::size_t  read(std::uint8_t* dst, std::size_t bytes) override;
     std::wstring lastError() const override;
+
+    // DoP marker 策略。运行时可在任何时刻调用 (新设定从下一次 read 起生效)。
+    void          setMarkerMode(DopMarkerMode mode);
+    DopMarkerMode markerMode() const;
 
 private:
     struct Impl;

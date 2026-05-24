@@ -29,9 +29,9 @@ Rectangle {
         height: parent.height
         anchors.left: parent.left
         anchors.top: parent.top
-        color: hamHover.containsPress
+        color: hamArea.pressed
                ? "#22000000"
-               : (hamHover.containsMouse ? "#11000000" : "transparent")
+               : (hamArea.containsMouse ? "#11000000" : "transparent")
         Behavior on color { ColorAnimation { duration: 120 } }
 
         AppIcon {
@@ -42,9 +42,15 @@ Rectangle {
             strokeWidth: 1.8
         }
 
-        HoverHandler { id: hamHover; cursorShape: Qt.PointingHandCursor }
-        TapHandler {
-            onTapped: root.hamburgerClicked()
+        MouseArea {
+            id: hamArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.hamburgerClicked()
+            ToolTip.visible: containsMouse
+            ToolTip.delay: 500
+            ToolTip.text: "展开/折叠"
         }
     }
 
@@ -81,22 +87,27 @@ Rectangle {
             id: btnMin
             width: 46
             height: parent.height
-            color: minHover.containsPress
+            color: minArea.pressed
                    ? "#22000000"
-                   : (minHover.containsMouse ? "#11000000" : "transparent")
+                   : (minArea.containsMouse ? "#11000000" : "transparent")
             Behavior on color { ColorAnimation { duration: 120 } }
 
             AppIcon {
                 anchors.centerIn: parent
                 name: "min"
-                size: 10
+                size: 12
                 color: window.textPrimary
-                strokeWidth: 1.5
+                strokeWidth: 1.2
             }
 
-            HoverHandler { id: minHover; cursorShape: Qt.ArrowCursor }
-            TapHandler {
-                onTapped: root.targetWindow.showMinimized()
+            MouseArea {
+                id: minArea
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: root.targetWindow.showMinimized()
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 500
+                ToolTip.text: "最小化"
             }
         }
 
@@ -105,9 +116,9 @@ Rectangle {
             id: btnMax
             width: 46
             height: parent.height
-            color: maxHover.containsPress
+            color: maxArea.pressed
                    ? "#22000000"
-                   : (maxHover.containsMouse ? "#11000000" : "transparent")
+                   : (maxArea.containsMouse ? "#11000000" : "transparent")
             Behavior on color { ColorAnimation { duration: 120 } }
 
             // 普通态:单层方框
@@ -146,12 +157,17 @@ Rectangle {
                 }
             }
 
-            HoverHandler { id: maxHover; cursorShape: Qt.ArrowCursor }
-            TapHandler {
-                onTapped: {
+            MouseArea {
+                id: maxArea
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: {
                     if (root.isMaximized) root.targetWindow.showNormal()
                     else                  root.targetWindow.showMaximized()
                 }
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 500
+                ToolTip.text: root.isMaximized ? "向下还原" : "最大化"
             }
         }
 
@@ -160,22 +176,27 @@ Rectangle {
             id: btnClose
             width: 46
             height: parent.height
-            color: closeHover.containsPress
+            color: closeArea.pressed
                    ? "#C5202F"
-                   : (closeHover.containsMouse ? "#E81123" : "transparent")
+                   : (closeArea.containsMouse ? "#E81123" : "transparent")
             Behavior on color { ColorAnimation { duration: 120 } }
 
             AppIcon {
                 anchors.centerIn: parent
                 name: "close"
-                size: 10
-                color: closeHover.containsMouse ? "#FFFFFF" : window.textPrimary
-                strokeWidth: 1.5
+                size: 12
+                color: closeArea.containsMouse ? "#FFFFFF" : window.textPrimary
+                strokeWidth: 1.2
             }
 
-            HoverHandler { id: closeHover; cursorShape: Qt.ArrowCursor }
-            TapHandler {
-                onTapped: root.targetWindow.close()
+            MouseArea {
+                id: closeArea
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: root.targetWindow.close()
+                ToolTip.visible: containsMouse
+                ToolTip.delay: 500
+                ToolTip.text: "关闭"
             }
         }
     }

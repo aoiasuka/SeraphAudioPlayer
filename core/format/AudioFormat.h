@@ -17,6 +17,10 @@ enum class SampleType : std::uint8_t {
     Int24Packed,    // 24-bit signed PCM,3 字节紧凑排布
     Int32,          // 32-bit container;若 valid_bits < 32(如 24-bit-in-32),右对齐
     Float32,        // IEEE 754 单精度
+    DsdLsb8,        // 原生 DSD:每字节装 8 个 1-bit 样本,LSB 在时间上靠前
+                    // (与 DSF 文件 storage 一致)。bits_per_sample 应为 8。
+                    // 仅可经 WASAPI KSDATAFORMAT_SUBTYPE_DSD 或 ASIO native DSD
+                    // 路径输出;走 DoP 时 decoder 输出 Int24Packed,不用这个枚举。
 };
 
 // AudioFormat

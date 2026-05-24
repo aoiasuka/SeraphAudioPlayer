@@ -33,18 +33,32 @@
 #  pragma warning(pop)
 #endif
 
+#include <atomic>
 #include <cstdio>
 #include <sstream>
+#include <thread>
 
 namespace apx {
 
+namespace {
+constexpr long kSyncScanThresholdBytes = 32 * 1024 * 1024;   // 32 MiB
+} // namespace
+
 struct VorbisDecoder::Impl {
-    stb_vorbis*  vorbis = nullptr;
-    AudioFormat  fmt{};
-    int64_t      total_frames = 0;
-    int64_t      cur_frame    = 0;
-    uint32_t     frame_bytes  = 0;
-    std::wstring last_error;
+    stb_vorbis*          vorbis = nullptr;
+    AudioFormat          fmt{};
+    std::atomic<int64_t> total_frames{0};   // 0 = 未知/扫描中
+    int64_t              cur_frame    = 0;
+    uint32_t             frame_bytes  = 0;
+    std::wstring         last_error;
+
+    std::thread          scan_thread;
+    std::atomic<bool>    scan_running{false};
+
+    void stop_scan() noexcept {
+        scan_running.store(false, std::memory_order_release);
+        if (scan_thread.joinable()) scan_thread.join();
+    }
 };
 
 VorbisDecoder::VorbisDecoder()  : d_(std::make_unique<Impl>()) {}
@@ -52,15 +66,16 @@ VorbisDecoder::~VorbisDecoder() { close(); }
 
 bool         VorbisDecoder::isOpen()       const { return d_->vorbis != nullptr; }
 AudioFormat  VorbisDecoder::format()       const { return d_->fmt; }
-std::int64_t VorbisDecoder::totalFrames()  const { return d_->total_frames; }
+std::int64_t VorbisDecoder::totalFrames()  const { return d_->total_frames.load(std::memory_order_acquire); }
 std::int64_t VorbisDecoder::currentFrame() const { return d_->cur_frame; }
 std::wstring VorbisDecoder::lastError()    const { return d_->last_error; }
 
 void VorbisDecoder::close()
 {
+    d_->stop_scan();
     if (d_->vorbis) { stb_vorbis_close(d_->vorbis); d_->vorbis = nullptr; }
     d_->fmt = {};
-    d_->total_frames = 0;
+    d_->total_frames.store(0, std::memory_order_release);
     d_->cur_frame    = 0;
     d_->frame_bytes  = 0;
 }
@@ -102,8 +117,41 @@ bool VorbisDecoder::open(const std::wstring& path)
     d_->vorbis       = v;
     d_->fmt          = fmt;
     d_->frame_bytes  = fmt.frame_bytes();
-    d_->total_frames = static_cast<int64_t>(stb_vorbis_stream_length_in_samples(v));
     d_->cur_frame    = 0;
+
+    // 总帧数:小文件同步计算,大文件后台扫描
+    long file_size = 0;
+    {
+        FILE* fs = nullptr;
+        if (_wfopen_s(&fs, path.c_str(), L"rb") == 0 && fs) {
+            std::fseek(fs, 0, SEEK_END);
+            file_size = std::ftell(fs);
+            std::fclose(fs);
+        }
+    }
+    if (file_size > 0 && file_size < kSyncScanThresholdBytes) {
+        d_->total_frames.store(
+            static_cast<int64_t>(stb_vorbis_stream_length_in_samples(v)),
+            std::memory_order_release);
+    } else {
+        d_->scan_running.store(true, std::memory_order_release);
+        const std::wstring scan_path = path;
+        Impl* impl = d_.get();
+        d_->scan_thread = std::thread([impl, scan_path]() {
+            FILE* fs = nullptr;
+            if (_wfopen_s(&fs, scan_path.c_str(), L"rb") != 0 || !fs) return;
+            int err = 0;
+            stb_vorbis* sv = stb_vorbis_open_file(fs, /*close_on_free=*/1, &err, nullptr);
+            if (!sv) { std::fclose(fs); return; }
+            const unsigned int n = stb_vorbis_stream_length_in_samples(sv);
+            stb_vorbis_close(sv);
+            if (impl->scan_running.load(std::memory_order_acquire)) {
+                impl->total_frames.store(static_cast<int64_t>(n),
+                                         std::memory_order_release);
+            }
+            impl->scan_running.store(false, std::memory_order_release);
+        });
+    }
     return true;
 }
 
@@ -111,7 +159,8 @@ bool VorbisDecoder::seek(std::int64_t frame)
 {
     if (!d_->vorbis) { d_->last_error = L"not open"; return false; }
     if (frame < 0) frame = 0;
-    if (d_->total_frames > 0 && frame > d_->total_frames) frame = d_->total_frames;
+    const int64_t total = d_->total_frames.load(std::memory_order_acquire);
+    if (total > 0 && frame > total) frame = total;
     if (!stb_vorbis_seek(d_->vorbis, static_cast<unsigned int>(frame))) {
         d_->last_error = L"stb_vorbis_seek failed";
         return false;

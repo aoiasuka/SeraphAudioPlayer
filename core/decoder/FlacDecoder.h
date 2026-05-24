@@ -4,10 +4,10 @@
 //  封装 dr_flac(单头文件 FLAC 解码器)为 IDecoder。
 //
 //  位深映射策略(为最大化 DAC 兼容性):
-//    源 16-bit FLAC  → Int16              (drflac_read_pcm_frames_s16)
-//    源 24-bit FLAC  → Int32, valid=24     (s32 → 算术右移 8 落入低 24 位)
-//    源 32-bit FLAC  → Int32, valid=32     (s32 直读)
-//    源 20-bit FLAC  → Int32, valid=32     (按 32-bit 容器处理,损失很小)
+//    源 16-bit FLAC  → Int16                (drflac_read_pcm_frames_s16)
+//    源 24-bit FLAC  → Int24Packed (3 字节)  (s32 算术右移 8 + 手动 pack)
+//    源 32-bit FLAC  → Int32, valid=32       (s32 直读)
+//    源 20-bit FLAC  → Int32, valid=20       (按 32-bit 容器,valid_bits 保留 20)
 // =============================================================================
 #pragma once
 
