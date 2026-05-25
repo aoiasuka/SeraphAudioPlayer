@@ -43,6 +43,11 @@ target_link_libraries(AudioPlayerX86 PRIVATE
     Qt6::QuickControls2
 )
 
+# Win11 圆角窗口需要 DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE)
+if(WIN32)
+    target_link_libraries(AudioPlayerX86 PRIVATE dwmapi)
+endif()
+
 # 安装目标(可选,后续打包用)
 install(TARGETS AudioPlayerX86 RUNTIME DESTINATION bin)
 

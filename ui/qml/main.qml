@@ -172,10 +172,14 @@ ApplicationWindow {
     // ===== 护眼纯色背景 =====
     // 弃用先前的紫色对角渐变 + 白雾化 + 浮动光晕,
     // 采用低饱和度米白纸张色作为主背景, 长时间观看更舒适
+    //
+    // radius: 8 与 DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_ROUND)
+    // 在 Win11 给出的系统圆角(约 8px)对齐,避免 DWM 圆角剪裁后露出方角"破角"。
+    // 最大化时窗口贴满工作区,Win11 自动取消圆角剪裁,此时圆角同样不会影响视觉。
     Rectangle {
         id: dynamicBg
         anchors.fill: parent
-        radius: 0
+        radius: window.visibility === Window.Maximized || window.visibility === Window.FullScreen ? 0 : 8
         antialiasing: true
         color: window.appBg
     }

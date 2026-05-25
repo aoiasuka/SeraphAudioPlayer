@@ -29,6 +29,14 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <dwmapi.h>
+// 旧版 Windows SDK 没有定义这两个,自己补上 (值取自 Win11 SDK)
+#  ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#    define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#  endif
+#  ifndef DWMWCP_ROUND
+#    define DWMWCP_ROUND 2
+#  endif
 #endif
 
 namespace {
@@ -175,6 +183,24 @@ int main(int argc, char* argv[])
             // 把主窗口的 HWND 绑给 SMTC / 任务栏按钮
             if (auto* win = qobject_cast<QQuickWindow*>(obj)) {
                 playerVM.attachWindow(reinterpret_cast<void*>(win->winId()));
+#ifdef _WIN32
+                // ---- Win11 系统原生圆角 + 阴影 (frameless / WS_POPUP 兼容) ----
+                // 1) DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND
+                //    让 DWM 在合成阶段把窗口外角做抗锯齿圆角剪裁。
+                // 2) DwmExtendFrameIntoClientArea(MARGINS{1,1,1,1})
+                //    告诉 DWM "把窗口框架延伸进 client area",DWM 会接管窗口
+                //    外侧阴影的合成。frameless WS_POPUP 默认 DWM 不画阴影,
+                //    此调用是补齐这一项的关键。1px 的延伸量肉眼不可见。
+                // Win10 / 旧系统上两个 API 都返回失败码但不会崩,视觉退化为
+                // 之前的"无圆角无阴影 frameless 窗口"行为。
+                HWND hwnd = reinterpret_cast<HWND>(win->winId());
+                UINT pref = DWMWCP_ROUND;
+                ::DwmSetWindowAttribute(hwnd,
+                                        DWMWA_WINDOW_CORNER_PREFERENCE,
+                                        &pref, sizeof(pref));
+                MARGINS shadow_margins{1, 1, 1, 1};
+                ::DwmExtendFrameIntoClientArea(hwnd, &shadow_margins);
+#endif
             }
         }
     }, Qt::QueuedConnection);
