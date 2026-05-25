@@ -180,10 +180,14 @@ bool WavDecoder::open(const std::wstring& path)
                           && std::memcmp(hdr + 8, "WAVE", 4) == 0);
 
     if (is_riff || is_rf64) {
+        // RIFF/RF64 顶层 header 都是 12 字节;前面为了一次性嗅探容器类型多读了
+        // 4 字节,这里把读指针复位到 chunk 起点(否则会把 fmt 数据当成下一个
+        // chunk header 处理,最终报 "fmt chunk not found")。
+        APX_FSEEK64(d_->fp, 12, SEEK_SET);
+
         // RF64 时,下一个 chunk 必须是 "ds64",含真实 64-bit data_size 等
         std::int64_t rf64_data_size_override = -1;
         if (is_rf64) {
-            APX_FSEEK64(d_->fp, 12, SEEK_SET);
             std::uint8_t ds64_hdr[8];
             if (std::fread(ds64_hdr, 1, 8, d_->fp) != 8
                 || std::memcmp(ds64_hdr, "ds64", 4) != 0) {
