@@ -1026,7 +1026,15 @@ void PlayerViewModel::updateFileInfo()
         emit durationChanged();
     }
 
-    QString newTitle = QFileInfo(QString::fromStdWString(player_->currentFile())).completeBaseName();
+    QString curPath  = QString::fromStdWString(player_->currentFile());
+    QString newTitle = QFileInfo(curPath).completeBaseName();
+    // 优先用文件内嵌的 metadata.title (FLAC VORBIS_COMMENT / ID3 TIT2 等),
+    // 否则回退到文件基名。与 itemsFromPaths() 中"最近播放"列表的逻辑保持一致,
+    // 修复列表显示曲目标题、MiniPlayer 显示原始文件名的不一致问题。
+    apx::TrackMetadata md;
+    if (fetchMeta(curPath, md) && !md.title.empty()) {
+        newTitle = QString::fromStdWString(md.title);
+    }
     if (newTitle.isEmpty()) newTitle = "未知曲目";
     if (m_title != newTitle) {
         m_title = newTitle;
