@@ -371,9 +371,13 @@ Item {
             anchors.fill: parent
             anchors.leftMargin: Math.max(0, (parent.width - 560) / 2)
             anchors.rightMargin: Math.max(0, (parent.width - 560) / 2)
-            spacing: 14
+            spacing: 12
 
-            Item { Layout.fillHeight: true }
+            // 顶部弹性占位，将封面和标题组推向垂直中间偏上区域
+            Item {
+                Layout.fillHeight: true
+                Layout.minimumHeight: 12
+            }
 
             // ----- 封面 (呼吸 + 光晕) -----
             Item {
@@ -531,10 +535,18 @@ Item {
                 formatText: playerVM.formatInfo
             }
 
-            // ----- Output 标签行 -----
+            // 中部弹性占位，在 EQ 展开时能够弹性压缩，防止封面和标题被过度向上挤压
+            Item {
+                Layout.fillHeight: true
+                Layout.minimumHeight: 8
+            }
+
+            // ----- Output 标签行 (左右内边距对齐波形进度条背景) -----
             RowLayout {
                 Layout.fillWidth: true
-                Layout.topMargin: 4
+                Layout.leftMargin: 36
+                Layout.rightMargin: 36
+                Layout.topMargin: 2
                 spacing: 0
 
                 Text {
@@ -545,22 +557,118 @@ Item {
                     color: window.textTertiary
                 }
 
-                RowLayout {
-                    spacing: 4
-                    AppIcon {
-                        name: "volume"
-                        size: 11
-                        color: window.textSecondary
-                        strokeWidth: 1.6
+                Item {
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: deviceRow.implicitWidth + 16
+                    implicitHeight: 24
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 4
+                        color: deviceMouseArea.containsMouse || deviceMenu.visible ? window.hoverBg : "transparent"
+                        Behavior on color { ColorAnimation { duration: 150 } }
                     }
-                    Text {
-                        text: (playerVM.currentDeviceName || "默认设备")
-                        font.family: window.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.DemiBold
-                        color: window.textSecondary
-                        elide: Text.ElideRight
-                        Layout.maximumWidth: 200
+
+                    RowLayout {
+                        id: deviceRow
+                        anchors.centerIn: parent
+                        spacing: 4
+                        AppIcon {
+                            name: "volume"
+                            size: 11
+                            color: window.textSecondary
+                            strokeWidth: 1.6
+                        }
+                        Text {
+                            text: (playerVM.currentDeviceName || "默认设备")
+                            font.family: window.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            color: window.textSecondary
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: 200
+                        }
+                        AppIcon {
+                            name: "chevron"
+                            size: 10
+                            rotation: -90
+                            color: window.textTertiary
+                        }
+                    }
+
+                    MouseArea {
+                        id: deviceMouseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: deviceMenu.popup(0, parent.height + 4)
+                    }
+
+                    Menu {
+                        id: deviceMenu
+
+                        padding: 6
+                        topPadding: 8
+                        bottomPadding: 8
+                        leftPadding: 6
+                        rightPadding: 6
+
+                        background: Rectangle {
+                            implicitWidth: 280
+                            radius: window.mediumRadius
+                            color: window.surfaceMenu
+                            border.color: window.borderColor
+                            border.width: 1
+                            antialiasing: true
+                        }
+
+                        delegate: MenuItem {
+                            id: mItemDelegate
+                            implicitHeight: 32
+                            leftPadding: 12
+                            rightPadding: 12
+
+                            // 移除默认打勾图标，让内容居左
+                            indicator: Item {}
+
+                            contentItem: Text {
+                                text: mItemDelegate.text
+                                font.family: window.fontFamily
+                                font.pixelSize: 11
+                                font.weight: mItemDelegate.checked ? Font.Bold : Font.Medium
+                                color: mItemDelegate.checked ? window.brand : window.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            background: Rectangle {
+                                implicitHeight: 32
+                                radius: window.smallRadius
+                                color: mItemDelegate.highlighted ? window.menuHoverBg : "transparent"
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                        }
+
+                        onAboutToShow: {
+                            while (count > 0) {
+                                removeItem(itemAt(0))
+                            }
+                            var devs = playerVM.devices
+                            for (var i = 0; i < devs.length; ++i) {
+                                var dev = devs[i]
+                                var title = dev.name + (dev.isDefault ? " (默认)" : "")
+                                var mItem = addItem(title)
+                                
+                                // 高亮当前所选设备
+                                if (dev.id === playerVM.currentDeviceId) {
+                                    mItem.checkable = true
+                                    mItem.checked = true
+                                }
+
+                                mItem.triggered.connect((function(id) {
+                                    return function() { playerVM.setDevice(id) }
+                                })(dev.id))
+                            }
+                        }
                     }
                 }
             }
@@ -579,7 +687,7 @@ Item {
             // ----- 控制行 -----
             Item {
                 Layout.fillWidth: true
-                Layout.topMargin: 8
+                Layout.topMargin: 4
                 Layout.preferredHeight: 56
 
                 Rectangle {
