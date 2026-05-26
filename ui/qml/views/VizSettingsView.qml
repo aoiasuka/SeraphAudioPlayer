@@ -53,14 +53,14 @@ Item {
                 spacing: 4
 
                 Text {
-                    text: "频谱效果设置"
+                    text: "波形律动设置"
                     font.family: window.fontFamily
                     font.pixelSize: 26
                     font.weight: Font.Bold
                     color: window.textPrimary
                 }
                 Text {
-                    text: "预览并选择你喜欢的可视化风格"
+                    text: "选择进度条随音频跳动的动态效果"
                     font.family: window.fontFamily
                     font.pixelSize: 13
                     color: window.textSecondary
@@ -76,23 +76,27 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.margins: 32
-        height: 240
+        height: 180
         radius: 16
         color: window.surfaceAlt
         border.color: window.borderColor
         border.width: 1
 
-        // 复用 SpectrumView
-        SpectrumView {
-            anchors.fill: parent
-            anchors.margins: 20
+        WaveformProgressBar {
+            anchors.centerIn: parent
+            width: parent.width - 64
+            height: 60
+            position: playerVM.position
+            duration: playerVM.duration
+            playing: playerVM.state === 2
+            trackKey: playerVM.currentTrack ? playerVM.currentTrack.id : ""
         }
         
         Text {
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.margins: 16
-            text: "实时预览"
+            text: "实时预览 (请播放音乐以查看效果)"
             font.family: window.fontFamily
             font.pixelSize: 12
             font.weight: Font.DemiBold
@@ -113,10 +117,9 @@ Item {
 
         Repeater {
             model: [
-                { v: 0, label: "经典柱状", desc: "16段向上的能量柱" },
-                { v: 1, label: "镜像对称", desc: "从中心向两端生长的能量柱" },
-                { v: 2, label: "平滑曲线", desc: "丝滑连续的单向波形" },
-                { v: 3, label: "对称波浪", desc: "上下起伏的连续声波" }
+                { v: 0, label: "全局频谱律动", desc: "所有波形随高低频独立跳动 (推荐)" },
+                { v: 1, label: "整体呼吸脉冲", desc: "波形随重低音节奏瞬间膨胀变大" },
+                { v: 2, label: "播放头涟漪", desc: "仅在当前播放头位置附近产生剧烈波动" }
             ]
 
             delegate: Rectangle {

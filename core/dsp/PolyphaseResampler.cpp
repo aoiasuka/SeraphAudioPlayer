@@ -19,7 +19,7 @@
 #include <cmath>
 #include <cstring>
 
-#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__) || defined(_M_IX86_FP) && _M_IX86_FP >= 2 || defined(__SSE2__)
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(__SSE2__)
 #  include <emmintrin.h>   // SSE2 intrinsics
 #  define APX_HAVE_SSE2 1
 #else

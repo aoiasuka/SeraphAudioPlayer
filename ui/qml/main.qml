@@ -20,11 +20,17 @@ ApplicationWindow {
     property bool sidebarExpanded: true
     function toggleSidebar() { sidebarExpanded = !sidebarExpanded }
 
+    // Windows 无边框窗口在最大化时会溢出屏幕 8px，这里全局定义补偿边距，保证显示完美
+    property int winMargin: (window.visibility === Window.Maximized && Qt.platform.os === "windows") ? 8 : 0
+
     TitleBar {
         id: titleBar
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
+        anchors.topMargin: window.winMargin
+        anchors.leftMargin: window.winMargin
+        anchors.rightMargin: window.winMargin
         targetWindow: window
         z: 9999
         onHamburgerClicked: window.toggleSidebar()
@@ -203,7 +209,9 @@ ApplicationWindow {
     Rectangle {
         id: dynamicBg
         anchors.fill: parent
+        anchors.margins: window.winMargin
         radius: window.visibility === Window.Maximized || window.visibility === Window.FullScreen ? 0 : 8
+        Behavior on radius { NumberAnimation { duration: 150 } }
         antialiasing: true
         clip: true
 
@@ -374,6 +382,7 @@ ApplicationWindow {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.left: parent.left
+        anchors.leftMargin: window.winMargin
         anchors.topMargin: titleBar.height
         anchors.bottomMargin: miniPlayer.onNowPlaying ? 0 : 80
         Behavior on anchors.bottomMargin { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
@@ -399,6 +408,7 @@ ApplicationWindow {
         anchors.bottom: parent.bottom
         anchors.left: drawerSidebar.right
         anchors.right: parent.right
+        anchors.rightMargin: window.winMargin
         anchors.topMargin: titleBar.height
         anchors.bottomMargin: miniPlayer.onNowPlaying ? 0 : 80        // 进入沉浸播放页时让出全屏空间
         color: "transparent"
@@ -463,7 +473,9 @@ ApplicationWindow {
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottomMargin: 0
+        anchors.leftMargin: window.winMargin
+        anchors.rightMargin: window.winMargin
+        anchors.bottomMargin: window.winMargin
         height: 80
 
         // 进入「正在播放」沉浸视图时隐藏，避免与页内控制栏功能/视觉冗余
@@ -478,14 +490,15 @@ ApplicationWindow {
         onShowQueueClicked: queueDrawer.toggle()
     }
 
-    // 队列抽屉(从右侧滑入)
     QueueDrawer {
         id: queueDrawer
+        z: 999
         anchors.right: parent.right
-        anchors.top: parent.top
+        anchors.top: titleBar.bottom
         anchors.bottom: parent.bottom
-        anchors.topMargin: 16
-        anchors.bottomMargin: 100 + 16  // miniPlayer 高度 + 边距
+        anchors.rightMargin: window.winMargin
+        anchors.topMargin: 8
+        anchors.bottomMargin: (miniPlayer.onNowPlaying ? 0 : miniPlayer.height) + 16 + window.winMargin
         width: 380
     }
 

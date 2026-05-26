@@ -209,6 +209,12 @@ struct PlayerController::Impl : public IDeviceChangeListener {
     mutable std::mutex       err_mutex;
     std::wstring             last_error;
 
+    // 已"被设备消费"的帧计数（track 内坐标）。estimated_position_sec()
+    // 对其做单调钳制，避免读侧拍到 producer 在两次读之间的中间态
+    // (decoded_frames 旧、in_ring_frames 新) 时 played 短暂回退、UI 进度条倒退。
+    // seek/stop/teardown/gapless 切换时显式重置。
+    mutable std::atomic<std::int64_t> last_played_frames{0};
+
     // ---- producer 线程 ----
     std::thread              prod_thread;
     std::mutex               prod_mutex;
@@ -292,6 +298,9 @@ struct PlayerController::Impl : public IDeviceChangeListener {
     }
 
     // 当前播放位置(以已被设备消费的帧数估算)。Cue 模式下减去起点偏移。
+    // 调用约束：调用方需持 ctrl_mutex（保护 decoder/ring/current_fmt 指针与字段）。
+    // 不持锁直接调用属于 use-after-free 风险路径——producer_loop 的 gapless
+    // 切换、teardown_session 都会 reset/swap 这些指针。
     double estimated_position_sec() const
     {
         if (!decoder || frame_bytes == 0 || current_fmt.sample_rate == 0) return 0.0;
@@ -299,10 +308,15 @@ struct PlayerController::Impl : public IDeviceChangeListener {
         const std::int64_t in_ring_frames = ring
             ? static_cast<std::int64_t>(ring->readable() / frame_bytes)
             : 0;
-        const std::int64_t played = decoded_frames - in_ring_frames
-                                  - cue_start_frame.load(std::memory_order_acquire);
-        const std::int64_t clamped = (played < 0) ? 0 : played;
-        return static_cast<double>(clamped) / current_fmt.sample_rate;
+        std::int64_t played = decoded_frames - in_ring_frames
+                            - cue_start_frame.load(std::memory_order_acquire);
+        if (played < 0) played = 0;
+        // 单调钳制：即便快照不完全同步（producer 在两次读之间又写入了 ring），
+        // 视觉上不允许 played 回退。下一 tick 自洽。
+        const std::int64_t prev = last_played_frames.load(std::memory_order_relaxed);
+        if (played < prev) played = prev;
+        else if (played > prev)  last_played_frames.store(played, std::memory_order_relaxed);
+        return static_cast<double>(played) / current_fmt.sample_rate;
     }
 
     // 释放当前会话(decoder/output/ring/线程)
@@ -349,6 +363,7 @@ struct PlayerController::Impl : public IDeviceChangeListener {
         cue_start_frame.store(0);
         cue_end_frame.store(std::numeric_limits<std::int64_t>::max());
         recovery_total.store(0);
+        last_played_frames.store(0, std::memory_order_relaxed);
     }
 
     // 启动 producer + monitor 线程(只调一次,在 loadFile 成功后)
@@ -461,17 +476,24 @@ void PlayerController::Impl::producer_loop()
                 }
             }
             if (swap) {
-                if (decoder) decoder->close();
-                decoder = std::move(swap);
+                // 与公共 const getter (position/duration) 串行化：它们也持 ctrl_mutex
+                // 读 decoder / current_fmt，避免在指针被换掉的同一瞬间被外部读到。
                 {
-                    std::lock_guard<std::mutex> lk(next_mutex);
-                    current_path = swap_path;
+                    std::lock_guard<std::mutex> ctl(ctrl_mutex);
+                    if (decoder) decoder->close();
+                    decoder = std::move(swap);
+                    {
+                        std::lock_guard<std::mutex> lk(next_mutex);
+                        current_path = swap_path;
+                    }
+                    cue_start_frame.store(0);
+                    cue_end_frame.store(std::numeric_limits<std::int64_t>::max());
+                    decoder_eof.store(false, std::memory_order_release);
+                    last_played_frames.store(0, std::memory_order_relaxed);
+                    eq.reset();
+                    viz.reset();
                 }
-                cue_start_frame.store(0);
-                cue_end_frame.store(std::numeric_limits<std::int64_t>::max());
-                decoder_eof.store(false, std::memory_order_release);
-                eq.reset();
-                viz.reset();
+                // 回调放在锁外触发，避免回调中再调入 public const API 时反向获取 ctrl_mutex 死锁。
                 fire_track_changed(swap_path);
                 continue;
             }
@@ -503,15 +525,19 @@ void PlayerController::Impl::producer_loop()
                 }
             }
             if (swap) {
-                if (decoder) decoder->close();
-                decoder = std::move(swap);
                 {
-                    std::lock_guard<std::mutex> lk(next_mutex);
-                    current_path = swap_path;
+                    std::lock_guard<std::mutex> ctl(ctrl_mutex);
+                    if (decoder) decoder->close();
+                    decoder = std::move(swap);
+                    {
+                        std::lock_guard<std::mutex> lk(next_mutex);
+                        current_path = swap_path;
+                    }
+                    decoder_eof.store(false, std::memory_order_release);
+                    last_played_frames.store(0, std::memory_order_relaxed);
+                    eq.reset();
+                    viz.reset();
                 }
-                decoder_eof.store(false, std::memory_order_release);
-                eq.reset();
-                viz.reset();
                 fire_track_changed(swap_path);
                 continue;
             }
@@ -558,19 +584,37 @@ void PlayerController::Impl::monitor_loop()
         }
 
         if (s == PlayerState::Playing) {
-            fire_position(estimated_position_sec());
-
-            // EOF + ring 排干 → Ended
-            if (decoder_eof.load() && ring && ring->readable() == 0) {
-                // 给设备 buffer 一点时间把尾帧播完
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(static_cast<int>(buffer_ms) + 30));
-                if (output) output->stop();
-                prod_paused.store(true);
-                set_state(PlayerState::Ended);
-                fire_ended();
-                continue;
+            // 拍快照 (decoder/ring/current_fmt) 时持 ctrl_mutex，避免与
+            // producer 的 gapless 切换 / 控制线程的 teardown 同时访问指针。
+            // try_lock：用户线程正持锁时让出本 tick，下次再来。
+            double pos_sec = 0.0;
+            bool   eof_drained = false;
+            {
+                std::unique_lock<std::mutex> lk(ctrl_mutex, std::try_to_lock);
+                if (!lk.owns_lock()) continue;
+                pos_sec     = estimated_position_sec();
+                eof_drained = decoder_eof.load() && ring && ring->readable() == 0;
             }
+            fire_position(pos_sec);
+
+            if (!eof_drained) continue;
+
+            // 给设备 buffer 一点时间把尾帧播完
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(static_cast<int>(buffer_ms) + 30));
+            // 与用户线程 (stop/seek/loadFile) 串行：用 try_lock 避免死锁等待。
+            // 若用户已抢先持锁，本次 tick 让出，下次再判定状态——状态机一致性优先。
+            std::unique_lock<std::mutex> lk(ctrl_mutex, std::try_to_lock);
+            if (!lk.owns_lock()) continue;
+            // 复检状态：sleep 期间可能已被用户改成 Stopped/Idle
+            if (state.load() != PlayerState::Playing) continue;
+            // 复检 EOF 条件：seek/load 可能已让 ring 重新有数据
+            if (!(decoder_eof.load() && ring && ring->readable() == 0)) continue;
+            if (output) output->stop();
+            prod_paused.store(true);
+            set_state(PlayerState::Ended);
+            fire_ended();
+            continue;
         }
     }
 }
@@ -667,6 +711,10 @@ void PlayerController::Impl::try_recovery()
         + cue_start_frame.load();
     if (decoder) decoder->seek(target);
     decoder_eof.store(false);
+    // 单调钳制点同步到 pos（track 内坐标）
+    last_played_frames.store(
+        std::max<std::int64_t>(0, static_cast<std::int64_t>(pos * current_fmt.sample_rate)),
+        std::memory_order_relaxed);
 
     if (was_playing) {
         prod_paused.store(false, std::memory_order_release);
@@ -702,8 +750,14 @@ PlayerController::~PlayerController()
 }
 
 PlayerState  PlayerController::state()       const { return d_->state.load(); }
-double       PlayerController::position()    const { return d_->estimated_position_sec(); }
+double       PlayerController::position()    const {
+    // 持 ctrl_mutex：与 producer_loop 的 gapless 切换 / teardown_session
+    // 串行，避免 estimated_position_sec 读到正在被 reset/swap 的 decoder/ring。
+    std::lock_guard<std::mutex> lk(d_->ctrl_mutex);
+    return d_->estimated_position_sec();
+}
 double       PlayerController::duration()    const {
+    std::lock_guard<std::mutex> lk(d_->ctrl_mutex);
     if (!d_->decoder || d_->current_fmt.sample_rate == 0) return 0.0;
     // 每次都向 decoder 询问 total_frames:VBR MP3/OGG 在后台扫描完成后会更新
     std::int64_t n = d_->decoder->totalFrames();
@@ -958,6 +1012,7 @@ bool PlayerController::play()
         if (d_->decoder) d_->decoder->seek(d_->cue_start_frame.load());
         d_->decoder_eof.store(false);
         if (d_->ring) d_->ring->clear();
+        d_->last_played_frames.store(0, std::memory_order_relaxed);
     }
 
     // 唤醒 producer
@@ -1004,6 +1059,7 @@ bool PlayerController::stop()
     if (d_->decoder) d_->decoder->seek(d_->cue_start_frame.load());
     d_->decoder_eof.store(false);
     if (d_->ring) d_->ring->clear();
+    d_->last_played_frames.store(0, std::memory_order_relaxed);
 
     d_->fire_position(0.0);
     d_->set_state(PlayerState::Stopped);
@@ -1046,6 +1102,12 @@ bool PlayerController::seek(double seconds)
     // 把 seek 请求委托给 producer 线程,避免在控制线程调 decoder->seek 时与 producer 抢用
     d_->seek_target_frame.store(target, std::memory_order_release);
     d_->prod_seek_pending.store(true,   std::memory_order_release);
+    // 立刻把单调钳制点更新到 seek 目标（track 内坐标），避免 UI 看到从 0
+    // 跳到目标的瞬间倒挂。
+    {
+        const std::int64_t in_track = std::max<std::int64_t>(0, target - cue_start);
+        d_->last_played_frames.store(in_track, std::memory_order_relaxed);
+    }
     d_->prod_cv.notify_all();
 
     // 等 producer 处理完 seek(等到 pending 清 0)
@@ -1130,6 +1192,10 @@ bool PlayerController::setDevice(const std::wstring& device_id)
         + d_->cue_start_frame.load();
     if (d_->decoder) d_->decoder->seek(target);
     d_->decoder_eof.store(false);
+    // 单调钳制点同步到 pos（track 内坐标），避免重建 output 后短暂回退
+    d_->last_played_frames.store(
+        std::max<std::int64_t>(0, static_cast<std::int64_t>(pos * d_->current_fmt.sample_rate)),
+        std::memory_order_relaxed);
 
     if (was_playing) {
         d_->prod_paused.store(false);

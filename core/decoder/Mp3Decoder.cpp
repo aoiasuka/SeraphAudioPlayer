@@ -124,12 +124,13 @@ bool Mp3Decoder::open(const std::wstring& path)
     d_->cur_frame    = 0;
 
     // 总帧数策略:小文件同步扫描;大文件后台扫描,避免 open() 阻塞 UI
-    long file_size = 0;
+    // 用 _ftelli64 而非 ftell，32-bit 进程下 long 是 32-bit，>2GB 文件会截断到 -1。
+    std::int64_t file_size = 0;
     {
         FILE* fp = nullptr;
         if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
-            std::fseek(fp, 0, SEEK_END);
-            file_size = std::ftell(fp);
+            _fseeki64(fp, 0, SEEK_END);
+            file_size = _ftelli64(fp);
             std::fclose(fp);
         }
     }

@@ -43,6 +43,12 @@ public:
     // 由 native event filter 调用,wParam = 命令 ID;返回 true 表示已处理
     bool handleCommand(uint32_t cmd);
 
+    // 返回 RegisterWindowMessageW(L"TaskbarButtonCreated") 的消息号；
+    // native event filter 拦到该消息时应调用 onTaskbarRestart() 重建按钮。
+    uint32_t taskbarCreatedMessageId() const;
+    // explorer 重启 / WM_TaskbarButtonCreated 触发后调用：丢弃旧 ITaskbarList3 句柄并重建。
+    void onTaskbarRestart();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> d_;

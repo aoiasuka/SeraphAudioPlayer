@@ -5,15 +5,7 @@
     "description": "Windows WASAPI exclusive-mode hi-fi audio player",
     "homepage": "https://github.com/local/audio_player_x86",
     "supports": "windows",
-    "builtin-baseline": "2024-01-01",
-    "dependencies": [
-        {
-            "name": "spdlog",
-            "default-features": false,
-            "features": ["wchar"]
-        },
-        "nlohmann-json"
-    ],
+    "dependencies": [],
     "features": {
         "decoders": {
             "description": "Full decoder set (FLAC/WAV/MP3/AAC/OGG/ALAC/APE)",

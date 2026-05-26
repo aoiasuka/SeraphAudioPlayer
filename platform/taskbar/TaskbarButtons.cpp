@@ -250,4 +250,29 @@ bool TaskbarButtons::handleCommand(uint32_t cmd)
     }
 }
 
+uint32_t TaskbarButtons::taskbarCreatedMessageId() const
+{
+    return d_ ? d_->taskbarCreatedMsg : 0;
+}
+
+void TaskbarButtons::onTaskbarRestart()
+{
+    // explorer.exe 重启或 DPI 变更后任务栏会重发 WM_TaskbarButtonCreated。
+    // 旧的 ITaskbarList3 对象已失效，必须 Release 后重新 CoCreate + HrInit + addButtons。
+    if (!d_) return;
+    HWND hwnd = d_->hwnd;
+    if (!hwnd) return;
+    if (d_->taskbar) { d_->taskbar->Release(); d_->taskbar = nullptr; }
+    d_->added = false;
+    HRESULT hr = CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&d_->taskbar));
+    if (FAILED(hr) || !d_->taskbar) return;
+    if (FAILED(d_->taskbar->HrInit())) {
+        d_->taskbar->Release();
+        d_->taskbar = nullptr;
+        return;
+    }
+    d_->addButtons();
+}
+
 } // namespace apx

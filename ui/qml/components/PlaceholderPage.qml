@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import "../components"
 
 // 即将上线占位页 — 用于歌单 / 歌手 / 专辑
 Item {

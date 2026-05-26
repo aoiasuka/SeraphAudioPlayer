@@ -19,11 +19,20 @@ QImage CoverImageProvider::requestImage(const QString& id, QSize* size, const QS
 {
     QString path = QUrl::fromPercentEncoding(id.toUtf8());
 
+    // 空路径直接返回空，避免无意义的 I/O 与日志噪声
+    if (path.isEmpty()) {
+        if (size) *size = QSize();
+        return QImage();
+    }
+
     // 命中缓存
     {
         QMutexLocker lock(&mtx_);
         auto it = cache_.constFind(path);
         if (it != cache_.constEnd()) {
+            // LRU：把命中项挪到队尾
+            lru_.removeOne(path);
+            lru_.append(path);
             const QImage& img = it.value();
             if (size) *size = img.size();
             if (requestedSize.isValid() && (requestedSize.width() > 0 || requestedSize.height() > 0)) {
@@ -47,11 +56,13 @@ QImage CoverImageProvider::requestImage(const QString& id, QSize* size, const QS
     // 失败时返回空 QImage (QML Image 会显示空白,组件可用 status 处理)
     {
         QMutexLocker lock(&mtx_);
-        if (cache_.size() >= kMaxCache) {
-            // 简单 LRU:随便丢一个最早进入的
-            cache_.erase(cache_.begin());
+        // 真正的 LRU：超容时从 lru_ 头部驱逐最久未访问项
+        while (cache_.size() >= kMaxCache && !lru_.isEmpty()) {
+            const QString oldest = lru_.takeFirst();
+            cache_.remove(oldest);
         }
         cache_.insert(path, out);
+        lru_.append(path);
     }
 
     if (size) *size = out.size();
@@ -67,6 +78,7 @@ void CoverImageProvider::clearCache()
 {
     QMutexLocker lock(&mtx_);
     cache_.clear();
+    lru_.clear();
 }
 
 } // namespace apx::ui

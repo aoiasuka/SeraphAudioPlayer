@@ -13,11 +13,11 @@ namespace {
 
 inline std::int32_t read_int24_packed(const std::uint8_t* p)
 {
-    std::int32_t v = static_cast<std::int32_t>(p[0])
-                   | (static_cast<std::int32_t>(p[1]) << 8)
-                   | (static_cast<std::int32_t>(p[2]) << 16);
-    if (v & 0x00800000) v |= static_cast<std::int32_t>(0xFF000000);
-    return v;
+    std::uint32_t u = static_cast<std::uint32_t>(p[0])
+                   | (static_cast<std::uint32_t>(p[1]) << 8)
+                   | (static_cast<std::uint32_t>(p[2]) << 16);
+    if (u & 0x00800000u) u |= 0xFF000000u;
+    return static_cast<std::int32_t>(u);
 }
 inline void write_int24_packed(std::uint8_t* p, std::int32_t v)
 {
@@ -127,6 +127,11 @@ bool FormatConverter::configure(const AudioFormat& src, const AudioFormat& dst)
                              static_cast<double>(dst.sample_rate));
     }
     dither_err_.assign(src.channels, 0.0f);
+    // 预分配逐帧 buffer，避免实时路径上 std::vector 临时分配。
+    frame_buf_.assign(src.channels, 0.0f);
+    linear_a_.assign(src.channels, 0.0f);
+    linear_b_.assign(src.channels, 0.0f);
+    linear_out_.assign(src.channels, 0.0f);
     return true;
 }
 
@@ -192,14 +197,14 @@ std::size_t FormatConverter::process(const std::uint8_t* src, std::size_t src_fr
     // 同采样率 → 只做位深/类型转换,逐帧
     if (src_.sample_rate == dst_.sample_rate) {
         const std::size_t n = std::min(src_frames, dst_capacity_frames);
-        std::vector<float> frame(ch);
+        float* frame = frame_buf_.data();
         const bool use_dither = dither_
                               && dst_.sample_type == SampleType::Int16
                               && src_.sample_type != SampleType::Int16;
         for (std::size_t i = 0; i < n; ++i) {
-            load_frame(src + i * src_fb, src_, frame.data());
-            if (use_dither) storeFrameWithDither(dst + i * dst_fb, frame.data());
-            else            store_frame(dst + i * dst_fb, dst_, frame.data());
+            load_frame(src + i * src_fb, src_, frame);
+            if (use_dither) storeFrameWithDither(dst + i * dst_fb, frame);
+            else            store_frame(dst + i * dst_fb, dst_, frame);
         }
         return n;
     }
@@ -228,7 +233,9 @@ std::size_t FormatConverter::process(const std::uint8_t* src, std::size_t src_fr
 
     // 低开销 fallback:线性插值
     const double step = 1.0 / ratio_;
-    std::vector<float> a(ch), b(ch);
+    float* a   = linear_a_.data();
+    float* b   = linear_b_.data();
+    float* out = linear_out_.data();
     std::size_t dst_written = 0;
     const bool use_dither = dither_
                           && dst_.sample_type == SampleType::Int16
@@ -241,13 +248,12 @@ std::size_t FormatConverter::process(const std::uint8_t* src, std::size_t src_fr
         if (i1 >= src_frames) break;        // 源数据不够再插一帧,留给下次
 
         const double frac = pos - static_cast<double>(i0);
-        load_frame(src + i0 * src_fb, src_, a.data());
-        load_frame(src + i1 * src_fb, src_, b.data());
-        std::vector<float> out(ch);
+        load_frame(src + i0 * src_fb, src_, a);
+        load_frame(src + i1 * src_fb, src_, b);
         for (int c = 0; c < ch; ++c)
             out[c] = static_cast<float>(a[c] + (b[c] - a[c]) * frac);
-        if (use_dither) storeFrameWithDither(dst + dst_written * dst_fb, out.data());
-        else            store_frame(dst + dst_written * dst_fb, dst_, out.data());
+        if (use_dither) storeFrameWithDither(dst + dst_written * dst_fb, out);
+        else            store_frame(dst + dst_written * dst_fb, dst_, out);
         dst_written += 1;
         phase_ += step;
     }

@@ -521,7 +521,8 @@ std::optional<TrackMetadata> MetadataReader::readMp3(const std::wstring& path)
             md.date = read_text_frame(); found = true;
         } else if (std::memcmp(fid, "TRCK", 4) == 0) {
             const auto w = read_text_frame();
-            try { md.track_no = std::stoi(std::wstring(w.begin(), w.end())); found = true; }
+            // std::stoi 接受 wstring 重载；之前 std::wstring(w.begin(), w.end()) 是冗余拷贝。
+            try { md.track_no = std::stoi(w); found = true; }
             catch (...) {}
         } else if (std::memcmp(fid, "TXXX", 4) == 0) {
             // TXXX: enc(1) desc(NUL-term in encoding) value

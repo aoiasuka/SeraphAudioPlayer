@@ -17,6 +17,7 @@
 #include <QStringList>
 #include <QList>
 #include <QMap>
+#include <QMutex>
 #include <QVariantList>
 #include <QColor>
 #include <QTimer>
@@ -65,7 +66,8 @@ class PlayerViewModel : public QObject {
     // 当前曲目封面 URL (image://covers/<encoded path>);未播放时为空
     Q_PROPERTY(QString currentCoverUrl READ currentCoverUrl NOTIFY currentCoverUrlChanged)
     // 当前曲目封面主色 (HSV 调整后);未播放时返回品牌默认色
-    Q_PROPERTY(QColor currentDominantColor READ currentDominantColor NOTIFY currentCoverUrlChanged)
+    // NOTIFY 改为独立信号：当 URL 未变但主色缓存被真正算出 / 更新时，QML 绑定也能刷新
+    Q_PROPERTY(QColor currentDominantColor READ currentDominantColor NOTIFY currentDominantColorChanged)
 
     // 当前曲目的歌词 ([{time,text,translation}, ...]) 与高亮索引
     Q_PROPERTY(QVariantList currentLyrics READ currentLyrics NOTIFY lyricsChanged)
@@ -283,6 +285,9 @@ public:
     // 在窗口创建之后由 main.cpp 调用,把 HWND 绑给 SMTC / 任务栏按钮
     void attachWindow(void* hwnd);
 
+    // 给 native event filter 用（拦截任务栏缩略图 WM_COMMAND）
+    apx::TaskbarButtons* taskbarButtons() { return taskbar_.get(); }
+
 signals:
     void stateChanged();
     void positionChanged();
@@ -308,6 +313,7 @@ signals:
     void libraryChanged();
     void playlistsChanged();
     void currentCoverUrlChanged();
+    void currentDominantColorChanged();
     void lyricsChanged();
     void currentLyricIndexChanged();
     void visualUpdated();
@@ -320,11 +326,11 @@ signals:
     void dopMarkerModeChanged();
     void dsdModeChanged();
 
-    // 跨线程内部信号
-    void _coreStateChanged(int s);
-    void _corePositionChanged(double sec);
-    void _coreEnded();
-    void _coreError(const QString& msg);
+    // 跨线程内部信号（核心→UI 线程的桥；Qt 约定信号名不以 _ 开头，避免与 moc 内部约定冲突）
+    void coreStateChangedInternal(int s);
+    void corePositionChangedInternal(double sec);
+    void coreEndedInternal();
+    void coreErrorInternal(const QString& msg);
 
 private slots:
     void onCoreStateChanged(int s);
@@ -345,10 +351,10 @@ private:
     void syncSmtcStatus();
     void syncSmtcTimeline();
     void syncTaskbar();
-public:
-    // 给 native event filter 用
-    apx::TaskbarButtons* taskbarButtons() { return taskbar_.get(); }
+
 private:
+    // 在 const getter 内 emit 信号的辅助桥（emit 需要非 const this）
+    void emitDominantColorChanged();
 
     int m_state = 0; // PlayerState::Idle
     double m_position = 0.0;
@@ -406,6 +412,9 @@ private:
     mutable QStringList m_metaMissed;
     // 主色缓存
     mutable QMap<QString, QColor> m_colorCache;
+    // 上述三份 cache 在 UI 线程与解码 Tap / 元数据补全回调之间被并发读写。
+    // 用一把粗粒度 mutex 串行化访问；锁内只做容器操作，不持锁回调，避免重入。
+    mutable QMutex m_cacheMutex;
 
     // 可视化
     apx::Visualizer m_visualizer;

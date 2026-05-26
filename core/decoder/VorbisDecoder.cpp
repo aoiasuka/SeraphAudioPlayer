@@ -120,12 +120,13 @@ bool VorbisDecoder::open(const std::wstring& path)
     d_->cur_frame    = 0;
 
     // 总帧数:小文件同步计算,大文件后台扫描
-    long file_size = 0;
+    // 用 _ftelli64 而非 ftell，32-bit 进程下 long 是 32-bit，>2GB 文件会截断。
+    std::int64_t file_size = 0;
     {
         FILE* fs = nullptr;
         if (_wfopen_s(&fs, path.c_str(), L"rb") == 0 && fs) {
-            std::fseek(fs, 0, SEEK_END);
-            file_size = std::ftell(fs);
+            _fseeki64(fs, 0, SEEK_END);
+            file_size = _ftelli64(fs);
             std::fclose(fs);
         }
     }

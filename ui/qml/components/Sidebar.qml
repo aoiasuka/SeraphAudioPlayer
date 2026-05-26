@@ -62,7 +62,11 @@ Rectangle {
         Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
         Behavior on y {
             enabled: root.isInitialized && !root.busy
-            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            NumberAnimation { duration: 350; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+        }
+        Behavior on height {
+            enabled: root.isInitialized && !root.busy
+            NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
         }
 
         // 左侧 3px cyan 竖条 (active pill)

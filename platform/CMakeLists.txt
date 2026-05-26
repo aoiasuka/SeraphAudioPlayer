@@ -8,8 +8,6 @@ file(GLOB_RECURSE APX_PLATFORM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/wasapi/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/mmdevice/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/mmdevice/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/com/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/com/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/smtc/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/smtc/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/taskbar/*.h"
@@ -41,6 +39,8 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/asiosdk/common/asio.h")
         ${CMAKE_SOURCE_DIR}/third_party/asiosdk/host/asiodrivers.cpp
         ${CMAKE_SOURCE_DIR}/third_party/asiosdk/host/pc/asiolist.cpp
     )
+    # 关键：把启用宏挂到 target 上，避免依赖根 CMake 的全局宏作用域（自包含）
+    target_compile_definitions(apx_platform PRIVATE APX_HAVE_ASIO_SDK=1)
 endif()
 
 target_link_libraries(apx_platform

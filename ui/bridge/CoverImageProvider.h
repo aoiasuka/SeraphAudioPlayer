@@ -14,6 +14,7 @@
 #include <QString>
 #include <QMutex>
 #include <QHash>
+#include <QList>
 
 namespace apx::ui {
 
@@ -32,7 +33,9 @@ public:
 private:
     QMutex mtx_;
     QHash<QString, QImage> cache_;
-    static constexpr int kMaxCache = 32;
+    // LRU 顺序：尾部最近使用，头部最早。需要驱逐时从头部丢。
+    QList<QString>         lru_;
+    static constexpr int kMaxCache = 64;   // 适度增大，缓解大歌单频繁切换的反复读盘
 };
 
 } // namespace apx::ui

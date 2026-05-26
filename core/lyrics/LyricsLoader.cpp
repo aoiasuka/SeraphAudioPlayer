@@ -140,13 +140,13 @@ std::string readAll(const std::wstring& path)
 {
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return {};
-    std::fseek(f, 0, SEEK_END);
-    long n = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
+    _fseeki64(f, 0, SEEK_END);
+    std::int64_t n = _ftelli64(f);
+    _fseeki64(f, 0, SEEK_SET);
     if (n <= 0) { std::fclose(f); return {}; }
     if (n > 4 * 1024 * 1024) n = 4 * 1024 * 1024;
-    std::string buf(n, '\0');
-    std::fread(buf.data(), 1, n, f);
+    std::string buf(static_cast<std::size_t>(n), '\0');
+    std::fread(buf.data(), 1, static_cast<std::size_t>(n), f);
     std::fclose(f);
     return buf;
 }

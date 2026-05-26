@@ -178,7 +178,12 @@ bool DffDecoder::open(const std::wstring& path)
 
         if (std::memcmp(id, "PROP", 4) == 0) {
             // PROP <u64 size> "SND " <sub chunks>
-            std::vector<uint8_t> buf(sz);
+            // 损坏/恶意 DFF 可能给出极大 sz，限制 16 MiB 防 OOM。
+            constexpr uint64_t kMaxPropSize = 16ull * 1024 * 1024;
+            if (sz == 0 || sz > kMaxPropSize) {
+                return fail(L"DFF: PROP size out of range");
+            }
+            std::vector<uint8_t> buf(static_cast<std::size_t>(sz));
             if (std::fread(buf.data(), 1, sz, f) != sz) {
                 return fail(L"DFF: PROP read failed");
             }

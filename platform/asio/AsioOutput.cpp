@@ -47,14 +47,18 @@ struct AsioOutput::Impl {
     std::vector<ASIOChannelInfo> channelInfos;
     bool                         buffersCreated = false;
     std::atomic<bool>            running{false};
+    // 实时回调的临时拼装缓冲：在 open() 时按 prefSize*ch*4 预分配，
+    // 回调内 memset+memcpy，避免每帧堆分配。
+    std::vector<std::uint8_t>    scratch;
 };
 
 // ASIO 回调由驱动线程发起,需要静态函数 + 单实例桥接
-static AsioOutput::Impl* g_active = nullptr;
+// atomic 防止 stop() 写 nullptr 与 onBufferSwitch 读裸指针之间出现撕裂。
+static std::atomic<AsioOutput::Impl*> g_active{nullptr};
 
 static void onBufferSwitch(long index, ASIOBool /*processNow*/)
 {
-    auto* impl = g_active;
+    auto* impl = g_active.load(std::memory_order_acquire);
     if (!impl || !impl->running.load()) return;
     if (impl->bufferInfos.empty() || impl->channelInfos.empty()) return;
 
@@ -65,20 +69,23 @@ static void onBufferSwitch(long index, ASIOBool /*processNow*/)
     // 拉一个 PCM 块,然后分发到各通道 buffer
     // 默认按 Int32 PCM (大多数 ASIO 驱动支持 ASIOSTInt32LSB)
     const std::size_t bytes = static_cast<std::size_t>(frames) * ch * 4;
-    std::vector<std::uint8_t> tmp(bytes, 0);
+    // 预分配的 scratch；理论上 open() 已 resize 好；这里只做保险一次性扩容（amortized O(1)）。
+    if (impl->scratch.size() < bytes) impl->scratch.resize(bytes);
+    std::uint8_t* tmp = impl->scratch.data();
+    std::memset(tmp, 0, bytes);
 
     DataCallback cb;
     { std::lock_guard<std::mutex> lk(impl->cbMutex); cb = impl->cb; }
     if (cb) {
-        std::size_t got = cb(tmp.data(), bytes);
-        if (got < bytes) std::memset(tmp.data() + got, 0, bytes - got);
+        std::size_t got = cb(tmp, bytes);
+        if (got < bytes) std::memset(tmp + got, 0, bytes - got);
     }
     // 解交错到每通道 ASIO buffer
     for (int c = 0; c < ch; ++c) {
         auto* dst = static_cast<int32_t*>(impl->bufferInfos[c].buffers[index]);
         for (long f = 0; f < frames; ++f) {
             std::int32_t s;
-            std::memcpy(&s, tmp.data() + (f * ch + c) * 4, 4);
+            std::memcpy(&s, tmp + (f * ch + c) * 4, 4);
             dst[f] = s;
         }
     }
@@ -189,6 +196,8 @@ bool AsioOutput::open(const AudioFormat& format, const OpenOptions&, OpenResult*
         return false;
     }
     d_->buffersCreated = true;
+    // 预分配实时 scratch（prefSize * ch * 4 字节，Int32 PCM）
+    d_->scratch.assign(static_cast<std::size_t>(d_->prefSize) * ch * 4, 0);
 
     AudioFormat fmt = format;
     fmt.channels        = static_cast<std::uint16_t>(ch);
@@ -223,7 +232,8 @@ void AsioOutput::close()
     d_->bufferInfos.clear();
     d_->channelInfos.clear();
     d_->st = OutputState::Closed;
-    if (g_active == d_.get()) g_active = nullptr;
+    AsioOutput::Impl* expected = d_.get();
+    g_active.compare_exchange_strong(expected, nullptr);
 }
 
 bool AsioOutput::start()
@@ -232,7 +242,7 @@ bool AsioOutput::start()
         d_->lastErr = L"ASIO: not in Stopped state";
         return false;
     }
-    g_active = d_.get();
+    g_active.store(d_.get(), std::memory_order_release);
     d_->running.store(true);
     if (ASIOStart() != ASE_OK) {
         d_->lastErr = L"ASIO: start failed";
@@ -251,7 +261,8 @@ void AsioOutput::stop()
         ASIOStop();
         d_->st = OutputState::Stopped;
     }
-    if (g_active == d_.get()) g_active = nullptr;
+    AsioOutput::Impl* expected = d_.get();
+    g_active.compare_exchange_strong(expected, nullptr);
 }
 
 OutputState  AsioOutput::state()     const { return d_->st; }

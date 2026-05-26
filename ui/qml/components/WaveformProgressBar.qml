@@ -25,6 +25,21 @@ Item {
 
     signal seekRequested(real seconds)
 
+    // 音频响应数据
+    readonly property var spectrumBands: playerVM.spectrum || []
+    readonly property double vuLeft: playerVM.vuLeft || 0
+    readonly property double vuRight: playerVM.vuRight || 0
+    readonly property int effectType: playerVM.visualizerType
+
+    Connections {
+        target: playerVM
+        function onVisualUpdated() {
+            if (root.playing || root.effectType !== -1) {
+                wave.requestPaint()
+            }
+        }
+    }
+
     // 时间格式化
     function _fmt(sec) {
         if (!sec || sec < 0) return "00:00"
@@ -63,7 +78,7 @@ Item {
         z: 2
     }
 
-    // 主交互区: hover 时背景轻微提亮 (类似 acrylic 卡片)
+    // 主交互区
     Rectangle {
         id: bg
         anchors.fill: parent
@@ -87,9 +102,13 @@ Item {
         readonly property int barCount: 70
         property real anim: 0    // 呼吸相位
         property var envelope: []
+        property string lastTrackKey: ""
 
-        // 用 trackKey 生成确定性"高保真"包络
         function buildBaseline() {
+            if (root.trackKey === lastTrackKey && envelope && envelope.length > 0) {
+                return
+            }
+            lastTrackKey = root.trackKey || ""
             var arr = []
             var seed = 1.0
             if (root.trackKey && root.trackKey.length > 0) {
@@ -124,28 +143,76 @@ Item {
 
             var ratio = root._progressRatio
             var barW = w / barCount
+            
+            // Create a vibrant linear gradient for the played portion
+            var gradient = c.createLinearGradient(0, 0, w, 0)
+            gradient.addColorStop(0.0, "#06b6d4") // Cyan-500
+            gradient.addColorStop(1.0, "#3b82f6") // Blue-500
+
+            // Find the index of the exact playhead position
+            var playheadIndex = -1
+            if (root.duration > 0 && ratio > 0) {
+                playheadIndex = Math.floor(ratio * barCount)
+                playheadIndex = Math.max(0, Math.min(barCount - 1, playheadIndex))
+            }
+
+            // Audio data
+            var bands = root.spectrumBands
+            var numBands = bands ? bands.length : 0
+            var globalBass = (root.vuLeft + root.vuRight) / 2.0
+
             for (var i = 0; i < barCount; ++i) {
                 var breath = root.playing
                     ? Math.sin(anim * 6.28 - i * 0.18) * 0.03
                     : Math.sin(anim * 6.28 + i * 0.12) * 0.05
-                var amp = envelope[i] + breath
+                
+                var baseAmp = envelope[i]
+                var extraAmp = 0
+                
+                // Apply visualizer effect
+                if (root.playing) {
+                    if (root.effectType === 0) {
+                        // Effect 0: Spectrum Mapping
+                        if (numBands > 0) {
+                            var bandIndex = Math.floor((i / barCount) * numBands)
+                            var bandVal = Math.max(0, Math.min(1, bands[bandIndex]))
+                            // 使用加法，保证无论原生柱子高低，跳动幅度都绝对明显
+                            extraAmp = bandVal * 0.6
+                        }
+                    } else if (root.effectType === 1) {
+                        // Effect 1: Global Bass Pulse
+                        extraAmp = globalBass * 0.5
+                    } else if (root.effectType === 2) {
+                        // Effect 2: Playhead Ripple
+                        if (playheadIndex >= 0) {
+                            var dist = Math.abs(i - playheadIndex)
+                            if (dist < 8) {
+                                extraAmp = globalBass * (1.0 - dist / 8.0) * 0.75
+                            }
+                        }
+                    }
+                }
+
+                // 改用加法，极大增强视觉波动感
+                var amp = baseAmp + extraAmp + breath
                 if (amp < 0.08) amp = 0.08
+                
+                var isPlayhead = (i === playheadIndex)
+                if (isPlayhead) {
+                    amp = Math.min(1.0, amp + 0.15) // Playhead 始终更高一点
+                }
+
+                // Max cap
+                if (amp > 1.0) amp = 1.0
+
                 var barH = h * 0.22 + amp * h * 0.7
                 var x = i * barW
                 var y = (h - barH) / 2
                 var rWidth = Math.max(1.5, barW - 3)
 
                 var barRatio = i / barCount
-                if (barRatio <= ratio) {
-                    // 已播放: Cyan-700 alpha 渐进 0.55→0.95
-                    var a = 0.55 + barRatio * 0.4
-                    c.fillStyle = "rgba(14, 116, 144, " + a.toFixed(2) + ")"
-                } else {
-                    // 未播放: 8% Slate-900
-                    c.fillStyle = "rgba(15, 23, 42, 0.10)"
-                }
 
-                // 圆角条
+                // Draw rounded bar
                 var rr = Math.min(1.6, rWidth / 2)
                 c.beginPath()
                 c.moveTo(x + 1.5 + rr, y)
@@ -158,25 +225,57 @@ Item {
                 c.lineTo(x + 1.5, y + rr)
                 c.quadraticCurveTo(x + 1.5, y, x + 1.5 + rr, y)
                 c.closePath()
+
+                if (barRatio <= ratio) {
+                    // Played portion
+                    if (isPlayhead) {
+                        c.fillStyle = "#60a5fa" // Bright blue for playhead
+                        c.shadowColor = "#60a5fa"
+                        c.shadowBlur = 6
+                    } else {
+                        c.fillStyle = gradient
+                        c.shadowColor = "transparent"
+                        c.shadowBlur = 0
+                    }
+                } else {
+                    // Unplayed portion: a modern frosted look
+                    c.fillStyle = "rgba(148, 163, 184, 0.25)"
+                    c.shadowColor = "transparent"
+                    c.shadowBlur = 0
+                }
                 c.fill()
             }
         }
     }
 
-    // 驱动重绘: 播放时每 50ms 触发, 暂停时每 250ms
+    // 驱动重绘: 播放时交给 playerVM 的 onVisualUpdated，暂停时仍保留缓慢呼吸
     Timer {
-        interval: root.playing ? 50 : 250
-        running: true
+        interval: 250
+        running: !root.playing
         repeat: true
         onTriggered: {
-            wave.anim = (wave.anim + (root.playing ? 0.012 : 0.004)) % 1.0
+            wave.anim = (wave.anim + 0.004) % 1.0
             wave.requestPaint()
         }
     }
+    
+    // 动画相位持续步进
+    Timer {
+        interval: 50
+        running: root.playing
+        repeat: true
+        onTriggered: {
+            wave.anim = (wave.anim + 0.012) % 1.0
+            // 重绘交由 onVisualUpdated 触发，若无音频信号也强制重绘以保证动画
+            if (root.vuLeft < 0.01 && root.vuRight < 0.01) {
+                wave.requestPaint()
+            }
+        }
+    }
 
-    // position 变化也要重绘 (拖动 / 自动推进)
     onPositionChanged: wave.requestPaint()
     onDurationChanged: wave.requestPaint()
+    onEffectTypeChanged: wave.requestPaint()
 
     MouseArea {
         id: scrubArea

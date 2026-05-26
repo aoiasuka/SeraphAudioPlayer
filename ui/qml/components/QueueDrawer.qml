@@ -9,16 +9,27 @@ Item {
 
     property bool open: false
     property bool _initialized: false
-    visible: open || slideAnim.running
+    // 隐藏时如果透明度不为0则保持可见，确保动画能完整播完
+    visible: opacity > 0
+    opacity: open ? 1.0 : 0.0
+    scale: open ? 1.0 : 0.94
 
     function show()   { root.open = true }
     function hide()   { root.open = false }
     function toggle() { root.open = !root.open }
 
-    // 滑入动画 — 初始化完成前禁用，避免启动时闪现
+    // 组合动画：位置滑入 + 透明度渐变 + 缩放放大，带来具有物理反馈的弹窗体验
     Behavior on x {
         enabled: root._initialized
-        NumberAnimation { id: slideAnim; duration: 220; easing.type: Easing.OutQuart }
+        NumberAnimation { duration: 400; easing.type: Easing.OutExpo }
+    }
+    Behavior on opacity {
+        enabled: root._initialized
+        NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+    }
+    Behavior on scale {
+        enabled: root._initialized
+        NumberAnimation { duration: 400; easing.type: Easing.OutExpo }
     }
 
     // 默认隐藏在右侧外
@@ -30,6 +41,7 @@ Item {
     onWidthChanged: updatePos()
     onOpenChanged: updatePos()
     function updatePos() {
+        // x 轴位移依然保留，配合 scale 和 opacity 形成更生动的划出效果
         x = open ? (parent ? parent.width - width - 16 : 0)
                  : (parent ? parent.width + 16 : 0)
     }

@@ -22,8 +22,6 @@ Item {
     id: root
     objectName: "nowPlayingView"
 
-    property bool eqPanelVisible: false
-
     readonly property bool hasTrack: playerVM.currentIndex >= 0
 
     function formatTime(seconds) {
@@ -220,17 +218,7 @@ Item {
                             }
                         }
 
-                        Item {
-                            Layout.preferredWidth: 22
-                            Layout.preferredHeight: 22
-                            AppIcon {
-                                anchors.centerIn: parent
-                                name: "more"
-                                size: 14
-                                color: window.textTertiary
-                                strokeWidth: 1.6
-                            }
-                        }
+
                     }
 
                     MouseArea {
@@ -712,8 +700,8 @@ Item {
                             iconName: "sliders"
                             size: 30
                             iconSize: 14
-                            iconColor: root.eqPanelVisible ? window.brand : window.textTertiary
-                            onClicked: root.eqPanelVisible = !root.eqPanelVisible
+                            iconColor: eqPopup.opened ? window.brand : window.textTertiary
+                            onClicked: eqPopup.opened ? eqPopup.close() : eqPopup.open()
                         }
                     }
 
@@ -895,120 +883,7 @@ Item {
                     }
                 }
             }
-            // ----- 底部 EQ & 参数迷你面板 -----
-            Item {
-                id: eqPanelContainer
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.eqPanelVisible ? 140 : 0
-                Layout.topMargin: root.eqPanelVisible ? 16 : 0
-                Layout.bottomMargin: root.eqPanelVisible ? 8 : 0
-                visible: opacity > 0
-                opacity: root.eqPanelVisible ? 1 : 0
-                clip: true
-                Behavior on Layout.preferredHeight { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
-                Behavior on Layout.topMargin { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
-                Behavior on Layout.bottomMargin { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
-                Behavior on opacity { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
-                
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 12
-                    color: window.acrylicCardBg
-                    border.color: window.borderColor
-                    border.width: 1
 
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 16
-                        spacing: 24
-
-                        // EQ 频段柱子
-                        RowLayout {
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 260
-                            spacing: 6
-                            Repeater {
-                                model: playerVM.eqGains
-                                delegate: Item {
-                                    Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                    Rectangle {
-                                        width: 6
-                                        height: Math.max(4, (modelData + 12) / 24 * parent.height)
-                                        anchors.bottom: parent.bottom
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        radius: 3
-                                        color: playerVM.eqEnabled ? window.brand : window.textTertiary
-                                        Behavior on height { NumberAnimation { duration: 200 } }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 分割线
-                        Rectangle {
-                            Layout.preferredWidth: 1
-                            Layout.fillHeight: true
-                            color: window.divider
-                        }
-
-                        // 音频参数
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            spacing: 4
-
-                            Text {
-                                text: "AUDIO TECH INFO"
-                                font.pixelSize: 10
-                                font.weight: Font.Bold
-                                color: window.textTertiary
-                                font.family: window.fontFamily
-                            }
-                            Text {
-                                text: "Format: " + (playerVM.formatInfo || "Unknown")
-                                font.pixelSize: 11
-                                color: window.textSecondary
-                                font.family: window.fontFamily
-                            }
-                            Text {
-                                text: "Device: " + (playerVM.currentDeviceName || "Default")
-                                font.pixelSize: 11
-                                color: window.textSecondary
-                                font.family: window.fontFamily
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Text {
-                                text: "Buffer Frames: " + playerVM.statsFramesTotal
-                                font.pixelSize: 11
-                                color: window.textSecondary
-                                font.family: window.fontFamily
-                            }
-                        }
-                        
-                        // 开关 EQ 的 Switch
-                        ColumnLayout {
-                            Layout.alignment: Qt.AlignTop | Qt.AlignRight
-                            Switch {
-                                checked: playerVM.eqEnabled
-                                onCheckedChanged: {
-                                    if (playerVM.eqEnabled !== checked) {
-                                        playerVM.eqEnabled = checked
-                                    }
-                                }
-                            }
-                            Text {
-                                text: playerVM.eqEnabled ? "EQ On" : "EQ Off"
-                                font.pixelSize: 10
-                                color: window.textTertiary
-                                font.family: window.fontFamily
-                                Layout.alignment: Qt.AlignHCenter
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1088,6 +963,232 @@ Item {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: window.navigateTo("library")
+                }
+            }
+        }
+    }
+
+    // ============ EQ 美化版弹窗 ============
+    Popup {
+        id: eqPopup
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: 760
+        height: 460
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        enter: Transition {
+            NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 250; easing.type: Easing.OutQuart }
+            NumberAnimation { property: "scale"; from: 0.95; to: 1.0; duration: 250; easing.type: Easing.OutBack }
+        }
+        exit: Transition {
+            NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 200; easing.type: Easing.InQuart }
+            NumberAnimation { property: "scale"; from: 1.0; to: 0.95; duration: 200; easing.type: Easing.InQuart }
+        }
+
+        background: Rectangle {
+            radius: 16
+            color: window.surface
+            border.color: window.borderColor
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 28
+            spacing: 24
+
+            // 头部: 标题与开关 / 预设 / 重置
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 16
+
+                Text {
+                    text: "均衡器"
+                    font.family: window.fontFamily
+                    font.pixelSize: 20
+                    font.weight: Font.DemiBold
+                    color: window.textPrimary
+                }
+
+                Item { Layout.preferredWidth: 8 }
+
+                Switch {
+                    id: eqSwitch
+                    checked: playerVM.eqEnabled
+                    onCheckedChanged: {
+                        if (playerVM.eqEnabled !== checked) {
+                            playerVM.eqEnabled = checked
+                        }
+                    }
+                }
+
+                Text {
+                    text: "启用"
+                    font.family: window.fontFamily
+                    font.pixelSize: 13
+                    color: window.textSecondary
+                }
+
+                Item { Layout.fillWidth: true }
+
+                ComboBox {
+                    id: presetCombo
+                    Layout.preferredWidth: 120
+                    Layout.preferredHeight: 34
+                    font.family: window.fontFamily
+                    font.pixelSize: 12
+                    model: ["自定义", "扁平", "重低音", "舞曲", "古典", "摇滚", "人声"]
+                    onActivated: function(index) {
+                        if (index === 0) return;
+                        var p = [
+                            [],
+                            [0,0,0,0,0,0,0,0,0,0], // 扁平
+                            [6,5,3,1,0,0,0,0,0,0], // 重低音
+                            [4,3,1,0,-1,0,2,4,4,3], // 舞曲
+                            [3,2,0,0,0,0,-1,-1,0,2], // 古典
+                            [4,3,2,0,-1,-1,0,2,3,3], // 摇滚
+                            [-2,-1,0,2,3,3,2,1,0,-1] // 人声
+                        ]
+                        var target = p[index]
+                        for (var i = 0; i < 10; ++i) {
+                            playerVM.setEqGain(i, target[i])
+                        }
+                    }
+                    background: Rectangle {
+                        radius: 8
+                        color: window.surfaceMenu
+                        border.color: window.borderColor
+                        border.width: 1
+                    }
+                }
+
+                Button {
+                    text: "重置"
+                    font.family: window.fontFamily
+                    font.pixelSize: 13
+                    Layout.preferredHeight: 34
+                    Layout.preferredWidth: 64
+                    background: Rectangle {
+                        radius: 17
+                        color: "transparent"
+                        border.color: "#FF5A5A"
+                        border.width: 1
+                        opacity: parent.pressed ? 0.6 : (parent.hovered ? 0.8 : 1.0)
+                        Behavior on opacity { NumberAnimation { duration: 100 } }
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#FF5A5A"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font: parent.font
+                    }
+                    onClicked: {
+                        playerVM.resetEq()
+                        presetCombo.currentIndex = 0
+                    }
+                }
+
+                Item { Layout.preferredWidth: 8 }
+
+                IconCircleBtn {
+                    iconName: "x"
+                    size: 32
+                    iconSize: 14
+                    iconColor: window.textSecondary
+                    onClicked: eqPopup.close()
+                }
+            }
+
+            // 分割线
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                color: window.divider
+            }
+
+            // EQ 调节区 (10 Band)
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 8
+
+                property var freqs: ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
+
+                Repeater {
+                    model: 10
+                    delegate: ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: 12
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: 48
+                            horizontalAlignment: Text.AlignHCenter
+                            text: (playerVM.eqGains[index] > 0 ? "+" : "") + playerVM.eqGains[index].toFixed(1) + " dB"
+                            font.family: window.fontFamily
+                            font.pixelSize: 11
+                            color: window.textSecondary
+                        }
+
+                        Slider {
+                            id: eqSlider
+                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignHCenter
+                            orientation: Qt.Vertical
+                            from: -12.0
+                            to: 12.0
+                            value: playerVM.eqGains[index]
+                            
+                            onMoved: {
+                                playerVM.setEqGain(index, value)
+                                presetCombo.currentIndex = 0 // 设置为自定义
+                            }
+
+                            background: Rectangle {
+                                x: eqSlider.leftPadding + (eqSlider.availableWidth - width) / 2
+                                y: eqSlider.topPadding
+                                implicitWidth: 4
+                                implicitHeight: 220
+                                width: 4
+                                height: eqSlider.availableHeight
+                                radius: 2
+                                color: window.divider
+                                
+                                Rectangle {
+                                    width: 4
+                                    radius: 2
+                                    color: playerVM.eqEnabled ? window.brand : window.textTertiary
+                                    opacity: 0.6
+                                    y: Math.min(eqSlider.visualPosition, 0.5) * eqSlider.availableHeight
+                                    height: Math.abs(eqSlider.visualPosition - 0.5) * eqSlider.availableHeight
+                                }
+                            }
+                            handle: Rectangle {
+                                x: eqSlider.leftPadding + (eqSlider.availableWidth - width) / 2
+                                y: eqSlider.topPadding + eqSlider.visualPosition * (eqSlider.availableHeight - height)
+                                width: 14
+                                height: 14
+                                radius: 7
+                                color: playerVM.eqEnabled ? window.brand : window.textTertiary
+                                border.color: window.surface
+                                border.width: 2
+                            }
+                        }
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: parent.parent.freqs[index]
+                            font.family: window.fontFamily
+                            font.pixelSize: 12
+                            font.weight: Font.DemiBold
+                            color: window.textPrimary
+                        }
+                    }
                 }
             }
         }

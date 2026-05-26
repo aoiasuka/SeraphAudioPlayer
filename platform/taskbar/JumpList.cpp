@@ -66,9 +66,16 @@ bool JumpList::install()
     std::wstring exePath;
     if (!getExePath(exePath)) return false;
 
+    // 保护性 CoInitializeEx：调用方未必已经初始化 COM。
+    // 若线程已 STA（如 Qt main 线程通常如此），返回 S_FALSE / RPC_E_CHANGED_MODE。
+    // 不持有 com 句柄就调用 CoCreateInstance 直接 0x800401F0 失败。
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool need_uninit = (comHr == S_OK || comHr == S_FALSE);
+
     ICustomDestinationList* dlist = nullptr;
     if (FAILED(CoCreateInstance(CLSID_DestinationList, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&dlist)))) {
+        if (need_uninit) CoUninitialize();
         return false;
     }
 
@@ -76,6 +83,7 @@ bool JumpList::install()
     IObjectArray* removed = nullptr;
     if (FAILED(dlist->BeginList(&maxSlots, IID_PPV_ARGS(&removed)))) {
         dlist->Release();
+        if (need_uninit) CoUninitialize();
         return false;
     }
 
@@ -85,6 +93,7 @@ bool JumpList::install()
         if (removed) removed->Release();
         dlist->AbortList();
         dlist->Release();
+        if (need_uninit) CoUninitialize();
         return false;
     }
 
@@ -126,6 +135,7 @@ bool JumpList::install()
 
     dlist->CommitList();
     dlist->Release();
+    if (need_uninit) CoUninitialize();
     return true;
 }
 

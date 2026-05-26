@@ -7,8 +7,9 @@ project(AudioPlayerX86
 )
 
 # 【核心修复】：将项目根目录加入到全局头文件搜索路径中
-# 这样在 ui 模块下也能通过 "app/controller/..." 找到头文件
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+# （历史遗留；各子目标已用 target_include_directories(PUBLIC ${CMAKE_SOURCE_DIR}) 覆盖，
+#  这里保留仅为兼容首次配置过程中的 file(GLOB) 探测脚本，可在确认无回归后删除。）
+# include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # -------- 全局设置 --------
 set(CMAKE_CXX_STANDARD 17)
@@ -23,6 +24,15 @@ endif()
 # 默认 Release,且默认 32-bit (x86) 通过命令行 -A Win32 指定
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+# 平台校验：项目名暗示 32-bit x86，配置时必须传 -A Win32（VS 多配置生成器）。
+# 若用户忘记，会得到 x64 构建并加载 x64 Qt → 运行期错位。给出明确告警而非默认。
+if(CMAKE_GENERATOR MATCHES "Visual Studio" AND DEFINED CMAKE_GENERATOR_PLATFORM
+        AND NOT CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
+    message(WARNING
+        "AudioPlayerX86 项目以 32-bit (x86) 为目标，当前 -A=${CMAKE_GENERATOR_PLATFORM}。"
+        " 如非有意为 x64 构建，请追加 -A Win32 重新配置。")
 endif()
 
 # Unicode (Windows)
@@ -59,7 +69,8 @@ option(APX_BUILD_UI       "Build Qt 6 Widgets UI (AudioPlayerX86.exe)"    ON)
 # -------- Qt --------
 if(APX_BUILD_UI)
     # 用户需通过 -DCMAKE_PREFIX_PATH=<Qt>/6.5.x/msvc2019_32 指定 Qt
-    find_package(Qt6 6.5 COMPONENTS Qml Quick QuickControls2 REQUIRED)
+    # 显式声明 Core/Gui 而非依赖传递依赖，便于版本错配时早期发现
+    find_package(Qt6 6.5 COMPONENTS Core Gui Qml Quick QuickControls2 REQUIRED)
     set(CMAKE_AUTOMOC ON)
     set(CMAKE_AUTORCC ON)
     set(CMAKE_AUTOUIC ON)
@@ -144,11 +155,9 @@ endif()
 
 # Opus 解码 (opusfile + libopus + libogg)。可通过 vcpkg / 系统包提供。
 # 找到则启用 OpusDecoder 真实实现;找不到留桩,不影响构建。
-find_package(OpusFile  CONFIG QUIET)
-find_package(Opusfile  CONFIG QUIET)
-find_package(opusfile  CONFIG QUIET)
-if(TARGET OpusFile::opusfile OR TARGET Opusfile::opusfile OR TARGET opusfile::opusfile
-        OR TARGET PkgConfig::OpusFile)
+# vcpkg 实际导出的 target 名为 OpusFile::opusfile。
+find_package(OpusFile CONFIG QUIET)
+if(TARGET OpusFile::opusfile)
     set(APX_HAVE_OPUS ON)
     add_compile_definitions(APX_HAVE_OPUS=1)
     message(STATUS "opusfile found, enabling Opus decoder")

@@ -9,7 +9,9 @@
 
 namespace apx {
 
-constexpr float Equalizer::kCenters[Equalizer::kNumBands];
+// C++17 起 inline static constexpr 变量已在类内定义完成，
+// 类外 redeclaration 已 deprecated（MSVC 触发 C5051），故删除原来的：
+//   constexpr float Equalizer::kCenters[Equalizer::kNumBands];
 
 namespace {
 constexpr double kQ = 1.0;
@@ -148,7 +150,7 @@ void Equalizer::process(std::uint8_t* data, std::size_t bytes, const AudioFormat
             for (int ch = 0; ch < channels; ++ch) {
                 float x = static_cast<float>(p[ch]) * (1.0f / 2147483648.f);
                 for (int b = 0; b < kNumBands; ++b) x = bands_[b].process(ch, x);
-                p[ch] = clampSat<int32_t>(static_cast<double>(x) * 2147483648.0);
+                p[ch] = clampSat<int32_t>(static_cast<double>(x) * 2147483647.0);
             }
             p += channels;
         }

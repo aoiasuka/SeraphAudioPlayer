@@ -57,10 +57,13 @@ Item {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 96
+        height: headerCol.implicitHeight + 16
 
         ColumnLayout {
-            anchors.fill: parent
+            id: headerCol
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
             anchors.leftMargin: 32
             anchors.rightMargin: 32
             spacing: 4

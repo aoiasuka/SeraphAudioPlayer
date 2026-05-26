@@ -69,6 +69,11 @@ private:
     // 临时浮点 buffer (避免 process 内每次分配)
     std::vector<float> src_f_;
     std::vector<float> dst_f_;
+    // 同采样率 & 线性插值路径的逐帧 buffer——避免实时路径里 std::vector 临时分配
+    std::vector<float> frame_buf_;   // 同采样率路径
+    std::vector<float> linear_a_;    // 线性插值 a
+    std::vector<float> linear_b_;    // 线性插值 b
+    std::vector<float> linear_out_;  // 线性插值 out
     // Dither + 一阶 noise shaping 状态:每通道保留上一帧 quantization error
     std::vector<float> dither_err_;
     std::uint32_t      rng_state_ = 0x12345678u;     // xorshift32 状态

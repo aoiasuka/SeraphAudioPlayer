@@ -146,7 +146,10 @@ public:
                     char hex[5] = { s_[i_], s_[i_+1], s_[i_+2], s_[i_+3], 0 };
                     i_ += 4;
                     unsigned cp = std::strtoul(hex, nullptr, 16);
-                    // 仅 BMP;surrogate pair 不展开(写出方也用 \uXXXX 形式)
+                    // Surrogate 区在 UTF-8 中是非法的，直接编码会产生坏序列。
+                    // 最小修复：把孤立的 high/low surrogate 写为 U+FFFD 替换字符。
+                    // 真正的 surrogate pair 展开需要前看下一个 \uXXXX，本最小补丁未实现。
+                    if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
                     if (cp < 0x80) out.push_back(static_cast<char>(cp));
                     else if (cp < 0x800) {
                         out.push_back(static_cast<char>(0xC0 | (cp >> 6)));

@@ -15,6 +15,7 @@
 #include <QHash>
 #include <QUuid>
 #include <QImage>
+#include <QMutexLocker>
 #include <algorithm>
 #include <random>
 
@@ -47,15 +48,15 @@ PlayerViewModel::PlayerViewModel(QObject* parent)
     connect(this, &PlayerViewModel::currentIndexChanged, this, refreshPlaylistModel);
 
     // 跨线程信号连接
-    connect(this, &PlayerViewModel::_coreStateChanged, this, &PlayerViewModel::onCoreStateChanged, Qt::QueuedConnection);
-    connect(this, &PlayerViewModel::_corePositionChanged, this, &PlayerViewModel::onCorePositionChanged, Qt::QueuedConnection);
-    connect(this, &PlayerViewModel::_coreEnded, this, &PlayerViewModel::onCoreEnded, Qt::QueuedConnection);
-    connect(this, &PlayerViewModel::_coreError, this, &PlayerViewModel::onCoreError, Qt::QueuedConnection);
+    connect(this, &PlayerViewModel::coreStateChangedInternal, this, &PlayerViewModel::onCoreStateChanged, Qt::QueuedConnection);
+    connect(this, &PlayerViewModel::corePositionChangedInternal, this, &PlayerViewModel::onCorePositionChanged, Qt::QueuedConnection);
+    connect(this, &PlayerViewModel::coreEndedInternal, this, &PlayerViewModel::onCoreEnded, Qt::QueuedConnection);
+    connect(this, &PlayerViewModel::coreErrorInternal, this, &PlayerViewModel::onCoreError, Qt::QueuedConnection);
 
-    player_->setOnStateChanged([this](PlayerState s) { emit _coreStateChanged(static_cast<int>(s)); });
-    player_->setOnPositionChanged([this](double sec) { emit _corePositionChanged(sec); });
-    player_->setOnEnded([this]() { emit _coreEnded(); });
-    player_->setOnError([this](const std::wstring& msg) { emit _coreError(QString::fromStdWString(msg)); });
+    player_->setOnStateChanged([this](PlayerState s) { emit coreStateChangedInternal(static_cast<int>(s)); });
+    player_->setOnPositionChanged([this](double sec) { emit corePositionChangedInternal(sec); });
+    player_->setOnEnded([this]() { emit coreEndedInternal(); });
+    player_->setOnError([this](const std::wstring& msg) { emit coreErrorInternal(QString::fromStdWString(msg)); });
     // PCM tap → 可视化(运行在 producer 线程,Visualizer 内部有 mutex)
     player_->setOnPcmTap([this](const std::uint8_t* data, std::size_t bytes, const apx::AudioFormat& fmt) {
         m_visualizer.push(data, bytes, fmt);
@@ -411,8 +412,20 @@ void PlayerViewModel::previous()
 
     int idx;
     if (m_shuffle) {
-        if (m_shufflePos <= 0) idx = m_shuffleOrder.isEmpty() ? -1 : m_shuffleOrder.first();
-        else idx = m_shuffleOrder.value(--m_shufflePos, -1);
+        if (m_shuffleOrder.isEmpty()) {
+            idx = -1;
+        } else if (m_shufflePos > 0) {
+            idx = m_shuffleOrder.value(--m_shufflePos, -1);
+        } else {
+            // 已位于 shuffle 序列起点：列表循环时绕到末尾，否则保持原位
+            // 不切歌（原实现会反复抓 first()，让"上一首"在头部失灵）。
+            if (m_repeatMode == 1 && m_shuffleOrder.size() > 0) {
+                m_shufflePos = m_shuffleOrder.size() - 1;
+                idx = m_shuffleOrder.value(m_shufflePos, -1);
+            } else {
+                return;
+            }
+        }
     } else {
         idx = m_currentIndex - 1;
         if (idx < 0) idx = (m_repeatMode == 1) ? m_queue.size() - 1 : 0;
@@ -479,17 +492,24 @@ void PlayerViewModel::moveQueueItem(int from, int to)
     if (to >= m_queue.size()) to = m_queue.size() - 1;
     if (from == to) return;
 
-    // 保留当前 index 指向的实际路径
-    QString curPath = (m_currentIndex >= 0 && m_currentIndex < m_queue.size())
-                        ? m_queue.at(m_currentIndex) : QString();
-
     m_queue.move(from, to);
 
-    // 重新定位 m_currentIndex
-    if (!curPath.isEmpty()) {
-        int newIdx = m_queue.indexOf(curPath);
-        if (newIdx >= 0 && newIdx != m_currentIndex) {
-            m_currentIndex = newIdx;
+    // 用 from/to/m_currentIndex 的数学位移更新当前索引：
+    //   - 当前曲目就是被移动那条 → 新位置 = to
+    //   - 否则在 [min(from,to), max(from,to)] 区间内的元素位置发生 ±1 平移
+    // 不能用 m_queue.indexOf(curPath)：队列里可能有同路径的多条记录，
+    // indexOf 只返回首次匹配的索引，会把"当前播放"误拉到列表中第一首同名曲。
+    if (m_currentIndex >= 0) {
+        int newCur = m_currentIndex;
+        if (m_currentIndex == from) {
+            newCur = to;
+        } else if (from < to && m_currentIndex > from && m_currentIndex <= to) {
+            newCur = m_currentIndex - 1;
+        } else if (from > to && m_currentIndex >= to && m_currentIndex < from) {
+            newCur = m_currentIndex + 1;
+        }
+        if (newCur != m_currentIndex) {
+            m_currentIndex = newCur;
             emit currentIndexChanged();
         }
     }
@@ -563,16 +583,22 @@ QColor PlayerViewModel::currentDominantColor() const
     QString cur = currentPath();
     if (cur.isEmpty()) return kDefault;
 
-    auto it = m_colorCache.constFind(cur);
-    if (it != m_colorCache.constEnd()) return it.value();
+    // 命中缓存：直接返回
+    {
+        QMutexLocker lk(&m_cacheMutex);
+        auto it = m_colorCache.constFind(cur);
+        if (it != m_colorCache.constEnd()) return it.value();
+    }
 
     apx::TrackMetadata md;
     if (!fetchMeta(cur, md) || !md.has_cover) {
+        QMutexLocker lk(&m_cacheMutex);
         m_colorCache.insert(cur, kDefault);
         return kDefault;
     }
     auto cov = apx::MetadataReader::readCover(cur.toStdWString());
     if (!cov || cov->data.empty()) {
+        QMutexLocker lk(&m_cacheMutex);
         m_colorCache.insert(cur, kDefault);
         return kDefault;
     }
@@ -580,6 +606,7 @@ QColor PlayerViewModel::currentDominantColor() const
     img.loadFromData(reinterpret_cast<const uchar*>(cov->data.data()),
                      static_cast<int>(cov->data.size()));
     if (img.isNull()) {
+        QMutexLocker lk(&m_cacheMutex);
         m_colorCache.insert(cur, kDefault);
         return kDefault;
     }
@@ -614,8 +641,19 @@ QColor PlayerViewModel::currentDominantColor() const
         v = std::clamp(v, 90, 180);
         out = QColor::fromHsv(h, s, v);
     }
-    m_colorCache.insert(cur, out);
+    {
+        QMutexLocker lk(&m_cacheMutex);
+        m_colorCache.insert(cur, out);
+    }
+    // 通知 QML 端绑定刷新（之前 NOTIFY 错位用了 currentCoverUrlChanged，
+    // 同一封面但首次解析出主色的场景就丢通知了）
+    const_cast<PlayerViewModel*>(this)->emitDominantColorChanged();
     return out;
+}
+
+void PlayerViewModel::emitDominantColorChanged()
+{
+    emit currentDominantColorChanged();
 }
 
 void PlayerViewModel::setVisualizerType(int type)
@@ -1194,14 +1232,22 @@ QVariantList PlayerViewModel::itemsFromPaths(const QStringList& paths, int curre
 
 bool PlayerViewModel::fetchMeta(const QString& path, apx::TrackMetadata& out) const
 {
-    auto it = m_metaCache.constFind(path);
-    if (it != m_metaCache.constEnd()) { out = it.value(); return true; }
-    if (m_metaMissed.contains(path))   return false;
+    {
+        QMutexLocker lk(&m_cacheMutex);
+        auto it = m_metaCache.constFind(path);
+        if (it != m_metaCache.constEnd()) { out = it.value(); return true; }
+        if (m_metaMissed.contains(path))   return false;
+    }
 
+    // 真正读盘不持锁——读盘耗时长，避免阻塞其它线程的命中查询
     auto opt = apx::MetadataReader::read(path.toStdWString());
+
+    QMutexLocker lk(&m_cacheMutex);
     if (!opt) {
-        m_metaMissed.append(path);
-        if (m_metaMissed.size() > 256) m_metaMissed.removeFirst();
+        if (!m_metaMissed.contains(path)) {
+            m_metaMissed.append(path);
+            if (m_metaMissed.size() > 256) m_metaMissed.removeFirst();
+        }
         return false;
     }
     m_metaCache.insert(path, *opt);
@@ -2059,7 +2105,12 @@ apx::Playlist makePlaylistFromQueue(
 
 QString PlayerViewModel::exportPlaylistM3U(const QString& path) const
 {
-    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, m_metaCache);
+    QMap<QString, apx::TrackMetadata> metaSnap;
+    {
+        QMutexLocker lk(&m_cacheMutex);
+        metaSnap = m_metaCache;   // QMap COW，开销低
+    }
+    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, metaSnap);
     std::wstring err;
     if (!apx::PlaylistIO::saveM3U(pl, path.toStdWString(), &err)) {
         return QString::fromStdWString(err);
@@ -2069,7 +2120,12 @@ QString PlayerViewModel::exportPlaylistM3U(const QString& path) const
 
 QString PlayerViewModel::exportPlaylistJson(const QString& path) const
 {
-    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, m_metaCache);
+    QMap<QString, apx::TrackMetadata> metaSnap;
+    {
+        QMutexLocker lk(&m_cacheMutex);
+        metaSnap = m_metaCache;
+    }
+    const auto pl = makePlaylistFromQueue(m_queue, m_currentIndex, metaSnap);
     std::wstring err;
     if (!apx::PlaylistIO::saveJson(pl, path.toStdWString(), &err)) {
         return QString::fromStdWString(err);
@@ -2120,7 +2176,10 @@ int PlayerViewModel::importCueSheet(const QString& cuePath)
         if (it.cue_end_sec > it.cue_start_sec) {
             md.duration_sec = it.cue_end_sec - it.cue_start_sec;
         }
-        m_metaCache[p] = std::move(md);
+        {
+            QMutexLocker lk(&m_cacheMutex);
+            m_metaCache[p] = std::move(md);
+        }
         paths << p;
     }
     enqueueMany(paths);

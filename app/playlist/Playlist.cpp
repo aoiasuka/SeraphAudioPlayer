@@ -101,7 +101,6 @@ int Playlist::pickShuffle() const
             candidates.push_back(i);
         }
     }
-    if (candidates.empty()) candidates.assign(n, 0), candidates.clear();
     if (candidates.empty()) {
         // 历史满了 → 重置历史,但保留 current_index 避免立刻重复
         shuffle_recent_.clear();

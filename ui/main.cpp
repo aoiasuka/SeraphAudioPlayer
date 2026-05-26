@@ -95,6 +95,14 @@ public:
                 if (tb->handleCommand(cmd)) return true;
             }
         }
+        // explorer.exe 重启后会广播 WM_TaskbarButtonCreated，需要重建按钮。
+        if (auto* tb = vm_->taskbarButtons()) {
+            const uint32_t restartMsg = tb->taskbarCreatedMessageId();
+            if (restartMsg != 0 && msg->message == restartMsg) {
+                tb->onTaskbarRestart();
+                return false;   // 让其它监听者也能收到
+            }
+        }
         return false;
     }
 
@@ -156,12 +164,15 @@ int main(int argc, char* argv[])
 
     QQmlApplicationEngine engine;
 
+    // ShortcutsViewModel 必须在 engine 之前声明，确保栈析构顺序：
+    // engine 先于 ViewModel 销毁，避免 QML binding 在 VM 已析构后再访问。
+    apx::ui::ShortcutsViewModel shortcutsVM;
+
     // 注册封面 ImageProvider
     engine.addImageProvider("covers", new apx::ui::CoverImageProvider());
 
     // 注册到 QML 上下文
     engine.rootContext()->setContextProperty("playerVM", &playerVM);
-    apx::ui::ShortcutsViewModel shortcutsVM;
     engine.rootContext()->setContextProperty("shortcutsVM", &shortcutsVM);
 
     // 捕获 QML 加载警告

@@ -113,7 +113,9 @@ bool MfMediaDecoder::open(const std::wstring& path)
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (hr == RPC_E_CHANGED_MODE) d_->com_init = false;
-    else if (SUCCEEDED(hr))       d_->com_init = (hr == S_OK);
+    // CoInitializeEx 文档：S_OK 与 S_FALSE 均表示"成功"，且都需要配对 CoUninitialize。
+    // 之前只在 S_OK 时记 com_init=true，长时间运行会让 COM 引用计数偏移。
+    else if (SUCCEEDED(hr))       d_->com_init = true;
     else { d_->set_err(L"CoInitializeEx", hr); return false; }
 
     if (!mf_startup_ref()) {
@@ -192,8 +194,15 @@ bool MfMediaDecoder::open(const std::wstring& path)
         (DWORD)MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &pv);
     if (SUCCEEDED(hr) && pv.vt == VT_UI8) {
         const std::uint64_t dur_100ns = pv.uhVal.QuadPart;
-        d_->total_frames = static_cast<std::int64_t>(
-            (dur_100ns * static_cast<std::uint64_t>(sr) + 5'000'000ULL) / 10'000'000ULL);
+        const std::uint64_t sr64 = static_cast<std::uint64_t>(sr);
+        // 防 dur_100ns * sr 溢出 uint64（极长 hi-res 文件理论值接近上限）。
+        // 检查 dur_100ns 是否大于 (UINT64_MAX - rounding) / sr 即可。
+        if (sr64 == 0 || dur_100ns > (UINT64_MAX - 5'000'000ULL) / sr64) {
+            // 无法精确表达 → 留 0，UI 会显示未知时长
+        } else {
+            d_->total_frames = static_cast<std::int64_t>(
+                (dur_100ns * sr64 + 5'000'000ULL) / 10'000'000ULL);
+        }
     }
     PropVariantClear(&pv);
 

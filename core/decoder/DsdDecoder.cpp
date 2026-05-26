@@ -213,7 +213,10 @@ bool DsdDecoder::open(const std::wstring& path)
     uint8_t dataHdr[12];
     if (std::fread(dataHdr, 1, 12, f) != 12) return fail(L"DSF: short data chunk header");
     if (std::memcmp(dataHdr, "data", 4) != 0) return fail(L"DSF: missing data chunk");
-    uint64_t dataSize = readU64LE(dataHdr + 4) - 12; // chunk size 含头本身
+    uint64_t rawDataSize = readU64LE(dataHdr + 4);
+    // 防无符号下溢：chunk size 必须至少包含其 12 字节的头。
+    if (rawDataSize < 12) return fail(L"DSF: data chunk size < 12");
+    uint64_t dataSize = rawDataSize - 12;
 
     long long dataOffset = _ftelli64(f);
     if (dataOffset < 0) return fail(L"DSF: ftelli64 failed");
@@ -272,6 +275,10 @@ bool DsdDecoder::seek(std::int64_t frame)
     }
     d_->cur_block_index   = blockIdx;
     d_->cur_byte_in_block = static_cast<uint32_t>(byteInBlock);
+    // 状态机不变量（修改本块时务必同时维护）：
+    //   block_loaded = false → 下一次 read() 会从 fileOff 起读完整 block 进 block_buf；
+    //   读 block 后再从 cur_byte_in_block 偏移开始消费；
+    //   cur_byte_in_block 必须 < block_size 且 与 channels*2 对齐（每帧 channels*2 byte）。
     d_->block_loaded      = false;
     d_->eof               = false;
     d_->pcm_frame_count   = static_cast<uint64_t>(frame);

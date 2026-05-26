@@ -399,9 +399,11 @@ void WasapiSharedOutput::Impl::render_proc()
         }
 
         // 估计需要多少源帧来产生 frames_avail 个目标帧
-        const double ratio = (double)device_fmt.sample_rate / (double)source_fmt.sample_rate;
+        // dst_per_src = device_fmt.sr / source_fmt.sr；need_src = need_dst / dst_per_src。
+        // 旧命名 `ratio` 容易让人误读为 src/dst；这里改成 dst_per_src 明确语义。
+        const double dst_per_src = (double)device_fmt.sample_rate / (double)source_fmt.sample_rate;
         std::size_t need_src_frames = static_cast<std::size_t>(
-            (double)frames_avail / ratio) + 2;
+            (double)frames_avail / dst_per_src) + 2;
         const std::size_t need_src_bytes = need_src_frames * src_frame_bytes;
         if (src_scratch.size() < need_src_bytes) src_scratch.resize(need_src_bytes);
 

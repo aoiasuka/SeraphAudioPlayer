@@ -78,6 +78,40 @@ Item {
                     PropertyChanges { target: content; opacity: 0.95 }
                 }
 
+                MouseArea {
+                    id: dragArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: held ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                    property bool held: false
+                    drag.target: held ? content : undefined
+                    drag.axis: Drag.YAxis
+                    drag.minimumY: -(cell.y)
+                    drag.maximumY: list.height - cell.height + 4
+
+                    onPressed: function(mouse) {
+                        if (!root.allowReorder) return
+                        // 仅当鼠标在左侧手柄区域(0..30) 才进入拖动
+                        if (mouse.x <= 30) {
+                            held = true
+                            root.draggingIndex = index
+                        }
+                    }
+                    onReleased: {
+                        if (held) {
+                            content.Drag.drop()
+                            held = false
+                            root.draggingIndex = -1
+                            // 复位
+                            content.x = 0
+                            content.y = 2
+                        }
+                    }
+                    onClicked: {
+                        if (!held) root.itemClicked(item.path)
+                    }
+                }
+
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 4
@@ -233,40 +267,6 @@ Item {
                 Drag.source: cell
                 Drag.hotSpot.x: width / 2
                 Drag.hotSpot.y: height / 2
-            }
-
-            MouseArea {
-                id: dragArea
-                anchors.fill: content
-                hoverEnabled: true
-                cursorShape: held ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-                property bool held: false
-                drag.target: held ? content : undefined
-                drag.axis: Drag.YAxis
-                drag.minimumY: -(cell.y)
-                drag.maximumY: list.height - cell.height + 4
-
-                onPressed: function(mouse) {
-                    if (!root.allowReorder) return
-                    // 仅当鼠标在左侧手柄区域(0..30) 才进入拖动
-                    if (mouse.x <= 30) {
-                        held = true
-                        root.draggingIndex = index
-                    }
-                }
-                onReleased: {
-                    if (held) {
-                        content.Drag.drop()
-                        held = false
-                        root.draggingIndex = -1
-                        // 复位
-                        content.x = 0
-                        content.y = 2
-                    }
-                }
-                onClicked: {
-                    if (!held) root.itemClicked(item.path)
-                }
             }
 
             // 顶部 DropArea:拖到这里 = "插入到本行之前"

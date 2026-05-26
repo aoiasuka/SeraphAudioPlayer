@@ -46,6 +46,17 @@ target_include_directories(apx_core
 
 target_compile_features(apx_core PUBLIC cxx_std_17)
 
+# Media Foundation 系统库（MfMediaDecoder.cpp 通过 #pragma comment(lib,...) 隐式链接，
+# 这里显式列出以避免 obj 被剥离或开 /NODEFAULTLIB 时链接失败）
+if(WIN32)
+    target_link_libraries(apx_core PUBLIC
+        mfplat
+        mfreadwrite
+        mfuuid
+        propsys
+    )
+endif()
+
 # Opus 解码可选依赖
 if(APX_HAVE_OPUS)
     # 按 vcpkg / 系统提供的 target 名称依次尝试

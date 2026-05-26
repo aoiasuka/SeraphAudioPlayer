@@ -83,9 +83,17 @@ std::wstring joinPath(const std::wstring& dir, const std::wstring& name)
 double CueSheet::parseTimecode(const std::string& tc)
 {
     int mm = 0, ss = 0, ff = 0;
-    if (sscanf_s(tc.c_str(), "%d:%d:%d", &mm, &ss, &ff) != 3) return -1.0;
-    if (mm < 0 || ss < 0 || ff < 0 || ss >= 60 || ff >= 75) return -1.0;
-    return mm * 60.0 + ss + ff / 75.0;
+    // 标准格式 MM:SS:FF
+    if (sscanf_s(tc.c_str(), "%d:%d:%d", &mm, &ss, &ff) == 3) {
+        if (mm < 0 || ss < 0 || ff < 0 || ss >= 60 || ff >= 75) return -1.0;
+        return mm * 60.0 + ss + ff / 75.0;
+    }
+    // 兜底：两段 MM:SS（部分手写 cue 文件遗漏 FF 段）
+    if (sscanf_s(tc.c_str(), "%d:%d", &mm, &ss) == 2) {
+        if (mm < 0 || ss < 0 || ss >= 60) return -1.0;
+        return mm * 60.0 + ss;
+    }
+    return -1.0;
 }
 
 std::vector<PlaylistItem> CueSheet::parse(const std::wstring& cue_path,
