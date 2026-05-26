@@ -57,24 +57,47 @@ Item {
                 elide: Text.ElideRight
             }
 
-            ToolButton {
-                text: "刷新"
-                font.pixelSize: 11
-                ToolTip.text: "重新从磁盘扫描同名 .lrc"
+            component LrcButton: Button {
+                id: btn
+                property string toolTipText: ""
+                padding: 4
+                leftPadding: 10
+                rightPadding: 10
+                
+                ToolTip.text: toolTipText
                 ToolTip.visible: hovered
+                
+                contentItem: Text {
+                    text: btn.text
+                    font.family: window.fontFamily
+                    font.pixelSize: 11
+                    font.weight: btn.hovered ? Font.Medium : Font.Normal
+                    color: btn.hovered ? window.textPrimary : window.textSecondary
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                
+                background: Rectangle {
+                    radius: height / 2
+                    color: btn.pressed ? "#1A000000" : (btn.hovered ? window.hoverBg : "transparent")
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                }
+            }
+
+            LrcButton {
+                text: "刷新"
+                toolTipText: "重新从磁盘扫描同名 .lrc"
                 onClicked: playerVM.refreshLyrics()
             }
-            ToolButton {
+            LrcButton {
                 text: "加载..."
-                font.pixelSize: 11
-                ToolTip.text: "选一个 .lrc 文件覆盖当前歌词"
-                ToolTip.visible: hovered
+                toolTipText: "选一个 .lrc 文件覆盖当前歌词"
                 onClicked: lrcDialog.open()
             }
-            ToolButton {
+            LrcButton {
                 text: "清空"
-                font.pixelSize: 11
                 visible: playerVM.hasLyrics
+                toolTipText: "清空当前显示的歌词"
                 onClicked: playerVM.clearLyrics()
             }
         }
@@ -156,8 +179,8 @@ Item {
                     text: modelData.text
                     font.family: window.fontFamily
                     font.pixelSize: isActive ? 16 : 14
-                    font.weight: isActive ? Font.DemiBold : Font.Medium
-                    color: isActive ? window.textPrimary : window.textSecondary
+                    font.weight: isActive ? Font.Bold : Font.Medium
+                    color: isActive ? window.brand : window.textSecondary
                     opacity: fadeOpacity
                     elide: Text.ElideRight
                     Behavior on font.pixelSize { NumberAnimation { duration: 200 } }

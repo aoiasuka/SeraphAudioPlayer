@@ -3,61 +3,108 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 
-// 一体化窗口控制条 — 透明拖拽区 + 左上角汉堡 + 右上角浮岛式系统按钮
-// 极简风格: 左 = 抽屉触发, 中 = 拖拽区, 右 = 最小化/最大化/关闭
+// Synapse 风格标题栏 — Acrylic 半透明白 + 品牌 logo + 系统按钮
+//
+// 布局:
+//   左 (可点击): 品牌圆形 disc 图标(slow spin) + "Synapse Audio" 文字 — 点击切换侧栏
+//   中: 拖拽区
+//   右: min / max / close (Win11 一体化 46x32)
 Rectangle {
     id: root
-    height: 36
-    color: "transparent"
+    height: 40
+    color: window.acrylicTitleBar
+    border.width: 0
 
     required property Window targetWindow
 
-    // 暴露按钮 (无外部 hit-test 库,但保留 alias 以备扩展)
     property alias minimizeButton: btnMin
     property alias maximizeButton: btnMax
     property alias closeButton: btnClose
 
-    // 由外部连接, 点击触发打开导航抽屉
     signal hamburgerClicked()
 
     readonly property bool isMaximized: targetWindow.visibility === Window.Maximized
 
-    // ===== 左上角汉堡: 触发 Drawer =====
+    // 底部 1px 极细分隔
     Rectangle {
-        id: btnHamburger
-        width: 46
-        height: parent.height
         anchors.left: parent.left
-        anchors.top: parent.top
-        color: hamArea.pressed
-               ? "#22000000"
-               : (hamArea.containsMouse ? "#11000000" : "transparent")
-        Behavior on color { ColorAnimation { duration: 120 } }
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 1
+        color: window.borderColor
+    }
 
-        AppIcon {
+    // ===== 左: 品牌 logo + 名称 (可点击切换侧栏) =====
+    Item {
+        id: brand
+        anchors.left: parent.left
+        anchors.leftMargin: 14
+        anchors.verticalCenter: parent.verticalCenter
+        width: brandRow.implicitWidth + 12
+        height: parent.height
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.topMargin: 4
+            anchors.bottomMargin: 4
+            radius: 6
+            color: brandArea.pressed
+                   ? "#1A000000"
+                   : (brandArea.containsMouse ? "#0A000000" : "transparent")
+            Behavior on color { ColorAnimation { duration: 120 } }
+        }
+
+        RowLayout {
+            id: brandRow
             anchors.centerIn: parent
-            name: "menu"
-            size: 16
-            color: window.textPrimary
-            strokeWidth: 1.8
+            spacing: 8
+
+            // Disc 图标 (slow spin)
+            Item {
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+
+                AppIcon {
+                    id: discIcon
+                    anchors.centerIn: parent
+                    name: "album"
+                    size: 16
+                    color: window.brand
+                    strokeWidth: 1.8
+                    RotationAnimation on rotation {
+                        from: 0; to: 360
+                        duration: 12000
+                        loops: Animation.Infinite
+                        running: true
+                    }
+                }
+            }
+
+            Text {
+                text: "Synapse Audio"
+                font.family: window.fontFamily
+                font.pixelSize: 12
+                font.weight: Font.DemiBold
+                color: window.textPrimary
+            }
         }
 
         MouseArea {
-            id: hamArea
+            id: brandArea
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: root.hamburgerClicked()
             ToolTip.visible: containsMouse
             ToolTip.delay: 500
-            ToolTip.text: "展开/折叠"
+            ToolTip.text: "展开/折叠侧栏"
         }
     }
 
-    // ===== 拖拽区 (除去汉堡和系统按钮以外的整条 titleBar 都可拖窗) =====
+    // ===== 拖拽区 =====
     MouseArea {
         id: dragArea
-        anchors.left: btnHamburger.right
+        anchors.left: brand.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.right: controls.left
@@ -74,7 +121,7 @@ Rectangle {
         }
     }
 
-    // ===== 右上角三联系统按钮 (Win11 一体化规格 46×32, 合体无间隙) =====
+    // ===== 右上角三联系统按钮 (Win11 规格 46x40) =====
     Row {
         id: controls
         anchors.right: parent.right
@@ -88,15 +135,15 @@ Rectangle {
             width: 46
             height: parent.height
             color: minArea.pressed
-                   ? "#22000000"
-                   : (minArea.containsMouse ? "#11000000" : "transparent")
+                   ? "#1F000000"
+                   : (minArea.containsMouse ? "#0E000000" : "transparent")
             Behavior on color { ColorAnimation { duration: 120 } }
 
             AppIcon {
                 anchors.centerIn: parent
                 name: "min"
                 size: 12
-                color: window.textPrimary
+                color: window.textSecondary
                 strokeWidth: 1.2
             }
 
@@ -117,24 +164,24 @@ Rectangle {
             width: 46
             height: parent.height
             color: maxArea.pressed
-                   ? "#22000000"
-                   : (maxArea.containsMouse ? "#11000000" : "transparent")
+                   ? "#1F000000"
+                   : (maxArea.containsMouse ? "#0E000000" : "transparent")
             Behavior on color { ColorAnimation { duration: 120 } }
 
-            // 普通态:单层方框
+            // 普通态: 单层方框
             Item {
                 anchors.centerIn: parent
-                width: 12; height: 12
+                width: 11; height: 11
                 visible: !root.isMaximized
                 Rectangle {
                     anchors.fill: parent
                     color: "transparent"
-                    border.color: window.textPrimary
+                    border.color: window.textSecondary
                     border.width: 1.2
                     radius: 1
                 }
             }
-            // 还原态:双层错位方框
+            // 还原态: 双层错位方框
             Item {
                 anchors.centerIn: parent
                 width: 12; height: 12
@@ -143,7 +190,7 @@ Rectangle {
                     width: 9; height: 9
                     x: 3; y: 0
                     color: "transparent"
-                    border.color: window.textPrimary
+                    border.color: window.textSecondary
                     border.width: 1.2
                     radius: 1
                 }
@@ -151,7 +198,7 @@ Rectangle {
                     width: 9; height: 9
                     x: 0; y: 3
                     color: btnMax.color
-                    border.color: window.textPrimary
+                    border.color: window.textSecondary
                     border.width: 1.2
                     radius: 1
                 }
@@ -171,7 +218,7 @@ Rectangle {
             }
         }
 
-        // ---- 关闭 (Win11 标准红 #E81123) ----
+        // ---- 关闭 ----
         Rectangle {
             id: btnClose
             width: 46
@@ -185,7 +232,7 @@ Rectangle {
                 anchors.centerIn: parent
                 name: "close"
                 size: 12
-                color: closeArea.containsMouse ? "#FFFFFF" : window.textPrimary
+                color: closeArea.containsMouse ? "#FFFFFF" : window.textSecondary
                 strokeWidth: 1.2
             }
 

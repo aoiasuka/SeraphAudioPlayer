@@ -20,9 +20,9 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        radius: height / 2
-        // 仅绘制悬浮背景（激活背景与指示条由 Sidebar 的 sharedHighlight 统一接管，实现极致顺滑的滑动独占高亮）
-        color: hoverArea.containsMouse ? "#153B82F6" : "transparent"
+        radius: 8
+        // 仅绘制悬浮背景（激活背景与指示条由 Sidebar 的 sharedHighlight 统一接管）
+        color: hoverArea.containsMouse ? window.hoverBg : "transparent"
         Behavior on color { ColorAnimation { duration: 150 } }
     }
 

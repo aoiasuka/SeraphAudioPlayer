@@ -1,15 +1,29 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../components"
 import QtQuick.Effects
+import "../components"
 
+// Synapse HiFi 正在播放视图 — 中央播放区 + 右侧 320px 信息栏
+//
+// 中央列:
+//   - Cover (呼吸光晕 + 边框)
+//   - Title / Artist / Album
+//   - Hi-Res 金色徽章
+//   - Output 状态行 (左 "轻量化"  右 "WASAPI - DAC")
+//   - Canvas 波形进度条
+//   - 控制行 (shuffle/prev/PLAY/next/loop/like + volume)
+//
+// 右侧列:
+//   - 下一首播放 卡片
+//   - Lyrics 歌词区
+//   - Audio Info 音频信息卡 (Format / Bitrate / SampleRate / Channels / Size)
 Item {
     id: root
     objectName: "nowPlayingView"
 
-    // 是否有正在播放/可播放的曲目: 队列已加载到某一首即视为"有曲目"
-    // 这是整个视图条件渲染的核心开关
+    property bool eqPanelVisible: false
+
     readonly property bool hasTrack: playerVM.currentIndex >= 0
 
     function formatTime(seconds) {
@@ -19,90 +33,43 @@ Item {
         return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s)
     }
 
-    TrackContextMenu {
-        id: ctxMenu
+    // 当前曲目摘要 (用于波形 trackKey)
+    readonly property string trackKey: {
+        if (!hasTrack || !playerVM.queue || playerVM.queue.length === 0) return ""
+        var cur = playerVM.queue[playerVM.currentIndex]
+        return cur ? (cur.path || cur.title || "") : ""
     }
 
-    // 视图模式: "cover" | "lyrics"
-    property string viewMode: "cover"
+    TrackContextMenu { id: ctxMenu }
 
-    // 背景透明, 主窗口的护眼米白背景自然透过
-    // (旧版叠加白雾化层是为压低紫色渐变的饱和度, 新版主背景已是浅色, 无需再加层)
-
-    // 顶部栏
+    // ============ 顶部小工具栏 (轻量化 — 仅返回 + more) ============
     RowLayout {
         id: topBar
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.margins: 20
-        height: 44
+        anchors.margins: 16
+        height: 32
         spacing: 8
 
         SidebarIconButton {
             iconName: "chevron"
-            iconSize: 18
-            iconColor: window.textPrimary
-            implicitWidth: 36
-            implicitHeight: 36
+            iconSize: 16
+            iconColor: window.textSecondary
+            implicitWidth: 32
+            implicitHeight: 32
             onClicked: root.StackView.view.pop()
-            // 反向显示 chevron
             rotation: 180
         }
 
         Item { Layout.fillWidth: true }
 
-        // 视图切换按钮(封面 / 歌词)
-        Rectangle {
-            visible: root.hasTrack
-            Layout.preferredHeight: 32
-            radius: 16
-            color: window.sidebarBg
-            border.color: window.borderColor
-            border.width: 1
-            Layout.preferredWidth: segRow.implicitWidth + 8
-
-            RowLayout {
-                id: segRow
-                anchors.centerIn: parent
-                spacing: 0
-                Repeater {
-                    model: [
-                        { v: "cover",  label: "封面" },
-                        { v: "lyrics", label: "歌词" },
-                        { v: "viz",    label: "频谱" }
-                    ]
-                    delegate: Rectangle {
-                        Layout.preferredWidth: 50
-                        Layout.preferredHeight: 26
-                        radius: 13
-                        color: root.viewMode === modelData.v ? window.brand : "transparent"
-                        Behavior on color { ColorAnimation { duration: 150 } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: modelData.label
-                            font.family: window.fontFamily
-                            font.pixelSize: 12
-                            font.weight: Font.DemiBold
-                            color: root.viewMode === modelData.v ? "#FFFFFF" : window.textPrimary
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.viewMode = modelData.v
-                        }
-                    }
-                }
-            }
-        }
-
         SidebarIconButton {
             iconName: "more"
-            iconSize: 18
-            iconColor: window.textPrimary
-            implicitWidth: 36
-            implicitHeight: 36
+            iconSize: 16
+            iconColor: window.textSecondary
+            implicitWidth: 32
+            implicitHeight: 32
             onClicked: {
                 if (playerVM.title && playerVM.title !== "未播放" && playerVM.queue.length > 0) {
                     var cur = playerVM.queue[playerVM.currentIndex]
@@ -112,344 +79,832 @@ Item {
         }
     }
 
-    // 封面
+    // ============ 右侧 320 信息栏 ============
     Rectangle {
-        id: coverArt
-        visible: root.hasTrack && root.viewMode === "cover"
-        anchors.top: topBar.bottom
-        anchors.topMargin: 40
-        anchors.horizontalCenter: parent.horizontalCenter
-        width: Math.min(parent.width * 0.6, bottomArea.y - y - 40)
-        height: width
-        radius: 16
-        color: window.textPrimary
-        clip: true
-
-        // 内嵌封面图(若有)
-        Rectangle {
-            id: coverImgMask
-            width: coverImg.width
-            height: coverImg.height
-            radius: 16
-            color: "black"
-            antialiasing: true
-        }
-
-        Image {
-            id: coverImg
-            anchors.fill: parent
-            source: playerVM.currentCoverUrl
-            visible: source.toString().length > 0 && status === Image.Ready
-            fillMode: Image.PreserveAspectCrop
-            asynchronous: true
-            cache: true
-
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                maskEnabled: true
-                maskSource: ShaderEffectSource {
-                    sourceItem: coverImgMask
-                    hideSource: true
-                }
-            }
-        }
-
-        // 黑胶纹理(无封面时显示)
-        Rectangle {
-            id: vinyl
-            visible: !coverImg.visible
-            anchors.centerIn: parent
-            width: parent.width * 0.75
-            height: width
-            radius: width / 2
-            color: "#0B0F14"
-
-            // 播放时旋转
-            RotationAnimation on rotation {
-                id: rot
-                from: 0; to: 360
-                duration: 8000
-                loops: Animation.Infinite
-                running: playerVM.state === 2 && !coverImg.visible
-            }
-
-            Repeater {
-                model: 5
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: parent.width - 16 - index * 22
-                    height: width
-                    radius: width / 2
-                    color: "transparent"
-                    border.color: "#16202C"
-                    border.width: 1
-                }
-            }
-
-            Rectangle {
-                anchors.centerIn: parent
-                width: parent.width * 0.3
-                height: width
-                radius: width / 2
-                color: "#2563EB"
-            }
-        }
-
-        // 软阴影
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: -8
-            anchors.verticalCenterOffset: 6
-            z: -1
-            radius: 24
-            color: "#000000"
-            opacity: 0.06
-        }
-    }
-
-    // 歌词视图(占据封面同位置)
-    LyricsView {
-        id: lyricsArea
-        visible: root.hasTrack && root.viewMode === "lyrics"
-        anchors.top: topBar.bottom
-        anchors.topMargin: 24
-        anchors.bottom: bottomArea.top
-        anchors.bottomMargin: 24
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: 32
-        anchors.rightMargin: 32
-    }
-
-    // 频谱视图(占据封面同位置)
-    SpectrumView {
-        id: vizArea
-        visible: root.hasTrack && root.viewMode === "viz"
-        anchors.top: topBar.bottom
-        anchors.topMargin: 40
-        anchors.bottom: bottomArea.top
-        anchors.bottomMargin: 24
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: 48
-        anchors.rightMargin: 48
-    }
-
-    // 底部控制区域 (统一布局, 避免组件重叠)
-    ColumnLayout {
-        id: bottomArea
+        id: rightPanel
         visible: root.hasTrack
+        anchors.top: topBar.bottom
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 40
-        anchors.left: parent.left
         anchors.right: parent.right
-        anchors.leftMargin: Math.max(48, parent.width * 0.15)
-        anchors.rightMargin: Math.max(48, parent.width * 0.15)
-        spacing: 32
+        anchors.topMargin: 8
+        anchors.bottomMargin: 16
+        anchors.rightMargin: 16
+        width: 320
+        radius: 14
+        color: window.acrylicRightBg
+        border.color: window.borderColor
+        border.width: 1
+        antialiasing: true
 
-        // 1. 歌曲信息 (标题、艺术家、格式)
         ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 6
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 12
 
-            RowLayout {
+            // ----- 下一首播放 -----
+            ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 8
-
-                Item { Layout.fillWidth: true }
+                spacing: 6
 
                 Text {
-                    text: playerVM.title
+                    text: "下一首播放"
                     font.family: window.fontFamily
-                    font.pixelSize: 24
+                    font.pixelSize: 10
+                    font.weight: Font.Bold
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.8
+                    color: window.textTertiary
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 56
+                    radius: 10
+                    color: nextArea.containsMouse ? window.acrylicCardBgHi : window.acrylicCardBg
+                    border.color: window.borderColor
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 10
+
+                        // 下一首封面
+                        Item {
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 6
+                                color: window.surfaceAlt
+                                border.color: window.borderColor
+                                border.width: 1
+                            }
+
+                            Rectangle {
+                                id: nextCoverMask
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                radius: 5
+                                color: "black"
+                                antialiasing: true
+                            }
+
+                            Image {
+                                id: nextCoverImg
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                source: {
+                                    if (!playerVM.queue || playerVM.queue.length === 0) return ""
+                                    var nextIdx = (playerVM.currentIndex + 1) % playerVM.queue.length
+                                    var nxt = playerVM.queue[nextIdx]
+                                    return nxt ? (nxt.coverUrl || "") : ""
+                                }
+                                visible: source.toString().length > 0 && status === Image.Ready
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                cache: true
+
+                                layer.enabled: true
+                                layer.effect: MultiEffect {
+                                    maskEnabled: true
+                                    maskSource: ShaderEffectSource {
+                                        sourceItem: nextCoverMask
+                                        hideSource: true
+                                    }
+                                }
+                            }
+
+                            AppIcon {
+                                anchors.centerIn: parent
+                                visible: !nextCoverImg.visible
+                                name: "music"
+                                size: 16
+                                color: window.textTertiary
+                                strokeWidth: 1.6
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: {
+                                    if (!playerVM.queue || playerVM.queue.length === 0) return "—"
+                                    var nextIdx = (playerVM.currentIndex + 1) % playerVM.queue.length
+                                    var nxt = playerVM.queue[nextIdx]
+                                    return nxt ? (nxt.title || "未知曲目") : "—"
+                                }
+                                font.family: window.fontFamily
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                                color: window.textPrimary
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: {
+                                    if (!playerVM.queue || playerVM.queue.length === 0) return ""
+                                    var nextIdx = (playerVM.currentIndex + 1) % playerVM.queue.length
+                                    var nxt = playerVM.queue[nextIdx]
+                                    return nxt ? (nxt.artist || "") : ""
+                                }
+                                font.family: window.fontFamily
+                                font.pixelSize: 10
+                                color: window.textTertiary
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        Item {
+                            Layout.preferredWidth: 22
+                            Layout.preferredHeight: 22
+                            AppIcon {
+                                anchors.centerIn: parent
+                                name: "more"
+                                size: 14
+                                color: window.textTertiary
+                                strokeWidth: 1.6
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: nextArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: playerVM.next()
+                    }
+                }
+            }
+
+            // ----- 歌词面板 -----
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 6
+
+                Text {
+                    text: "LYRICS 歌词区域"
+                    font.family: window.fontFamily
+                    font.pixelSize: 10
+                    font.weight: Font.Bold
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.8
+                    color: window.textTertiary
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 10
+                    color: window.acrylicCardBg
+                    border.color: window.borderColor
+                    border.width: 1
+                    clip: true
+
+                    LyricsView {
+                        anchors.fill: parent
+                        anchors.margins: 6
+                    }
+                }
+            }
+
+            // ----- 音频信息 -----
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Text {
+                    text: "AUDIO INFO 音频信息"
+                    font.family: window.fontFamily
+                    font.pixelSize: 10
+                    font.weight: Font.Bold
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.8
+                    color: window.textTertiary
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: audioInfoCol.implicitHeight + 16
+                    radius: 10
+                    color: window.acrylicCardBg
+                    border.color: window.borderColor
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: audioInfoCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 4
+
+                        function parseFormat() {
+                            var f = playerVM.formatInfo || ""
+                            var parts = { format: "—", rate: "—", bits: "—" }
+                            if (f.length === 0) return parts
+                            var m = f.match(/^(\w+)/)
+                            if (m) parts.format = m[1]
+                            var r = f.match(/(\d+(\.\d+)?)\s*kHz/i)
+                            if (r) parts.rate = r[1] + " kHz"
+                            var b = f.match(/(\d+)\s*bit/i)
+                            if (b) parts.bits = b[1] + " bit"
+                            return parts
+                        }
+
+                        readonly property var info: parseFormat()
+
+                        Repeater {
+                            model: [
+                                { k: "Format",      v: audioInfoCol.info.format },
+                                { k: "Bit Depth",   v: audioInfoCol.info.bits },
+                                { k: "Sample Rate", v: audioInfoCol.info.rate },
+                                { k: "Device",      v: playerVM.currentDeviceName || "—" }
+                            ]
+                            delegate: RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: modelData.k + ":"
+                                    font.family: window.fontFamily
+                                    font.pixelSize: 10
+                                    color: window.textTertiary
+                                    Layout.preferredWidth: 80
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.v
+                                    font.family: window.fontFamily
+                                    font.pixelSize: 10
+                                    font.weight: Font.Medium
+                                    color: window.textPrimary
+                                    elide: Text.ElideRight
+                                    horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ============ 中央播放区 ============
+    Item {
+        id: centerCol
+        visible: root.hasTrack
+        anchors.top: topBar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: rightPanel.left
+        anchors.topMargin: 8
+        anchors.bottomMargin: 16
+        anchors.leftMargin: 24
+        anchors.rightMargin: 24
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Math.max(0, (parent.width - 560) / 2)
+            anchors.rightMargin: Math.max(0, (parent.width - 560) / 2)
+            spacing: 14
+
+            Item { Layout.fillHeight: true }
+
+            // ----- 封面 (呼吸 + 光晕) -----
+            Item {
+                id: coverWrap
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: 240
+                Layout.preferredHeight: 240
+
+                // 后置光晕 (品牌色, 缓慢呼吸)
+                Rectangle {
+                    id: coverGlow
+                    anchors.centerIn: parent
+                    width: parent.width * 1.15
+                    height: parent.height * 1.15
+                    radius: width / 2
+                    color: window.brandLite
+                    opacity: 0.20
+                    layer.enabled: true
+                    layer.smooth: true
+                    layer.effect: MultiEffect {
+                        blurEnabled: true
+                        blurMax: 64
+                        blur: 1.0
+                    }
+
+                    SequentialAnimation on opacity {
+                        loops: Animation.Infinite
+                        running: playerVM.state === 2
+                        NumberAnimation { from: 0.12; to: 0.28; duration: 6000; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 0.28; to: 0.12; duration: 6000; easing.type: Easing.InOutSine }
+                    }
+                }
+
+                // 封面卡片
+                Rectangle {
+                    id: coverCard
+                    anchors.fill: parent
+                    radius: 16
+                    color: window.surface
+                    border.color: "#80FFFFFF"
+                    border.width: 1
+                    clip: true
+                    antialiasing: true
+
+                    // 呼吸缩放
+                    SequentialAnimation on scale {
+                        loops: Animation.Infinite
+                        running: playerVM.state === 2
+                        NumberAnimation { from: 1.0;   to: 1.012; duration: 6000; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 1.012; to: 1.0;   duration: 6000; easing.type: Easing.InOutSine }
+                    }
+
+                    Rectangle {
+                        id: coverImgMask
+                        width: coverImg.width
+                        height: coverImg.height
+                        radius: 16
+                        color: "black"
+                        antialiasing: true
+                    }
+
+                    Image {
+                        id: coverImg
+                        anchors.fill: parent
+                        source: playerVM.currentCoverUrl
+                        visible: source.toString().length > 0 && status === Image.Ready
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                        cache: true
+
+                        layer.enabled: true
+                        layer.effect: MultiEffect {
+                            maskEnabled: true
+                            maskSource: ShaderEffectSource {
+                                sourceItem: coverImgMask
+                                hideSource: true
+                            }
+                        }
+                    }
+
+                    // 无封面占位
+                    Rectangle {
+                        visible: !coverImg.visible
+                        anchors.fill: parent
+                        gradient: Gradient {
+                            orientation: Gradient.Diagonal
+                            GradientStop { position: 0.0; color: "#E2E8F0" }
+                            GradientStop { position: 1.0; color: "#CBD5E1" }
+                        }
+                        AppIcon {
+                            anchors.centerIn: parent
+                            name: "music"
+                            size: 56
+                            color: window.brand
+                            strokeWidth: 1.6
+                        }
+                    }
+                }
+            }
+
+            // ----- 标题 / 艺术家 / 专辑 -----
+            ColumnLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    text: playerVM.title || "未播放"
+                    font.family: window.fontFamily
+                    font.pixelSize: 22
                     font.weight: Font.Bold
                     color: window.textPrimary
                     elide: Text.ElideRight
                     horizontalAlignment: Text.AlignHCenter
                 }
 
-                // 喜欢按钮
-                Item {
-                    Layout.preferredWidth: 36
-                    Layout.preferredHeight: 36
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 18
-                        color: likeArea.containsMouse ? window.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: 120 } }
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    text: {
+                        var cur = playerVM.queue && playerVM.queue.length > 0
+                            ? playerVM.queue[playerVM.currentIndex] : null
+                        return "Artist · " + (cur && cur.artist ? cur.artist : "—")
                     }
+                    font.family: window.fontFamily
+                    font.pixelSize: 11
+                    font.weight: Font.DemiBold
+                    color: window.textSecondary
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignHCenter
+                }
 
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    text: {
+                        var cur = playerVM.queue && playerVM.queue.length > 0
+                            ? playerVM.queue[playerVM.currentIndex] : null
+                        return "💿 Album · " + (cur && cur.album ? cur.album : "—")
+                    }
+                    font.family: window.fontFamily
+                    font.pixelSize: 11
+                    color: window.textTertiary
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignHCenter
+                }
+            }
+
+            // ----- Hi-Res 徽章 -----
+            HiResBadge {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 2
+                formatText: playerVM.formatInfo
+            }
+
+            // ----- Output 标签行 -----
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+                spacing: 0
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "轻量化 · 独占模式"
+                    font.family: window.fontFamily
+                    font.pixelSize: 10
+                    color: window.textTertiary
+                }
+
+                RowLayout {
+                    spacing: 4
                     AppIcon {
-                        anchors.centerIn: parent
-                        name: "heart"
-                        size: 22
-                        color: playerVM.currentLiked ? window.likeRed : window.textSecondary
-                        filled: playerVM.currentLiked
-                        strokeWidth: 1.8
+                        name: "volume"
+                        size: 11
+                        color: window.textSecondary
+                        strokeWidth: 1.6
                     }
-
-                    MouseArea {
-                        id: likeArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: playerVM.toggleLikeCurrent()
+                    Text {
+                        text: (playerVM.currentDeviceName || "默认设备")
+                        font.family: window.fontFamily
+                        font.pixelSize: 10
+                        font.weight: Font.DemiBold
+                        color: window.textSecondary
+                        elide: Text.ElideRight
+                        Layout.maximumWidth: 200
                     }
                 }
-
-                Item { Layout.fillWidth: true }
             }
 
-            Text {
-                text: playerVM.formatInfo
-                font.family: window.fontFamily
-                font.pixelSize: 14
-                color: window.textSecondary
-                elide: Text.ElideRight
+            // ----- 波形进度条 -----
+            WaveformProgressBar {
                 Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-            }
-        }
-
-        // 2. 进度条 (同行布局: 时间 - 进度条 - 时间)
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 16
-
-            Text {
-                text: root.formatTime(playerVM.position)
-                font.family: window.fontFamily
-                font.pixelSize: 12
-                color: window.textTertiary
-                Layout.minimumWidth: 40
-                horizontalAlignment: Text.AlignRight
+                Layout.preferredHeight: 40
+                position: playerVM.position
+                duration: playerVM.duration > 0 ? playerVM.duration : 1
+                playing: playerVM.state === 2
+                trackKey: root.trackKey
+                onSeekRequested: function(t) { playerVM.seek(t) }
             }
 
-            Slider {
-                id: progressSlider
+            // ----- 控制行 -----
+            Item {
                 Layout.fillWidth: true
-                from: 0
-                to: playerVM.duration > 0 ? playerVM.duration : 1
-                Binding {
-                    target: progressSlider
-                    property: "value"
-                    value: playerVM.position
-                    when: !progressSlider.pressed
+                Layout.topMargin: 8
+                Layout.preferredHeight: 56
+
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: 1
+                    color: window.borderColor
                 }
 
-                onPressedChanged: {
-                    if (!pressed) playerVM.seek(value)
-                }
-
-                property bool barHovered: progressHover.hovered || pressed
-
-                background: Rectangle {
-                    x: progressSlider.leftPadding
-                    y: progressSlider.topPadding + progressSlider.availableHeight / 2 - height / 2
-                    width: progressSlider.availableWidth
-                    height: progressSlider.barHovered ? 4 : 2
-                    radius: height / 2
-                    color: window.hairline // 更淡的线条背景
-                    Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
-
-                    Rectangle {
-                        width: progressSlider.visualPosition * parent.width
-                        height: parent.height
-                        radius: parent.radius
-                        color: window.textPrimary
-                    }
-                }
-
-                handle: Rectangle {
-                    x: progressSlider.leftPadding + progressSlider.visualPosition * (progressSlider.availableWidth - width)
-                    y: progressSlider.topPadding + progressSlider.availableHeight / 2 - height / 2
-                    width: progressSlider.barHovered ? 12 : 0
-                    height: width
-                    radius: width / 2
-                    color: window.textPrimary
-                    Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutQuart } }
-                }
-
-                HoverHandler { id: progressHover }
-            }
-
-            Text {
-                text: root.formatTime(playerVM.duration)
-                font.family: window.fontFamily
-                font.pixelSize: 12
-                color: window.textTertiary
-                Layout.minimumWidth: 40
-            }
-        }
-
-        // 3. 控制按钮
-        RowLayout {
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 32
-
-            IconCircleBtn {
-                iconName: "shuffle"; size: 40; iconSize: 18
-                iconColor: playerVM.shuffle ? window.textPrimary : window.textTertiary
-                onClicked: playerVM.toggleShuffle()
-            }
-
-            IconCircleBtn {
-                iconName: "prev"; size: 44; iconSize: 22
-                iconColor: window.textPrimary
-                iconFilled: true
-                strokeWidthOverride: 0
-                onClicked: playerVM.previous()
-            }
-
-            // 主播放按钮 (深色实心胶囊)
-            Rectangle {
-                Layout.preferredWidth: 64
-                Layout.preferredHeight: 64
-                radius: 32
-                color: mainPlayArea.pressed ? "#000000"
-                     : (mainPlayArea.containsMouse ? "#0F0F11" : window.textPrimary)
-                Behavior on color { ColorAnimation { duration: 120 } }
-
-                AppIcon {
-                    anchors.centerIn: parent
-                    anchors.horizontalCenterOffset: playerVM.state === 2 ? 0 : 2
-                    name: playerVM.state === 2 ? "pause" : "play"
-                    size: 26
-                    color: "#FFFFFF"
-                    filled: true
-                }
-
-                MouseArea {
-                    id: mainPlayArea
+                RowLayout {
                     anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (playerVM.state === 2) playerVM.pause()
-                        else playerVM.play()
+                    anchors.topMargin: 10
+                    spacing: 0
+
+                    // 左侧控制 (EQ开关等)
+                    RowLayout {
+                        Layout.preferredWidth: 140
+                        spacing: 12
+                        
+                        IconCircleBtn {
+                            iconName: "sliders"
+                            size: 30
+                            iconSize: 14
+                            iconColor: root.eqPanelVisible ? window.brand : window.textTertiary
+                            onClicked: root.eqPanelVisible = !root.eqPanelVisible
+                        }
+                    }
+
+                    // 中部主控按钮
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 18
+
+                        Item { Layout.fillWidth: true }
+
+                        IconCircleBtn {
+                            iconName: "shuffle"; size: 30; iconSize: 14
+                            iconColor: playerVM.shuffle ? window.brand : window.textTertiary
+                            onClicked: playerVM.toggleShuffle()
+                        }
+
+                        IconCircleBtn {
+                            iconName: "prev"; size: 32; iconSize: 16
+                            iconColor: window.textSecondary
+                            iconFilled: true
+                            strokeWidthOverride: 0
+                            onClicked: playerVM.previous()
+                        }
+
+                        // 主播放按钮 (Cyan-600 圆形 + 阴影)
+                        Item {
+                            Layout.preferredWidth: 44
+                            Layout.preferredHeight: 44
+
+                            // 软阴影
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.margins: -3
+                                anchors.verticalCenterOffset: 4
+                                radius: width / 2
+                                color: window.brand
+                                opacity: mainPlayArea.containsMouse ? 0.42 : 0.28
+                                z: -1
+                                Behavior on opacity { NumberAnimation { duration: 180 } }
+                                layer.enabled: true
+                                layer.smooth: true
+                                layer.effect: MultiEffect {
+                                    blurEnabled: true
+                                    blurMax: 24
+                                    blur: 1.0
+                                }
+                            }
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: mainPlayArea.pressed ? window.brandPress
+                                     : (mainPlayArea.containsMouse ? window.brandHover : window.brand)
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                scale: mainPlayArea.containsMouse ? 1.05 : 1.0
+                                Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
+
+                                AppIcon {
+                                    anchors.centerIn: parent
+                                    anchors.horizontalCenterOffset: playerVM.state === 2 ? 0 : 1.5
+                                    name: playerVM.state === 2 ? "pause" : "play"
+                                    size: 18
+                                    color: "#FFFFFF"
+                                    filled: true
+                                }
+                            }
+
+                            MouseArea {
+                                id: mainPlayArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (playerVM.state === 2) playerVM.pause()
+                                    else playerVM.play()
+                                }
+                            }
+                        }
+
+                        IconCircleBtn {
+                            iconName: "next"; size: 32; iconSize: 16
+                            iconColor: window.textSecondary
+                            iconFilled: true
+                            strokeWidthOverride: 0
+                            onClicked: playerVM.next()
+                        }
+
+                        IconCircleBtn {
+                            iconName: "repeat"; size: 30; iconSize: 14
+                            iconColor: playerVM.repeatMode > 0 ? window.brand : window.textTertiary
+                            badgeText: playerVM.repeatMode === 2 ? "1" : ""
+                            onClicked: playerVM.cycleRepeatMode()
+                        }
+
+                        // Like
+                        Item {
+                            Layout.preferredWidth: 30
+                            Layout.preferredHeight: 30
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: likeArea.containsMouse ? window.hoverBg : "transparent"
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                            }
+
+                            AppIcon {
+                                anchors.centerIn: parent
+                                name: "heart"
+                                size: 14
+                                color: playerVM.currentLiked ? window.likeRed : window.textTertiary
+                                filled: playerVM.currentLiked
+                                strokeWidth: 1.6
+                            }
+
+                            MouseArea {
+                                id: likeArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: playerVM.toggleLikeCurrent()
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // 右侧音量
+                    RowLayout {
+                        Layout.preferredWidth: 140
+                        spacing: 6
+
+                        Item { Layout.fillWidth: true }
+
+                        AppIcon {
+                            name: playerVM.muted || playerVM.volume === 0 ? "volume-mute" : "volume"
+                            size: 13
+                            color: window.textSecondary
+                            strokeWidth: 1.6
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: playerVM.toggleMute()
+                            }
+                        }
+
+                        Slider {
+                            id: volSlider
+                            Layout.preferredWidth: 72
+                            from: 0; to: 100
+                            value: playerVM.volume
+                            onMoved: {
+                                playerVM.volume = Math.round(value)
+                                if (playerVM.muted && value > 0) playerVM.muted = false
+                            }
+                            background: Rectangle {
+                                x: volSlider.leftPadding
+                                y: volSlider.topPadding + volSlider.availableHeight / 2 - 1
+                                width: volSlider.availableWidth
+                                height: 2
+                                radius: 1
+                                color: window.hairline
+                                Rectangle {
+                                    width: volSlider.visualPosition * parent.width
+                                    height: parent.height
+                                    radius: parent.radius
+                                    color: window.brand
+                                }
+                            }
+                            handle: Rectangle {
+                                x: volSlider.leftPadding + volSlider.visualPosition * (volSlider.availableWidth - width)
+                                y: volSlider.topPadding + (volSlider.availableHeight - height) / 2
+                                width: 8; height: 8; radius: 4
+                                color: window.brand
+                            }
+                        }
                     }
                 }
             }
+            // ----- 底部 EQ & 参数迷你面板 -----
+            Item {
+                id: eqPanelContainer
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.eqPanelVisible ? 140 : 0
+                Layout.topMargin: root.eqPanelVisible ? 16 : 0
+                Layout.bottomMargin: root.eqPanelVisible ? 8 : 0
+                visible: opacity > 0
+                opacity: root.eqPanelVisible ? 1 : 0
+                clip: true
+                Behavior on Layout.preferredHeight { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
+                Behavior on Layout.topMargin { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
+                Behavior on Layout.bottomMargin { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
+                Behavior on opacity { NumberAnimation { duration: 300; easing.type: Easing.OutQuart } }
+                
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 12
+                    color: window.acrylicCardBg
+                    border.color: window.borderColor
+                    border.width: 1
 
-            IconCircleBtn {
-                iconName: "next"; size: 44; iconSize: 22
-                iconColor: window.textPrimary
-                iconFilled: true
-                strokeWidthOverride: 0
-                onClicked: playerVM.next()
-            }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 24
 
-            IconCircleBtn {
-                iconName: "repeat"; size: 40; iconSize: 18
-                iconColor: playerVM.repeatMode > 0 ? window.textPrimary : window.textTertiary
-                badgeText: playerVM.repeatMode === 2 ? "1" : ""
-                onClicked: playerVM.cycleRepeatMode()
+                        // EQ 频段柱子
+                        RowLayout {
+                            Layout.fillHeight: true
+                            Layout.preferredWidth: 260
+                            spacing: 6
+                            Repeater {
+                                model: playerVM.eqGains
+                                delegate: Item {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    Rectangle {
+                                        width: 6
+                                        height: Math.max(4, (modelData + 12) / 24 * parent.height)
+                                        anchors.bottom: parent.bottom
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        radius: 3
+                                        color: playerVM.eqEnabled ? window.brand : window.textTertiary
+                                        Behavior on height { NumberAnimation { duration: 200 } }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 分割线
+                        Rectangle {
+                            Layout.preferredWidth: 1
+                            Layout.fillHeight: true
+                            color: window.divider
+                        }
+
+                        // 音频参数
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 4
+
+                            Text {
+                                text: "AUDIO TECH INFO"
+                                font.pixelSize: 10
+                                font.weight: Font.Bold
+                                color: window.textTertiary
+                                font.family: window.fontFamily
+                            }
+                            Text {
+                                text: "Format: " + (playerVM.formatInfo || "Unknown")
+                                font.pixelSize: 11
+                                color: window.textSecondary
+                                font.family: window.fontFamily
+                            }
+                            Text {
+                                text: "Device: " + (playerVM.currentDeviceName || "Default")
+                                font.pixelSize: 11
+                                color: window.textSecondary
+                                font.family: window.fontFamily
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: "Buffer Frames: " + playerVM.statsFramesTotal
+                                font.pixelSize: 11
+                                color: window.textSecondary
+                                font.family: window.fontFamily
+                            }
+                        }
+                        
+                        // 开关 EQ 的 Switch
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignTop | Qt.AlignRight
+                            Switch {
+                                checked: playerVM.eqEnabled
+                                onCheckedChanged: {
+                                    if (playerVM.eqEnabled !== checked) {
+                                        playerVM.eqEnabled = checked
+                                    }
+                                }
+                            }
+                            Text {
+                                text: playerVM.eqEnabled ? "EQ On" : "EQ Off"
+                                font.pixelSize: 10
+                                color: window.textTertiary
+                                font.family: window.fontFamily
+                                Layout.alignment: Qt.AlignHCenter
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // ===== 空状态: 没有任何曲目时显示提示, 与上面所有"播放态"元素互斥 =====
+    // ============ 空状态 ============
     Item {
         id: emptyState
         visible: !root.hasTrack
@@ -460,48 +915,47 @@ Item {
 
         ColumnLayout {
             anchors.centerIn: parent
-            spacing: 18
+            spacing: 16
 
             Rectangle {
                 Layout.alignment: Qt.AlignHCenter
-                width: 112; height: 112; radius: 56
-                color: window.sidebarBg
+                width: 96; height: 96; radius: 48
+                color: window.acrylicCardBg
                 border.color: window.borderColor
                 border.width: 1
 
                 AppIcon {
                     anchors.centerIn: parent
                     name: "music"
-                    size: 48
-                    color: window.textTertiary
+                    size: 40
+                    color: window.brand
                     strokeWidth: 1.6
                 }
             }
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                Layout.topMargin: 4
                 text: "暂无播放歌曲"
                 font.family: window.fontFamily
-                font.pixelSize: 20
+                font.pixelSize: 18
                 font.weight: Font.DemiBold
-                color: window.textSecondary
+                color: window.textPrimary
             }
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "请从左侧「音乐库」选择曲目,或拖拽音频文件到窗口"
+                text: "请从左侧「音乐库」选择曲目, 或拖拽音频文件到窗口"
                 font.family: window.fontFamily
-                font.pixelSize: 13
+                font.pixelSize: 12
                 color: window.textTertiary
             }
 
             Rectangle {
                 Layout.alignment: Qt.AlignHCenter
-                Layout.topMargin: 12
-                width: gotoRow.implicitWidth + 36
-                height: 38
-                radius: 19
+                Layout.topMargin: 8
+                width: gotoRow.implicitWidth + 32
+                height: 34
+                radius: 17
                 color: gotoArea.pressed ? window.brandPress
                      : (gotoArea.containsMouse ? window.brandHover : window.brand)
                 Behavior on color { ColorAnimation { duration: 150 } }
@@ -515,7 +969,7 @@ Item {
                         text: "打开音乐库"
                         color: "#FFFFFF"
                         font.family: window.fontFamily
-                        font.pixelSize: 13
+                        font.pixelSize: 12
                         font.weight: Font.DemiBold
                     }
                 }

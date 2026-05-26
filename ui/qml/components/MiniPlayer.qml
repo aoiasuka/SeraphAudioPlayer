@@ -3,19 +3,18 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Effects
 
-// 底部播放条 — 极简纯色悬浮胶囊
-// 设计:
-//   - 纯白卡片 + 柔和投影, 在米色主背景上"悬空"
-//   - 1px 极细描边 (10% 黑), 让边缘清晰
-//   - 极简单色进度条 (深灰), handle 仅 hover 时显现
+// 底部播放条 — Synapse Acrylic 风格悬浮胶囊
+// 视觉:
+//   - 半透明白 Acrylic 卡片 (#D9FFFFFF, 85%) + 1px 极细描边
+//   - 进度条用 cyan 渐变填充, hover 时增高 + 露出 handle
+//   - 主播放按钮为 cyan-600 圆形, 带 cyan 阴影光晕
 //   - 左: 封面 + 歌名/格式 + 喜欢
-//   - 中: 5 个控制按钮
-//   - 右: 音量 + 队列
+//   - 中: 5 个控制按钮 (主按钮 cyan)
+//   - 右: 时间 + 音量 (cyan 填充) + 队列
 Item {
     id: root
     clip: false
 
-    // 通过 alias 让外部继续用 .radius 调整
     property real radius: 0
 
     signal clicked()
@@ -41,12 +40,12 @@ Item {
         shadowHorizontalOffset: 0
     }
 
-    // ===== 主面板: 纯白胶囊 + 极细描边 =====
+    // ===== 主面板: Acrylic 白胶囊 + 极细描边 =====
     Rectangle {
         id: panel
         anchors.fill: parent
         radius: root.radius
-        color: window.surface
+        color: window.acrylicCardBgHi
         border.color: window.borderColor
         border.width: 1
         antialiasing: true
@@ -69,7 +68,7 @@ Item {
         return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s)
     }
 
-    // ===== 进度条 (极简单色细线) =====
+    // ===== 进度条 (cyan 渐变细线) =====
     Slider {
         id: progressSlider
         anchors.top: parent.top
@@ -101,15 +100,19 @@ Item {
             width: progressSlider.availableWidth
             height: progressSlider.barHovered ? 3 : 2
             radius: height / 2
-            color: "#1A000000"          // 极细灰线
+            color: "#14000000"
             Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
-            // 进度填充: 单色深灰, 与"极简"基调一致
+            // 进度填充: cyan 渐变
             Rectangle {
                 width: progressSlider.visualPosition * parent.width
                 height: parent.height
                 radius: parent.radius
-                color: window.textPrimary
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: window.brand }
+                    GradientStop { position: 1.0; color: "#22D3EE" }   // cyan-400
+                }
             }
         }
 
@@ -119,7 +122,9 @@ Item {
             width: progressSlider.barHovered ? 10 : 0
             height: width
             radius: width / 2
-            color: window.textPrimary
+            color: window.brand
+            border.color: "#FFFFFF"
+            border.width: 1.5
             Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutQuart } }
         }
 
@@ -129,7 +134,7 @@ Item {
     // 进度条下方留出 8px 后再渲染主行
     RowLayout {
         anchors.fill: parent
-        anchors.topMargin: 8              // 给细进度条让出空间
+        anchors.topMargin: 8
         anchors.leftMargin: 20
         anchors.rightMargin: 28
         spacing: 0
@@ -193,26 +198,47 @@ Item {
                 }
             }
 
-            ColumnLayout {
+            // 整列可点击 → 进入 NowPlayingView
+            Item {
                 Layout.fillWidth: true
-                spacing: 2
+                Layout.fillHeight: true
+                Layout.minimumHeight: 52
 
-                Text {
-                    Layout.fillWidth: true
-                    text: playerVM.title && playerVM.title !== "未播放" ? playerVM.title : ""
-                    font.family: window.fontFamily
-                    font.pixelSize: 14
-                    font.weight: Font.DemiBold
-                    color: window.textPrimary
-                    elide: Text.ElideRight
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 2
+
+                    Item { Layout.fillHeight: true }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: playerVM.title && playerVM.title !== "未播放" ? playerVM.title : "未播放"
+                        font.family: window.fontFamily
+                        font.pixelSize: 14
+                        font.weight: Font.DemiBold
+                        color: titleArea.containsMouse ? window.brand : window.textPrimary
+                        elide: Text.ElideRight
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: playerVM.formatInfo !== "" ? playerVM.formatInfo : ""
+                        font.family: window.fontFamily
+                        font.pixelSize: 12
+                        color: window.textSecondary
+                        elide: Text.ElideRight
+                    }
+
+                    Item { Layout.fillHeight: true }
                 }
-                Text {
-                    Layout.fillWidth: true
-                    text: playerVM.formatInfo !== "" ? playerVM.formatInfo : ""
-                    font.family: window.fontFamily
-                    font.pixelSize: 12
-                    color: window.textSecondary
-                    elide: Text.ElideRight
+
+                MouseArea {
+                    id: titleArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.clicked()
+                    z: 10
                 }
             }
 
@@ -260,7 +286,7 @@ Item {
             // shuffle
             IconCircleBtn {
                 iconName: "shuffle"; size: 32; iconSize: 16
-                iconColor: playerVM.shuffle ? window.textPrimary : window.textTertiary
+                iconColor: playerVM.shuffle ? window.brand : window.textTertiary
                 onClicked: playerVM.toggleShuffle()
             }
 
@@ -273,35 +299,61 @@ Item {
                 onClicked: playerVM.previous()
             }
 
-            // 主播放/暂停 (深色精细胶囊)
-            Rectangle {
+            // 主播放/暂停 — Cyan 圆形 + Cyan 光晕
+            Item {
                 Layout.preferredWidth: 46
                 Layout.preferredHeight: 46
-                radius: 23
-                color: playArea.pressed ? "#000000"
-                     : (playArea.containsMouse ? "#0F0F11" : window.textPrimary)
-                Behavior on color { ColorAnimation { duration: 150 } }
 
-                scale: playArea.containsMouse ? 1.04 : 1.0
-                Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
-
-                AppIcon {
-                    anchors.centerIn: parent
-                    anchors.horizontalCenterOffset: playerVM.state === 2 ? 0 : 1.5
-                    name: playerVM.state === 2 ? "pause" : "play"
-                    size: 18
-                    color: "#FFFFFF"
-                    filled: true
+                // 光晕底层
+                Rectangle {
+                    id: playGlowSrc
+                    anchors.fill: parent
+                    radius: width / 2
+                    color: window.brand
+                    visible: false
+                    layer.enabled: true
+                    layer.smooth: true
+                }
+                MultiEffect {
+                    anchors.fill: playGlowSrc
+                    source: playGlowSrc
+                    shadowEnabled: true
+                    shadowColor: window.brand
+                    shadowBlur: 1.0
+                    shadowVerticalOffset: 4
+                    shadowHorizontalOffset: 0
+                    opacity: 0.55
                 }
 
-                MouseArea {
-                    id: playArea
+                Rectangle {
+                    id: playBtn
                     anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (playerVM.state === 2) playerVM.pause()
-                        else playerVM.play()
+                    radius: width / 2
+                    color: playArea.pressed ? Qt.darker(window.brand, 1.1)
+                         : (playArea.containsMouse ? window.brandHover : window.brand)
+                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                    scale: playArea.containsMouse ? 1.05 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutQuad } }
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        anchors.horizontalCenterOffset: playerVM.state === 2 ? 0 : 1.5
+                        name: playerVM.state === 2 ? "pause" : "play"
+                        size: 18
+                        color: "#FFFFFF"
+                        filled: true
+                    }
+
+                    MouseArea {
+                        id: playArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (playerVM.state === 2) playerVM.pause()
+                            else playerVM.play()
+                        }
                     }
                 }
             }
@@ -318,7 +370,7 @@ Item {
             // repeat
             IconCircleBtn {
                 iconName: "repeat"; size: 32; iconSize: 16
-                iconColor: playerVM.repeatMode > 0 ? window.textPrimary : window.textTertiary
+                iconColor: playerVM.repeatMode > 0 ? window.brand : window.textTertiary
                 badgeText: playerVM.repeatMode === 2 ? "1" : ""
                 onClicked: playerVM.cycleRepeatMode()
             }
@@ -334,7 +386,40 @@ Item {
 
             Item { Layout.fillWidth: true }
 
-            // 紧凑时间显示 (取代原来中央长时间块)
+            // 展开按钮 → NowPlayingView
+            Item {
+                Layout.preferredWidth: 34
+                Layout.preferredHeight: 34
+                Layout.alignment: Qt.AlignVCenter
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 17
+                    color: expandArea.containsMouse ? window.hoverBg : "transparent"
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                }
+                AppIcon {
+                    anchors.centerIn: parent
+                    name: "chevron"
+                    size: 17
+                    color: expandArea.containsMouse ? window.brand : window.textSecondary
+                    strokeWidth: 1.8
+                    rotation: -90   // 默认右指 → 上指
+                }
+                MouseArea {
+                    id: expandArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    ToolTip.text: "展开正在播放"
+                    ToolTip.visible: containsMouse
+                    ToolTip.delay: 500
+                    onClicked: root.clicked()
+                    z: 10
+                }
+            }
+
+            // 紧凑时间显示
             Text {
                 text: root.formatTime(playerVM.position) + "  /  " + root.formatTime(playerVM.duration)
                 font.family: window.fontFamily
@@ -376,13 +461,13 @@ Item {
                     width: volumeSlider.availableWidth
                     height: 2
                     radius: 1
-                    color: "#1A000000"
+                    color: "#14000000"
 
                     Rectangle {
                         width: volumeSlider.visualPosition * parent.width
                         height: parent.height
                         radius: parent.radius
-                        color: window.textPrimary
+                        color: window.brand
                     }
                 }
 
@@ -392,7 +477,9 @@ Item {
                     width: volumeSlider.barHovered ? 10 : 0
                     height: width
                     radius: width / 2
-                    color: window.textPrimary
+                    color: window.brand
+                    border.color: "#FFFFFF"
+                    border.width: 1.5
                     Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
                 }
 
@@ -413,7 +500,7 @@ Item {
                     anchors.centerIn: parent
                     name: "list"
                     size: 17
-                    color: qArea.containsMouse ? window.textPrimary : window.textSecondary
+                    color: qArea.containsMouse ? window.brand : window.textSecondary
                     strokeWidth: 1.8
                 }
                 MouseArea {

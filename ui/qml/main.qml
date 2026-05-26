@@ -102,46 +102,65 @@ ApplicationWindow {
     }
 
     // ---- 主题 token (子组件通过 window.xxx 访问) ----
-    // 极简护眼主题:
-    //   • 全局背景使用低饱和度复古纸张色, 长时间使用减少疲劳
-    //   • 不再依靠透明叠加表达层级, 改用纯色面板 + 柔和投影
-    //   • 文字使用接近纯黑的深灰提高对比度
-    readonly property color appBg: "#FDFBF7"             // 主背景: 米白纸张色
-    readonly property color appBgSubtle: "#F4F0EA"       // 次级背景: 浅麦色 (备用)
-    readonly property color surface: "#FFFFFF"           // 卡片/弹窗面板: 纯白
-    readonly property color surfaceAlt: "#FAFAFA"        // 备用/分区背景
-    readonly property color surfaceHover: "#F2EFE8"      // 行 hover 浅麦色
-    readonly property color sidebarBg: "#FFFFFF"         // 侧边/抽屉面板
+    // Synapse HiFi 主题 (Light Mica/Acrylic):
+    //   • 主背景使用冷色淡蓝渐变 + 极光光晕作为生动背景
+    //   • 面板大量使用半透明 + acrylic blur (Mica/Fluent 风)
+    //   • 品牌色 Cyan-600 作为高亮 / 进度 / 主播放按钮
+    readonly property color appBg: "#F4F7FC"             // 主背景基底(渐变中段)
+    readonly property color appBgTop: "#E9EFFD"          // 渐变顶部
+    readonly property color appBgBottom: "#EDF4F0"       // 渐变底部
+    readonly property color appBgSubtle: "#F1F5F9"       // 次级背景
+    readonly property color surface: "#FFFFFF"           // 纯白面板 (对话框/菜单底色)
+    readonly property color surfaceAlt: "#F8FAFC"        // 备用/分区背景 (右栏 acrylic 底)
+    readonly property color surfaceHover: "#EEF2F7"      // 行 hover
+    readonly property color sidebarBg: "#FFFFFF"         // 侧边/抽屉面板 (会通过 acrylic 复合)
     readonly property color hoverBg: "#0A000000"         // 通用 hover 4% 黑
-    readonly property color cardHover: "#F2EFE8"
-    readonly property color activeBg: "#FFE8E6FF"        // 选中态: 极淡品牌冷调
+    readonly property color cardHover: "#EEF2F7"
+    readonly property color activeBg: "#140891B2"        // 选中态: 8% Cyan-600
     readonly property color playerBg: "#FFFFFF"
 
-    readonly property color textPrimary: "#1C1C1E"       // iOS 风深灰, 接近纯黑
-    readonly property color textSecondary: "#6E6E73"     // 次级
-    readonly property color textTertiary: "#8E8E93"      // 占位/弱化
+    // ===== Acrylic / Mica 半透明面板 =====
+    readonly property color acrylicSidebarBg: "#8CF8FAFC"   // 55% Slate-50  (左侧栏底色)
+    readonly property color acrylicRightBg:   "#CCF8FAFC"   // 80% Slate-50  (右侧栏底色)
+    readonly property color acrylicCardBg:    "#A6FFFFFF"   // 65% White     (acrylic 卡片)
+    readonly property color acrylicCardBgHi:  "#D9FFFFFF"   // 85% White     (hover/active 卡片)
+    readonly property color acrylicTitleBar:  "#B3FFFFFF"   // 70% White     (标题栏)
 
-    readonly property color brand: "#3B82F6"
-    readonly property color brandHover: "#2563EB"
-    readonly property color brandPress: "#1D4ED8"
-    readonly property color brandSoft: "#DBEAFE"
+    readonly property color textPrimary: "#1E293B"       // Slate-800
+    readonly property color textSecondary: "#475569"     // Slate-600
+    readonly property color textTertiary: "#94A3B8"      // Slate-400
+    readonly property color textMuted: "#CBD5E1"         // Slate-300 (极淡)
 
-    readonly property color heroTop: "#2563EB"
-    readonly property color heroBottom: "#4F46E5"
+    // 品牌色: Cyan-600 (参考 HTML)
+    readonly property color brand: "#0891B2"
+    readonly property color brandHover: "#0E7490"        // Cyan-700
+    readonly property color brandPress: "#155E75"        // Cyan-800
+    readonly property color brandSoft: "#CFFAFE"         // Cyan-100
+    readonly property color brandSoftBg: "#1A0891B2"     // 10% Cyan-600
+    readonly property color brandLite:  "#67E8F9"        // Cyan-300 (光晕)
 
-    readonly property color borderColor: "#1A000000"     // 1px 描边: 10% 黑
-    readonly property color hairline: "#0F000000"        // 极细分隔
+    // Hi-Res 金徽
+    readonly property color goldText: "#B48A12"
+    readonly property color goldBorder: "#D4AF37"
+    readonly property color goldBgTop: "#FFFBF0"
+    readonly property color goldBgBottom: "#FFF8E1"
+
+    // Hero 渐变 (品牌)
+    readonly property color heroTop: "#0891B2"
+    readonly property color heroBottom: "#6366F1"
+
+    readonly property color borderColor: "#0F000000"     // 1px 极细描边: 6% 黑
+    readonly property color hairline: "#0A000000"        // 极细分隔
     readonly property color divider: "#14000000"
-    readonly property color likeRed: "#EF4444"
+    readonly property color likeRed: "#F43F5E"           // Rose-500
 
-    // ===== Design tokens: 纯色面板 + 阴影 + 圆角 =====
-    readonly property color surfaceMenu: "#FFFFFF"       // 菜单/弹窗: 纯白
-    readonly property color menuHoverBg: "#F2EFE8"       // 菜单项 hover: 浅麦色
-    readonly property color modalScrim: "#66000000"      // 模态遮罩: 40% 黑
+    // ===== Design tokens: 弹窗 & 阴影 =====
+    readonly property color surfaceMenu: "#FFFFFF"
+    readonly property color menuHoverBg: "#EEF2F7"
+    readonly property color modalScrim: "#4D0F172A"      // 30% Slate-900
 
-    // 阴影色 (用于 MultiEffect shadowColor)
-    readonly property color shadowColor: "#26000000"     // 大阴影 (浮窗)
-    readonly property color shadowColorSoft: "#14000000" // 卡片阴影
+    readonly property color shadowColor: "#260F172A"     // 大阴影 (浮窗) 15% Slate-900
+    readonly property color shadowColorSoft: "#14000000"
     readonly property color shadowColorHairline: "#0A000000"
 
     // 圆角令牌
@@ -159,7 +178,7 @@ ApplicationWindow {
     readonly property color glassBorder: borderColor
     readonly property color glassBorderDark: borderColor
 
-    readonly property string fontFamily: "Microsoft YaHei UI"
+    readonly property string fontFamily: "Inter, Segoe UI, Microsoft YaHei UI"
 
     // MiniPlayer 玻璃背景使用此别名抓取动态背景做 backdrop blur
     property alias backdropItem: dynamicBg
@@ -169,19 +188,94 @@ ApplicationWindow {
     property color domColor2: window.brand
     Behavior on domColor1 { ColorAnimation { duration: 1500; easing.type: Easing.InOutQuad } }
 
-    // ===== 护眼纯色背景 =====
-    // 弃用先前的紫色对角渐变 + 白雾化 + 浮动光晕,
-    // 采用低饱和度米白纸张色作为主背景, 长时间观看更舒适
+    // ===== 极光光晕颜色 (随当前曲目主色平滑切换) =====
+    // 取曲目主色派生 3 个柔和色相, 落在 Cyan/Purple/Blue 之间, 保持 Light Mode 柔和气质
+    readonly property color glowColor1: Qt.lighter(window.domColor1, 1.55)        // 左上, 提亮
+    readonly property color glowColor2: Qt.tint(window.domColor1, "#80C084FC")    // 右下, 紫调混合
+    readonly property color glowColor3: Qt.tint(window.domColor1, "#60A5B4FC")    // 中, 蓝调混合
+
+    // ===== Synapse 渐变 + 极光光晕背景 =====
+    // 底层: 三段对角渐变 (E9EFFD → F1F3F9 → EDF4F0)
+    // 中层: 三个 800px 大半径模糊圆形, 颜色随当前曲目主色平滑过渡
     //
     // radius: 8 与 DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_ROUND)
-    // 在 Win11 给出的系统圆角(约 8px)对齐,避免 DWM 圆角剪裁后露出方角"破角"。
-    // 最大化时窗口贴满工作区,Win11 自动取消圆角剪裁,此时圆角同样不会影响视觉。
+    // 在 Win11 给出的系统圆角(约 8px)对齐, 避免 DWM 圆角剪裁后露出方角"破角"。
     Rectangle {
         id: dynamicBg
         anchors.fill: parent
         radius: window.visibility === Window.Maximized || window.visibility === Window.FullScreen ? 0 : 8
         antialiasing: true
-        color: window.appBg
+        clip: true
+
+        gradient: Gradient {
+            orientation: Gradient.Vertical
+            GradientStop { position: 0.0; color: window.appBgTop }
+            GradientStop { position: 0.55; color: window.appBg }
+            GradientStop { position: 1.0; color: window.appBgBottom }
+        }
+
+        // 极光光晕 1 — 左上 (Cyan / 切歌随主色调)
+        Rectangle {
+            id: glow1
+            x: -160
+            y: -160
+            width: 720
+            height: 720
+            radius: width / 2
+            color: window.currentNav === "settings" ? "#A5B4FC" : window.glowColor1
+            opacity: 0.32
+            antialiasing: true
+            Behavior on color { ColorAnimation { duration: 2500; easing.type: Easing.InOutQuad } }
+            layer.enabled: true
+            layer.smooth: true
+            layer.effect: MultiEffect {
+                blurEnabled: true
+                blurMax: 96
+                blur: 1.0
+            }
+        }
+
+        // 极光光晕 2 — 右下 (Purple)
+        Rectangle {
+            id: glow2
+            x: parent.width - 560
+            y: parent.height - 560
+            width: 720
+            height: 720
+            radius: width / 2
+            color: window.glowColor2
+            opacity: 0.28
+            antialiasing: true
+            Behavior on color { ColorAnimation { duration: 2500; easing.type: Easing.InOutQuad } }
+            layer.enabled: true
+            layer.smooth: true
+            layer.effect: MultiEffect {
+                blurEnabled: true
+                blurMax: 96
+                blur: 1.0
+            }
+        }
+
+        // 极光光晕 3 — 中部 (Blue, 极淡)
+        Rectangle {
+            id: glow3
+            x: parent.width * 0.33
+            y: parent.height * 0.18
+            width: 640
+            height: 640
+            radius: width / 2
+            color: window.glowColor3
+            opacity: 0.18
+            antialiasing: true
+            Behavior on color { ColorAnimation { duration: 2500; easing.type: Easing.InOutQuad } }
+            layer.enabled: true
+            layer.smooth: true
+            layer.effect: MultiEffect {
+                blurEnabled: true
+                blurMax: 96
+                blur: 1.0
+            }
+        }
     }
 
     // 当前选中的侧栏菜单 (用于 active 高亮)
@@ -231,6 +325,33 @@ ApplicationWindow {
         stackView.replace(Qt.resolvedUrl("views/SearchResultsView.qml"), { query: q })
     }
 
+    // 打开「正在播放」(由 MiniPlayer 三处入口共享)
+    function openNowPlaying() {
+        var cur = stackView.currentItem
+        if (cur && cur.objectName === "nowPlayingView") return
+
+        var comp = Qt.createComponent(Qt.resolvedUrl("views/NowPlayingView.qml"))
+        var finish = function() {
+            if (comp.status === Component.Error) {
+                console.log("[openNowPlaying] ERROR:", comp.errorString())
+                toast.message = "加载失败: " + comp.errorString().substring(0, 220)
+                toast.opacity = 1
+                toastTimer.restart()
+            } else if (comp.status === Component.Ready) {
+                stackView.push(comp, {}, StackView.Immediate)
+                var c = stackView.currentItem
+                if (!c || c.objectName !== "nowPlayingView") {
+                    toast.message = "push 异常 now=" +
+                                    (c ? c.objectName : "null")
+                    toast.opacity = 1
+                    toastTimer.restart()
+                }
+            }
+        }
+        if (comp.status === Component.Loading) comp.statusChanged.connect(finish)
+        else finish()
+    }
+
     function viewFor(key) {
         switch (key) {
         case "home":     return Qt.resolvedUrl("views/HomeView.qml")
@@ -254,8 +375,9 @@ ApplicationWindow {
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.topMargin: titleBar.height
-        anchors.bottomMargin: 80
-        width: window.sidebarExpanded ? 260 : 72
+        anchors.bottomMargin: miniPlayer.onNowPlaying ? 0 : 80
+        Behavior on anchors.bottomMargin { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
+        width: window.sidebarExpanded ? 220 : 64
         Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutQuart } }
 
         activeKey: window.currentNav
@@ -278,8 +400,10 @@ ApplicationWindow {
         anchors.left: drawerSidebar.right
         anchors.right: parent.right
         anchors.topMargin: titleBar.height
-        anchors.bottomMargin: 80        // 给底栏让出空间
+        anchors.bottomMargin: miniPlayer.onNowPlaying ? 0 : 80        // 进入沉浸播放页时让出全屏空间
         color: "transparent"
+        
+        Behavior on anchors.bottomMargin { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
 
         StackView {
             id: stackView
@@ -350,11 +474,7 @@ ApplicationWindow {
         enabled: !onNowPlaying
         Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutQuad } }
 
-        onClicked: {
-            if (stackView.currentItem.objectName !== "nowPlayingView") {
-                stackView.push(Qt.resolvedUrl("views/NowPlayingView.qml"))
-            }
-        }
+        onClicked: window.openNowPlaying()
         onShowQueueClicked: queueDrawer.toggle()
     }
 

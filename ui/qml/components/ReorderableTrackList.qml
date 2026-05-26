@@ -147,6 +147,15 @@ Item {
 
                         AppIcon {
                             anchors.centerIn: parent
+                            visible: !(item.isCurrent === true) && !reorderListCoverImg.visible
+                            name: "music"
+                            size: 16
+                            color: window.textTertiary
+                            strokeWidth: 1.6
+                        }
+
+                        AppIcon {
+                            anchors.centerIn: parent
                             visible: item.isCurrent === true
                             name: "volume"; size: 16; color: window.brand; strokeWidth: 2
                         }

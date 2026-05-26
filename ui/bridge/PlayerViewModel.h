@@ -398,6 +398,7 @@ private:
     // 持久化
     QString m_preferredDeviceId;     // 启动时记住的设备
     bool m_loadingSettings = false;  // 加载阶段抑制写回
+    QMap<QString, QString> m_manualLyricsMap; // path -> 手动歌词 path
 
     // 元数据缓存:path -> (title/artist/album/date/track_no)
     mutable QMap<QString, apx::TrackMetadata> m_metaCache;

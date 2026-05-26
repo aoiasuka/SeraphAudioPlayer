@@ -670,12 +670,33 @@ void PlayerViewModel::reloadLyricsForCurrent()
             m_lyricsSource = it->source;
         } else {
             LyricsCacheEntry entry;
-            auto doc = apx::LyricsLoader::loadDocFor(cur.toStdWString());
-            if (!doc.empty()) {
-                entry.lines  = std::move(doc.lines);
-                entry.meta   = std::move(doc.meta);
-                entry.source = QStringLiteral("external");
-            } else {
+            bool loaded = false;
+
+            // 1. 先检查是否有手动绑定的持久化歌词
+            if (m_manualLyricsMap.contains(cur)) {
+                QString manualPath = m_manualLyricsMap.value(cur);
+                auto doc = apx::LyricsLoader::loadDoc(manualPath.toStdWString());
+                if (!doc.empty()) {
+                    entry.lines  = std::move(doc.lines);
+                    entry.meta   = std::move(doc.meta);
+                    entry.source = QStringLiteral("manual");
+                    loaded = true;
+                }
+            }
+
+            // 2. 没有手动绑定或加载失败，尝试同名 .lrc
+            if (!loaded) {
+                auto doc = apx::LyricsLoader::loadDocFor(cur.toStdWString());
+                if (!doc.empty()) {
+                    entry.lines  = std::move(doc.lines);
+                    entry.meta   = std::move(doc.meta);
+                    entry.source = QStringLiteral("external");
+                    loaded = true;
+                }
+            }
+
+            // 3. 都没有，尝试内嵌歌词
+            if (!loaded) {
                 // 外部 .lrc 未命中 → 试内嵌歌词(ID3v2 SYLT/USLT、FLAC VC、MP4 ©lyr)
                 auto raw = apx::MetadataReader::readEmbeddedLyrics(cur.toStdWString());
                 if (raw.has_value() && !raw->empty()) {
@@ -714,6 +735,18 @@ bool PlayerViewModel::loadExternalLyrics(const QString& path)
     m_lyricsSource = QStringLiteral("manual");
     m_lyricsForPath = currentPath();   // 阻止下一次自动 reload 覆盖
     m_lyricIndex   = -1;
+    
+    // 更新内存缓存，否则切歌回来会读到老缓存
+    LyricsCacheEntry entry;
+    entry.lines = doc.lines;
+    entry.meta = doc.meta;
+    entry.source = QStringLiteral("manual");
+    m_lyricsCache.insert(currentPath(), entry);
+
+    // 保存持久化映射
+    m_manualLyricsMap.insert(currentPath(), local);
+    saveSettings();
+
     emit lyricsChanged();
     emit currentLyricIndexChanged();
     updateLyricIndex(m_position);
@@ -738,6 +771,14 @@ void PlayerViewModel::clearLyrics()
     m_lyricsSource.clear();
     m_lyricsForPath = currentPath();
     m_lyricIndex = -1;
+
+    // 清理内存缓存
+    m_lyricsCache.remove(currentPath());
+
+    // 清除持久化映射
+    m_manualLyricsMap.remove(currentPath());
+    saveSettings();
+
     emit lyricsChanged();
     emit currentLyricIndexChanged();
 }
@@ -1788,6 +1829,15 @@ void PlayerViewModel::loadSettings()
     }
     s.endArray();
 
+    // 歌词映射
+    int nLrc = s.beginReadArray("manualLyrics");
+    m_manualLyricsMap.clear();
+    for (int i = 0; i < nLrc; ++i) {
+        s.setArrayIndex(i);
+        m_manualLyricsMap.insert(s.value("audioPath").toString(), s.value("lrcPath").toString());
+    }
+    s.endArray();
+
     // 重建 library 稳定顺序: recent (最新在前) -> liked -> playlists
     // 持久化层不单独存 library 顺序, 每次启动按此规则一次性重建,
     // 之后运行期由 touchLibrary 维护
@@ -1847,6 +1897,17 @@ void PlayerViewModel::saveSettings() const
         s.setValue("id", m_playlists[i].id);
         s.setValue("name", m_playlists[i].name);
         s.setValue("tracks", m_playlists[i].paths);
+    }
+    s.endArray();
+
+    // 歌词映射
+    s.remove("manualLyrics");
+    s.beginWriteArray("manualLyrics", m_manualLyricsMap.size());
+    int lrcIdx = 0;
+    for (auto it = m_manualLyricsMap.constBegin(); it != m_manualLyricsMap.constEnd(); ++it, ++lrcIdx) {
+        s.setArrayIndex(lrcIdx);
+        s.setValue("audioPath", it.key());
+        s.setValue("lrcPath", it.value());
     }
     s.endArray();
 }
