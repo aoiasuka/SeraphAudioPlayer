@@ -54,6 +54,9 @@ logs/
 *.tmp
 *.bak
 
+# Project analysis (local only)
+issues*.md
+
 # OS
 Thumbs.db
 desktop.ini
