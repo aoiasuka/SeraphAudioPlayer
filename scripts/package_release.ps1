@@ -7,12 +7,12 @@ $root = Split-Path -Parent $PSScriptRoot
 
 $srcDir = Join-Path $root "build_app\bin\Release"
 $distDir = Join-Path $root "build_app\dist"
-$pkgName = "SeraphAudioPlayer-v0.1.0-Win64"
+$pkgName = "SeraphAudioPlayer-v0.3.3-Win64"
 $tempDir = Join-Path $distDir $pkgName
 $zipFile = Join-Path $distDir "$pkgName.zip"
 
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host " Starting packaging for Seraph Audio Player v0.1.0 " -ForegroundColor Cyan
+Write-Host " Starting packaging for Seraph Audio Player v0.3.3 " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
 if (-not (Test-Path $srcDir)) {

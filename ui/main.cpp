@@ -120,7 +120,7 @@ int main(int argc, char* argv[])
 
     QGuiApplication::setApplicationName("SeraphAudioPlayer");
     QGuiApplication::setOrganizationName("SeraphAudioPlayer");
-    QGuiApplication::setApplicationVersion("0.1.0");
+    QGuiApplication::setApplicationVersion("0.3.3");
 
     // 强制使用 Basic 样式 — 让 Slider 等控件的自定义 background/handle 生效
     // (Windows 默认会用原生样式,不支持自定义)
