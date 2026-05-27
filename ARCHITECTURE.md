@@ -1,4 +1,4 @@
-# Audio Player X86 — 项目架构设计
+# Seraph Audio Player — 项目架构设计
 
 > Windows 平台 WASAPI 独占模式高保真音频播放器
 
