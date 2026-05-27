@@ -1,6 +1,6 @@
 # Seraph Audio Player
 
-> Windows 平台 WASAPI 独占模式高保真音频播放器 (原名 AudioPlayerX86)
+> Windows 平台 WASAPI 独占模式高保真音频播放器 
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
