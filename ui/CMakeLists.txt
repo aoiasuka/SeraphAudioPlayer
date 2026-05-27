@@ -27,7 +27,7 @@ add_executable(AudioPlayerX86 WIN32
 )
 
 set_target_properties(AudioPlayerX86 PROPERTIES
-    OUTPUT_NAME "AudioPlayerX86"
+    OUTPUT_NAME "SeraphAudioPlayer"
     # WIN32_EXECUTABLE 已在 add_executable 中显式声明
 )
 

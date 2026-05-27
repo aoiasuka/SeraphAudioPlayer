@@ -147,7 +147,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Synapse"
+                text: "Seraph Audio"
                 font.family: window.fontFamily
                 font.pixelSize: 15
                 font.weight: Font.Bold

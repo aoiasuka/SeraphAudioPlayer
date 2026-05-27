@@ -14,7 +14,7 @@ ApplicationWindow {
     minimumWidth: 1024
     minimumHeight: 640
     visible: true
-    title: qsTr("Audio Player X86")
+    title: qsTr("Seraph Audio Player")
     color: "transparent"
 
     property bool sidebarExpanded: true

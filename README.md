@@ -1,6 +1,6 @@
-# AudioPlayerX86
+# Seraph Audio Player
 
-> Windows 平台 WASAPI 独占模式高保真音频播放器
+> Windows 平台 WASAPI 独占模式高保真音频播放器 (原名 AudioPlayerX86)
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -10,7 +10,7 @@
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| **AudioPlayerX86.exe** | `build_app\bin\Release\` | 主程序,Qt 6 Quick GUI,双击运行 |
+| **SeraphAudioPlayer.exe** | `build_app\bin\Release\` | 主程序,Qt 6 Quick GUI,双击运行 |
 | 各 example .exe(可选) | `build\bin\Release\` | 后端验证工具,默认不编译 |
 
 ## 快速开始(构建主程序)
@@ -36,7 +36,7 @@ $env:APX_QT_PATH = "C:\Qt\6.5.3\msvc2019_64"
 .\scripts\build_app.ps1 -Run
 ```
 
-产物在 `build_app\bin\Release\AudioPlayerX86.exe`,所在目录已经包含 Qt DLLs,可整体拷贝到任意 Windows 机器运行。
+产物在 `build_app\bin\Release\SeraphAudioPlayer.exe`,所在目录已经包含 Qt DLLs,可整体拷贝到任意 Windows 机器运行。
 
 ## 支持的音频格式
 
@@ -208,7 +208,7 @@ audio_player_x86/
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `APX_BUILD_UI` | ON | Qt 主程序 `AudioPlayerX86.exe` |
+| `APX_BUILD_UI` | ON | Qt 主程序 `SeraphAudioPlayer.exe` |
 | `APX_BUILD_APP` | ON | app 层(controller / playlist / metadata 等) |
 | `APX_BUILD_EXAMPLES` | ON | 各 demo;主程序构建脚本中默认 OFF |
 | `APX_BUILD_TESTS` | OFF | 单元测试 |

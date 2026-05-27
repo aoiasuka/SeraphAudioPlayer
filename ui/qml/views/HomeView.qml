@@ -147,7 +147,7 @@ Item {
                     var src = playerVM.recent || []
                     return src.length > 0 ? src[0] : null
                 }
-                fallbackTitle: "Audio Player X86"
+                fallbackTitle: "Seraph Audio Player"
                 fallbackSubtitle: "拖拽 .wav / .flac 到窗口或点击下方按钮选择文件"
                 onPlayClicked: fileDialog.open()
                 onItemClicked: function(path) { playerVM.openFile(path) }

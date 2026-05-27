@@ -118,8 +118,8 @@ int main(int argc, char* argv[])
 
     QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
 
-    QGuiApplication::setApplicationName("AudioPlayerX86");
-    QGuiApplication::setOrganizationName("AudioPlayerX86");
+    QGuiApplication::setApplicationName("SeraphAudioPlayer");
+    QGuiApplication::setOrganizationName("SeraphAudioPlayer");
     QGuiApplication::setApplicationVersion("0.1.0");
 
     // 强制使用 Basic 样式 — 让 Slider 等控件的自定义 background/handle 生效
@@ -134,7 +134,7 @@ int main(int argc, char* argv[])
     QGuiApplication app(argc, argv);
     app.setWindowIcon(QIcon(":/app_icon.svg"));
 
-    qInfo() << "AudioPlayerX86 startup";
+    qInfo() << "SeraphAudioPlayer startup";
     qInfo() << "app dir:" << QCoreApplication::applicationDirPath();
 
     // 一次性注册 Jump List 任务

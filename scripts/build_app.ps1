@@ -50,7 +50,7 @@ if (-not $QtPath -or -not (Test-Path "$QtPath\lib\cmake\Qt6")) {
     Write-Host "  1. 参数:     .\scripts\build_app.ps1 -QtPath ""C:\Qt\6.5.3\msvc2019_32"""
     Write-Host "  2. 环境变量: `$env:APX_QT_PATH = ""C:\Qt\6.5.3\msvc2019_32"""
     Write-Host ""
-    Write-Host "需要 Qt 6.5+ 的 msvc2019_32 (x86) 套件,"
+    Write-Host "需要 Qt 6.5+ 的 msvc2019_32 x86 套件,"
     Write-Host "路径下必须存在 lib\cmake\Qt6 子目录。"
     exit 1
 }
@@ -120,12 +120,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
     # ---------- 4. 定位产物 ----------
-    $exe = Join-Path $root "$BuildDir\bin\$Config\AudioPlayerX86.exe"
+    $exe = Join-Path $root "$BuildDir\bin\$Config\SeraphAudioPlayer.exe"
     if (-not (Test-Path $exe)) {
-        $found = Get-ChildItem -Path (Join-Path $root $BuildDir) -Filter 'AudioPlayerX86.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $found = Get-ChildItem -Path (Join-Path $root $BuildDir) -Filter 'SeraphAudioPlayer.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($found) { $exe = $found.FullName }
     }
-    if (-not (Test-Path $exe)) { throw "Cannot find AudioPlayerX86.exe" }
+    if (-not (Test-Path $exe)) { throw "Cannot find SeraphAudioPlayer.exe" }
 
     # ---------- 5. windeployqt ----------
     $windeployqt = Join-Path $QtPath "bin\windeployqt.exe"
@@ -148,7 +148,7 @@ try {
 
     if ($Run) {
         Write-Host ""
-        Write-Host "[RUN] Starting AudioPlayerX86.exe" -ForegroundColor Yellow
+        Write-Host "[RUN] Starting SeraphAudioPlayer.exe" -ForegroundColor Yellow
         Start-Process -FilePath $exe
     }
 }

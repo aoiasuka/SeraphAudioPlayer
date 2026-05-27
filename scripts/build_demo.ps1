@@ -24,7 +24,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Write-Host ""
-Write-Host "AudioPlayerX86 — WASAPI demo build" -ForegroundColor Cyan
+Write-Host "SeraphAudioPlayer — WASAPI demo build" -ForegroundColor Cyan
 Write-Host "  Root    : $root"
 Write-Host "  Arch    : $Arch"
 Write-Host "  Config  : $Config"

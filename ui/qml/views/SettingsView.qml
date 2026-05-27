@@ -905,7 +905,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 2
                             Text {
-                                text: "AudioPlayerX86"
+                                text: "Seraph Audio Player"
                                 font.family: window.fontFamily
                                 font.pixelSize: 15
                                 font.weight: Font.DemiBold

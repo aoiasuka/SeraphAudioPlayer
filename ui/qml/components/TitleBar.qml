@@ -81,11 +81,40 @@ Rectangle {
             }
 
             Text {
-                text: "Synapse Audio"
+                text: "Seraph"
                 font.family: window.fontFamily
-                font.pixelSize: 12
-                font.weight: Font.DemiBold
-                color: window.textPrimary
+                font.pixelSize: 13
+                font.weight: Font.Bold
+                color: window.brand
+            }
+
+            Text {
+                text: "Audio Player"
+                font.family: window.fontFamily
+                font.pixelSize: 13
+                font.weight: Font.Medium
+                color: window.textSecondary
+            }
+
+            Rectangle {
+                Layout.preferredHeight: 14
+                Layout.preferredWidth: badgeText.implicitWidth + 8
+                radius: 3
+                color: window.brandSoftBg
+                border.color: Qt.rgba(8/255, 145/255, 178/255, 0.3)
+                border.width: 1
+                Layout.alignment: Qt.AlignVCenter
+
+                Text {
+                    id: badgeText
+                    anchors.centerIn: parent
+                    text: "HIFI"
+                    font.family: window.fontFamily
+                    font.pixelSize: 8
+                    font.weight: Font.Bold
+                    font.letterSpacing: 0.5
+                    color: window.brand
+                }
             }
         }
 
