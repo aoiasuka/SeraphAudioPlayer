@@ -248,7 +248,7 @@ export function LyricsPanel() {
         <div className="acrylic-card rounded-lg p-3 flex-1 min-h-0 overflow-hidden flex flex-col">
           <div
             ref={containerRef}
-            className="relative flex-1 min-h-0 overflow-y-auto pr-1 text-left"
+            className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1 text-left no-scrollbar"
           >
             {lyricGroups.length === 0 ? (
               <div className="flex h-full min-h-[180px] items-center justify-center text-center">
