@@ -1,0 +1,89 @@
+//! 播放控制 IPC handlers（骨架）。
+//!
+//! 当前所有命令都只更新前端可见的状态机并返回 `Ok(())`；
+//! 真正接通 `seraph-audio` 后再补实现。
+
+use crate::state::AppState;
+use seraph_core::PlayerState;
+use std::path::PathBuf;
+use tauri::State;
+use tracing::debug;
+
+#[tauri::command]
+pub fn play(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    track_id: Option<String>,
+    start_seconds: Option<f64>,
+) -> Result<(), String> {
+    debug!("ipc::play");
+    if let Some(path) = path {
+        state
+            .audio
+            .play_file(
+                PathBuf::from(path),
+                track_id.unwrap_or_default(),
+                start_seconds.unwrap_or(0.0),
+            )
+            .map_err(|err| err.to_string())?;
+    } else {
+        state.audio.resume().map_err(|err| err.to_string())?;
+    }
+    *state.player_state.write() = PlayerState::Playing;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pause(state: State<'_, AppState>) -> Result<(), String> {
+    debug!("ipc::pause");
+    state.audio.pause().map_err(|err| err.to_string())?;
+    *state.player_state.write() = PlayerState::Paused;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop(state: State<'_, AppState>) -> Result<(), String> {
+    debug!("ipc::stop");
+    state.audio.stop().map_err(|err| err.to_string())?;
+    *state.player_state.write() = PlayerState::Stopped;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
+    debug!("ipc::seek -> {seconds}s");
+    state.audio.seek(seconds).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn next_track(_state: State<'_, AppState>) -> Result<(), String> {
+    debug!("ipc::next_track");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn prev_track(_state: State<'_, AppState>) -> Result<(), String> {
+    debug!("ipc::prev_track");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
+    debug!("ipc::set_volume -> {volume}");
+    state
+        .audio
+        .set_volume(volume)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn select_output_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+    debug!("ipc::select_output_device -> {device_id}");
+    state
+        .audio
+        .set_output_device(device_id)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}

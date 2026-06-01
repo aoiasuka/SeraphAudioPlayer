@@ -1,0 +1,37 @@
+[package]
+name = "seraph-tauri"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Seraph audio player — Tauri shell"
+
+[lib]
+name = "seraph_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "seraph-audio-player"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+seraph-core = { workspace = true }
+seraph-audio = { workspace = true }
+seraph-dsp = { workspace = true }
+seraph-decoder = { workspace = true }
+seraph-playlist = { workspace = true }
+seraph-visualizer = { workspace = true }
+
+tauri = { version = "2.1", features = [] }
+
+lofty = "0.24"
+encoding_rs = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }

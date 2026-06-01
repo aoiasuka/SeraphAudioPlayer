@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-family:
+      "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #334155;
+    background: linear-gradient(
+      to bottom right,
+      #e9effd 0%,
+      #f1f3f9 50%,
+      #edf4f0 100%
+    );
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.08);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.16);
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #0891b2;
+    box-shadow: 0 0 6px rgba(8, 145, 178, 0.4);
+    cursor: pointer;
+    transition: transform 0.1s ease;
+  }
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.4);
+  }
+}
+
+@layer components {
+  .acrylic-sidebar {
+    background: rgba(248, 250, 252, 0.55);
+    backdrop-filter: blur(40px) saturate(190%);
+    -webkit-backdrop-filter: blur(40px) saturate(190%);
+    border-right: 1px solid rgba(0, 0, 0, 0.05);
+  }
+
+  .acrylic-panel {
+    background: rgba(255, 255, 255, 0.4);
+    backdrop-filter: blur(30px) saturate(170%);
+    -webkit-backdrop-filter: blur(30px) saturate(170%);
+    border: 1px solid rgba(0, 0, 0, 0.04);
+  }
+
+  .acrylic-card {
+    background: rgba(255, 255, 255, 0.65);
+    border: 1px solid rgba(0, 0, 0, 0.04);
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .acrylic-card:hover {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(0, 0, 0, 0.08);
+    box-shadow: 0 6px 24px rgba(15, 23, 42, 0.07);
+  }
+
+  .album-breath {
+    animation: gentle-breath 12s ease-in-out infinite;
+  }
+
+  .ambient-aurora {
+    position: absolute;
+    width: 800px;
+    height: 800px;
+    border-radius: 50%;
+    filter: blur(140px);
+    opacity: 0.18;
+    pointer-events: none;
+    transition: all 2.5s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 0;
+  }
+
+  .fluent-item {
+    position: relative;
+    overflow: hidden;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .fluent-item::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      circle 80px at var(--fluent-x, 0px) var(--fluent-y, 0px),
+      rgba(0, 0, 0, 0.03),
+      transparent
+    );
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  .fluent-item:hover::before {
+    opacity: 1;
+  }
+
+  .active-pill {
+    position: relative;
+  }
+  .active-pill::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 25%;
+    height: 50%;
+    width: 3px;
+    background: #0891b2;
+    border-radius: 99px;
+    box-shadow: 0 0 8px rgba(8, 145, 178, 0.6);
+  }
+
+  .hires-badge {
+    background: linear-gradient(135deg, #fffbf0 0%, #fff8e1 100%);
+    border: 1px solid #d4af37;
+    box-shadow: 0 2px 10px rgba(212, 175, 55, 0.1);
+  }
+
+  .app-shell {
+    background: linear-gradient(
+      to bottom right,
+      #e9effd 0%,
+      #f1f3f9 50%,
+      #edf4f0 100%
+    );
+  }
+}

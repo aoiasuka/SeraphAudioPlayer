@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "crates/seraph-core",
+    "crates/seraph-audio",
+    "crates/seraph-dsp",
+    "crates/seraph-decoder",
+    "crates/seraph-playlist",
+    "crates/seraph-visualizer",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Seraph Audio"]
+license = "MIT"
+repository = "https://github.com/seraph-audio/seraph"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rtrb = "0.3"
+ringbuf = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+
+seraph-core = { path = "crates/seraph-core" }
+seraph-audio = { path = "crates/seraph-audio" }
+seraph-dsp = { path = "crates/seraph-dsp" }
+seraph-decoder = { path = "crates/seraph-decoder" }
+seraph-playlist = { path = "crates/seraph-playlist" }
+seraph-visualizer = { path = "crates/seraph-visualizer" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1

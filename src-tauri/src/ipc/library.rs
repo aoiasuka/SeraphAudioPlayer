@@ -1,0 +1,1354 @@
+//! Library IPC handlers.
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    fs,
+    hash::{Hash, Hasher},
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use encoding_rs::GBK;
+use lofty::{
+    file::{AudioFile, TaggedFileExt},
+    prelude::Accessor,
+    tag::{ItemKey, Tag},
+};
+use seraph_audio::list_output_devices;
+use seraph_decoder::probe_stream_info;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutputDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTrack {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_year: Option<String>,
+    pub cover: String,
+    pub format: String,
+    pub bitdepth: String,
+    pub sample_rate: String,
+    pub bitrate: String,
+    pub channels: String,
+    pub size: String,
+    pub path: String,
+    pub duration: u64,
+    pub glow_color: String,
+    pub glow1: String,
+    pub glow2: String,
+    pub lyrics: Vec<LyricLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LyricLine {
+    pub time: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Default)]
+struct ParsedAudioMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_year: Option<String>,
+    duration: Option<u64>,
+    bitrate: Option<u32>,
+    sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
+    channels: Option<u8>,
+    lyrics: Vec<LyricLine>,
+}
+
+#[derive(Debug, Default)]
+struct FilenameMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_playlist(app: AppHandle) -> Result<Vec<ImportedTrack>, String> {
+    read_cached_tracks(&app)
+}
+
+#[tauri::command]
+pub fn get_track_info(app: AppHandle, track_id: String) -> Result<Option<ImportedTrack>, String> {
+    Ok(read_cached_tracks(&app)?
+        .into_iter()
+        .find(|track| track.id == track_id))
+}
+
+#[tauri::command]
+pub fn list_devices() -> Result<Vec<OutputDeviceInfo>, String> {
+    let devices = list_output_devices().map_err(|err| err.to_string())?;
+    Ok(devices
+        .into_iter()
+        .map(|device| OutputDeviceInfo {
+            id: device.id,
+            name: device.name,
+            is_default: device.is_default,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<ImportedTrack>, String> {
+    let mut tracks = Vec::new();
+    let mut seen_files = HashSet::new();
+
+    for path in paths {
+        collect_audio_files(PathBuf::from(path), &mut tracks, &mut seen_files)?;
+    }
+
+    if !tracks.is_empty() {
+        let cached = read_cached_tracks(&app).unwrap_or_default();
+        let merged = merge_cached_tracks(cached, &tracks);
+        write_cached_tracks(&app, &merged)?;
+        return Ok(imported_tracks_from_cache(&merged, &tracks));
+    }
+
+    Ok(tracks)
+}
+
+#[tauri::command]
+pub fn save_track_lyrics(
+    app: AppHandle,
+    track_id: String,
+    lyrics_bytes: Vec<u8>,
+    track_path: Option<String>,
+) -> Result<Vec<LyricLine>, String> {
+    if track_id.trim().is_empty() {
+        return Err("missing track id".into());
+    }
+
+    if lyrics_bytes.is_empty() {
+        return Err("lyrics file is empty".into());
+    }
+
+    let text = decode_lyric_bytes(&lyrics_bytes);
+    let lyrics = parse_lyrics_text(&text);
+    if lyrics.is_empty() {
+        return Err("lyrics file has no usable text".into());
+    }
+
+    let mut tracks = read_cached_tracks(&app)?;
+    apply_track_lyrics(
+        &mut tracks,
+        &track_id,
+        lyrics.clone(),
+        track_path.as_deref(),
+    )?;
+    write_cached_tracks(&app, &tracks)?;
+
+    Ok(lyrics)
+}
+
+fn collect_audio_files(
+    path: PathBuf,
+    tracks: &mut Vec<ImportedTrack>,
+    seen_files: &mut HashSet<String>,
+) -> Result<(), String> {
+    if path.is_dir() {
+        let entries = fs::read_dir(&path)
+            .map_err(|err| format!("failed to read directory {}: {err}", path.display()))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| err.to_string())?;
+            collect_audio_files(entry.path(), tracks, seen_files)?;
+        }
+        return Ok(());
+    }
+
+    if path.is_file() && is_audio_file(&path) {
+        let key = import_dedupe_key(&path);
+        if seen_files.insert(key) {
+            tracks.push(track_from_path(&path)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
+    let path = library_cache_path(app)?;
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = fs::read(&path)
+        .map_err(|err| format!("failed to read library cache {}: {err}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))
+}
+
+fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
+    let path = library_cache_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create library cache dir {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let bytes = serde_json::to_vec_pretty(tracks)
+        .map_err(|err| format!("failed to serialize library cache: {err}"))?;
+    fs::write(&path, bytes)
+        .map_err(|err| format!("failed to write library cache {}: {err}", path.display()))
+}
+
+fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
+    Ok(dir.join("library-cache.json"))
+}
+
+fn merge_cached_tracks(
+    mut cached: Vec<ImportedTrack>,
+    imported: &[ImportedTrack],
+) -> Vec<ImportedTrack> {
+    let mut index_by_key = HashMap::with_capacity(cached.len());
+    for (index, track) in cached.iter().enumerate() {
+        index_by_key.insert(import_track_key(track), index);
+    }
+
+    for track in imported {
+        let key = import_track_key(track);
+        if let Some(index) = index_by_key.get(&key).copied() {
+            cached[index] = merge_imported_track(&cached[index], track);
+        } else {
+            index_by_key.insert(key, cached.len());
+            cached.push(track.clone());
+        }
+    }
+
+    cached
+}
+
+fn merge_imported_track(cached: &ImportedTrack, imported: &ImportedTrack) -> ImportedTrack {
+    let mut merged = imported.clone();
+    if merged.lyrics.is_empty() && !cached.lyrics.is_empty() {
+        merged.lyrics = cached.lyrics.clone();
+    }
+    merged
+}
+
+fn imported_tracks_from_cache(
+    cached: &[ImportedTrack],
+    imported: &[ImportedTrack],
+) -> Vec<ImportedTrack> {
+    let cached_by_key = cached
+        .iter()
+        .map(|track| (import_track_key(track), track.clone()))
+        .collect::<HashMap<_, _>>();
+
+    imported
+        .iter()
+        .map(|track| {
+            cached_by_key
+                .get(&import_track_key(track))
+                .cloned()
+                .unwrap_or_else(|| track.clone())
+        })
+        .collect()
+}
+
+fn apply_track_lyrics(
+    tracks: &mut Vec<ImportedTrack>,
+    track_id: &str,
+    lyrics: Vec<LyricLine>,
+    track_path: Option<&str>,
+) -> Result<(), String> {
+    let index = ensure_track_for_lyrics(tracks, track_id, track_path)?;
+    let track = &mut tracks[index];
+    track.lyrics = lyrics;
+    Ok(())
+}
+
+fn ensure_track_for_lyrics(
+    tracks: &mut Vec<ImportedTrack>,
+    track_id: &str,
+    track_path: Option<&str>,
+) -> Result<usize, String> {
+    if let Some(index) = tracks.iter().position(|track| track.id == track_id) {
+        return Ok(index);
+    }
+
+    let Some(track_path) = track_path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Err("track was not found in the library cache".into());
+    };
+
+    let path = PathBuf::from(track_path);
+    if !path.is_file() {
+        return Err(
+            "track is not in the library cache and the audio file is unavailable; re-import the audio file first"
+                .into(),
+        );
+    }
+
+    let mut track = track_from_path(&path)?;
+    track.id = track_id.to_string();
+    tracks.push(track);
+    Ok(tracks.len() - 1)
+}
+
+fn import_track_key(track: &ImportedTrack) -> String {
+    import_dedupe_key(Path::new(&track.path))
+}
+
+fn import_dedupe_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase()
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .and_then(audio_format_from_extension)
+        .is_some()
+        || audio_format_from_magic(path).is_some()
+}
+
+fn audio_format_label(path: &Path) -> String {
+    audio_format_from_magic(path)
+        .or_else(|| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .and_then(audio_format_from_extension)
+        })
+        .unwrap_or("AUDIO")
+        .to_string()
+}
+
+fn audio_format_from_magic(path: &Path) -> Option<&'static str> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0_u8; 64];
+    let read = file.read(&mut header).ok()?;
+    audio_format_from_header(&header[..read])
+}
+
+fn audio_format_from_header(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"DSD ") {
+        return Some("DSF");
+    }
+    if header.len() >= 16 && &header[0..4] == b"FRM8" && &header[12..16] == b"DSD " {
+        return Some("DFF");
+    }
+    if header.starts_with(b"fLaC") {
+        return Some("FLAC");
+    }
+    if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WAVE" {
+        return Some("WAV");
+    }
+    if header.len() >= 12
+        && &header[0..4] == b"FORM"
+        && (&header[8..12] == b"AIFF" || &header[8..12] == b"AIFC")
+    {
+        return Some("AIFF");
+    }
+    if header.starts_with(b"ID3") || is_mpeg_audio_header(header) {
+        return Some("MP3");
+    }
+    if header.starts_with(b"OggS") {
+        return Some(if header.windows(8).any(|window| window == b"OpusHead") {
+            "OPUS"
+        } else {
+            "OGG"
+        });
+    }
+    if header.len() >= 12 && &header[4..8] == b"ftyp" {
+        return Some(if header.windows(4).any(|window| window == b"alac") {
+            "ALAC"
+        } else {
+            "M4A"
+        });
+    }
+    if is_adts_header(header) {
+        return Some("AAC");
+    }
+
+    None
+}
+
+fn audio_format_from_extension(extension: &str) -> Option<&'static str> {
+    match extension.to_ascii_lowercase().as_str() {
+        "aac" => Some("AAC"),
+        "aif" | "aiff" => Some("AIFF"),
+        "alac" => Some("ALAC"),
+        "dff" => Some("DFF"),
+        "dsf" => Some("DSF"),
+        "flac" => Some("FLAC"),
+        "m4a" => Some("M4A"),
+        "mp3" => Some("MP3"),
+        "ogg" => Some("OGG"),
+        "opus" => Some("OPUS"),
+        "wav" => Some("WAV"),
+        "wma" => Some("WMA"),
+        _ => None,
+    }
+}
+
+fn is_mpeg_audio_header(header: &[u8]) -> bool {
+    header.len() >= 2 && header[0] == 0xff && (header[1] & 0xe0) == 0xe0 && (header[1] & 0x06) != 0
+}
+
+fn is_adts_header(header: &[u8]) -> bool {
+    header.len() >= 2 && header[0] == 0xff && (header[1] & 0xf0) == 0xf0
+}
+
+fn is_dsd_format(format: &str) -> bool {
+    format.eq_ignore_ascii_case("DSF") || format.eq_ignore_ascii_case("DFF")
+}
+
+fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("failed to read file metadata {}: {err}", path.display()))?;
+    let path_string = path.to_string_lossy().to_string();
+    let mut hasher = DefaultHasher::new();
+    path_string.to_ascii_lowercase().hash(&mut hasher);
+    let hash = hasher.finish();
+    let format = audio_format_label(path);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Unknown Track");
+    let audio_metadata = parse_audio_metadata(path);
+    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| audio_metadata.lyrics.clone());
+    let filename_metadata = parse_filename_metadata(stem);
+    let title = audio_metadata
+        .title
+        .or(filename_metadata.title)
+        .unwrap_or_else(|| clean_metadata_text(stem).unwrap_or_else(|| "Unknown Track".into()));
+    let artist = audio_metadata
+        .artist
+        .or(filename_metadata.artist)
+        .unwrap_or_else(|| "Unknown Artist".into());
+    let album = audio_metadata
+        .album
+        .or(filename_metadata.album)
+        .unwrap_or_else(|| "Local Files".into());
+    let size = format_file_size(metadata.len());
+    let (glow1, glow2) = color_pair(hash);
+
+    Ok(ImportedTrack {
+        id: format!("local-{hash:016x}"),
+        title,
+        artist,
+        album,
+        album_year: audio_metadata.album_year,
+        cover: String::new(),
+        format: format.clone(),
+        bitdepth: format_audio_quality(
+            &format,
+            audio_metadata.bit_depth,
+            audio_metadata.sample_rate,
+        ),
+        sample_rate: format_sample_rate(&format, audio_metadata.sample_rate),
+        bitrate: format_bitrate(audio_metadata.bitrate),
+        channels: format_channels(audio_metadata.channels),
+        size,
+        path: path_string,
+        duration: audio_metadata.duration.unwrap_or(0),
+        glow_color: glow1.clone(),
+        glow1,
+        glow2,
+        lyrics,
+    })
+}
+
+fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
+    let Ok(tagged_file) = lofty::read_from_path(path) else {
+        let mut parsed = ParsedAudioMetadata::default();
+        enrich_with_decoder_probe(path, &mut parsed);
+        return parsed;
+    };
+
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
+    let properties = tagged_file.properties();
+    let duration = properties.duration().as_secs();
+
+    let mut parsed = ParsedAudioMetadata {
+        duration: (duration > 0).then_some(duration),
+        bitrate: properties
+            .audio_bitrate()
+            .or_else(|| properties.overall_bitrate()),
+        sample_rate: properties.sample_rate(),
+        bit_depth: properties.bit_depth(),
+        channels: properties.channels(),
+        ..ParsedAudioMetadata::default()
+    };
+
+    if let Some(tag) = tag {
+        parsed.title = tag
+            .title()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.artist = tag
+            .artist()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.album = tag
+            .album()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.album_year = tag
+            .date()
+            .and_then(|value| (value.year > 0).then(|| value.year.to_string()));
+    }
+
+    parsed.lyrics = lyrics_from_tags(tagged_file.tags());
+    enrich_with_decoder_probe(path, &mut parsed);
+
+    parsed
+}
+
+fn enrich_with_decoder_probe(path: &Path, parsed: &mut ParsedAudioMetadata) {
+    if parsed.duration.is_some()
+        && parsed.bit_depth.is_some()
+        && parsed.sample_rate.is_some()
+        && parsed.channels.is_some()
+        && !is_dsd_file(path)
+    {
+        return;
+    }
+
+    let Ok(info) = probe_stream_info(path) else {
+        return;
+    };
+
+    if parsed.duration.is_none() && info.duration_seconds > 0.0 {
+        parsed.duration = Some(info.duration_seconds.round() as u64);
+    }
+    if parsed.bit_depth.is_none() && info.bit_depth.0 <= u8::MAX as u16 {
+        parsed.bit_depth = Some(info.bit_depth.0 as u8);
+    }
+    if parsed.sample_rate.is_none() && info.sample_rate.0 > 0 {
+        parsed.sample_rate = Some(info.sample_rate.0);
+    }
+    if parsed.channels.is_none() && info.channels.0 <= u8::MAX as u16 {
+        parsed.channels = Some(info.channels.0 as u8);
+    }
+}
+
+#[cfg(test)]
+fn write_test_dsf(path: &Path) {
+    use std::io::Write;
+
+    let channels = 2_u32;
+    let dsd_rate = 2_822_400_u32;
+    let sample_count = dsd_rate as u64;
+    let block_size_per_channel = 8_u32;
+    let data_len = channels as u64 * block_size_per_channel as u64;
+    let file_size = 28_u64 + 52 + 12 + data_len;
+
+    let mut file = fs::File::create(path).expect("create dsf");
+    file.write_all(b"DSD ").unwrap();
+    file.write_all(&28_u64.to_le_bytes()).unwrap();
+    file.write_all(&file_size.to_le_bytes()).unwrap();
+    file.write_all(&0_u64.to_le_bytes()).unwrap();
+
+    file.write_all(b"fmt ").unwrap();
+    file.write_all(&52_u64.to_le_bytes()).unwrap();
+    file.write_all(&1_u32.to_le_bytes()).unwrap();
+    file.write_all(&0_u32.to_le_bytes()).unwrap();
+    file.write_all(&2_u32.to_le_bytes()).unwrap();
+    file.write_all(&channels.to_le_bytes()).unwrap();
+    file.write_all(&dsd_rate.to_le_bytes()).unwrap();
+    file.write_all(&1_u32.to_le_bytes()).unwrap();
+    file.write_all(&sample_count.to_le_bytes()).unwrap();
+    file.write_all(&block_size_per_channel.to_le_bytes())
+        .unwrap();
+    file.write_all(&0_u32.to_le_bytes()).unwrap();
+
+    file.write_all(b"data").unwrap();
+    file.write_all(&(12_u64 + data_len).to_le_bytes()).unwrap();
+    file.write_all(&[0xff; 8]).unwrap();
+    file.write_all(&[0x00; 8]).unwrap();
+}
+
+#[cfg(test)]
+fn temp_audio_path(prefix: &str, extension: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}.{extension}"))
+}
+
+fn is_dsd_file(path: &Path) -> bool {
+    if let Some(format) = audio_format_from_magic(path) {
+        return is_dsd_format(format);
+    }
+
+    path.extension()
+        .and_then(|value| value.to_str())
+        .and_then(audio_format_from_extension)
+        .is_some_and(is_dsd_format)
+}
+
+fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
+    let lrc_path = find_lrc_file(path)?;
+    let bytes = fs::read(lrc_path).ok()?;
+    let text = decode_lyric_bytes(&bytes);
+    let lyrics = parse_lyrics_text(&text);
+    (!lyrics.is_empty()).then_some(lyrics)
+}
+
+fn find_lrc_file(path: &Path) -> Option<PathBuf> {
+    let exact = path.with_extension("lrc");
+    if exact.is_file() {
+        return Some(exact);
+    }
+
+    let expected_stem = path.file_stem()?.to_string_lossy().to_lowercase();
+    let parent = path.parent()?;
+    let entries = fs::read_dir(parent).ok()?;
+
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        let is_lrc = candidate
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lrc"));
+        let same_stem = candidate
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_lowercase() == expected_stem)
+            .unwrap_or(false);
+
+        if is_lrc && same_stem {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn decode_lyric_bytes(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16_lossy(&units);
+    }
+
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16_lossy(&units);
+    }
+
+    if looks_like_utf16_le(bytes) {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16_lossy(&units);
+    }
+
+    if looks_like_utf16_be(bytes) {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16_lossy(&units);
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    let (text, _, _) = GBK.decode(bytes);
+    text.into_owned()
+}
+
+fn looks_like_utf16_le(bytes: &[u8]) -> bool {
+    looks_like_utf16(bytes, 1)
+}
+
+fn looks_like_utf16_be(bytes: &[u8]) -> bool {
+    looks_like_utf16(bytes, 0)
+}
+
+fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
+    if bytes.len() < 8 || bytes.len() % 2 != 0 {
+        return false;
+    }
+
+    let pairs = bytes.len() / 2;
+    let zero_count = bytes
+        .chunks_exact(2)
+        .filter(|pair| pair[zero_offset] == 0)
+        .count();
+
+    zero_count * 100 / pairs >= 60
+}
+
+fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
+    for tag in tags {
+        for key in [ItemKey::Lyrics, ItemKey::UnsyncLyrics] {
+            for value in tag.get_strings(key) {
+                let lyrics = parse_lyrics_text(value);
+                if !lyrics.is_empty() {
+                    return lyrics;
+                }
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\u{2028}', "\n")
+        .replace('\u{2029}', "\n");
+    let mut offset_ms = 0_i64;
+    let mut timed = Vec::new();
+    let mut unsynced = Vec::new();
+
+    for raw_line in normalized.lines() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(offset) = parse_lrc_offset(line) {
+            offset_ms = offset;
+            continue;
+        }
+
+        let (times, body) = split_lrc_time_tags(line);
+        if !times.is_empty() {
+            if let Some(text) = clean_lyric_text(body) {
+                for time in times {
+                    let shifted = ((time * 1000.0).round() as i64 + offset_ms).max(0);
+                    timed.push(LyricLine {
+                        time: shifted as f64 / 1000.0,
+                        text: text.clone(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        if !is_lrc_metadata_line(line) {
+            if let Some(text) = clean_lyric_text(line) {
+                unsynced.push(text);
+            }
+        }
+    }
+
+    if !timed.is_empty() {
+        timed.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        timed.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
+        return timed;
+    }
+
+    unsynced
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| LyricLine {
+            time: index as f64 * 4.0,
+            text,
+        })
+        .collect()
+}
+
+fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
+    let mut rest = line.trim_start();
+    let mut times = Vec::new();
+
+    loop {
+        let Some(stripped) = rest.strip_prefix('[') else {
+            break;
+        };
+        let Some(end) = stripped.find(']') else {
+            break;
+        };
+        let token = &stripped[..end];
+        let Some(time) = parse_lrc_time_token(token) else {
+            break;
+        };
+
+        times.push(time);
+        rest = stripped[end + 1..].trim_start();
+    }
+
+    (times, rest)
+}
+
+fn parse_lrc_offset(line: &str) -> Option<i64> {
+    let content = lrc_tag_content(line)?;
+    let (key, value) = content.split_once(':')?;
+    if !key.trim().eq_ignore_ascii_case("offset") {
+        return None;
+    }
+
+    value.trim().parse::<i64>().ok()
+}
+
+fn parse_lrc_time_token(token: &str) -> Option<f64> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    if !token.contains(':') {
+        return parse_millisecond_lrc_token(token);
+    }
+
+    let normalized = token.replace(',', ".");
+    let parts = normalized.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (0, minutes.parse::<u64>().ok()?, seconds),
+        [hours, minutes, seconds] => (
+            hours.parse::<u64>().ok()?,
+            minutes.parse::<u64>().ok()?,
+            seconds,
+        ),
+        _ => return None,
+    };
+
+    let seconds = seconds.parse::<f64>().ok()?;
+    if seconds.is_nan() || seconds.is_sign_negative() {
+        return None;
+    }
+
+    Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds)
+}
+
+fn parse_millisecond_lrc_token(token: &str) -> Option<f64> {
+    let (start_ms, _) = token.split_once(',')?;
+    if start_ms.is_empty() || !start_ms.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(start_ms.parse::<u64>().ok()? as f64 / 1000.0)
+}
+
+fn is_lrc_metadata_line(line: &str) -> bool {
+    let Some(content) = lrc_tag_content(line) else {
+        return false;
+    };
+    let Some((key, _)) = content.split_once(':') else {
+        return false;
+    };
+
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "al" | "ar" | "au" | "by" | "length" | "offset" | "re" | "ti" | "ve"
+    )
+}
+
+fn clean_lyric_text(value: &str) -> Option<String> {
+    let text = strip_inline_time_tags(value)
+        .replace('\u{3000}', " ")
+        .replace('\t', " ")
+        .replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .trim_matches('\0')
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    (!text.is_empty()).then_some(text)
+}
+
+fn lrc_tag_content(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .map(str::trim)
+}
+
+fn strip_inline_time_tags(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some((start, open, close)) = find_next_time_tag_open(rest) {
+        output.push_str(&rest[..start]);
+        let after_open = start + open.len_utf8();
+
+        let Some(close_at) = rest[after_open..].find(close) else {
+            output.push(open);
+            rest = &rest[after_open..];
+            continue;
+        };
+
+        let token = &rest[after_open..after_open + close_at];
+        let after_close = after_open + close_at + close.len_utf8();
+        if parse_lrc_time_token(token).is_some() {
+            rest = &rest[after_close..];
+            continue;
+        }
+
+        output.push(open);
+        rest = &rest[after_open..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn find_next_time_tag_open(value: &str) -> Option<(usize, char, char)> {
+    match (value.find('['), value.find('<')) {
+        (Some(square), Some(angle)) if square <= angle => Some((square, '[', ']')),
+        (Some(_), Some(angle)) => Some((angle, '<', '>')),
+        (Some(square), None) => Some((square, '[', ']')),
+        (None, Some(angle)) => Some((angle, '<', '>')),
+        (None, None) => None,
+    }
+}
+
+fn parse_filename_metadata(stem: &str) -> FilenameMetadata {
+    let normalized = strip_track_number_prefix(stem);
+    let parts: Vec<String> = normalized
+        .split(" - ")
+        .filter_map(clean_metadata_text)
+        .collect();
+
+    match parts.as_slice() {
+        [artist, title] => FilenameMetadata {
+            artist: Some(artist.clone()),
+            title: Some(title.clone()),
+            album: None,
+        },
+        [artist, album, title] => FilenameMetadata {
+            artist: Some(artist.clone()),
+            album: Some(album.clone()),
+            title: Some(title.clone()),
+        },
+        [artist, middle @ .., title] if !middle.is_empty() => FilenameMetadata {
+            artist: Some(artist.clone()),
+            album: Some(middle.join(" - ")),
+            title: Some(title.clone()),
+        },
+        [title] => FilenameMetadata {
+            title: Some(title.clone()),
+            ..FilenameMetadata::default()
+        },
+        _ => FilenameMetadata::default(),
+    }
+}
+
+fn strip_track_number_prefix(value: &str) -> &str {
+    let trimmed = value.trim();
+    let digit_end = trimmed
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+
+    if (1..=3).contains(&digit_end) {
+        let rest = trimmed[digit_end..]
+            .trim_start()
+            .trim_start_matches(['-', '.', '_', ' '])
+            .trim_start();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+
+    trimmed
+}
+
+fn clean_metadata_text(value: &str) -> Option<String> {
+    let text = value
+        .trim_matches('\0')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    (!text.is_empty()).then_some(text)
+}
+
+fn format_audio_quality(format: &str, bit_depth: Option<u8>, sample_rate: Option<u32>) -> String {
+    let mut label = match bit_depth {
+        Some(bits) if bits > 0 => format!("{format} {bits}-bit"),
+        _ => format!("{format} Local"),
+    };
+
+    if let Some(sample_rate) = sample_rate.and_then(sample_rate_label) {
+        label.push_str(" / ");
+        label.push_str(&sample_rate);
+        if is_dsd_format(format) {
+            label.push_str(" PCM");
+        }
+    }
+
+    label
+}
+
+fn format_sample_rate(format: &str, sample_rate: Option<u32>) -> String {
+    match sample_rate.and_then(sample_rate_label) {
+        Some(mut label) => {
+            if is_dsd_format(format) {
+                label.push_str(" PCM");
+            }
+            label
+        }
+        None => "Unknown".into(),
+    }
+}
+
+fn sample_rate_label(sample_rate: u32) -> Option<String> {
+    if sample_rate == 0 {
+        return None;
+    }
+
+    if sample_rate >= 1000 {
+        let mut khz = if sample_rate % 1000 == 0 {
+            format!("{}", sample_rate / 1000)
+        } else if sample_rate % 100 == 0 {
+            format!("{:.1}", sample_rate as f64 / 1000.0)
+        } else {
+            format!("{:.3}", sample_rate as f64 / 1000.0)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        };
+        khz.push_str(" kHz");
+        return Some(khz);
+    }
+
+    Some(format!("{sample_rate} Hz"))
+}
+
+fn format_bitrate(bitrate: Option<u32>) -> String {
+    match bitrate {
+        Some(value) if value > 0 => format!("{value} kbps"),
+        _ => "Unknown".into(),
+    }
+}
+
+fn format_channels(channels: Option<u8>) -> String {
+    match channels {
+        Some(1) => "Mono".into(),
+        Some(2) => "Stereo".into(),
+        Some(6) => "5.1".into(),
+        Some(8) => "7.1".into(),
+        Some(value) if value > 0 => format!("{value} ch"),
+        _ => "Unknown".into(),
+    }
+}
+
+fn format_file_size(bytes: u64) -> String {
+    let mb = bytes as f64 / 1024.0 / 1024.0;
+    format!("{mb:.1} MB")
+}
+
+fn color_pair(hash: u64) -> (String, String) {
+    const PAIRS: [(&str, &str); 6] = [
+        ("#67e8f9", "#a5b4fc"),
+        ("#7dd3fc", "#f0abfc"),
+        ("#5eead4", "#93c5fd"),
+        ("#f9a8d4", "#86efac"),
+        ("#fde68a", "#67e8f9"),
+        ("#c4b5fd", "#fda4af"),
+    ];
+    let pair = PAIRS[(hash as usize) % PAIRS.len()];
+    (pair.0.into(), pair.1.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn parses_artist_and_title_from_filename() {
+        let parsed = parse_filename_metadata("01 - 宇多田ヒカル - First Love");
+
+        assert_eq!(parsed.artist.as_deref(), Some("宇多田ヒカル"));
+        assert_eq!(parsed.title.as_deref(), Some("First Love"));
+        assert_eq!(parsed.album, None);
+    }
+
+    #[test]
+    fn parses_artist_album_and_title_from_filename() {
+        let parsed = parse_filename_metadata("Radiohead - OK Computer - No Surprises");
+
+        assert_eq!(parsed.artist.as_deref(), Some("Radiohead"));
+        assert_eq!(parsed.album.as_deref(), Some("OK Computer"));
+        assert_eq!(parsed.title.as_deref(), Some("No Surprises"));
+    }
+
+    #[test]
+    fn keeps_plain_filename_as_title() {
+        let parsed = parse_filename_metadata("Track Without Tags");
+
+        assert_eq!(parsed.title.as_deref(), Some("Track Without Tags"));
+        assert_eq!(parsed.artist, None);
+        assert_eq!(parsed.album, None);
+    }
+
+    #[test]
+    fn enriches_dsd_metadata_from_decoder_probe() {
+        let path = temp_audio_path("seraph-import-dsd", "dsf");
+        write_test_dsf(&path);
+
+        let metadata = parse_audio_metadata(&path);
+        assert_eq!(metadata.duration, Some(1));
+        assert_eq!(metadata.bit_depth, Some(24));
+        assert_eq!(metadata.sample_rate, Some(44_100));
+        assert_eq!(metadata.channels, Some(2));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn detects_dsd_by_magic_when_extension_differs() {
+        let path = temp_audio_path("seraph-import-dsd-magic", "bin");
+        write_test_dsf(&path);
+
+        assert!(is_audio_file(&path));
+        assert_eq!(audio_format_label(&path), "DSF");
+
+        let track = track_from_path(&path).expect("track from dsf magic");
+        assert_eq!(track.format, "DSF");
+        assert_eq!(track.bitdepth, "DSF 24-bit / 44.1 kHz PCM");
+        assert_eq!(track.sample_rate, "44.1 kHz PCM");
+        assert_eq!(track.channels, "Stereo");
+        assert_eq!(track.duration, 1);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn trusts_riff_magic_over_dsf_extension() {
+        let path = temp_audio_path("seraph-import-fake-dsf", "dsf");
+        fs::write(&path, b"RIFF\0\0\0\0WAVE").expect("write fake dsf");
+
+        assert_eq!(audio_format_label(&path), "WAV");
+        assert!(!is_dsd_file(&path));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn formats_quality_with_sample_rate() {
+        assert_eq!(
+            format_audio_quality("FLAC", Some(24), Some(96_000)),
+            "FLAC 24-bit / 96 kHz"
+        );
+        assert_eq!(
+            format_audio_quality("WAV", Some(16), Some(44_100)),
+            "WAV 16-bit / 44.1 kHz"
+        );
+        assert_eq!(
+            format_audio_quality("DSF", Some(24), Some(44_100)),
+            "DSF 24-bit / 44.1 kHz PCM"
+        );
+    }
+
+    #[test]
+    fn merges_cached_tracks_by_path() {
+        let cached = vec![test_imported_track("old", "C:/Music/a.flac", "Old")];
+        let imported = vec![
+            test_imported_track("new", "c:/music/a.flac", "Updated"),
+            test_imported_track("b", "C:/Music/b.flac", "Added"),
+        ];
+
+        let merged = merge_cached_tracks(cached, &imported);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "new");
+        assert_eq!(merged[0].title, "Updated");
+        assert_eq!(merged[1].id, "b");
+    }
+
+    #[test]
+    fn merge_preserves_cached_lyrics_when_reimport_has_none() {
+        let mut cached_track = test_imported_track("old", "C:/Music/a.flac", "Old");
+        cached_track.lyrics = vec![LyricLine {
+            time: 1.5,
+            text: "cached line".into(),
+        }];
+        let imported = vec![test_imported_track("new", "c:/music/a.flac", "Updated")];
+
+        let merged = merge_cached_tracks(vec![cached_track], &imported);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "new");
+        assert_eq!(merged[0].title, "Updated");
+        assert_eq!(merged[0].lyrics.len(), 1);
+        assert!((merged[0].lyrics[0].time - 1.5).abs() < 0.001);
+        assert_eq!(merged[0].lyrics[0].text, "cached line");
+    }
+
+    #[test]
+    fn imported_tracks_from_cache_returns_preserved_lyrics() {
+        let mut cached_track = test_imported_track("new", "c:/music/a.flac", "Updated");
+        cached_track.lyrics = vec![LyricLine {
+            time: 1.5,
+            text: "cached line".into(),
+        }];
+        let imported = vec![test_imported_track("new", "C:/Music/a.flac", "Updated")];
+
+        let returned = imported_tracks_from_cache(&[cached_track], &imported);
+
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0].id, "new");
+        assert_eq!(returned[0].lyrics.len(), 1);
+        assert_eq!(returned[0].lyrics[0].text, "cached line");
+    }
+
+    #[test]
+    fn applies_track_lyrics_by_id() {
+        let mut tracks = vec![
+            test_imported_track("a", "C:/Music/a.flac", "A"),
+            test_imported_track("b", "C:/Music/b.flac", "B"),
+        ];
+        let lyrics = vec![LyricLine {
+            time: 2.0,
+            text: "imported line".into(),
+        }];
+
+        apply_track_lyrics(&mut tracks, "b", lyrics, None).expect("apply lyrics");
+
+        assert!(tracks[0].lyrics.is_empty());
+        assert_eq!(tracks[1].lyrics.len(), 1);
+        assert_eq!(tracks[1].lyrics[0].text, "imported line");
+    }
+
+    #[test]
+    fn errors_when_applying_lyrics_to_missing_track() {
+        let mut tracks = vec![test_imported_track("a", "C:/Music/a.flac", "A")];
+        let lyrics = vec![LyricLine {
+            time: 0.0,
+            text: "line".into(),
+        }];
+
+        let err =
+            apply_track_lyrics(&mut tracks, "missing", lyrics, None).expect_err("missing track");
+
+        assert!(err.contains("track was not found"));
+        assert!(tracks[0].lyrics.is_empty());
+    }
+
+    fn test_imported_track(id: &str, path: &str, title: &str) -> ImportedTrack {
+        ImportedTrack {
+            id: id.into(),
+            title: title.into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            album_year: None,
+            cover: String::new(),
+            format: "FLAC".into(),
+            bitdepth: "FLAC 24-bit / 96 kHz".into(),
+            sample_rate: "96 kHz".into(),
+            bitrate: "Unknown".into(),
+            channels: "Stereo".into(),
+            size: "1.0 MB".into(),
+            path: path.into(),
+            duration: 1,
+            glow_color: "#fff".into(),
+            glow1: "#fff".into(),
+            glow2: "#000".into(),
+            lyrics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parses_timestamped_lrc_lines() {
+        let lyrics = parse_lyrics_text("[ti:Test]\n[00:01.20]第一句\n[00:03.40][00:05.00]重复一句");
+
+        assert_eq!(lyrics.len(), 3);
+        assert!((lyrics[0].time - 1.2).abs() < 0.001);
+        assert_eq!(lyrics[0].text, "第一句");
+        assert!((lyrics[1].time - 3.4).abs() < 0.001);
+        assert_eq!(lyrics[1].text, "重复一句");
+        assert!((lyrics[2].time - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn decodes_gbk_lrc_bytes() {
+        let bytes = vec![
+            b'[', b'0', b'0', b':', b'0', b'1', b'.', b'0', b'0', b']', 0xd6, 0xd0, 0xce, 0xc4,
+        ];
+
+        let lyrics = parse_lyrics_text(&decode_lyric_bytes(&bytes));
+
+        assert_eq!(lyrics.len(), 1);
+        assert_eq!(lyrics[0].text, "\u{4e2d}\u{6587}");
+    }
+
+    #[test]
+    fn decodes_utf16_le_without_bom() {
+        let bytes = "[00:01.00]hello"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let lyrics = parse_lyrics_text(&decode_lyric_bytes(&bytes));
+
+        assert_eq!(lyrics.len(), 1);
+        assert_eq!(lyrics[0].text, "hello");
+    }
+
+    #[test]
+    fn parses_common_lrc_time_variants() {
+        let lyrics = parse_lyrics_text(
+            "[OFFSET:-500]\n[00:01,20]comma\n[1234,567]krc\n[00:02.00]a <00:02.10>b [00:02.20]c",
+        );
+
+        assert_eq!(lyrics.len(), 3);
+        assert!((lyrics[0].time - 0.7).abs() < 0.001);
+        assert_eq!(lyrics[0].text, "comma");
+        assert!((lyrics[1].time - 0.734).abs() < 0.001);
+        assert_eq!(lyrics[1].text, "krc");
+        assert!((lyrics[2].time - 1.5).abs() < 0.001);
+        assert_eq!(lyrics[2].text, "a b c");
+    }
+
+    #[test]
+    fn applies_lrc_offset() {
+        let lyrics = parse_lyrics_text("[offset:500]\n[00:01.00]提前半秒");
+
+        assert_eq!(lyrics.len(), 1);
+        assert!((lyrics[0].time - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn converts_unsynced_lyrics_to_display_lines() {
+        let lyrics = parse_lyrics_text("第一行\n\n第二行");
+
+        assert_eq!(lyrics.len(), 2);
+        assert_eq!(lyrics[0].time, 0.0);
+        assert_eq!(lyrics[0].text, "第一行");
+        assert_eq!(lyrics[1].time, 4.0);
+        assert_eq!(lyrics[1].text, "第二行");
+    }
+}

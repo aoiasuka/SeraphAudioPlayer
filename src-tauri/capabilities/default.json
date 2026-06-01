@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for the Seraph desktop app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-show",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "core:event:default",
+    "core:app:default"
+  ]
+}

@@ -1,0 +1,15 @@
+[package]
+name = "seraph-dsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Seraph audio player — DSP traits (resampler, DSD converter)"
+
+[dependencies]
+seraph-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# TODO: 真正实现重采样时启用
+# rubato = "0.16"

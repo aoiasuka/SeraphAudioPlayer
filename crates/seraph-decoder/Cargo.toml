@@ -1,0 +1,13 @@
+[package]
+name = "seraph-decoder"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Seraph audio player audio decoder"
+
+[dependencies]
+seraph-core = { workspace = true }
+symphonia = { version = "0.5", features = ["all"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }

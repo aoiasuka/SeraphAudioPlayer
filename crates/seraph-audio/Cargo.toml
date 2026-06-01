@@ -1,0 +1,24 @@
+[package]
+name = "seraph-audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Seraph audio player — audio backend abstraction (WASAPI, ASIO, CoreAudio, ALSA)"
+
+[dependencies]
+seraph-core = { workspace = true }
+seraph-decoder = { workspace = true }
+seraph-dsp = { workspace = true }
+seraph-visualizer = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+rtrb = { workspace = true }
+cpal = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+# TODO: 真正实现 WASAPI 时启用，如:
+# wasapi = "0.15"
+# windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com"] }

@@ -1,0 +1,17 @@
+[package]
+name = "seraph-visualizer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Seraph audio player — FFT visualizer with shared ringbuffer"
+
+[dependencies]
+seraph-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+rtrb = { workspace = true }
+
+# TODO: 真正实现 FFT 时启用
+# rustfft = "6"
