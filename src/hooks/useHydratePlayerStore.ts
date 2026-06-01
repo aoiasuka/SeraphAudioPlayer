@@ -8,6 +8,7 @@ export function useHydratePlayerStore() {
       const hydration = usePlayerStore.persist.rehydrate();
       void Promise.resolve(hydration).then(() => {
         const state = usePlayerStore.getState();
+        state.normalizeLibrary();
         void state.loadBackendLibrary();
         state.loadDevices();
       });

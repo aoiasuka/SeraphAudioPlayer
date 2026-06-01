@@ -14,7 +14,11 @@ pub enum PlayerEvent {
     PlaybackStopped,
     PlaybackEnded { track_id: TrackId },
     TrackChanged { track_id: TrackId },
-    Progress { seconds: f64, total: f64 },
+    Progress {
+        track_id: TrackId,
+        seconds: f64,
+        total: f64,
+    },
     BufferingStart,
     BufferingEnd,
     DeviceLost { reason: String },

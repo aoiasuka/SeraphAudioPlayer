@@ -133,6 +133,7 @@ pub struct PlaybackEngine {
 struct PlaybackSession {
     path: PathBuf,
     track_id: String,
+    duration_seconds: f64,
     shared: Arc<PlaybackShared>,
     worker: Option<JoinHandle<()>>,
     _stream: Stream,
@@ -174,6 +175,7 @@ impl PlaybackEngine {
 
         let info = probe_stream_info(&path)
             .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+        let duration_seconds = info.duration_seconds;
         self.stop_session();
 
         let device = self.output_device()?;
@@ -217,6 +219,7 @@ impl PlaybackEngine {
         self.session = Some(PlaybackSession {
             path,
             track_id: track_id.clone(),
+            duration_seconds,
             shared,
             worker: Some(worker),
             _stream: stream,
@@ -267,6 +270,11 @@ impl PlaybackEngine {
         );
         session.shared.queue.lock().clear();
         *session.shared.seek_request.lock() = Some(seconds);
+        self.event_bus.publish(PlayerEvent::Progress {
+            track_id: session.track_id.clone(),
+            seconds,
+            total: session.duration_seconds,
+        });
         Ok(())
     }
 
@@ -419,7 +427,14 @@ fn spawn_decode_worker(
     start_seconds: f64,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let result = run_decode_worker(&path, &info, &shared, &event_bus, start_seconds);
+        let result = run_decode_worker(
+            &path,
+            &track_id,
+            &info,
+            &shared,
+            &event_bus,
+            start_seconds,
+        );
         if let Err(err) = result {
             shared.stopped.store(true, Ordering::Release);
             event_bus.publish(PlayerEvent::Error {
@@ -432,6 +447,7 @@ fn spawn_decode_worker(
         if !shared.stopped.load(Ordering::Acquire) {
             shared.stopped.store(true, Ordering::Release);
             event_bus.publish(PlayerEvent::Progress {
+                track_id: track_id.clone(),
                 seconds: info.duration_seconds,
                 total: info.duration_seconds,
             });
@@ -445,6 +461,7 @@ fn spawn_decode_worker(
 
 fn run_decode_worker(
     path: &PathBuf,
+    track_id: &str,
     info: &StreamInfo,
     shared: &Arc<PlaybackShared>,
     event_bus: &EventBus,
@@ -475,13 +492,25 @@ fn run_decode_worker(
         }
 
         if shared.paused.load(Ordering::Acquire) {
-            publish_progress_if_due(shared, event_bus, info.duration_seconds, &mut last_progress);
+            publish_progress_if_due(
+                track_id,
+                shared,
+                event_bus,
+                info.duration_seconds,
+                &mut last_progress,
+            );
             thread::sleep(QUEUE_SLEEP);
             continue;
         }
 
         if shared.queue.lock().len() >= shared.max_buffer_samples {
-            publish_progress_if_due(shared, event_bus, info.duration_seconds, &mut last_progress);
+            publish_progress_if_due(
+                track_id,
+                shared,
+                event_bus,
+                info.duration_seconds,
+                &mut last_progress,
+            );
             thread::sleep(QUEUE_SLEEP);
             continue;
         }
@@ -504,6 +533,7 @@ fn run_decode_worker(
             &samples,
             shared,
             event_bus,
+            track_id,
             info.duration_seconds,
             &mut last_progress,
         );
@@ -511,7 +541,13 @@ fn run_decode_worker(
     }
 
     while !shared.stopped.load(Ordering::Acquire) && !shared.queue.lock().is_empty() {
-        publish_progress_if_due(shared, event_bus, info.duration_seconds, &mut last_progress);
+        publish_progress_if_due(
+            track_id,
+            shared,
+            event_bus,
+            info.duration_seconds,
+            &mut last_progress,
+        );
         thread::sleep(QUEUE_SLEEP);
     }
 
@@ -542,6 +578,7 @@ fn push_samples(
     samples: &[f32],
     shared: &Arc<PlaybackShared>,
     event_bus: &EventBus,
+    track_id: &str,
     total_seconds: f64,
     last_progress: &mut Instant,
 ) {
@@ -566,13 +603,14 @@ fn push_samples(
 
         offset += written;
         if written == 0 {
-            publish_progress_if_due(shared, event_bus, total_seconds, last_progress);
+            publish_progress_if_due(track_id, shared, event_bus, total_seconds, last_progress);
             thread::sleep(QUEUE_SLEEP);
         }
     }
 }
 
 fn publish_progress_if_due(
+    track_id: &str,
     shared: &PlaybackShared,
     event_bus: &EventBus,
     total_seconds: f64,
@@ -584,6 +622,7 @@ fn publish_progress_if_due(
 
     *last_progress = Instant::now();
     event_bus.publish(PlayerEvent::Progress {
+        track_id: track_id.to_string(),
         seconds: shared.progress_seconds().min(total_seconds.max(0.0)),
         total: total_seconds,
     });

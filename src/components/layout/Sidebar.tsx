@@ -4,6 +4,7 @@ import {
   History,
   ListMusic,
   Music,
+  Radio,
   Settings,
   Sliders,
   User,
@@ -28,6 +29,7 @@ export function Sidebar() {
 
   const items: NavItem[] = [
     { key: "local", label: "本地音乐", icon: Music },
+    { key: "streaming", label: "流媒体", icon: Radio },
     { key: "recent", label: "最近播放", icon: History },
     { key: "liked", label: "我喜欢", icon: Heart },
     { key: "playlists", label: "歌单", icon: ListMusic },

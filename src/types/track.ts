@@ -17,6 +17,9 @@ export interface Track {
   channels: string;
   size: string;
   path: string;
+  sourceUrl?: string | null;
+  sourceId?: string | null;
+  cacheMissing?: boolean;
   duration: number;
   glowColor: string;
   glow1?: string;
@@ -34,6 +37,7 @@ export type DriverKind = "wasapi" | "asio" | "direct";
 
 export type LibraryView =
   | "local"
+  | "streaming"
   | "recent"
   | "liked"
   | "playlists"

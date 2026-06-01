@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { formatSeconds } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePlayerStore } from "@/store/player";
@@ -11,24 +11,51 @@ export function WaveformProgress() {
   const seek = usePlayerStore((s) => s.seek);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [dragTime, setDragTime] = useState<number | null>(null);
+  const draggingRef = useRef(false);
 
-  useWaveform(canvasRef, { track, currentTime, isPlaying });
+  const displayTime = dragTime ?? currentTime;
 
-  const onClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  useWaveform(canvasRef, { track, currentTime: displayTime, isPlaying });
+
+  const timeFromClientX = (clientX: number) => {
     if (!track || track.duration <= 0) return;
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const clickX = e.clientX - rect.left - WAVEFORM_SIDE_PADDING;
+    const clickX = clientX - rect.left - WAVEFORM_SIDE_PADDING;
     const realWidth = rect.width - WAVEFORM_SIDE_PADDING * 2;
     const pct = Math.max(0, Math.min(1, clickX / realWidth));
-    seek(pct * track.duration);
+    return pct * track.duration;
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!canSeek) return;
+    const nextTime = timeFromClientX(e.clientX);
+    if (nextTime === undefined) return;
+    draggingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragTime(nextTime);
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    const nextTime = timeFromClientX(e.clientX);
+    if (nextTime !== undefined) setDragTime(nextTime);
+  };
+
+  const finishDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    const nextTime = timeFromClientX(e.clientX) ?? dragTime;
+    setDragTime(null);
+    if (nextTime !== null && nextTime !== undefined) seek(nextTime);
   };
 
   if (!track) return null;
 
   const canSeek = track.duration > 0;
-  const currentLabel = formatSeconds(currentTime);
+  const currentLabel = formatSeconds(displayTime);
   const durationLabel = canSeek ? formatSeconds(track.duration) : "--:--";
 
   return (
@@ -38,16 +65,19 @@ export function WaveformProgress() {
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={track.duration || 0}
-        aria-valuenow={Math.min(currentTime, track.duration || 0)}
+        aria-valuenow={Math.min(displayTime, track.duration || 0)}
       >
         <span className="rounded-md bg-white/70 px-2 py-1 text-center font-mono text-[10px] font-semibold tabular-nums text-slate-600 shadow-[0_1px_6px_rgba(15,23,42,0.04)]">
           {currentLabel}
         </span>
         <div
           ref={containerRef}
-          onClick={onClick}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={finishDrag}
+          onPointerCancel={finishDrag}
           className={cn(
-            "relative flex h-8 min-w-0 items-center overflow-hidden rounded-md bg-gradient-to-r from-cyan-950/[0.035] via-white/35 to-cyan-950/[0.035]",
+            "relative flex h-8 min-w-0 touch-none items-center overflow-hidden rounded-md bg-gradient-to-r from-cyan-950/[0.035] via-white/35 to-cyan-950/[0.035]",
             canSeek ? "cursor-pointer" : "cursor-default"
           )}
         >

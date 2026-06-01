@@ -26,6 +26,7 @@ seraph-playlist = { workspace = true }
 seraph-visualizer = { workspace = true }
 
 tauri = { version = "2.1", features = [] }
+tauri-plugin-dialog = "2"
 
 lofty = "0.24"
 encoding_rs = "0.8"
@@ -35,3 +36,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
+reqwest = { version = "0.13", features = ["json", "query"] }
+base64 = "0.22"

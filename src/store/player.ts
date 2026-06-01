@@ -16,6 +16,22 @@ interface BackendDevice {
   isDefault?: boolean;
 }
 
+export interface BilibiliImportOptions {
+  preferFlac: boolean;
+  preferDolbyAtmos: boolean;
+  remuxWithFfmpeg: boolean;
+}
+
+export interface BilibiliImportFailure {
+  input: string;
+  reason: string;
+}
+
+export interface BilibiliBatchImportResult {
+  tracks: Track[];
+  failed: BilibiliImportFailure[];
+}
+
 interface PersistedPlayerState {
   currentTrackIndex: number;
   recentTrackIds: string[];
@@ -66,6 +82,16 @@ interface PlayerStore {
   toggleLike: (trackId: string) => void;
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (paths: string[]) => Promise<void>;
+  importBilibiliAudio: (
+    input: string,
+    options?: BilibiliImportOptions
+  ) => Promise<void>;
+  importBilibiliFavorites: (
+    input: string,
+    options?: BilibiliImportOptions
+  ) => Promise<BilibiliBatchImportResult | null>;
+  markTracksCacheMissingByPaths: (paths: string[]) => void;
+  normalizeLibrary: () => void;
   importLyricsForCurrentTrack: (file: File) => Promise<void>;
   loadDevices: () => void;
   selectDevice: (id: string) => void;
@@ -101,6 +127,15 @@ function sendPlayCommand(track: Track, startSeconds = 0) {
   });
 }
 
+function streamingSourceInput(track: Track) {
+  const bvid = bvidFromTrack(track);
+  return (
+    track.sourceUrl?.trim() ||
+    track.sourceId?.trim() ||
+    (bvid ? `https://www.bilibili.com/video/${bvid}` : "")
+  );
+}
+
 function normalizeDevice(device: BackendDevice): OutputDevice {
   return {
     id: device.id,
@@ -113,31 +148,145 @@ function normalizePath(path: string) {
   return path.trim().toLowerCase();
 }
 
+function normalizeText(value: string | undefined | null) {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function bvidFromTrack(track: Track) {
+  const sourceId = track.sourceId?.trim();
+  if (sourceId?.toLowerCase().startsWith("bv")) return sourceId.toLowerCase();
+
+  const sourceUrl = track.sourceUrl ?? "";
+  const sourceMatch = sourceUrl.match(/BV[a-zA-Z0-9]+/);
+  if (sourceMatch) return sourceMatch[0].toLowerCase();
+
+  const idMatch = track.id.match(/bilibili-(bv[a-zA-Z0-9]+)/i);
+  if (idMatch) return idMatch[1].toLowerCase();
+
+  const pathMatch = track.path.match(/(BV[a-zA-Z0-9]+)-\d+/i);
+  if (pathMatch) return pathMatch[1].toLowerCase();
+
+  return "";
+}
+
+function isBilibiliTrack(track: Track) {
+  return track.id.startsWith("bilibili-") || track.album === "Bilibili";
+}
+
+function trackMergeKey(track: Track) {
+  const bvid = bvidFromTrack(track);
+  if (bvid) return `bvid:${bvid}`;
+  const sourceId = track.sourceId?.trim().toLowerCase();
+  if (sourceId) return `source-id:${sourceId}`;
+  const sourceUrl = track.sourceUrl?.trim().toLowerCase();
+  if (sourceUrl) return `source-url:${sourceUrl}`;
+  if (isBilibiliTrack(track)) {
+    return [
+      "bilibili-meta",
+      normalizeText(track.title),
+      normalizeText(track.artist),
+      Math.round(track.duration || 0),
+    ].join(":");
+  }
+  return `path:${normalizePath(track.path)}`;
+}
+
+function dedupeTracks(tracks: Track[]) {
+  const byKey = new Map<string, Track>();
+  const orderedKeys: string[] = [];
+
+  for (const track of tracks) {
+    const key = trackMergeKey(track);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, track);
+      orderedKeys.push(key);
+      continue;
+    }
+
+    const preferred =
+      existing.cacheMissing && !track.cacheMissing
+        ? mergeIncomingTrack(existing, track)
+        : mergeIncomingTrack(track, existing);
+    byKey.set(key, preferred);
+  }
+
+  return orderedKeys.map((key) => byKey.get(key)).filter((track): track is Track => !!track);
+}
+
+function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) {
+  const likedByKey = new Set<string>();
+  for (const track of tracks) {
+    if (liked[track.id]) likedByKey.add(trackMergeKey(track));
+  }
+
+  const playlist = dedupeTracks(tracks);
+  const nextLiked = { ...liked };
+  for (const track of playlist) {
+    if (likedByKey.has(trackMergeKey(track))) {
+      nextLiked[track.id] = true;
+    }
+  }
+
+  return { playlist, liked: nextLiked };
+}
+
 function mergeTracksByPath(existing: Track[], incoming: Track[]) {
   const remaining = new Map<string, Track>();
   for (const track of incoming) {
-    const key = normalizePath(track.path);
+    const key = trackMergeKey(track);
     if (key) remaining.set(key, track);
   }
 
   const playlist = existing.map((track) => {
-    const key = normalizePath(track.path);
+    const key = trackMergeKey(track);
     const updated = remaining.get(key);
     if (!updated) return track;
     remaining.delete(key);
     return mergeIncomingTrack(track, updated);
   });
 
-  return [...playlist, ...Array.from(remaining.values())];
+  return dedupeTracks([...playlist, ...Array.from(remaining.values())]);
+}
+
+function mergeTracksByPathWithStats(existing: Track[], incoming: Track[]) {
+  const remaining = new Map<string, Track>();
+  for (const track of incoming) {
+    const key = trackMergeKey(track);
+    if (key) remaining.set(key, track);
+  }
+
+  let updatedCount = 0;
+  const playlist = existing.map((track) => {
+    const key = trackMergeKey(track);
+    const updated = remaining.get(key);
+    if (!updated) return track;
+    remaining.delete(key);
+    updatedCount += 1;
+    return mergeIncomingTrack(track, updated);
+  });
+  const addedTracks = Array.from(remaining.values());
+
+  return {
+    playlist: dedupeTracks([...playlist, ...addedTracks]),
+    addedCount: addedTracks.length,
+    updatedCount,
+  };
 }
 
 function mergeIncomingTrack(existing: Track, incoming: Track) {
   const incomingLyrics = incoming.lyrics ?? [];
   const existingLyrics = existing.lyrics ?? [];
+  const merged = {
+    ...incoming,
+    sourceUrl: incoming.sourceUrl ?? existing.sourceUrl,
+    sourceId: incoming.sourceId ?? existing.sourceId,
+    cacheMissing: incoming.cacheMissing ?? false,
+  };
   if (incomingLyrics.length === 0 && existingLyrics.length > 0) {
-    return { ...incoming, lyrics: existingLyrics };
+    return { ...merged, lyrics: existingLyrics };
   }
-  return { ...incoming, lyrics: incomingLyrics };
+  return { ...merged, lyrics: incomingLyrics };
 }
 
 function replaceTrackLyrics(
@@ -148,6 +297,32 @@ function replaceTrackLyrics(
   return playlist.map((track) =>
     track.id === trackId ? { ...track, lyrics } : track
   );
+}
+
+async function ensurePlayableTrack(
+  track: Track,
+  replaceTrack: (track: Track) => void,
+  notify: (text: string) => void
+) {
+  const sourceInput = streamingSourceInput(track);
+  if (!track.cacheMissing || !sourceInput) {
+    return track;
+  }
+
+  notify(`正在重新缓存: ${track.title}`);
+  const imported = await invoke<Track>("import_bilibili_audio_with_options", {
+    input: sourceInput,
+    options: {
+      preferFlac: true,
+      preferDolbyAtmos: true,
+      remuxWithFfmpeg: true,
+    },
+  });
+
+  const merged = mergeIncomingTrack(track, imported);
+  replaceTrack(merged);
+  notify(`已重新缓存: ${merged.title}`);
+  return merged;
 }
 
 function lyricImportErrorMessage(err: unknown) {
@@ -176,6 +351,30 @@ function lyricImportErrorMessage(err: unknown) {
   }
 
   return `导入歌词失败：${message}`;
+}
+
+function bilibiliImportErrorMessage(err: unknown) {
+  const message =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : "";
+
+  if (!message) return "导入 B 站音频失败";
+  if (message.includes("BV") || message.includes("B 站链接")) return message;
+  if (message.includes("no dash audio") || message.includes("no usable audio")) {
+    return "这个视频没有可用的 DASH 音频流";
+  }
+  if (message.includes("403") || message.includes("401")) {
+    return "B 站拒绝了音频下载，可能需要登录或该内容受限";
+  }
+  if (message.includes("404")) return "B 站音频链接已失效，请重新导入";
+  if (message.includes("timed out") || message.includes("timeout")) {
+    return "连接 B 站超时，请稍后重试";
+  }
+
+  return `导入 B 站音频失败：${message}`;
 }
 
 function clampVolume(volume: number) {
@@ -316,9 +515,27 @@ export const usePlayerStore = create<PlayerStore>()(
       return;
     }
 
-    sendPlayCommand(track, get().currentTime);
-    set({ isPlaying: true });
-    get().showNotification(`正在播放: ${track.title}`);
+    void ensurePlayableTrack(
+      track,
+      (updatedTrack) => {
+        set((state) => ({
+          playlist: state.playlist.map((item) =>
+            item.id === track.id ? updatedTrack : item
+          ),
+        }));
+      },
+      get().showNotification
+    )
+      .then((playableTrack) => {
+        sendPlayCommand(playableTrack, get().currentTime);
+        set({ isPlaying: true });
+        get().showNotification(`正在播放: ${playableTrack.title}`);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("Failed to prepare streaming track", err);
+        get().showNotification(bilibiliImportErrorMessage(err));
+      });
   },
 
   nextTrack: () => {
@@ -348,7 +565,25 @@ export const usePlayerStore = create<PlayerStore>()(
       currentTime: 0,
       recentTrackIds: withRecentTrack(get().recentTrackIds, track.id),
     });
-    if (wasPlaying) sendPlayCommand(track, 0);
+    if (wasPlaying) {
+      void ensurePlayableTrack(
+        track,
+        (updatedTrack) => {
+          set((state) => ({
+            playlist: state.playlist.map((item, itemIndex) =>
+              itemIndex === index ? updatedTrack : item
+            ),
+          }));
+        },
+        get().showNotification
+      )
+        .then((playableTrack) => sendPlayCommand(playableTrack, 0))
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("Failed to prepare streaming track", err);
+          get().showNotification(bilibiliImportErrorMessage(err));
+        });
+    }
   },
 
   setActiveView: (view) => {
@@ -426,7 +661,10 @@ export const usePlayerStore = create<PlayerStore>()(
       if (!Array.isArray(cached) || cached.length === 0) return;
 
       set((state) => ({
-        playlist: mergeTracksByPath(state.playlist, cached),
+        ...dedupeTracksWithLiked(
+          mergeTracksByPath(state.playlist, cached),
+          state.liked
+        ),
         currentTrackIndex:
           state.playlist.length === 0 && cached.length > 0
             ? 0
@@ -500,6 +738,140 @@ export const usePlayerStore = create<PlayerStore>()(
       console.warn("Tauri command failed: import_tracks", err);
       get().showNotification("导入本地音乐失败");
     }
+  },
+
+  importBilibiliAudio: async (input, options) => {
+    const cleanInput = input.trim();
+    if (!cleanInput) {
+      get().showNotification("请输入 B 站视频链接或 BV 号");
+      return;
+    }
+
+    try {
+      const imported = await invoke<Track>("import_bilibili_audio_with_options", {
+        input: cleanInput,
+        options,
+      });
+
+      if (!imported?.path) {
+        get().showNotification("没有解析到可用的 B 站音频");
+        return;
+      }
+
+      let added = false;
+      let updated = false;
+      const previousLength = get().playlist.length;
+
+      set((state) => {
+        const incomingKey = trackMergeKey(imported);
+        const existingIndex = state.playlist.findIndex(
+          (track) => trackMergeKey(track) === incomingKey
+        );
+
+        if (existingIndex >= 0) {
+          updated = true;
+          const playlist = state.playlist.map((track, index) =>
+            index === existingIndex ? mergeIncomingTrack(track, imported) : track
+          );
+          return {
+            playlist,
+            currentTrackIndex: state.currentTrackIndex,
+            activeView: "streaming",
+          };
+        }
+
+        added = true;
+        return {
+          playlist: [...state.playlist, imported],
+          currentTrackIndex: previousLength === 0 ? 0 : state.currentTrackIndex,
+          activeView: "streaming",
+        };
+      });
+
+      get().showNotification(
+        added
+          ? `已添加 B 站音频: ${imported.title}`
+          : updated
+            ? `已更新 B 站音频: ${imported.title}`
+            : "B 站音频已在曲库中"
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: import_bilibili_audio", err);
+      get().showNotification(bilibiliImportErrorMessage(err));
+    }
+  },
+
+  importBilibiliFavorites: async (input, options) => {
+    const cleanInput = input.trim();
+    if (!cleanInput) {
+      get().showNotification("请输入 B 站收藏夹链接、media_id 或 fid");
+      return null;
+    }
+
+    try {
+      const result = await invoke<BilibiliBatchImportResult>("import_bilibili_favorites", {
+        input: cleanInput,
+        options,
+      });
+      const tracks = Array.isArray(result.tracks) ? result.tracks : [];
+      const failed = Array.isArray(result.failed) ? result.failed : [];
+
+      if (tracks.length > 0) {
+        const previousLength = get().playlist.length;
+        const stats = mergeTracksByPathWithStats(get().playlist, tracks);
+        set({
+          playlist: stats.playlist,
+          currentTrackIndex: previousLength === 0 ? 0 : get().currentTrackIndex,
+          activeView: "streaming",
+        });
+        get().showNotification(
+          `收藏夹导入完成：新增 ${stats.addedCount} 首，更新 ${stats.updatedCount} 首，失败 ${failed.length} 首`
+        );
+      } else {
+        get().showNotification(
+          failed.length > 0
+            ? `收藏夹导入失败：${failed[0].reason}`
+            : "收藏夹里没有可导入的音频"
+        );
+      }
+
+      return { tracks, failed };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: import_bilibili_favorites", err);
+      get().showNotification(bilibiliImportErrorMessage(err));
+      return null;
+    }
+  },
+
+  markTracksCacheMissingByPaths: (paths) => {
+    const removed = new Set(paths.map(normalizePath).filter(Boolean));
+    if (removed.size === 0) return;
+    set((state) => {
+      const playlist = state.playlist.map((track) =>
+        removed.has(normalizePath(track.path)) && streamingSourceInput(track)
+          ? { ...track, cacheMissing: true, size: "0 MB" }
+          : track
+      );
+      return {
+        playlist,
+        currentTrackIndex: Math.min(state.currentTrackIndex, Math.max(playlist.length - 1, 0)),
+      };
+    });
+  },
+
+  normalizeLibrary: () => {
+    set((state) => {
+      const deduped = dedupeTracksWithLiked(state.playlist, state.liked);
+      return {
+        ...deduped,
+        currentTrackIndex: Math.min(
+          state.currentTrackIndex,
+          Math.max(deduped.playlist.length - 1, 0)
+        ),
+      };
+    });
   },
 
   importLyricsForCurrentTrack: async (file) => {

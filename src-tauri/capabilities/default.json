@@ -12,6 +12,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
     "core:event:default",
-    "core:app:default"
+    "core:app:default",
+    "dialog:allow-open"
   ]
 }

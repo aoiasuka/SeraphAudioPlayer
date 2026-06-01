@@ -1,26 +1,65 @@
 import {
+  ArrowLeft,
+  BadgeCheck,
   Disc3,
+  DownloadCloud,
+  FolderHeart,
+  Headphones,
   Heart,
+  Link2,
   ListMusic,
+  Loader2,
+  LogIn,
+  LogOut,
   Music2,
   Pause,
   Play,
+  QrCode,
+  RefreshCw,
+  Settings2,
+  Sparkles,
   User,
 } from "lucide-react";
-import { useMemo, useState, type UIEvent } from "react";
+import * as QRCode from "qrcode";
+import { useEffect, useMemo, useState, type FormEvent, type UIEvent } from "react";
 import { DeviceMenu } from "@/components/player/DeviceMenu";
 import { PlaybackControls } from "@/components/player/PlaybackControls";
 import { VolumeControl } from "@/components/player/VolumeControl";
 import { WaveformProgress } from "@/components/player/WaveformProgress";
 import { cn } from "@/lib/utils";
 import { formatSeconds } from "@/lib/format";
-import { usePlayerStore } from "@/store/player";
+import { invoke } from "@/lib/tauri";
+import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
 import type { LibraryView, Track } from "@/types/track";
 
 interface PageCopy {
   title: string;
   kicker: string;
   description: string;
+}
+
+interface BilibiliLoginStatus {
+  loggedIn: boolean;
+  username?: string | null;
+  mid?: number | null;
+  face?: string | null;
+}
+
+interface BilibiliLoginQrCode {
+  url: string;
+  qrcodeKey: string;
+}
+
+interface BilibiliLoginPollResult {
+  code: number;
+  message: string;
+  loggedIn: boolean;
+  profile?: BilibiliLoginStatus | null;
+}
+
+interface BilibiliFfmpegStatus {
+  available: boolean;
+  path?: string | null;
 }
 
 const TRACK_ROW_HEIGHT = 57;
@@ -31,6 +70,11 @@ const copy: Record<LibraryView, PageCopy> = {
     title: "本地音乐",
     kicker: "Local Library",
     description: "管理本机已索引的无损曲目，点击任意曲目即可载入播放。",
+  },
+  streaming: {
+    title: "流媒体",
+    kicker: "Streaming",
+    description: "粘贴 B 站视频链接或 BV 号，将音频缓存到本地后加入播放队列。",
   },
   recent: {
     title: "最近播放",
@@ -214,7 +258,7 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
                 className="truncate text-[11px] font-semibold text-slate-500"
                 title={track.bitdepth}
               >
-                {compactQualityLabel(track)}
+                {track.cacheMissing ? "需重缓存" : compactQualityLabel(track)}
               </span>
               <span className="text-[11px] font-mono text-slate-500">
                 {formatSeconds(track.duration)}
@@ -241,9 +285,394 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
   );
 }
 
+function isStreamingTrack(track: Track) {
+  return (
+    track.id.startsWith("bilibili-") ||
+    track.sourceId?.trim().toLowerCase().startsWith("bv") ||
+    track.sourceUrl?.trim().toLowerCase().includes("bilibili.com") ||
+    track.album === "Bilibili"
+  );
+}
+
+function isLocalTrack(track: Track) {
+  return !isStreamingTrack(track);
+}
+
 function LocalPage() {
   const playlist = usePlayerStore((s) => s.playlist);
-  return <TrackRows tracks={playlist} empty="暂无本地曲目" />;
+  const localTracks = useMemo(() => playlist.filter(isLocalTrack), [playlist]);
+  return <TrackRows tracks={localTracks} empty="暂无本地曲目" />;
+}
+
+function StreamingPage() {
+  const playlist = usePlayerStore((s) => s.playlist);
+  const streamingTracks = useMemo(
+    () => playlist.filter(isStreamingTrack),
+    [playlist]
+  );
+  const importBilibiliAudio = usePlayerStore((s) => s.importBilibiliAudio);
+  const importBilibiliFavorites = usePlayerStore((s) => s.importBilibiliFavorites);
+  const showNotification = usePlayerStore((s) => s.showNotification);
+  const [bilibiliInput, setBilibiliInput] = useState("");
+  const [favoriteInput, setFavoriteInput] = useState("");
+  const [isImporting, setIsImporting] = useState(false);
+  const [isBatchImporting, setIsBatchImporting] = useState(false);
+  const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(true);
+  const [preferFlac, setPreferFlac] = useState(true);
+  const [remuxWithFfmpeg, setRemuxWithFfmpeg] = useState(true);
+  const [loginStatus, setLoginStatus] = useState<BilibiliLoginStatus>({
+    loggedIn: false,
+  });
+  const [ffmpegStatus, setFfmpegStatus] = useState<BilibiliFfmpegStatus>({
+    available: false,
+  });
+  const [loginQr, setLoginQr] = useState<BilibiliLoginQrCode | null>(null);
+  const [loginQrDataUrl, setLoginQrDataUrl] = useState("");
+  const [loginPollMessage, setLoginPollMessage] = useState("");
+  const [isLoginBusy, setIsLoginBusy] = useState(false);
+
+  const importOptions: BilibiliImportOptions = {
+    preferFlac,
+    preferDolbyAtmos,
+    remuxWithFfmpeg,
+  };
+
+  const refreshBilibiliState = async () => {
+    try {
+      const [status, ffmpeg] = await Promise.all([
+        invoke<BilibiliLoginStatus>("bilibili_login_status"),
+        invoke<BilibiliFfmpegStatus>("bilibili_ffmpeg_status"),
+      ]);
+      setLoginStatus(status);
+      setFfmpegStatus(ffmpeg);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: bilibili status", err);
+    }
+  };
+
+  useEffect(() => {
+    void refreshBilibiliState();
+  }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!loginQr?.url) {
+      setLoginQrDataUrl("");
+      return;
+    }
+
+    void QRCode.toDataURL(loginQr.url, {
+      width: 184,
+      margin: 1,
+      color: { dark: "#0f172a", light: "#ffffff" },
+    }).then((dataUrl) => {
+      if (!canceled) setLoginQrDataUrl(dataUrl);
+    });
+
+    return () => {
+      canceled = true;
+    };
+  }, [loginQr]);
+
+  useEffect(() => {
+    if (!loginQr?.qrcodeKey) return;
+
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      void invoke<BilibiliLoginPollResult>("bilibili_poll_login", {
+        qrcodeKey: loginQr.qrcodeKey,
+      })
+        .then((result) => {
+          if (stopped) return;
+          setLoginPollMessage(result.message);
+          if (result.loggedIn || result.code === 0) {
+            setLoginStatus(
+              result.profile ?? {
+                loggedIn: true,
+              }
+            );
+            setLoginQr(null);
+            showNotification("B 站登录成功");
+          } else if (result.code === 86038) {
+            setLoginQr(null);
+            showNotification("B 站二维码已过期");
+          }
+        })
+        .catch((err) => {
+          if (stopped) return;
+          // eslint-disable-next-line no-console
+          console.warn("Tauri command failed: bilibili_poll_login", err);
+          setLoginPollMessage("登录轮询失败");
+        });
+    }, 1800);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [loginQr, showNotification]);
+
+  const startBilibiliLogin = async () => {
+    if (isLoginBusy) return;
+    setIsLoginBusy(true);
+    try {
+      const qrcode = await invoke<BilibiliLoginQrCode>("bilibili_login_qrcode");
+      setLoginQr(qrcode);
+      setLoginPollMessage("等待扫码");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: bilibili_login_qrcode", err);
+      showNotification("无法生成 B 站登录二维码");
+    } finally {
+      setIsLoginBusy(false);
+    }
+  };
+
+  const logoutBilibili = async () => {
+    try {
+      await invoke("bilibili_logout");
+      setLoginStatus({ loggedIn: false });
+      showNotification("已退出 B 站登录");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: bilibili_logout", err);
+      showNotification("退出 B 站登录失败");
+    }
+  };
+
+  const handleImportBilibili = async (event: FormEvent) => {
+    event.preventDefault();
+    const input = bilibiliInput.trim();
+    if (!input || isImporting) return;
+
+    setIsImporting(true);
+    try {
+      await importBilibiliAudio(input, importOptions);
+      setBilibiliInput("");
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleImportFavorites = async (event: FormEvent) => {
+    event.preventDefault();
+    const input = favoriteInput.trim();
+    if (!input || isBatchImporting) return;
+
+    setIsBatchImporting(true);
+    try {
+      const result = await importBilibiliFavorites(input, importOptions);
+      if (result && result.tracks.length > 0) {
+        setFavoriteInput("");
+      }
+    } finally {
+      setIsBatchImporting(false);
+    }
+  };
+
+  return (
+    <div className="relative flex min-h-0 flex-col gap-3">
+      <div className="grid gap-2 rounded-lg border border-black/[0.04] bg-white/50 p-2 shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
+        <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex h-9 min-w-0 items-center gap-2 rounded-md px-3 text-xs font-bold",
+                loginStatus.loggedIn
+                  ? "bg-emerald-500/10 text-emerald-700"
+                  : "bg-slate-900/5 text-slate-500"
+              )}
+            >
+              {loginStatus.face ? (
+                <img
+                  src={loginStatus.face}
+                  alt=""
+                  className="h-5 w-5 rounded-full object-cover"
+                />
+              ) : loginStatus.loggedIn ? (
+                <BadgeCheck className="h-4 w-4" />
+              ) : (
+                <QrCode className="h-4 w-4" />
+              )}
+              <span className="max-w-[180px] truncate">
+                {loginStatus.loggedIn
+                  ? loginStatus.username ?? "已登录"
+                  : "未登录"}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={startBilibiliLogin}
+              disabled={isLoginBusy}
+              className="inline-flex h-9 items-center gap-2 rounded-md bg-cyan-700 px-3 text-xs font-bold text-white transition-colors hover:bg-cyan-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {isLoginBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <LogIn className="h-4 w-4" />
+              )}
+              <span>扫码登录</span>
+            </button>
+            {loginStatus.loggedIn ? (
+              <button
+                type="button"
+                onClick={logoutBilibili}
+                className="inline-flex h-9 items-center justify-center rounded-md bg-white/60 px-3 text-xs font-bold text-slate-500 transition-colors hover:bg-white hover:text-slate-700"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void refreshBilibiliState()}
+              className="inline-flex h-9 items-center justify-center rounded-md bg-white/60 px-3 text-xs font-bold text-slate-500 transition-colors hover:bg-white hover:text-slate-700"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPreferDolbyAtmos((value) => !value)}
+              className={cn(
+                "inline-flex h-9 items-center gap-2 rounded-md px-3 text-xs font-bold transition-colors",
+                preferDolbyAtmos
+                  ? "bg-violet-500/10 text-violet-700"
+                  : "bg-white/60 text-slate-500 hover:bg-white"
+              )}
+            >
+              <Headphones className="h-4 w-4" />
+              <span>Dolby Atmos</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPreferFlac((value) => !value)}
+              className={cn(
+                "inline-flex h-9 items-center gap-2 rounded-md px-3 text-xs font-bold transition-colors",
+                preferFlac
+                  ? "bg-amber-400/20 text-amber-700"
+                  : "bg-white/60 text-slate-500 hover:bg-white"
+              )}
+            >
+              <Sparkles className="h-4 w-4" />
+              <span>FLAC/Hi-Res</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setRemuxWithFfmpeg((value) => !value)}
+              className={cn(
+                "inline-flex h-9 items-center gap-2 rounded-md px-3 text-xs font-bold transition-colors",
+                remuxWithFfmpeg
+                  ? "bg-cyan-600/10 text-cyan-700"
+                  : "bg-white/60 text-slate-500 hover:bg-white"
+              )}
+            >
+              <Settings2 className="h-4 w-4" />
+              <span>Remux</span>
+            </button>
+            <span
+              className={cn(
+                "inline-flex h-9 items-center rounded-md px-3 text-[11px] font-bold",
+                ffmpegStatus.available
+                  ? "bg-emerald-500/10 text-emerald-700"
+                  : "bg-rose-500/10 text-rose-600"
+              )}
+              title={ffmpegStatus.path ?? undefined}
+            >
+              ffmpeg {ffmpegStatus.available ? "可用" : "未找到"}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid gap-2 xl:grid-cols-2">
+          <form
+            onSubmit={handleImportBilibili}
+            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2"
+          >
+            <label className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 rounded-md bg-white/55 px-3 py-2 text-slate-500">
+              <Link2 className="h-4 w-4 shrink-0 text-cyan-700" />
+              <input
+                value={bilibiliInput}
+                onChange={(event) => setBilibiliInput(event.target.value)}
+                placeholder="B 站视频链接或 BV 号"
+                className="min-w-0 bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400"
+                disabled={isImporting}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={!bilibiliInput.trim() || isImporting}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-700 px-3 text-xs font-bold text-white shadow-[0_8px_20px_rgba(8,145,178,0.18)] transition-colors hover:bg-cyan-800 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none"
+            >
+              {isImporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <DownloadCloud className="h-4 w-4" />
+              )}
+              <span>{isImporting ? "导入中" : "添加"}</span>
+            </button>
+          </form>
+
+          <form
+            onSubmit={handleImportFavorites}
+            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2"
+          >
+            <label className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 rounded-md bg-white/55 px-3 py-2 text-slate-500">
+              <FolderHeart className="h-4 w-4 shrink-0 text-cyan-700" />
+              <input
+                value={favoriteInput}
+                onChange={(event) => setFavoriteInput(event.target.value)}
+                placeholder="收藏夹链接、media_id 或 fid"
+                className="min-w-0 bg-transparent text-sm font-medium text-slate-800 outline-none placeholder:text-slate-400"
+                disabled={isBatchImporting}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={!favoriteInput.trim() || isBatchImporting}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-800 px-3 text-xs font-bold text-white shadow-[0_8px_20px_rgba(15,23,42,0.14)] transition-colors hover:bg-slate-900 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none"
+            >
+              {isBatchImporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FolderHeart className="h-4 w-4" />
+              )}
+              <span>{isBatchImporting ? "批量中" : "批量"}</span>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {loginQr ? (
+        <div className="absolute left-2 top-12 z-20 w-[236px] rounded-lg border border-black/[0.06] bg-white p-4 shadow-[0_18px_48px_rgba(15,23,42,0.18)]">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-800">哔哩哔哩登录</span>
+            <button
+              type="button"
+              onClick={() => setLoginQr(null)}
+              className="rounded-md px-2 py-1 text-xs font-bold text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            >
+              关闭
+            </button>
+          </div>
+          <div className="mt-3 flex h-[184px] w-[184px] items-center justify-center rounded-lg bg-white">
+            {loginQrDataUrl ? (
+              <img src={loginQrDataUrl} alt="B 站登录二维码" className="h-[184px] w-[184px]" />
+            ) : (
+              <Loader2 className="h-5 w-5 animate-spin text-cyan-700" />
+            )}
+          </div>
+          <p className="mt-2 truncate text-center text-xs font-semibold text-slate-500">
+            {loginPollMessage || "等待扫码"}
+          </p>
+        </div>
+      ) : null}
+
+      <TrackRows tracks={streamingTracks} empty="暂无流媒体曲目" />
+    </div>
+  );
 }
 
 function RecentPage() {
@@ -278,6 +707,10 @@ function PlaylistsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
   const liked = usePlayerStore((s) => s.liked);
   const recentTrackIds = usePlayerStore((s) => s.recentTrackIds);
+  const localCount = useMemo(
+    () => playlist.filter(isLocalTrack).length,
+    [playlist]
+  );
   const likedCount = useMemo(
     () => Object.values(liked).filter(Boolean).length,
     [liked]
@@ -285,7 +718,7 @@ function PlaylistsPage() {
   const cards = useMemo(() => [
     {
       title: "Hi-Res 本地精选",
-      count: playlist.length,
+      count: localCount,
       view: "local" as LibraryView,
       icon: Music2,
       color: "text-cyan-700 bg-cyan-600/10",
@@ -304,7 +737,7 @@ function PlaylistsPage() {
       icon: ListMusic,
       color: "text-indigo-600 bg-indigo-500/10",
     },
-  ], [likedCount, playlist.length, recentTrackIds.length]);
+  ], [likedCount, localCount, recentTrackIds.length]);
 
   return (
     <div className="grid grid-cols-3 gap-4">
@@ -331,14 +764,15 @@ function PlaylistsPage() {
 
 function ArtistsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
-  const loadTrack = usePlayerStore((s) => s.loadTrack);
+  const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const localTracks = useMemo(() => playlist.filter(isLocalTrack), [playlist]);
   const artists = useMemo(() => {
     const groups = new Map<
       string,
-      { name: string; tracks: Track[]; firstIndex: number }
+      { name: string; tracks: Track[] }
     >();
 
-    playlist.forEach((track, index) => {
+    localTracks.forEach((track) => {
       const group = groups.get(track.artist);
       if (group) {
         group.tracks.push(track);
@@ -348,12 +782,48 @@ function ArtistsPage() {
       groups.set(track.artist, {
         name: track.artist,
         tracks: [track],
-        firstIndex: index,
       });
     });
 
     return Array.from(groups.values());
-  }, [playlist]);
+  }, [localTracks]);
+  const activeArtist = useMemo(
+    () => artists.find((artist) => artist.name === selectedArtist) ?? null,
+    [artists, selectedArtist]
+  );
+
+  useEffect(() => {
+    if (selectedArtist && !activeArtist) setSelectedArtist(null);
+  }, [activeArtist, selectedArtist]);
+
+  if (activeArtist) {
+    return (
+      <div className="flex min-h-0 flex-col gap-3">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-black/[0.04] bg-white/50 p-3">
+          <button
+            type="button"
+            onClick={() => setSelectedArtist(null)}
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-white/65 px-3 text-xs font-bold text-slate-600 transition-colors hover:bg-white hover:text-cyan-700"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            返回艺术家
+          </button>
+          <div className="min-w-0 text-right">
+            <p className="truncate text-sm font-bold text-slate-800">
+              {activeArtist.name}
+            </p>
+            <p className="text-[11px] text-slate-500">
+              {activeArtist.tracks.length} 首曲目
+            </p>
+          </div>
+        </div>
+        <TrackRows
+          tracks={activeArtist.tracks}
+          empty={`${activeArtist.name} 暂无曲目`}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
@@ -363,7 +833,7 @@ function ArtistsPage() {
           <button
             key={artist.name}
             type="button"
-            onClick={() => loadTrack(artist.firstIndex)}
+            onClick={() => setSelectedArtist(artist.name)}
             className="rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left hover:bg-white/70 transition-colors"
           >
             <span className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-600/10 text-cyan-700">
@@ -383,18 +853,22 @@ function ArtistsPage() {
 function AlbumsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
   const loadTrack = usePlayerStore((s) => s.loadTrack);
+  const localTracks = useMemo(() => playlist.filter(isLocalTrack), [playlist]);
   const albums = useMemo(() => {
     const seen = new Set<string>();
     const albumTracks: Array<{ track: Track; index: number }> = [];
+    const indexById = new Map<string, number>();
 
-    playlist.forEach((track, index) => {
+    playlist.forEach((track, index) => indexById.set(track.id, index));
+
+    localTracks.forEach((track) => {
       if (seen.has(track.album)) return;
       seen.add(track.album);
-      albumTracks.push({ track, index });
+      albumTracks.push({ track, index: indexById.get(track.id) ?? -1 });
     });
 
     return albumTracks;
-  }, [playlist]);
+  }, [localTracks, playlist]);
 
   return (
     <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
@@ -465,6 +939,7 @@ function MiniPlayer() {
 }
 
 function PageBody({ view }: { view: LibraryView }) {
+  if (view === "streaming") return <StreamingPage />;
   if (view === "recent") return <RecentPage />;
   if (view === "liked") return <LikedPage />;
   if (view === "playlists") return <PlaylistsPage />;

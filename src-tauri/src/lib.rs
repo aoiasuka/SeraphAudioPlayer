@@ -19,6 +19,7 @@ pub fn run() {
     init_tracing();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             ipc::playback::play,
@@ -29,9 +30,20 @@ pub fn run() {
             ipc::playback::prev_track,
             ipc::playback::set_volume,
             ipc::playback::select_output_device,
+            ipc::cache::clear_cache,
+            ipc::cache::get_cache_status,
+            ipc::cache::update_cache_settings,
             ipc::library::get_playlist,
             ipc::library::get_track_info,
             ipc::library::import_tracks,
+            ipc::bilibili::bilibili_ffmpeg_status,
+            ipc::bilibili::bilibili_login_qrcode,
+            ipc::bilibili::bilibili_login_status,
+            ipc::bilibili::bilibili_logout,
+            ipc::bilibili::bilibili_poll_login,
+            ipc::bilibili::import_bilibili_audio,
+            ipc::bilibili::import_bilibili_audio_with_options,
+            ipc::bilibili::import_bilibili_favorites,
             ipc::library::save_track_lyrics,
             ipc::library::list_devices,
         ])

@@ -15,6 +15,15 @@ export function usePlayback() {
       const seconds = typeof event.seconds === "number" ? event.seconds : 0;
       usePlayerStore.setState((state) => {
         const track = state.playlist[state.currentTrackIndex];
+        const eventTrackId =
+          typeof event.track_id === "string"
+            ? event.track_id
+            : typeof event.trackId === "string"
+              ? event.trackId
+              : undefined;
+        if (eventTrackId && track?.id && eventTrackId !== track.id) {
+          return {};
+        }
         const duration = track?.duration ?? Number.POSITIVE_INFINITY;
         return { currentTime: Math.max(0, Math.min(seconds, duration)) };
       });

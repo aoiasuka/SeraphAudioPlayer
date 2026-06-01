@@ -41,6 +41,12 @@ pub struct ImportedTrack {
     pub channels: String,
     pub size: String,
     pub path: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub cache_missing: bool,
     pub duration: u64,
     pub glow_color: String,
     pub glow1: String,
@@ -186,8 +192,9 @@ fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
 
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read library cache {}: {err}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))
+    let tracks: Vec<ImportedTrack> = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))?;
+    Ok(tracks.into_iter().map(enrich_cached_track).collect())
 }
 
 fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
@@ -204,6 +211,46 @@ fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), 
         .map_err(|err| format!("failed to serialize library cache: {err}"))?;
     fs::write(&path, bytes)
         .map_err(|err| format!("failed to write library cache {}: {err}", path.display()))
+}
+
+pub(super) fn merge_tracks_into_cache(
+    app: &AppHandle,
+    tracks: &[ImportedTrack],
+) -> Result<Vec<ImportedTrack>, String> {
+    if tracks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cached = read_cached_tracks(app).unwrap_or_default();
+    let merged = merge_cached_tracks(cached, tracks);
+    write_cached_tracks(app, &merged)?;
+    Ok(imported_tracks_from_cache(&merged, tracks))
+}
+
+pub(super) fn mark_tracks_cache_missing_by_paths(
+    app: &AppHandle,
+    removed_paths: &[PathBuf],
+) -> Result<(), String> {
+    if removed_paths.is_empty() {
+        return Ok(());
+    }
+
+    let removed = removed_paths
+        .iter()
+        .map(|path| import_dedupe_key(path))
+        .collect::<HashSet<_>>();
+    let tracks = read_cached_tracks(app).unwrap_or_default();
+    let updated = tracks
+        .into_iter()
+        .map(|mut track| {
+            if removed.contains(&import_track_key(&track)) && track.source_url.is_some() {
+                track.cache_missing = true;
+                track.size = "0 MB".into();
+            }
+            track
+        })
+        .collect::<Vec<_>>();
+    write_cached_tracks(app, &updated)
 }
 
 fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -233,7 +280,29 @@ fn merge_cached_tracks(
         }
     }
 
-    cached
+    dedupe_cached_tracks(cached)
+}
+
+fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {
+    let mut output: Vec<ImportedTrack> = Vec::new();
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+
+    for track in tracks {
+        let key = import_track_key(&track);
+        if let Some(index) = index_by_key.get(&key).copied() {
+            let existing = &output[index];
+            output[index] = if existing.cache_missing && !track.cache_missing {
+                merge_imported_track(existing, &track)
+            } else {
+                merge_imported_track(&track, existing)
+            };
+        } else {
+            index_by_key.insert(key, output.len());
+            output.push(track);
+        }
+    }
+
+    output
 }
 
 fn merge_imported_track(cached: &ImportedTrack, imported: &ImportedTrack) -> ImportedTrack {
@@ -242,6 +311,30 @@ fn merge_imported_track(cached: &ImportedTrack, imported: &ImportedTrack) -> Imp
         merged.lyrics = cached.lyrics.clone();
     }
     merged
+}
+
+fn enrich_cached_track(mut track: ImportedTrack) -> ImportedTrack {
+    if track.source_url.is_none() && track.id.starts_with("bilibili-") {
+        if let Some(source_id) = track
+            .source_id
+            .clone()
+            .or_else(|| bilibili_source_id_from_path(&track.path))
+        {
+            track.source_url = Some(format!("https://www.bilibili.com/video/{source_id}"));
+            track.source_id = Some(source_id);
+        }
+    }
+    track
+}
+
+fn bilibili_source_id_from_path(path: &str) -> Option<String> {
+    let stem = Path::new(path).file_stem()?.to_str()?.trim();
+    let (source_id, _) = stem.rsplit_once('-')?;
+    if source_id.len() >= 12 && source_id.get(..2)?.eq_ignore_ascii_case("BV") {
+        Some(source_id.to_string())
+    } else {
+        None
+    }
 }
 
 fn imported_tracks_from_cache(
@@ -304,6 +397,12 @@ fn ensure_track_for_lyrics(
 }
 
 fn import_track_key(track: &ImportedTrack) -> String {
+    if let Some(source_id) = track.source_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("source-id:{}", source_id.to_ascii_lowercase());
+    }
+    if let Some(source_url) = track.source_url.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("source-url:{}", source_url.to_ascii_lowercase());
+    }
     import_dedupe_key(Path::new(&track.path))
 }
 
@@ -461,6 +560,9 @@ fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
         channels: format_channels(audio_metadata.channels),
         size,
         path: path_string,
+        source_url: None,
+        source_id: None,
+        cache_missing: false,
         duration: audio_metadata.duration.unwrap_or(0),
         glow_color: glow1.clone(),
         glow1,
@@ -1273,6 +1375,9 @@ mod tests {
             channels: "Stereo".into(),
             size: "1.0 MB".into(),
             path: path.into(),
+            source_url: None,
+            source_id: None,
+            cache_missing: false,
             duration: 1,
             glow_color: "#fff".into(),
             glow1: "#fff".into(),
