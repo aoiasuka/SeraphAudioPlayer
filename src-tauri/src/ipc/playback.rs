@@ -87,3 +87,13 @@ pub fn select_output_device(state: State<'_, AppState>, device_id: String) -> Re
         .map_err(|err| err.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(), String> {
+    debug!("ipc::set_output_driver -> {driver}");
+    state
+        .audio
+        .set_driver(driver)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}

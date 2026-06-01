@@ -19,6 +19,4 @@ rtrb = { workspace = true }
 cpal = "0.15"
 
 [target.'cfg(windows)'.dependencies]
-# TODO: 真正实现 WASAPI 时启用，如:
-# wasapi = "0.15"
-# windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com"] }
+wasapi = "0.23"

@@ -104,7 +104,7 @@ fn capabilities_from_device(device: &cpal::Device) -> DeviceCapabilities {
         sample_rates: sample_rates.into_iter().map(SampleRate).collect(),
         bit_depths: bit_depths.into_iter().map(BitDepth).collect(),
         max_channels: Channels(max_channels),
-        supports_exclusive: false,
+        supports_exclusive: cfg!(windows),
         supports_dsd_dop: false,
         supports_dsd_native: false,
     }

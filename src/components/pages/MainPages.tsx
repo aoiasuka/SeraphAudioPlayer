@@ -14,14 +14,17 @@ import {
   Music2,
   Pause,
   Play,
+  Plus,
   QrCode,
   RefreshCw,
   Settings2,
   Sparkles,
+  Trash2,
   User,
 } from "lucide-react";
 import * as QRCode from "qrcode";
 import { useEffect, useMemo, useState, type FormEvent, type UIEvent } from "react";
+import { Dialog } from "@/components/ui/dialog";
 import { DeviceMenu } from "@/components/player/DeviceMenu";
 import { PlaybackControls } from "@/components/player/PlaybackControls";
 import { VolumeControl } from "@/components/player/VolumeControl";
@@ -222,10 +225,13 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
             <div
               key={track.id}
               className={cn(
-                "grid h-[57px] grid-cols-[minmax(0,1fr)_120px_84px_44px] items-center gap-4 border-b border-black/[0.03] px-4",
-                active ? "bg-cyan-600/10" : "hover:bg-white/55"
+                "grid h-[57px] grid-cols-[minmax(0,1fr)_120px_84px_44px] items-center gap-4 border-b border-black/[0.03] px-4 transition-all duration-300 relative overflow-hidden",
+                active ? "bg-cyan-600/8" : "hover:bg-white/60 hover:translate-x-1"
               )}
             >
+              {active && (
+                <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-gradient-to-b from-cyan-500 to-blue-600 shadow-[0_0_8px_rgba(8,145,178,0.6)]" />
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -707,6 +713,14 @@ function PlaylistsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
   const liked = usePlayerStore((s) => s.liked);
   const recentTrackIds = usePlayerStore((s) => s.recentTrackIds);
+  const userPlaylists = usePlayerStore((s) => s.userPlaylists);
+  const createUserPlaylist = usePlayerStore((s) => s.createUserPlaylist);
+  const deleteUserPlaylist = usePlayerStore((s) => s.deleteUserPlaylist);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [playlistToDeleteId, setPlaylistToDeleteId] = useState<string | null>(
+    null
+  );
   const localCount = useMemo(
     () => playlist.filter(isLocalTrack).length,
     [playlist]
@@ -738,27 +752,173 @@ function PlaylistsPage() {
       color: "text-indigo-600 bg-indigo-500/10",
     },
   ], [likedCount, localCount, recentTrackIds.length]);
+  const openCreateDialog = () => {
+    const names = new Set(userPlaylists.map((item) => item.name));
+    let index = userPlaylists.length + 1;
+    let name = `新歌单 ${index}`;
+    while (names.has(name)) {
+      index += 1;
+      name = `新歌单 ${index}`;
+    }
+    setNewPlaylistName(name);
+    setCreateDialogOpen(true);
+  };
+  const handleCreatePlaylist = (event: FormEvent) => {
+    event.preventDefault();
+    const name = newPlaylistName.trim();
+    if (!name) return;
+    createUserPlaylist(name);
+    setCreateDialogOpen(false);
+    setNewPlaylistName("");
+  };
+  const playlistToDelete = useMemo(
+    () =>
+      userPlaylists.find((playlist) => playlist.id === playlistToDeleteId) ??
+      null,
+    [playlistToDeleteId, userPlaylists]
+  );
+  const handleDeletePlaylist = () => {
+    if (!playlistToDelete) return;
+    deleteUserPlaylist(playlistToDelete.id);
+    setPlaylistToDeleteId(null);
+  };
 
   return (
-    <div className="grid grid-cols-3 gap-4">
-      {cards.map((card) => {
-        const Icon = card.icon;
-        return (
-          <button
-            key={card.title}
-            type="button"
-            onClick={() => setActiveView(card.view)}
-            className="rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left shadow-[0_8px_24px_rgba(15,23,42,0.04)] hover:bg-white/70 transition-colors"
+    <>
+      <div className="mb-4 flex justify-end">
+        <button
+          type="button"
+          onClick={openCreateDialog}
+          className="inline-flex h-9 items-center gap-2 rounded-md bg-cyan-700 px-3 text-xs font-bold text-white shadow-[0_8px_22px_rgba(8,145,178,0.16)] transition-colors hover:bg-cyan-800 active:scale-[0.98]"
+        >
+          <Plus className="h-4 w-4" />
+          <span>新增歌单</span>
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-4">
+        {cards.map((card) => {
+          const Icon = card.icon;
+          return (
+            <button
+              key={card.title}
+              type="button"
+              onClick={() => setActiveView(card.view)}
+              className="rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left shadow-[0_8px_24px_rgba(15,23,42,0.04)] hover:bg-white/80 hover:-translate-y-1 hover:shadow-[0_12px_32px_rgba(15,23,42,0.08)] active:scale-98 transition-all duration-300"
+            >
+              <span className={cn("mb-6 flex h-10 w-10 items-center justify-center rounded-lg", card.color)}>
+                <Icon className="h-4 w-4" />
+              </span>
+              <span className="block text-sm font-bold text-slate-800">{card.title}</span>
+              <span className="mt-1 block text-[11px] text-slate-500">{card.count} 首曲目</span>
+            </button>
+          );
+        })}
+        {userPlaylists.map((item) => (
+          <div
+            key={item.id}
+            className="group relative rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left shadow-[0_8px_24px_rgba(15,23,42,0.04)] transition-all duration-300 hover:-translate-y-1 hover:bg-white/80 hover:shadow-[0_12px_32px_rgba(15,23,42,0.08)]"
           >
-            <span className={cn("mb-6 flex h-10 w-10 items-center justify-center rounded-lg", card.color)}>
-              <Icon className="h-4 w-4" />
+            <button
+              type="button"
+              onClick={() => setPlaylistToDeleteId(item.id)}
+              className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-md text-slate-300 opacity-0 transition-all hover:bg-rose-500/10 hover:text-rose-600 group-hover:opacity-100 focus:opacity-100"
+              aria-label={`删除歌单 ${item.name}`}
+              title="删除歌单"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+            <span className="mb-6 flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-700">
+              <ListMusic className="h-4 w-4" />
             </span>
-            <span className="block text-sm font-bold text-slate-800">{card.title}</span>
-            <span className="mt-1 block text-[11px] text-slate-500">{card.count} 首曲目</span>
-          </button>
-        );
-      })}
-    </div>
+            <span className="block truncate text-sm font-bold text-slate-800">
+              {item.name}
+            </span>
+            <span className="mt-1 block text-[11px] text-slate-500">
+              {item.trackIds.length} 首曲目
+            </span>
+          </div>
+        ))}
+      </div>
+      <Dialog
+        open={createDialogOpen}
+        onClose={() => setCreateDialogOpen(false)}
+        className="max-w-sm"
+      >
+        <form onSubmit={handleCreatePlaylist} className="space-y-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-700">
+              New Playlist
+            </p>
+            <h2 className="mt-1 text-lg font-bold text-slate-800">
+              新增歌单
+            </h2>
+          </div>
+          <label className="block space-y-1.5">
+            <span className="text-[11px] font-bold text-slate-500">
+              歌单名称
+            </span>
+            <input
+              value={newPlaylistName}
+              onChange={(event) => setNewPlaylistName(event.target.value)}
+              autoFocus
+              className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none transition-colors placeholder:text-slate-400 focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+              placeholder="输入歌单名称"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setCreateDialogOpen(false)}
+              className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-50"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={!newPlaylistName.trim()}
+              className="h-9 rounded-md bg-cyan-700 px-3 text-xs font-bold text-white transition-colors hover:bg-cyan-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              创建
+            </button>
+          </div>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(playlistToDelete)}
+        onClose={() => setPlaylistToDeleteId(null)}
+        className="max-w-sm"
+      >
+        <div className="space-y-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-rose-600">
+              Delete Playlist
+            </p>
+            <h2 className="mt-1 text-lg font-bold text-slate-800">
+              删除歌单
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              确定删除“{playlistToDelete?.name}”吗？歌单内的曲目不会从曲库中删除。
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setPlaylistToDeleteId(null)}
+              className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-50"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={handleDeletePlaylist}
+              className="h-9 rounded-md bg-rose-600 px-3 text-xs font-bold text-white transition-colors hover:bg-rose-700"
+            >
+              删除
+            </button>
+          </div>
+        </div>
+      </Dialog>
+    </>
   );
 }
 
@@ -834,7 +994,7 @@ function ArtistsPage() {
             key={artist.name}
             type="button"
             onClick={() => setSelectedArtist(artist.name)}
-            className="rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left hover:bg-white/70 transition-colors"
+            className="rounded-lg border border-black/[0.04] bg-white/50 p-4 text-left shadow-[0_8px_24px_rgba(15,23,42,0.04)] hover:bg-white/80 hover:-translate-y-1 hover:shadow-[0_12px_32px_rgba(15,23,42,0.08)] active:scale-98 transition-all duration-300"
           >
             <span className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-600/10 text-cyan-700">
               <User className="h-4 w-4" />
@@ -852,47 +1012,109 @@ function ArtistsPage() {
 
 function AlbumsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
-  const loadTrack = usePlayerStore((s) => s.loadTrack);
+  const [selectedAlbumKey, setSelectedAlbumKey] = useState<string | null>(null);
   const localTracks = useMemo(() => playlist.filter(isLocalTrack), [playlist]);
   const albums = useMemo(() => {
-    const seen = new Set<string>();
-    const albumTracks: Array<{ track: Track; index: number }> = [];
-    const indexById = new Map<string, number>();
-
-    playlist.forEach((track, index) => indexById.set(track.id, index));
+    const groups = new Map<
+      string,
+      {
+        key: string;
+        title: string;
+        artist: string;
+        year?: string;
+        format: string;
+        cover: string;
+        tracks: Track[];
+      }
+    >();
 
     localTracks.forEach((track) => {
-      if (seen.has(track.album)) return;
-      seen.add(track.album);
-      albumTracks.push({ track, index: indexById.get(track.id) ?? -1 });
+      const key = `${track.artist}::${track.album}`;
+      const group = groups.get(key);
+      if (group) {
+        group.tracks.push(track);
+        return;
+      }
+
+      groups.set(key, {
+        key,
+        title: track.album,
+        artist: track.artist,
+        year: track.albumYear,
+        format: track.format,
+        cover: track.cover,
+        tracks: [track],
+      });
     });
 
-    return albumTracks;
-  }, [localTracks, playlist]);
+    return Array.from(groups.values());
+  }, [localTracks]);
+  const activeAlbum = useMemo(
+    () => albums.find((album) => album.key === selectedAlbumKey) ?? null,
+    [albums, selectedAlbumKey]
+  );
+
+  useEffect(() => {
+    if (selectedAlbumKey && !activeAlbum) setSelectedAlbumKey(null);
+  }, [activeAlbum, selectedAlbumKey]);
+
+  if (activeAlbum) {
+    return (
+      <div className="flex min-h-0 flex-col gap-3">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-black/[0.04] bg-white/50 p-3">
+          <button
+            type="button"
+            onClick={() => setSelectedAlbumKey(null)}
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-white/65 px-3 text-xs font-bold text-slate-600 transition-colors hover:bg-white hover:text-cyan-700"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            返回专辑
+          </button>
+          <div className="min-w-0 text-right">
+            <p className="truncate text-sm font-bold text-slate-800">
+              {activeAlbum.title}
+            </p>
+            <p className="text-[11px] text-slate-500">
+              {activeAlbum.artist} · {activeAlbum.tracks.length} 首曲目
+            </p>
+          </div>
+        </div>
+        <TrackRows
+          tracks={activeAlbum.tracks}
+          empty={`${activeAlbum.title} 暂无曲目`}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
-      {albums.map(({ track: album, index }) => {
+      {albums.map((album) => {
         return (
           <button
-            key={album.album}
+            key={album.key}
             type="button"
-            onClick={() => loadTrack(index)}
-            className="flex gap-4 rounded-lg border border-black/[0.04] bg-white/50 p-3 text-left hover:bg-white/70 transition-colors"
+            onClick={() => setSelectedAlbumKey(album.key)}
+            className="flex gap-4 rounded-lg border border-black/[0.04] bg-white/50 p-3 text-left shadow-[0_8px_24px_rgba(15,23,42,0.04)] hover:bg-white/80 hover:-translate-y-1 hover:shadow-[0_12px_32px_rgba(15,23,42,0.08)] active:scale-98 transition-all duration-300 group"
           >
             {album.cover ? (
-              <img
-                src={album.cover}
-                alt=""
-                className="h-20 w-20 rounded-lg object-cover border border-black/[0.04]"
-              />
+              <div className="overflow-hidden rounded-lg border border-black/[0.04] shrink-0">
+                <img
+                  src={album.cover}
+                  alt=""
+                  className="h-20 w-20 object-cover transition-transform duration-500 group-hover:scale-110"
+                />
+              </div>
             ) : null}
             <span className="min-w-0 self-center">
               <span className="block truncate text-sm font-bold text-slate-800">
-                {album.album}
+                {album.title}
               </span>
               <span className="mt-1 block truncate text-[11px] text-slate-500">
-                {album.artist} · {album.albumYear ?? "Unknown"}
+                {album.artist} · {album.year ?? "Unknown"}
+              </span>
+              <span className="mt-1 block truncate text-[11px] text-slate-400">
+                {album.tracks.length} 首曲目
               </span>
               <span className="mt-2 inline-flex items-center gap-1 rounded border border-seraph-gold/50 bg-seraph-gold-light px-1.5 py-0.5 text-[9px] font-bold text-seraph-gold-dark">
                 <Disc3 className="h-2.5 w-2.5" />
@@ -955,7 +1177,9 @@ export function MainPages() {
     <main className="flex-1 min-w-0 min-h-0 flex flex-col gap-5 p-[clamp(18px,2.5vw,34px)] overflow-hidden z-10">
       <PageHeader view={activeView} />
       <section className="min-h-0 flex-1 overflow-hidden">
-        <PageBody view={activeView} />
+        <div key={activeView} className="h-full w-full animate-page-transition flex flex-col min-h-0">
+          <PageBody view={activeView} />
+        </div>
       </section>
       <MiniPlayer />
     </main>

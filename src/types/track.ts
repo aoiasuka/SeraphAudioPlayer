@@ -3,6 +3,16 @@ export interface LyricLine {
   text: string;
 }
 
+export interface OnlineLyricsCandidate {
+  id: string;
+  source: string;
+  title: string;
+  artist: string;
+  album?: string | null;
+  duration?: number | null;
+  lyrics: LyricLine[];
+}
+
 export interface Track {
   id: string;
   title: string;
@@ -31,6 +41,13 @@ export interface OutputDevice {
   id: string;
   name: string;
   isDefault: boolean;
+}
+
+export interface UserPlaylist {
+  id: string;
+  name: string;
+  trackIds: string[];
+  createdAt: number;
 }
 
 export type DriverKind = "wasapi" | "asio" | "direct";

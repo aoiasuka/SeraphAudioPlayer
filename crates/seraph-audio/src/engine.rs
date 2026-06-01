@@ -4,11 +4,11 @@ use crate::{
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    SampleFormat, Stream, StreamConfig,
+    BufferSize, SampleFormat, SampleRate as CpalSampleRate, Stream, StreamConfig,
 };
 use parking_lot::Mutex;
 use seraph_core::{EventBus, PlayerEvent};
-use seraph_decoder::{open_decoder, probe_stream_info, StreamInfo};
+use seraph_decoder::{open_decoder, Decoder, StreamInfo};
 use seraph_dsp::resample_interleaved_linear;
 use seraph_visualizer::{SimpleVisualizer, Visualizer};
 use std::{
@@ -30,6 +30,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const SPECTRUM_INTERVAL: Duration = Duration::from_millis(66);
 const SPECTRUM_FFT_SIZE: usize = 1024;
 const SPECTRUM_BINS: usize = 32;
+const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
 
 #[derive(Clone)]
 pub struct PlaybackController {
@@ -47,6 +48,7 @@ enum PlaybackCommand {
     Stop,
     Seek(f64),
     SetOutputDevice(String),
+    SetDriver(String),
     SetVolume(f32),
 }
 
@@ -69,6 +71,7 @@ impl PlaybackController {
                     PlaybackCommand::SetOutputDevice(device_id) => {
                         engine.set_output_device(device_id)
                     }
+                    PlaybackCommand::SetDriver(driver) => engine.set_driver(driver),
                     PlaybackCommand::SetVolume(volume) => engine.set_volume(volume),
                 };
 
@@ -116,6 +119,10 @@ impl PlaybackController {
         self.send(PlaybackCommand::SetOutputDevice(device_id))
     }
 
+    pub fn set_driver(&self, driver: String) -> Result<()> {
+        self.send(PlaybackCommand::SetDriver(driver))
+    }
+
     fn send(&self, command: PlaybackCommand) -> Result<()> {
         self.tx
             .send(command)
@@ -128,6 +135,7 @@ pub struct PlaybackEngine {
     session: Option<PlaybackSession>,
     volume: f32,
     selected_device_id: Option<String>,
+    driver: OutputDriver,
 }
 
 struct PlaybackSession {
@@ -135,8 +143,9 @@ struct PlaybackSession {
     track_id: String,
     duration_seconds: f64,
     shared: Arc<PlaybackShared>,
-    worker: Option<JoinHandle<()>>,
-    _stream: Stream,
+    decode_worker: Option<JoinHandle<()>>,
+    render_worker: Option<JoinHandle<Result<()>>>,
+    _stream: Option<Stream>,
 }
 
 struct PlaybackShared {
@@ -151,6 +160,26 @@ struct PlaybackShared {
     max_buffer_samples: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputDriver {
+    Shared,
+    WasapiExclusive,
+    Asio,
+}
+
+impl OutputDriver {
+    fn from_frontend_value(value: &str) -> Result<Self> {
+        match value {
+            "wasapi" => Ok(Self::WasapiExclusive),
+            "direct" => Ok(Self::Shared),
+            "asio" => Ok(Self::Asio),
+            other => Err(BackendError::UnsupportedFormat(format!(
+                "unknown output driver: {other}"
+            ))),
+        }
+    }
+}
+
 impl PlaybackEngine {
     pub fn new(event_bus: EventBus) -> Self {
         Self {
@@ -158,6 +187,7 @@ impl PlaybackEngine {
             session: None,
             volume: 0.7,
             selected_device_id: None,
+            driver: OutputDriver::WasapiExclusive,
         }
     }
 
@@ -173,17 +203,24 @@ impl PlaybackEngine {
             return self.resume();
         }
 
-        let info = probe_stream_info(&path)
-            .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+        let decoder =
+            open_decoder(&path).map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+        let info = decoder
+            .info()
+            .cloned()
+            .ok_or_else(|| BackendError::Internal("decoder opened without stream info".into()))?;
         let duration_seconds = info.duration_seconds;
         self.stop_session();
 
+        if self.driver == OutputDriver::Asio {
+            return Err(BackendError::NotImplemented);
+        }
+
         let device = self.output_device()?;
-        let supported_config = device
-            .default_output_config()
+        let device_name = device
+            .name()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let sample_format = supported_config.sample_format();
-        let config: StreamConfig = supported_config.into();
+        let (sample_format, config) = select_output_config(&device, &info, self.driver)?;
         let output_rate = config.sample_rate.0;
         let output_channels = usize::from(config.channels).max(1);
         let shared = Arc::new(PlaybackShared::new(
@@ -196,12 +233,29 @@ impl PlaybackEngine {
             Ordering::Relaxed,
         );
 
-        let stream = build_output_stream(&device, &config, sample_format, shared.clone())?;
-        stream
-            .play()
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let (stream, render_worker) = match self.driver {
+            OutputDriver::WasapiExclusive => {
+                let worker = spawn_wasapi_exclusive_render_worker(
+                    self.selected_device_id.clone(),
+                    device_name,
+                    config.clone(),
+                    sample_format,
+                    shared.clone(),
+                )?;
+                (None, Some(worker))
+            }
+            OutputDriver::Shared => {
+                let stream = build_output_stream(&device, &config, sample_format, shared.clone())?;
+                stream
+                    .play()
+                    .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+                (Some(stream), None)
+            }
+            OutputDriver::Asio => unreachable!("ASIO checked above"),
+        };
 
         let worker = spawn_decode_worker(
+            decoder,
             path.clone(),
             track_id.clone(),
             info,
@@ -211,17 +265,19 @@ impl PlaybackEngine {
         );
 
         debug!(
-            "started playback: {} @ {} Hz / {} ch",
+            "started playback: {} @ {} Hz / {} ch / {:?}",
             path.display(),
             output_rate,
-            output_channels
+            output_channels,
+            self.driver
         );
         self.session = Some(PlaybackSession {
             path,
             track_id: track_id.clone(),
             duration_seconds,
             shared,
-            worker: Some(worker),
+            decode_worker: Some(worker),
+            render_worker,
             _stream: stream,
         });
         self.event_bus.publish(PlayerEvent::TrackChanged {
@@ -229,6 +285,30 @@ impl PlaybackEngine {
         });
         self.event_bus
             .publish(PlayerEvent::PlaybackStarted { track_id });
+        Ok(())
+    }
+
+    pub fn set_driver(&mut self, driver: String) -> Result<()> {
+        let next = OutputDriver::from_frontend_value(&driver)?;
+        if self.driver == next {
+            return Ok(());
+        }
+
+        self.driver = next;
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+
+        let path = session.path.clone();
+        let track_id = session.track_id.clone();
+        let seconds = session.shared.progress_seconds();
+        let was_paused = session.shared.paused.load(Ordering::Acquire);
+        self.stop_session();
+        self.play_file(path, track_id, seconds)?;
+        if was_paused {
+            self.pause()?;
+        }
+
         Ok(())
     }
 
@@ -330,8 +410,13 @@ impl PlaybackEngine {
 
         session.shared.stopped.store(true, Ordering::Release);
         session.shared.queue.lock().clear();
-        if let Some(worker) = session.worker.take() {
+        if let Some(worker) = session.decode_worker.take() {
             let _ = worker.join();
+        }
+        if let Some(worker) = session.render_worker.take() {
+            if let Ok(Err(err)) = worker.join() {
+                warn!("audio render worker stopped with error: {err}");
+            }
         }
     }
 }
@@ -418,7 +503,262 @@ fn build_output_stream(
     }
 }
 
+fn select_output_config(
+    device: &cpal::Device,
+    info: &StreamInfo,
+    driver: OutputDriver,
+) -> Result<(SampleFormat, StreamConfig)> {
+    if driver == OutputDriver::WasapiExclusive {
+        let channels = info.channels.0.max(1);
+        let sample_format = if info.bit_depth.0 <= 16 {
+            SampleFormat::I16
+        } else {
+            SampleFormat::I32
+        };
+        return Ok((
+            sample_format,
+            StreamConfig {
+                channels,
+                sample_rate: CpalSampleRate(info.sample_rate.0.max(1)),
+                buffer_size: BufferSize::Fixed(DEFAULT_EXCLUSIVE_PERIOD_FRAMES),
+            },
+        ));
+    }
+
+    let configs = device
+        .supported_output_configs()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let desired_rate = CpalSampleRate(info.sample_rate.0.max(1));
+    let desired_channels = info.channels.0.max(1);
+
+    for range in configs {
+        if range.channels() != desired_channels {
+            continue;
+        }
+        if let Some(config) = range.try_with_sample_rate(desired_rate) {
+            let sample_format = config.sample_format();
+            return Ok((sample_format, config.into()));
+        }
+    }
+
+    let supported_config = device
+        .default_output_config()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let sample_format = supported_config.sample_format();
+    Ok((sample_format, supported_config.into()))
+}
+
+#[cfg(windows)]
+fn spawn_wasapi_exclusive_render_worker(
+    selected_device_id: Option<String>,
+    device_name: String,
+    config: StreamConfig,
+    sample_format: SampleFormat,
+    shared: Arc<PlaybackShared>,
+) -> Result<JoinHandle<Result<()>>> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let result = run_wasapi_exclusive_render_worker(
+            selected_device_id,
+            device_name,
+            config,
+            sample_format,
+            shared,
+        );
+        let _ = ready_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        result
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(())) => Ok(worker),
+        Ok(Err(message)) => {
+            let _ = worker.join();
+            Err(BackendError::ExclusiveModeUnavailable(message))
+        }
+        Err(_) => Ok(worker),
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_wasapi_exclusive_render_worker(
+    _selected_device_id: Option<String>,
+    _device_name: String,
+    _config: StreamConfig,
+    _sample_format: SampleFormat,
+    _shared: Arc<PlaybackShared>,
+) -> Result<JoinHandle<Result<()>>> {
+    Err(BackendError::ExclusiveModeUnavailable(
+        "WASAPI exclusive output is only available on Windows".into(),
+    ))
+}
+
+#[cfg(windows)]
+fn run_wasapi_exclusive_render_worker(
+    selected_device_id: Option<String>,
+    device_name: String,
+    config: StreamConfig,
+    sample_format: SampleFormat,
+    shared: Arc<PlaybackShared>,
+) -> Result<()> {
+    use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
+
+    wasapi::initialize_mta()
+        .ok()
+        .map_err(|err| BackendError::Internal(err.to_string()))?;
+
+    let enumerator =
+        wasapi::DeviceEnumerator::new().map_err(|err| BackendError::Internal(err.to_string()))?;
+    let device = if selected_device_id.is_some() {
+        enumerator
+            .get_device_collection(&Direction::Render)
+            .and_then(|collection| collection.get_device_with_name(&device_name))
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+    } else {
+        enumerator
+            .get_default_device(&Direction::Render)
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+    };
+
+    let mut audio_client = device
+        .get_iaudioclient()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let sample_type = match sample_format {
+        SampleFormat::I16 | SampleFormat::I32 => SampleType::Int,
+        SampleFormat::F32 => SampleType::Float,
+        other => {
+            return Err(BackendError::UnsupportedFormat(format!(
+                "exclusive output sample format {other:?}"
+            )));
+        }
+    };
+    let valid_bits = match sample_format {
+        SampleFormat::I16 => 16,
+        SampleFormat::I32 => 24,
+        SampleFormat::F32 => 32,
+        _ => 32,
+    };
+    let store_bits = if sample_format == SampleFormat::I16 {
+        16
+    } else {
+        32
+    };
+    let desired_format = WaveFormat::new(
+        store_bits,
+        valid_bits,
+        &sample_type,
+        config.sample_rate.0 as usize,
+        usize::from(config.channels),
+        None,
+    );
+    let desired_format = audio_client
+        .is_supported_exclusive_with_quirks(&desired_format)
+        .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
+    let desired_period = wasapi::calculate_period_100ns(
+        i64::from(DEFAULT_EXCLUSIVE_PERIOD_FRAMES),
+        i64::from(desired_format.get_samplespersec()),
+    );
+    let period = audio_client
+        .calculate_aligned_period_near(desired_period, Some(128), &desired_format)
+        .unwrap_or(desired_period);
+    let mode = StreamMode::PollingExclusive {
+        period_hns: period,
+        buffer_duration_hns: 16 * period,
+    };
+
+    audio_client
+        .initialize_client(&desired_format, &Direction::Render, &mode)
+        .or_else(|err| {
+            let buffer_size = audio_client.get_buffer_size()?;
+            let aligned_period = wasapi::calculate_period_100ns(
+                i64::from(buffer_size),
+                i64::from(desired_format.get_samplespersec()),
+            );
+            audio_client = device.get_iaudioclient()?;
+            let mode = StreamMode::PollingExclusive {
+                period_hns: aligned_period,
+                buffer_duration_hns: 16 * aligned_period,
+            };
+            audio_client
+                .initialize_client(&desired_format, &Direction::Render, &mode)
+                .map_err(|_| err)
+        })
+        .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
+
+    let render_client = audio_client
+        .get_audiorenderclient()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let buffer_frames = audio_client
+        .get_buffer_size()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let sleep_period = Duration::from_millis(
+        (500 * u64::from(buffer_frames) / u64::from(config.sample_rate.0.max(1))).max(1),
+    );
+    audio_client
+        .start_stream()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+
+    while !shared.stopped.load(Ordering::Acquire) {
+        let frames = audio_client
+            .get_available_space_in_frames()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        if frames > 0 {
+            let bytes = render_wasapi_output_bytes(frames as usize, sample_format, &shared);
+            render_client
+                .write_to_device(frames as usize, &bytes, None)
+                .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        }
+        thread::sleep(sleep_period);
+    }
+
+    let _ = audio_client.stop_stream();
+    Ok(())
+}
+
+fn exclusive_mode_unavailable(detail: String) -> BackendError {
+    BackendError::ExclusiveModeUnavailable(detail)
+}
+
+fn render_wasapi_output_bytes(
+    frames: usize,
+    sample_format: SampleFormat,
+    shared: &PlaybackShared,
+) -> Vec<u8> {
+    let channels = shared.output_channels.max(1);
+    let sample_count = frames * channels;
+    let mut samples = vec![0.0_f32; sample_count];
+    render_output(&mut samples, shared, |sample, value| *sample = value);
+
+    match sample_format {
+        SampleFormat::I16 => {
+            let mut bytes = Vec::with_capacity(sample_count * 2);
+            for sample in samples {
+                bytes.extend_from_slice(
+                    &((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes(),
+                );
+            }
+            bytes
+        }
+        SampleFormat::I32 => {
+            let mut bytes = Vec::with_capacity(sample_count * 4);
+            for sample in samples {
+                let value = (sample.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+                bytes.extend_from_slice(&(value << 8).to_le_bytes());
+            }
+            bytes
+        }
+        SampleFormat::F32 => {
+            let mut bytes = Vec::with_capacity(sample_count * 4);
+            for sample in samples {
+                bytes.extend_from_slice(&sample.clamp(-1.0, 1.0).to_le_bytes());
+            }
+            bytes
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn spawn_decode_worker(
+    decoder: Box<dyn Decoder>,
     path: PathBuf,
     track_id: String,
     info: StreamInfo,
@@ -428,7 +768,7 @@ fn spawn_decode_worker(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let result = run_decode_worker(
-            &path,
+            decoder,
             &track_id,
             &info,
             &shared,
@@ -460,15 +800,13 @@ fn spawn_decode_worker(
 }
 
 fn run_decode_worker(
-    path: &PathBuf,
+    mut decoder: Box<dyn Decoder>,
     track_id: &str,
     info: &StreamInfo,
     shared: &Arc<PlaybackShared>,
     event_bus: &EventBus,
     start_seconds: f64,
 ) -> Result<()> {
-    let mut decoder =
-        open_decoder(path).map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
     if start_seconds > 0.0 {
         decoder
             .seek(start_seconds)

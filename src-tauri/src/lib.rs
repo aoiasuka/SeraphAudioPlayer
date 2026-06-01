@@ -30,6 +30,7 @@ pub fn run() {
             ipc::playback::prev_track,
             ipc::playback::set_volume,
             ipc::playback::select_output_device,
+            ipc::playback::set_output_driver,
             ipc::cache::clear_cache,
             ipc::cache::get_cache_status,
             ipc::cache::update_cache_settings,
@@ -44,6 +45,8 @@ pub fn run() {
             ipc::bilibili::import_bilibili_audio,
             ipc::bilibili::import_bilibili_audio_with_options,
             ipc::bilibili::import_bilibili_favorites,
+            ipc::library::apply_online_lyrics,
+            ipc::library::fetch_online_lyrics,
             ipc::library::save_track_lyrics,
             ipc::library::list_devices,
         ])

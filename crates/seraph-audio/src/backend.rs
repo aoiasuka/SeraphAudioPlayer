@@ -10,8 +10,8 @@ pub enum BackendError {
     DeviceNotFound,
     #[error("device lost: {0}")]
     DeviceLost(String),
-    #[error("exclusive mode unavailable")]
-    ExclusiveModeUnavailable,
+    #[error("exclusive mode unavailable: {0}")]
+    ExclusiveModeUnavailable(String),
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
     #[error("internal error: {0}")]

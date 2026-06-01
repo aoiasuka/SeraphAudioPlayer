@@ -17,18 +17,18 @@ import type { DriverKind } from "@/types/track";
 const drivers: { value: DriverKind; label: string; hint: string }[] = [
   {
     value: "wasapi",
-    label: "系统共享输出",
-    hint: "当前可用的稳定输出路径，使用系统默认音频栈和已选择设备。",
+    label: "WASAPI 独占",
+    hint: "直接以曲目采样率和声道打开 Windows WASAPI 独占设备，失败时会提示，不会静默降级。",
   },
   {
     value: "asio",
     label: "ASIO 专业驱动",
-    hint: "预留给专业声卡和低延迟播放链路，当前版本会暂时使用共享输出。",
+    hint: "尚未实现，选择后播放会提示暂不支持。",
   },
   {
     value: "direct",
-    label: "兼容输出",
-    hint: "用于保守兼容设置，适合普通扬声器和蓝牙设备。",
+    label: "系统共享输出",
+    hint: "使用系统共享音频栈，兼容性最高，适合普通扬声器和蓝牙设备。",
   },
 ];
 

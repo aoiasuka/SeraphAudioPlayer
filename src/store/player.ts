@@ -2,7 +2,14 @@ import { create } from "zustand";
 import { persist, type PersistStorage } from "zustand/middleware";
 import { mockDevices, mockPlaylist } from "@/data/mock-playlist";
 import { invoke } from "@/lib/tauri";
-import type { LibraryView, LyricLine, OutputDevice, Track } from "@/types/track";
+import type {
+  LibraryView,
+  LyricLine,
+  OnlineLyricsCandidate,
+  OutputDevice,
+  Track,
+  UserPlaylist,
+} from "@/types/track";
 
 interface NotificationPayload {
   id: number;
@@ -41,6 +48,7 @@ interface PersistedPlayerState {
   shuffleMode: boolean;
   loopMode: boolean;
   liked: Record<string, boolean>;
+  userPlaylists: UserPlaylist[];
   playlist: Track[];
   currentDeviceId: string;
   driverKind: "wasapi" | "asio" | "direct";
@@ -59,6 +67,7 @@ interface PlayerStore {
   shuffleMode: boolean;
   loopMode: boolean;
   liked: Record<string, boolean>;
+  userPlaylists: UserPlaylist[];
   devices: OutputDevice[];
   currentDeviceId: string;
   driverKind: "wasapi" | "asio" | "direct";
@@ -80,6 +89,8 @@ interface PlayerStore {
   toggleShuffle: () => void;
   toggleLoop: () => void;
   toggleLike: (trackId: string) => void;
+  createUserPlaylist: (name: string) => void;
+  deleteUserPlaylist: (playlistId: string) => void;
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (paths: string[]) => Promise<void>;
   importBilibiliAudio: (
@@ -93,6 +104,10 @@ interface PlayerStore {
   markTracksCacheMissingByPaths: (paths: string[]) => void;
   normalizeLibrary: () => void;
   importLyricsForCurrentTrack: (file: File) => Promise<void>;
+  fetchOnlineLyricsForCurrentTrack: (
+    query?: string
+  ) => Promise<OnlineLyricsCandidate[]>;
+  applyOnlineLyricsForCurrentTrack: (lyrics: LyricLine[]) => Promise<boolean>;
   loadDevices: () => void;
   selectDevice: (id: string) => void;
   setDriver: (k: "wasapi" | "asio" | "direct") => void;
@@ -120,6 +135,7 @@ function sendCommand(cmd: string, args?: Record<string, unknown>) {
 }
 
 function sendPlayCommand(track: Track, startSeconds = 0) {
+  sendCommand("set_output_driver", { driver: usePlayerStore.getState().driverKind });
   sendCommand("play", {
     path: track.path,
     trackId: track.id,
@@ -353,6 +369,29 @@ function lyricImportErrorMessage(err: unknown) {
   return `导入歌词失败：${message}`;
 }
 
+function onlineLyricsErrorMessage(err: unknown) {
+  const message =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : "";
+
+  if (!message) return "在线歌词获取失败";
+  if (message.includes("missing track title")) return "当前曲目缺少标题";
+  if (message.includes("online lyrics not found")) {
+    return "没有匹配到在线歌词";
+  }
+  if (message.includes("track was not found")) {
+    return "当前曲目未写入曲库缓存，请重新导入音频";
+  }
+  if (message.includes("failed to write library cache")) {
+    return "无法写入曲库缓存";
+  }
+
+  return `在线歌词获取失败：${message}`;
+}
+
 function bilibiliImportErrorMessage(err: unknown) {
   const message =
     typeof err === "string"
@@ -424,6 +463,7 @@ function isSamePersistedState(
     previous.shuffleMode === next.shuffleMode &&
     previous.loopMode === next.loopMode &&
     previous.liked === next.liked &&
+    previous.userPlaylists === next.userPlaylists &&
     previous.playlist === next.playlist &&
     previous.currentDeviceId === next.currentDeviceId &&
     previous.driverKind === next.driverKind &&
@@ -485,6 +525,7 @@ export const usePlayerStore = create<PlayerStore>()(
   shuffleMode: false,
   loopMode: false,
   liked: {},
+  userPlaylists: [],
   devices: mockDevices,
   currentDeviceId: "wasapi:hd-dac1",
   driverKind: "wasapi",
@@ -653,6 +694,40 @@ export const usePlayerStore = create<PlayerStore>()(
     const current = get().liked[trackId] ?? false;
     set({ liked: { ...get().liked, [trackId]: !current } });
     get().showNotification(current ? "已取消收藏" : "已加入我喜欢");
+  },
+
+  createUserPlaylist: (name) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      get().showNotification("请输入歌单名称");
+      return;
+    }
+
+    const createdAt = Date.now();
+    set((state) => ({
+      userPlaylists: [
+        ...state.userPlaylists,
+        {
+          id: `playlist-${createdAt}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`,
+          name: trimmedName,
+          trackIds: [],
+          createdAt,
+        },
+      ],
+    }));
+    get().showNotification(`已创建歌单：${trimmedName}`);
+  },
+
+  deleteUserPlaylist: (playlistId) => {
+    const playlist = get().userPlaylists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+
+    set((state) => ({
+      userPlaylists: state.userPlaylists.filter((item) => item.id !== playlistId),
+    }));
+    get().showNotification(`已删除歌单：${playlist.name}`);
   },
 
   loadBackendLibrary: async () => {
@@ -915,6 +990,78 @@ export const usePlayerStore = create<PlayerStore>()(
     }
   },
 
+  fetchOnlineLyricsForCurrentTrack: async (query) => {
+    const track = get().currentTrack();
+    if (!track) {
+      get().showNotification("请先选择曲目");
+      return [];
+    }
+
+    const manualQuery = query?.trim();
+
+    try {
+      const candidates = await invoke<OnlineLyricsCandidate[]>(
+        "fetch_online_lyrics",
+        {
+          trackId: track.id,
+          title: manualQuery || track.title,
+          artist: manualQuery ? "" : track.artist,
+          duration: track.duration,
+        }
+      );
+
+      if (!Array.isArray(candidates) || candidates.length === 0) {
+        get().showNotification("没有匹配到在线歌词");
+        return [];
+      }
+
+      get().showNotification(`找到 ${candidates.length} 份在线歌词`);
+      return candidates;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: fetch_online_lyrics", err);
+      get().showNotification(onlineLyricsErrorMessage(err));
+      return [];
+    }
+  },
+
+  applyOnlineLyricsForCurrentTrack: async (lyrics) => {
+    const track = get().currentTrack();
+    if (!track) {
+      get().showNotification("请先选择曲目");
+      return false;
+    }
+
+    if (lyrics.length === 0) {
+      get().showNotification("歌词内容为空");
+      return false;
+    }
+
+    try {
+      const savedLyrics = await invoke<LyricLine[]>("apply_online_lyrics", {
+        trackId: track.id,
+        trackPath: track.path,
+        lyrics,
+      });
+
+      if (!Array.isArray(savedLyrics) || savedLyrics.length === 0) {
+        get().showNotification("歌词内容为空");
+        return false;
+      }
+
+      set((state) => ({
+        playlist: replaceTrackLyrics(state.playlist, track.id, savedLyrics),
+      }));
+      get().showNotification(`已应用 ${savedLyrics.length} 行在线歌词`);
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: apply_online_lyrics", err);
+      get().showNotification(onlineLyricsErrorMessage(err));
+      return false;
+    }
+  },
+
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
       .then((devices) => {
@@ -929,6 +1076,7 @@ export const usePlayerStore = create<PlayerStore>()(
           devices: normalized,
           currentDeviceId: selectedDeviceId,
         });
+        sendCommand("set_output_driver", { driver: get().driverKind });
         sendCommand("select_output_device", { deviceId: selectedDeviceId });
       })
       .catch((err) => {
@@ -952,6 +1100,7 @@ export const usePlayerStore = create<PlayerStore>()(
 
   setDriver: (k) => {
     if (get().driverKind === k) return;
+    sendCommand("set_output_driver", { driver: k });
     set({ driverKind: k });
   },
 
@@ -991,6 +1140,7 @@ export const usePlayerStore = create<PlayerStore>()(
         shuffleMode: state.shuffleMode,
         loopMode: state.loopMode,
         liked: state.liked,
+        userPlaylists: state.userPlaylists,
         playlist: state.playlist,
         currentDeviceId: state.currentDeviceId,
         driverKind: state.driverKind,
