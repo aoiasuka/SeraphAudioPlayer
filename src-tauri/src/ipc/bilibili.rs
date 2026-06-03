@@ -1,6 +1,6 @@
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
-    env, fs,
+    fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
@@ -27,8 +27,7 @@ use super::{
 const VIEW_API: &str = "https://api.bilibili.com/x/web-interface/view";
 const PLAY_URL_API: &str = "https://api.bilibili.com/x/player/playurl";
 const NAV_API: &str = "https://api.bilibili.com/x/web-interface/nav";
-const QR_GENERATE_API: &str =
-    "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
+const QR_GENERATE_API: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
 const QR_POLL_API: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
 const FAV_RESOURCE_LIST_API: &str = "https://api.bilibili.com/x/v3/fav/resource/list";
 const BILIBILI_REFERER: &str = "https://www.bilibili.com";
@@ -695,7 +694,11 @@ async fn fetch_favorite_bvids(
         let medias = data.medias.unwrap_or_default();
         let count_before = all.len();
         for media in medias {
-            if media.bvid.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+            if media
+                .bvid
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
                 all.push(media);
                 if all.len() >= max_items {
                     break;
@@ -829,11 +832,7 @@ fn avatar_mime_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn write_audio_file(
-    path: &Path,
-    bytes: &[u8],
-    ffmpeg_path: Option<&Path>,
-) -> Result<(), String> {
+fn write_audio_file(path: &Path, bytes: &[u8], ffmpeg_path: Option<&Path>) -> Result<(), String> {
     let temp_path = temp_download_path(path);
     fs::write(&temp_path, bytes)
         .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
@@ -875,7 +874,11 @@ fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), St
         return Err(format!("ffmpeg remux failed: {stderr}"));
     }
 
-    if !output.is_file() || fs::metadata(output).map(|meta| meta.len() == 0).unwrap_or(true) {
+    if !output.is_file()
+        || fs::metadata(output)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
+    {
         return Err("ffmpeg did not create a usable output file".into());
     }
 
@@ -1025,7 +1028,10 @@ fn merge_set_cookie_headers(headers: &HeaderMap, cookies: &mut BTreeMap<String, 
         let Ok(value) = value.to_str() else {
             continue;
         };
-        let Some((name, cookie_value)) = value.split(';').next().and_then(|part| part.split_once('='))
+        let Some((name, cookie_value)) = value
+            .split(';')
+            .next()
+            .and_then(|part| part.split_once('='))
         else {
             continue;
         };
@@ -1194,23 +1200,11 @@ fn color_pair(hash: u64) -> (String, String) {
 }
 
 fn find_ffmpeg(app: &AppHandle) -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    let mut candidates = Vec::new();
-
     if let Ok(app_dir) = app.path().app_data_dir() {
-        candidates.push(app_dir.join("ffmpeg").join(exe_name));
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(exe_name));
-            candidates.push(dir.join("ffmpeg").join(exe_name));
-        }
-    }
-    if let Some(path) = env::var_os("PATH") {
-        candidates.extend(env::split_paths(&path).map(|dir| dir.join(exe_name)));
+        seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
     }
 
-    candidates.into_iter().find(|path| path.is_file())
+    seraph_decoder::find_ffmpeg()
 }
 
 fn login_poll_message(code: i32) -> String {
@@ -1315,8 +1309,7 @@ mod tests {
     #[test]
     fn extracts_bvid_from_url() {
         assert_eq!(
-            extract_bvid("https://www.bilibili.com/video/BV1xx411c7mD/?spm_id_from=333")
-                .as_deref(),
+            extract_bvid("https://www.bilibili.com/video/BV1xx411c7mD/?spm_id_from=333").as_deref(),
             Some("BV1xx411c7mD")
         );
     }
@@ -1329,8 +1322,7 @@ mod tests {
             Some("123456")
         );
         assert_eq!(
-            extract_media_id("https://www.bilibili.com/medialist/detail/ml987654")
-                .as_deref(),
+            extract_media_id("https://www.bilibili.com/medialist/detail/ml987654").as_deref(),
             Some("987654")
         );
         assert_eq!(extract_media_id("123").as_deref(), Some("123"));

@@ -3,12 +3,16 @@
 use crate::decoder::{Decoder, DecoderError, Packet, StreamInfo};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::{
+    env,
     io::Read,
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
+    sync::{Mutex, OnceLock},
 };
 
 const PACKET_FRAMES: usize = 2048;
+
+static EXTRA_TOOL_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
 
 pub struct FfmpegDecoder {
     path: Option<PathBuf>,
@@ -38,7 +42,7 @@ impl FfmpegDecoder {
             .as_ref()
             .ok_or_else(|| DecoderError::Internal("ffmpeg decoder is not open".into()))?;
 
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(ffmpeg_command_path());
         command.arg("-v").arg("error");
         if start_seconds > 0.0 {
             command.arg("-ss").arg(format!("{start_seconds:.6}"));
@@ -154,7 +158,7 @@ impl Decoder for FfmpegDecoder {
 }
 
 fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(ffprobe_command_path())
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
@@ -242,6 +246,107 @@ fn map_tool_spawn_error(err: std::io::Error) -> DecoderError {
     } else {
         DecoderError::Io(err)
     }
+}
+
+/// Register application-specific directories that may contain ffmpeg tools.
+///
+/// This lets the Tauri shell provide bundled locations such as
+/// `%APPDATA%/.../ffmpeg` while the decoder crate remains UI-runtime agnostic.
+pub fn configure_ffmpeg_search_dirs<I, P>(dirs: I)
+where
+    I: IntoIterator<Item = P>,
+    P: Into<PathBuf>,
+{
+    let mut stored = EXTRA_TOOL_DIRS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("ffmpeg search dirs mutex poisoned");
+    for dir in dirs {
+        let dir = dir.into();
+        if !stored.iter().any(|existing| existing == &dir) {
+            stored.push(dir);
+        }
+    }
+}
+
+pub fn find_ffmpeg() -> Option<PathBuf> {
+    find_tool("ffmpeg")
+}
+
+pub fn find_ffprobe() -> Option<PathBuf> {
+    find_tool("ffprobe")
+}
+
+fn ffmpeg_command_path() -> PathBuf {
+    find_ffmpeg().unwrap_or_else(|| PathBuf::from(tool_exe_name("ffmpeg")))
+}
+
+fn ffprobe_command_path() -> PathBuf {
+    find_ffprobe().unwrap_or_else(|| PathBuf::from(tool_exe_name("ffprobe")))
+}
+
+fn find_tool(tool: &str) -> Option<PathBuf> {
+    tool_candidates(tool)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+fn tool_candidates(tool: &str) -> Vec<PathBuf> {
+    let exe_name = tool_exe_name(tool);
+    let mut candidates = Vec::new();
+
+    if let Some(path) = tool_env_path(tool) {
+        candidates.push(path);
+    }
+
+    if let Some(lock) = EXTRA_TOOL_DIRS.get() {
+        let dirs = lock.lock().expect("ffmpeg search dirs mutex poisoned");
+        candidates.extend(dirs.iter().map(|dir| dir.join(&exe_name)));
+    }
+
+    if let Some(dirs) = env::var_os("SERAPH_FFMPEG_DIRS") {
+        candidates.extend(env::split_paths(&dirs).map(|dir| dir.join(&exe_name)));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(&exe_name));
+            candidates.push(dir.join("ffmpeg").join(&exe_name));
+        }
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path).map(|dir| dir.join(&exe_name)));
+    }
+
+    dedupe_paths(candidates)
+}
+
+fn tool_env_path(tool: &str) -> Option<PathBuf> {
+    let key = match tool {
+        "ffmpeg" => "SERAPH_FFMPEG_PATH",
+        "ffprobe" => "SERAPH_FFPROBE_PATH",
+        _ => return None,
+    };
+    env::var_os(key).map(PathBuf::from)
+}
+
+fn tool_exe_name(tool: &str) -> String {
+    if cfg!(windows) {
+        format!("{tool}.exe")
+    } else {
+        tool.to_string()
+    }
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 #[cfg(test)]

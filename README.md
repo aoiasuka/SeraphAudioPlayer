@@ -4,7 +4,7 @@ Premium local HiFi audio player — Rust + Tauri + React.
 
 参考 `初始化.md` 中确定的架构：放弃 Qt/C++，以 Rust 重写底层、Tauri 做系统壳、React 做 UI，WASAPI Exclusive + DSD 保留。
 
-> 当前为 **骨架阶段**：UI 已完整还原 `synapse_hifi_music_player (1).html` 设计稿，Rust 侧只定义了 trait 与模块结构，实际音频路径尚未接通。
+> 当前音频路径已接入：本地文件会经 Rust 解码、重采样/声道适配后进入输出线程。DSD 目前使用 PCM Conversion；DoP、Native DSD 和 bit-perfect 路径尚未开启。
 
 ## 技术栈
 
@@ -12,9 +12,9 @@ Premium local HiFi audio player — Rust + Tauri + React.
 |---|---|
 | 系统壳 | Tauri v2 |
 | 音频核心 | Rust workspace（多 crate） |
-| 解码 | symphonia + ffmpeg-next fallback（占位） |
-| 重采样 | rubato（占位） |
-| 输出 | WASAPI Exclusive（占位，AudioBackend trait 已定义） |
+| 解码 | Symphonia 主解码 + FFmpeg CLI fallback |
+| 重采样 | 窗口化 sinc 重采样（线性重采样保留为 fallback） |
+| 输出 | WASAPI Exclusive / 系统共享输出 |
 | 前端 | React 18 + TypeScript + Vite |
 | 样式 | Tailwind CSS v3 + shadcn/ui |
 | 动画 | Framer Motion |
@@ -26,9 +26,9 @@ Premium local HiFi audio player — Rust + Tauri + React.
 ```
 crates/
   seraph-core/        共享类型 / 事件总线 / 状态机
-  seraph-audio/       AudioBackend trait + WASAPI 占位
-  seraph-dsp/         Resampler / DsdConverter trait
-  seraph-decoder/     Decoder trait + symphonia 占位
+  seraph-audio/       播放引擎 / 输出设备 / WASAPI 独占
+  seraph-dsp/         重采样 / DSD 转换 trait
+  seraph-decoder/     Symphonia / FFmpeg / DSD 解码
   seraph-playlist/    歌单 / 库
   seraph-visualizer/  FFT / shared ringbuffer
 src-tauri/            Tauri shell + IPC bridge
@@ -81,12 +81,11 @@ cargo build
 
 ## 下一步路线
 
-1. 实现 `WasapiExclusive` backend（独占模式 + Bit-Perfect）
-2. 接 `symphonia` 解码 FLAC，跑通"打开本地文件 → 出声"
-3. 把 mock playlist 换成本地文件扫描
-4. AppDataDir 持久化（`%APPDATA%/com.seraph.audio/`）
-5. DSD（DoP/Native/PCM 三种）
-6. Gapless 与 Device Lost 恢复
+1. 完善 bit-perfect PCM 路径：音量旁路、格式锁定、避免不必要的 f32/重采样转换
+2. DSD 分模式实现：PCM Conversion / DoP / Native DSD
+3. Gapless 与 Device Lost 恢复
+4. ASIO 输出路径
+5. 更完整的真实音频格式回归测试
 
 ## 参考文件
 

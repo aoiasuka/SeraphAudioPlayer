@@ -11,6 +11,7 @@ mod ipc;
 mod state;
 
 use state::AppState;
+use tauri::Manager;
 #[cfg(debug_assertions)]
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +52,9 @@ pub fn run() {
             ipc::library::list_devices,
         ])
         .setup(|app| {
+            if let Ok(app_dir) = app.path().app_data_dir() {
+                seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
+            }
             ipc::events::wire_event_bus(app.handle().clone());
             Ok(())
         })

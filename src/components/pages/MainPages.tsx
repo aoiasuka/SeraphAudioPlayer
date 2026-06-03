@@ -726,8 +726,8 @@ function PlaylistsPage() {
     [playlist]
   );
   const likedCount = useMemo(
-    () => Object.values(liked).filter(Boolean).length,
-    [liked]
+    () => playlist.filter((track) => liked[track.id]).length,
+    [liked, playlist]
   );
   const cards = useMemo(() => [
     {

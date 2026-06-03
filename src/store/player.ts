@@ -127,6 +127,74 @@ function withRecentTrack(ids: string[], trackId: string) {
   return [trackId, ...ids.filter((id) => id !== trackId)].slice(0, 12);
 }
 
+function hashString(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function nextSequentialTrackIndex(playlist: Track[], currentTrackIndex: number) {
+  if (playlist.length === 0) return -1;
+  return (currentTrackIndex + 1) % playlist.length;
+}
+
+function prevSequentialTrackIndex(playlist: Track[], currentTrackIndex: number) {
+  if (playlist.length === 0) return -1;
+  return (currentTrackIndex - 1 + playlist.length) % playlist.length;
+}
+
+function nextShuffleTrackIndex(
+  playlist: Track[],
+  currentTrackIndex: number,
+  recentTrackIds: string[]
+) {
+  if (playlist.length === 0) return -1;
+  if (playlist.length === 1) return 0;
+
+  const candidates = playlist
+    .map((_, index) => index)
+    .filter((index) => index !== currentTrackIndex);
+  const freshCandidates = candidates.filter(
+    (index) => !recentTrackIds.includes(playlist[index].id)
+  );
+  const pool = freshCandidates.length > 0 ? freshCandidates : candidates;
+  const currentId = playlist[currentTrackIndex]?.id ?? String(currentTrackIndex);
+  const seed = `${currentId}:${recentTrackIds.join("|")}:${playlist.length}`;
+  return pool[hashString(seed) % pool.length];
+}
+
+function nextTrackIndex(
+  playlist: Track[],
+  currentTrackIndex: number,
+  shuffleMode: boolean,
+  recentTrackIds: string[]
+) {
+  return shuffleMode
+    ? nextShuffleTrackIndex(playlist, currentTrackIndex, recentTrackIds)
+    : nextSequentialTrackIndex(playlist, currentTrackIndex);
+}
+
+function prevTrackIndex(
+  playlist: Track[],
+  currentTrackIndex: number,
+  shuffleMode: boolean,
+  recentTrackIds: string[]
+) {
+  if (!shuffleMode) return prevSequentialTrackIndex(playlist, currentTrackIndex);
+
+  const previousRecentId = recentTrackIds.find(
+    (trackId) => trackId !== playlist[currentTrackIndex]?.id
+  );
+  const previousRecentIndex = playlist.findIndex(
+    (track) => track.id === previousRecentId
+  );
+  return previousRecentIndex >= 0
+    ? previousRecentIndex
+    : prevSequentialTrackIndex(playlist, currentTrackIndex);
+}
+
 function sendCommand(cmd: string, args?: Record<string, unknown>) {
   void invoke(cmd, args).catch((err) => {
     // eslint-disable-next-line no-console
@@ -134,9 +202,24 @@ function sendCommand(cmd: string, args?: Record<string, unknown>) {
   });
 }
 
-function sendPlayCommand(track: Track, startSeconds = 0) {
-  sendCommand("set_output_driver", { driver: usePlayerStore.getState().driverKind });
-  sendCommand("play", {
+async function sendCommandAsync(cmd: string, args?: Record<string, unknown>) {
+  await invoke(cmd, args);
+}
+
+async function applyOutputConfiguration() {
+  const { currentDeviceId, devices, driverKind } = usePlayerStore.getState();
+  await sendCommandAsync("set_output_driver", { driver: driverKind });
+  if (
+    devices !== mockDevices &&
+    devices.some((device) => device.id === currentDeviceId)
+  ) {
+    await sendCommandAsync("select_output_device", { deviceId: currentDeviceId });
+  }
+}
+
+async function sendPlayCommand(track: Track, startSeconds = 0) {
+  await applyOutputConfiguration();
+  await sendCommandAsync("play", {
     path: track.path,
     trackId: track.id,
     startSeconds,
@@ -237,9 +320,9 @@ function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) 
   }
 
   const playlist = dedupeTracks(tracks);
-  const nextLiked = { ...liked };
+  const nextLiked: Record<string, boolean> = {};
   for (const track of playlist) {
-    if (likedByKey.has(trackMergeKey(track))) {
+    if (liked[track.id] || likedByKey.has(trackMergeKey(track))) {
       nextLiked[track.id] = true;
     }
   }
@@ -416,6 +499,17 @@ function bilibiliImportErrorMessage(err: unknown) {
   return `导入 B 站音频失败：${message}`;
 }
 
+function playbackErrorMessage(err: unknown) {
+  const message =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : "";
+
+  return message ? `播放失败：${message}` : "播放失败";
+}
+
 function clampVolume(volume: number) {
   if (!Number.isFinite(volume)) return 0;
   return Math.max(0, Math.min(1, volume));
@@ -485,12 +579,20 @@ function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {
         return null;
       }
 
-      const parsed = JSON.parse(value) as {
-        state: PersistedPlayerState;
-        version?: number;
-      };
-      lastValue = parsed;
-      return parsed;
+      try {
+        const parsed = JSON.parse(value) as {
+          state: PersistedPlayerState;
+          version?: number;
+        };
+        lastValue = parsed;
+        return parsed;
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("Failed to parse persisted player state, resetting it", err);
+        lastValue = null;
+        window.localStorage.removeItem(name);
+        return null;
+      }
     },
     setItem: (name, value) => {
       if (
@@ -537,9 +639,15 @@ export const usePlayerStore = create<PlayerStore>()(
   currentTrack: () => get().playlist[get().currentTrackIndex] ?? null,
 
   nextTrackPreview: () => {
-    const { playlist, currentTrackIndex } = get();
+    const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
     if (playlist.length === 0) return null;
-    return playlist[(currentTrackIndex + 1) % playlist.length];
+    const next = nextTrackIndex(
+      playlist,
+      currentTrackIndex,
+      shuffleMode,
+      recentTrackIds
+    );
+    return next >= 0 ? playlist[next] : null;
   },
 
   togglePlayback: () => {
@@ -568,9 +676,17 @@ export const usePlayerStore = create<PlayerStore>()(
       get().showNotification
     )
       .then((playableTrack) => {
-        sendPlayCommand(playableTrack, get().currentTime);
-        set({ isPlaying: true });
-        get().showNotification(`正在播放: ${playableTrack.title}`);
+        void sendPlayCommand(playableTrack, get().currentTime)
+          .then(() => {
+            set({ isPlaying: true });
+            get().showNotification(`正在播放: ${playableTrack.title}`);
+          })
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("Failed to start playback", err);
+            set({ isPlaying: false });
+            get().showNotification(playbackErrorMessage(err));
+          });
       })
       .catch((err) => {
         // eslint-disable-next-line no-console
@@ -580,18 +696,30 @@ export const usePlayerStore = create<PlayerStore>()(
   },
 
   nextTrack: () => {
-    const { currentTrackIndex, playlist } = get();
+    const { currentTrackIndex, playlist, recentTrackIds, shuffleMode } = get();
     if (playlist.length === 0) return;
-    const next = (currentTrackIndex + 1) % playlist.length;
+    const next = nextTrackIndex(
+      playlist,
+      currentTrackIndex,
+      shuffleMode,
+      recentTrackIds
+    );
+    if (next < 0) return;
     sendCommand("next_track");
     get().loadTrack(next);
     get().showNotification(`已切换到: ${playlist[next].title}`);
   },
 
   prevTrack: () => {
-    const { currentTrackIndex, playlist } = get();
+    const { currentTrackIndex, playlist, recentTrackIds, shuffleMode } = get();
     if (playlist.length === 0) return;
-    const prev = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+    const prev = prevTrackIndex(
+      playlist,
+      currentTrackIndex,
+      shuffleMode,
+      recentTrackIds
+    );
+    if (prev < 0) return;
     sendCommand("prev_track");
     get().loadTrack(prev);
     get().showNotification(`已切换到: ${playlist[prev].title}`);
@@ -618,7 +746,14 @@ export const usePlayerStore = create<PlayerStore>()(
         },
         get().showNotification
       )
-        .then((playableTrack) => sendPlayCommand(playableTrack, 0))
+        .then((playableTrack) => {
+          void sendPlayCommand(playableTrack, 0).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("Failed to start playback", err);
+            set({ isPlaying: false });
+            get().showNotification(playbackErrorMessage(err));
+          });
+        })
         .catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("Failed to prepare streaming track", err);
@@ -1064,7 +1199,7 @@ export const usePlayerStore = create<PlayerStore>()(
 
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
-      .then((devices) => {
+      .then(async (devices) => {
         if (!Array.isArray(devices) || devices.length === 0) return;
         const normalized = devices.map(normalizeDevice);
         const currentDeviceId = get().currentDeviceId;
@@ -1076,8 +1211,8 @@ export const usePlayerStore = create<PlayerStore>()(
           devices: normalized,
           currentDeviceId: selectedDeviceId,
         });
-        sendCommand("set_output_driver", { driver: get().driverKind });
-        sendCommand("select_output_device", { deviceId: selectedDeviceId });
+        await sendCommandAsync("set_output_driver", { driver: get().driverKind });
+        await sendCommandAsync("select_output_device", { deviceId: selectedDeviceId });
       })
       .catch((err) => {
         // eslint-disable-next-line no-console

@@ -6,7 +6,7 @@
 //! - IAudioClient::Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, ...)
 //! - 处理 AUDCLNT_E_UNSUPPORTED_FORMAT 退到 SUPPORTED 表
 //! - Device Lost 状态机：监听 IMMNotificationClient
-//! - DSD DoP：把 DSD 流封装成 PCM 24bit / 176.4kHz 喂给硬件
+//! - DSD DoP：未来模式；当前播放链路使用 DSD -> PCM Conversion
 
 use crate::backend::{AudioBackend, BackendError, Result};
 use crate::device::{AudioDevice, ShareMode};

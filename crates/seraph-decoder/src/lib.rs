@@ -11,5 +11,5 @@ pub mod symphonia;
 
 pub use decoder::{open_decoder, probe_stream_info, Decoder, DecoderError, Packet, StreamInfo};
 pub use dsd::DsdDecoder;
-pub use ffmpeg::FfmpegDecoder;
+pub use ffmpeg::{configure_ffmpeg_search_dirs, find_ffmpeg, find_ffprobe, FfmpegDecoder};
 pub use symphonia::SymphoniaDecoder;

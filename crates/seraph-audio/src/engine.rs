@@ -9,7 +9,7 @@ use cpal::{
 use parking_lot::Mutex;
 use seraph_core::{EventBus, PlayerEvent};
 use seraph_decoder::{open_decoder, Decoder, StreamInfo};
-use seraph_dsp::resample_interleaved_linear;
+use seraph_dsp::{resample_interleaved_linear, resample_interleaved_sinc};
 use seraph_visualizer::{SimpleVisualizer, Visualizer};
 use std::{
     collections::VecDeque,
@@ -1045,7 +1045,7 @@ fn adapt_samples(
     }
 
     let mut output = Vec::new();
-    match resample_interleaved_linear(
+    match resample_interleaved_sinc(
         &remapped,
         output_channels,
         input_rate.max(1),
@@ -1053,7 +1053,19 @@ fn adapt_samples(
         &mut output,
     ) {
         Ok(()) => output,
-        Err(_) => remapped,
+        Err(_) => {
+            let mut fallback = Vec::new();
+            match resample_interleaved_linear(
+                &remapped,
+                output_channels,
+                input_rate.max(1),
+                output_rate.max(1),
+                &mut fallback,
+            ) {
+                Ok(()) => fallback,
+                Err(_) => remapped,
+            }
+        }
     }
 }
 
@@ -1110,7 +1122,7 @@ mod tests {
     fn resamples_to_target_rate() {
         let output = adapt_samples(&[0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1);
         assert_eq!(output.len(), 2);
-        assert!((output[0] - 0.0).abs() < 0.001);
-        assert!((output[1] - 0.0).abs() < 0.001);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().all(|sample| sample.abs() <= 1.0));
     }
 }

@@ -98,8 +98,12 @@ pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
     let mut removed_bytes = 0;
 
     for entry in entries {
-        fs::remove_file(&entry.path)
-            .map_err(|err| format!("failed to remove cache file {}: {err}", entry.path.display()))?;
+        fs::remove_file(&entry.path).map_err(|err| {
+            format!(
+                "failed to remove cache file {}: {err}",
+                entry.path.display()
+            )
+        })?;
         removed_bytes += entry.size;
         removed_paths.push(entry.path);
     }
@@ -183,8 +187,12 @@ fn enforce_cache_limit_inner(
             continue;
         }
 
-        fs::remove_file(&entry.path)
-            .map_err(|err| format!("failed to remove cache file {}: {err}", entry.path.display()))?;
+        fs::remove_file(&entry.path).map_err(|err| {
+            format!(
+                "failed to remove cache file {}: {err}",
+                entry.path.display()
+            )
+        })?;
         used_bytes = used_bytes.saturating_sub(entry.size);
         removed_bytes += entry.size;
         removed_paths.push(entry.path);

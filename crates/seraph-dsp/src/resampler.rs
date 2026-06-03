@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+const DEFAULT_SINC_RADIUS: usize = 16;
+
 #[derive(Debug, Error)]
 pub enum ResamplerError {
     #[error("resampler not implemented yet")]
@@ -130,6 +132,110 @@ pub fn resample_interleaved_linear(
     Ok(())
 }
 
+pub fn resample_interleaved_sinc(
+    input: &[f32],
+    channels: usize,
+    input_rate: u32,
+    output_rate: u32,
+    output: &mut Vec<f32>,
+) -> Result<(), ResamplerError> {
+    resample_interleaved_sinc_with_radius(
+        input,
+        channels,
+        input_rate,
+        output_rate,
+        DEFAULT_SINC_RADIUS,
+        output,
+    )
+}
+
+pub fn resample_interleaved_sinc_with_radius(
+    input: &[f32],
+    channels: usize,
+    input_rate: u32,
+    output_rate: u32,
+    radius: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), ResamplerError> {
+    if channels == 0 {
+        return Err(ResamplerError::InvalidChannelCount);
+    }
+    if input_rate == 0 || output_rate == 0 {
+        return Err(ResamplerError::InvalidSampleRate);
+    }
+    if input.len() % channels != 0 {
+        return Err(ResamplerError::InvalidInputLength);
+    }
+    if input.is_empty() {
+        return Ok(());
+    }
+    if input_rate == output_rate {
+        output.extend_from_slice(input);
+        return Ok(());
+    }
+
+    let input_frames = input.len() / channels;
+    let output_frames =
+        ((input_frames as u64 * output_rate as u64).div_ceil(input_rate as u64)).max(1) as usize;
+    let ratio = input_rate as f64 / output_rate as f64;
+    let cutoff = (output_rate as f64 / input_rate as f64).min(1.0);
+    let radius = radius.max(2);
+    output.reserve(output_frames * channels);
+
+    for output_frame in 0..output_frames {
+        let position = output_frame as f64 * ratio;
+        let center = position.floor() as isize;
+
+        for channel in 0..channels {
+            let mut weighted_sum = 0.0_f64;
+            let mut weight_sum = 0.0_f64;
+
+            for tap in -(radius as isize)..=(radius as isize) {
+                let source_frame = center + tap;
+                let clamped_frame = source_frame.clamp(0, input_frames.saturating_sub(1) as isize);
+                let distance = position - source_frame as f64;
+                let window = hann_window(distance, radius as f64);
+                if window <= 0.0 {
+                    continue;
+                }
+
+                let weight = cutoff * sinc(cutoff * distance) * window;
+                let sample = input[(clamped_frame as usize * channels) + channel] as f64;
+                weighted_sum += sample * weight;
+                weight_sum += weight;
+            }
+
+            let value = if weight_sum.abs() > f64::EPSILON {
+                weighted_sum / weight_sum
+            } else {
+                let frame = center.clamp(0, input_frames.saturating_sub(1) as isize) as usize;
+                input[(frame * channels) + channel] as f64
+            };
+            output.push(value as f32);
+        }
+    }
+
+    Ok(())
+}
+
+fn sinc(value: f64) -> f64 {
+    let x = std::f64::consts::PI * value;
+    if x.abs() < 1.0e-8 {
+        1.0
+    } else {
+        x.sin() / x
+    }
+}
+
+fn hann_window(distance: f64, radius: f64) -> f64 {
+    let normalized = distance.abs() / radius;
+    if normalized >= 1.0 {
+        0.0
+    } else {
+        0.5 + 0.5 * (std::f64::consts::PI * normalized).cos()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +263,24 @@ mod tests {
     fn rejects_partial_frames() {
         let mut output = Vec::new();
         let err = resample_interleaved_linear(&[0.0, 1.0, 0.5], 2, 44_100, 48_000, &mut output)
+            .unwrap_err();
+        assert!(matches!(err, ResamplerError::InvalidInputLength));
+    }
+
+    #[test]
+    fn resamples_interleaved_with_windowed_sinc() {
+        let mut output = Vec::new();
+        resample_interleaved_sinc(&[0.0, 1.0, 0.0, -1.0], 1, 4, 2, &mut output).unwrap();
+
+        assert_eq!(output.len(), 2);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
+    #[test]
+    fn sinc_rejects_partial_frames() {
+        let mut output = Vec::new();
+        let err = resample_interleaved_sinc(&[0.0, 1.0, 0.5], 2, 44_100, 48_000, &mut output)
             .unwrap_err();
         assert!(matches!(err, ResamplerError::InvalidInputLength));
     }

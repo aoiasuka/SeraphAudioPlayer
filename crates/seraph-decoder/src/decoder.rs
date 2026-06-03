@@ -104,6 +104,7 @@ mod tests {
     use std::{
         fs,
         io::Write,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -127,6 +128,85 @@ mod tests {
         assert!(!is_dsd_stream(&path));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn probes_24_bit_wav_fixture() {
+        let path = temp_audio_path("seraph-decoder-24bit", "wav");
+        write_test_wav_24(&path);
+
+        let info = probe_stream_info(&path).expect("probe 24-bit wav");
+        assert_eq!(info.sample_rate, SampleRate(96_000));
+        assert_eq!(info.bit_depth, BitDepth(24));
+        assert_eq!(info.channels, Channels(2));
+        assert!(info.duration_seconds > 0.0);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn seek_returns_packets_near_requested_time() {
+        let path = temp_audio_path("seraph-decoder-seek", "wav");
+        write_test_seek_wav(&path);
+
+        let mut decoder = open_decoder(&path).expect("open seek fixture");
+        decoder.seek(0.5).expect("seek fixture");
+        let packet = decoder
+            .next_packet()
+            .expect("packet after seek")
+            .expect("packet exists after seek");
+
+        assert!(
+            (0.45..=0.55).contains(&packet.timestamp_seconds),
+            "unexpected timestamp after seek: {}",
+            packet.timestamp_seconds
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn decodes_generated_compressed_fixtures_when_ffmpeg_is_available() {
+        let Some(ffmpeg) = crate::ffmpeg::find_ffmpeg() else {
+            eprintln!("skipping compressed fixture decode test: ffmpeg not found");
+            return;
+        };
+
+        let formats: [(&str, &[&str]); 4] = [
+            ("flac", &[]),
+            ("mp3", &["-codec:a", "libmp3lame"]),
+            ("m4a", &["-codec:a", "aac"]),
+            ("opus", &["-codec:a", "libopus"]),
+        ];
+        let mut decoded_count = 0;
+
+        for (extension, codec_args) in formats {
+            let path = temp_audio_path("seraph-decoder-compressed", extension);
+            if !generate_sine_fixture(&ffmpeg, &path, codec_args) {
+                eprintln!("skipping {extension} fixture: ffmpeg could not generate it");
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+
+            let mut decoder = open_decoder(&path).expect("open generated compressed fixture");
+            let info = decoder.info().expect("stream info");
+            assert_eq!(info.channels, Channels(2));
+            assert!(info.sample_rate.0 > 0);
+
+            let packet = decoder
+                .next_packet()
+                .expect("decode generated compressed fixture")
+                .expect("first packet");
+            assert!(!packet.samples.is_empty());
+            decoded_count += 1;
+
+            let _ = fs::remove_file(path);
+        }
+
+        assert!(
+            decoded_count > 0,
+            "ffmpeg was found but no compressed fixtures could be generated"
+        );
     }
 
     fn write_test_dsf(path: &Path) {
@@ -160,6 +240,86 @@ mod tests {
         file.write_all(&(12_u64 + data_len).to_le_bytes()).unwrap();
         file.write_all(&[0xff; 8]).unwrap();
         file.write_all(&[0x00; 8]).unwrap();
+    }
+
+    fn write_test_wav_24(path: &Path) {
+        let sample_rate = 96_000_u32;
+        let channels = 2_u16;
+        let bits_per_sample = 24_u16;
+        let frames = 96_u32;
+        let block_align = channels * 3;
+        let byte_rate = sample_rate * block_align as u32;
+        let data_len = frames * block_align as u32;
+
+        let mut file = File::create(path).expect("create 24-bit wav");
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&channels.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(&byte_rate.to_le_bytes()).unwrap();
+        file.write_all(&block_align.to_le_bytes()).unwrap();
+        file.write_all(&bits_per_sample.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+
+        for frame in 0..frames {
+            let value = ((frame as i32) * 4096).to_le_bytes();
+            file.write_all(&value[0..3]).unwrap();
+            file.write_all(&value[0..3]).unwrap();
+        }
+    }
+
+    fn write_test_seek_wav(path: &Path) {
+        let sample_rate = 44_100_u32;
+        let channels = 2_u16;
+        let bits_per_sample = 16_u16;
+        let frames = sample_rate;
+        let block_align = channels * bits_per_sample / 8;
+        let byte_rate = sample_rate * block_align as u32;
+        let data_len = frames * block_align as u32;
+
+        let mut file = File::create(path).expect("create seek wav");
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&channels.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(&byte_rate.to_le_bytes()).unwrap();
+        file.write_all(&block_align.to_le_bytes()).unwrap();
+        file.write_all(&bits_per_sample.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+
+        for frame in 0..frames {
+            let value = (((frame % 512) as i16) * 32).to_le_bytes();
+            file.write_all(&value).unwrap();
+            file.write_all(&value).unwrap();
+        }
+    }
+
+    fn generate_sine_fixture(ffmpeg: &Path, path: &Path, codec_args: &[&str]) -> bool {
+        let mut command = Command::new(ffmpeg);
+        command
+            .arg("-y")
+            .arg("-v")
+            .arg("error")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("sine=frequency=440:duration=0.25")
+            .arg("-ac")
+            .arg("2")
+            .arg("-ar")
+            .arg("48000");
+        command.args(codec_args);
+        command.arg(path);
+
+        command.status().is_ok_and(|status| status.success())
     }
 
     fn temp_audio_path(prefix: &str, extension: &str) -> std::path::PathBuf {

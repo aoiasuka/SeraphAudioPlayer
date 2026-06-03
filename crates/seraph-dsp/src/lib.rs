@@ -9,5 +9,6 @@ pub mod resampler;
 
 pub use dsd::{DopConverter, DsdConverter, DsdMode, DsdToPcmConverter, NativeDsdPassthrough};
 pub use resampler::{
-    resample_interleaved_linear, LinearResampler, Resampler, ResamplerError, ResamplerQuality,
+    resample_interleaved_linear, resample_interleaved_sinc, LinearResampler, Resampler,
+    ResamplerError, ResamplerQuality,
 };

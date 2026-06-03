@@ -18,7 +18,7 @@ const drivers: { value: DriverKind; label: string; hint: string }[] = [
   {
     value: "wasapi",
     label: "WASAPI 独占",
-    hint: "直接以曲目采样率和声道打开 Windows WASAPI 独占设备，失败时会提示，不会静默降级。",
+    hint: "以当前 PCM 输出格式打开 Windows WASAPI 独占设备，失败时提示，不静默降级。",
   },
   {
     value: "asio",
@@ -372,7 +372,7 @@ export function SettingsModal() {
             输出链路已接入
           </h4>
           <p className="text-[10px] text-slate-500 leading-relaxed">
-            本地解码、播放进度事件和系统输出设备已经由 Rust 音频线程驱动。
+            本地解码、播放进度事件和系统输出设备已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP 与 Native DSD 尚未开启。
           </p>
         </div>
       </div>
