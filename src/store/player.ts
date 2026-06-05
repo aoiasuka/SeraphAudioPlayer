@@ -570,10 +570,14 @@ function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {
     state: PersistedPlayerState;
     version?: number;
   } | null = null;
+  const memoryStorage = new Map<string, string>();
+
+  const storage = () =>
+    typeof window === "undefined" ? null : window.localStorage;
 
   return {
     getItem: (name) => {
-      const value = window.localStorage.getItem(name);
+      const value = storage()?.getItem(name) ?? memoryStorage.get(name) ?? null;
       if (value === null) {
         lastValue = null;
         return null;
@@ -590,7 +594,8 @@ function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {
         // eslint-disable-next-line no-console
         console.warn("Failed to parse persisted player state, resetting it", err);
         lastValue = null;
-        window.localStorage.removeItem(name);
+        storage()?.removeItem(name);
+        memoryStorage.delete(name);
         return null;
       }
     },
@@ -604,11 +609,18 @@ function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {
       }
 
       lastValue = value;
-      window.localStorage.setItem(name, JSON.stringify(value));
+      const serialized = JSON.stringify(value);
+      const localStorage = storage();
+      if (localStorage) {
+        localStorage.setItem(name, serialized);
+      } else {
+        memoryStorage.set(name, serialized);
+      }
     },
     removeItem: (name) => {
       lastValue = null;
-      window.localStorage.removeItem(name);
+      storage()?.removeItem(name);
+      memoryStorage.delete(name);
     },
   };
 }
@@ -1234,6 +1246,10 @@ export const usePlayerStore = create<PlayerStore>()(
   },
 
   setDriver: (k) => {
+    if (k === "asio") {
+      get().showNotification("ASIO 输出尚未开放，请先使用 WASAPI 独占或系统共享输出");
+      return;
+    }
     if (get().driverKind === k) return;
     sendCommand("set_output_driver", { driver: k });
     set({ driverKind: k });

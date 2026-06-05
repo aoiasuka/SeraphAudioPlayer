@@ -7,12 +7,12 @@ use cpal::{
     BufferSize, SampleFormat, SampleRate as CpalSampleRate, Stream, StreamConfig,
 };
 use parking_lot::Mutex;
+use rtrb::{Consumer, Producer, RingBuffer};
 use seraph_core::{EventBus, PlayerEvent};
 use seraph_decoder::{open_decoder, Decoder, StreamInfo};
 use seraph_dsp::{resample_interleaved_linear, resample_interleaved_sinc};
 use seraph_visualizer::{SimpleVisualizer, Visualizer};
 use std::{
-    collections::VecDeque,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -149,15 +149,32 @@ struct PlaybackSession {
 }
 
 struct PlaybackShared {
-    queue: Mutex<VecDeque<f32>>,
     seek_request: Mutex<Option<f64>>,
     paused: AtomicBool,
     stopped: AtomicBool,
     frame_position: AtomicU64,
     volume_bits: AtomicU32,
+    buffer_generation: AtomicU64,
     output_rate: u32,
     output_channels: usize,
     max_buffer_samples: usize,
+}
+
+#[derive(Clone, Copy)]
+struct QueuedSample {
+    generation: u64,
+    value: f32,
+}
+
+struct DecodeWorkerInput {
+    decoder: Box<dyn Decoder>,
+    path: PathBuf,
+    track_id: String,
+    info: StreamInfo,
+    shared: Arc<PlaybackShared>,
+    producer: Producer<QueuedSample>,
+    event_bus: EventBus,
+    start_seconds: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +245,7 @@ impl PlaybackEngine {
             output_channels,
             self.volume,
         ));
+        let (producer, consumer) = RingBuffer::new(shared.max_buffer_samples);
         shared.frame_position.store(
             seconds_to_frames(start_seconds, output_rate),
             Ordering::Relaxed,
@@ -241,11 +259,13 @@ impl PlaybackEngine {
                     config.clone(),
                     sample_format,
                     shared.clone(),
+                    consumer,
                 )?;
                 (None, Some(worker))
             }
             OutputDriver::Shared => {
-                let stream = build_output_stream(&device, &config, sample_format, shared.clone())?;
+                let stream =
+                    build_output_stream(&device, &config, sample_format, shared.clone(), consumer)?;
                 stream
                     .play()
                     .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
@@ -254,15 +274,16 @@ impl PlaybackEngine {
             OutputDriver::Asio => unreachable!("ASIO checked above"),
         };
 
-        let worker = spawn_decode_worker(
+        let worker = spawn_decode_worker(DecodeWorkerInput {
             decoder,
-            path.clone(),
-            track_id.clone(),
+            path: path.clone(),
+            track_id: track_id.clone(),
             info,
-            shared.clone(),
-            self.event_bus.clone(),
+            shared: shared.clone(),
+            producer,
+            event_bus: self.event_bus.clone(),
             start_seconds,
-        );
+        });
 
         debug!(
             "started playback: {} @ {} Hz / {} ch / {:?}",
@@ -348,7 +369,7 @@ impl PlaybackEngine {
             seconds_to_frames(seconds, session.shared.output_rate),
             Ordering::Relaxed,
         );
-        session.shared.queue.lock().clear();
+        session.shared.next_buffer_generation();
         *session.shared.seek_request.lock() = Some(seconds);
         self.event_bus.publish(PlayerEvent::Progress {
             track_id: session.track_id.clone(),
@@ -409,7 +430,6 @@ impl PlaybackEngine {
         };
 
         session.shared.stopped.store(true, Ordering::Release);
-        session.shared.queue.lock().clear();
         if let Some(worker) = session.decode_worker.take() {
             let _ = worker.join();
         }
@@ -431,12 +451,12 @@ impl PlaybackShared {
     fn new(output_rate: u32, output_channels: usize, volume: f32) -> Self {
         let max_buffer_samples = output_rate as usize * output_channels * TARGET_BUFFER_SECONDS;
         Self {
-            queue: Mutex::new(VecDeque::with_capacity(max_buffer_samples)),
             seek_request: Mutex::new(None),
             paused: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             frame_position: AtomicU64::new(0),
             volume_bits: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
+            buffer_generation: AtomicU64::new(0),
             output_rate,
             output_channels,
             max_buffer_samples,
@@ -452,6 +472,14 @@ impl PlaybackShared {
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
+    fn buffer_generation(&self) -> u64 {
+        self.buffer_generation.load(Ordering::Acquire)
+    }
+
+    fn next_buffer_generation(&self) {
+        self.buffer_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     fn progress_seconds(&self) -> f64 {
         self.frame_position.load(Ordering::Relaxed) as f64 / self.output_rate.max(1) as f64
     }
@@ -462,13 +490,17 @@ fn build_output_stream(
     config: &StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
+    mut consumer: Consumer<QueuedSample>,
 ) -> Result<Stream> {
     let err_fn = |err| warn!("audio output stream error: {err}");
+    let mut observed_generation = shared.buffer_generation();
     match sample_format {
         SampleFormat::F32 => device
             .build_output_stream(
                 config,
-                move |data: &mut [f32], _| render_output_f32(data, &shared),
+                move |data: &mut [f32], _| {
+                    render_output_f32(data, &shared, &mut consumer, &mut observed_generation)
+                },
                 err_fn,
                 None,
             )
@@ -476,7 +508,9 @@ fn build_output_stream(
         SampleFormat::I16 => device
             .build_output_stream(
                 config,
-                move |data: &mut [i16], _| render_output_i16(data, &shared),
+                move |data: &mut [i16], _| {
+                    render_output_i16(data, &shared, &mut consumer, &mut observed_generation)
+                },
                 err_fn,
                 None,
             )
@@ -484,7 +518,9 @@ fn build_output_stream(
         SampleFormat::U16 => device
             .build_output_stream(
                 config,
-                move |data: &mut [u16], _| render_output_u16(data, &shared),
+                move |data: &mut [u16], _| {
+                    render_output_u16(data, &shared, &mut consumer, &mut observed_generation)
+                },
                 err_fn,
                 None,
             )
@@ -492,7 +528,9 @@ fn build_output_stream(
         SampleFormat::F64 => device
             .build_output_stream(
                 config,
-                move |data: &mut [f64], _| render_output_f64(data, &shared),
+                move |data: &mut [f64], _| {
+                    render_output_f64(data, &shared, &mut consumer, &mut observed_generation)
+                },
                 err_fn,
                 None,
             )
@@ -555,6 +593,7 @@ fn spawn_wasapi_exclusive_render_worker(
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
+    consumer: Consumer<QueuedSample>,
 ) -> Result<JoinHandle<Result<()>>> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
@@ -564,6 +603,7 @@ fn spawn_wasapi_exclusive_render_worker(
             config,
             sample_format,
             shared,
+            consumer,
         );
         let _ = ready_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
         result
@@ -586,6 +626,7 @@ fn spawn_wasapi_exclusive_render_worker(
     _config: StreamConfig,
     _sample_format: SampleFormat,
     _shared: Arc<PlaybackShared>,
+    _consumer: Consumer<QueuedSample>,
 ) -> Result<JoinHandle<Result<()>>> {
     Err(BackendError::ExclusiveModeUnavailable(
         "WASAPI exclusive output is only available on Windows".into(),
@@ -599,6 +640,7 @@ fn run_wasapi_exclusive_render_worker(
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
+    mut consumer: Consumer<QueuedSample>,
 ) -> Result<()> {
     use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
@@ -696,13 +738,20 @@ fn run_wasapi_exclusive_render_worker(
     audio_client
         .start_stream()
         .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+    let mut observed_generation = shared.buffer_generation();
 
     while !shared.stopped.load(Ordering::Acquire) {
         let frames = audio_client
             .get_available_space_in_frames()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
         if frames > 0 {
-            let bytes = render_wasapi_output_bytes(frames as usize, sample_format, &shared);
+            let bytes = render_wasapi_output_bytes(
+                frames as usize,
+                sample_format,
+                &shared,
+                &mut consumer,
+                &mut observed_generation,
+            );
             render_client
                 .write_to_device(frames as usize, &bytes, None)
                 .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
@@ -722,11 +771,19 @@ fn render_wasapi_output_bytes(
     frames: usize,
     sample_format: SampleFormat,
     shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
 ) -> Vec<u8> {
     let channels = shared.output_channels.max(1);
     let sample_count = frames * channels;
     let mut samples = vec![0.0_f32; sample_count];
-    render_output(&mut samples, shared, |sample, value| *sample = value);
+    render_output(
+        &mut samples,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| *sample = value,
+    );
 
     match sample_format {
         SampleFormat::I16 => {
@@ -757,21 +814,24 @@ fn render_wasapi_output_bytes(
     }
 }
 
-fn spawn_decode_worker(
-    decoder: Box<dyn Decoder>,
-    path: PathBuf,
-    track_id: String,
-    info: StreamInfo,
-    shared: Arc<PlaybackShared>,
-    event_bus: EventBus,
-    start_seconds: f64,
-) -> JoinHandle<()> {
+fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
     thread::spawn(move || {
+        let DecodeWorkerInput {
+            decoder,
+            path,
+            track_id,
+            info,
+            shared,
+            producer,
+            event_bus,
+            start_seconds,
+        } = input;
         let result = run_decode_worker(
             decoder,
             &track_id,
             &info,
             &shared,
+            producer,
             &event_bus,
             start_seconds,
         );
@@ -804,6 +864,7 @@ fn run_decode_worker(
     track_id: &str,
     info: &StreamInfo,
     shared: &Arc<PlaybackShared>,
+    mut producer: Producer<QueuedSample>,
     event_bus: &EventBus,
     start_seconds: f64,
 ) -> Result<()> {
@@ -826,7 +887,6 @@ fn run_decode_worker(
             decoder
                 .seek(seconds)
                 .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
-            shared.queue.lock().clear();
         }
 
         if shared.paused.load(Ordering::Acquire) {
@@ -841,7 +901,7 @@ fn run_decode_worker(
             continue;
         }
 
-        if shared.queue.lock().len() >= shared.max_buffer_samples {
+        if producer.slots() == 0 {
             publish_progress_if_due(
                 track_id,
                 shared,
@@ -874,11 +934,12 @@ fn run_decode_worker(
             track_id,
             info.duration_seconds,
             &mut last_progress,
+            &mut producer,
         );
         publish_spectrum_if_due(&visualizer, &samples, event_bus, &mut last_spectrum)?;
     }
 
-    while !shared.stopped.load(Ordering::Acquire) && !shared.queue.lock().is_empty() {
+    while !shared.stopped.load(Ordering::Acquire) && producer.slots() < shared.max_buffer_samples {
         publish_progress_if_due(
             track_id,
             shared,
@@ -919,6 +980,7 @@ fn push_samples(
     track_id: &str,
     total_seconds: f64,
     last_progress: &mut Instant,
+    producer: &mut Producer<QueuedSample>,
 ) {
     let mut offset = 0;
     while offset < samples.len() && !shared.stopped.load(Ordering::Acquire) {
@@ -927,17 +989,24 @@ fn push_samples(
                 seconds_to_frames(seconds, shared.output_rate),
                 Ordering::Relaxed,
             );
-            shared.queue.lock().clear();
             return;
         }
 
-        let written = {
-            let mut queue = shared.queue.lock();
-            let available = shared.max_buffer_samples.saturating_sub(queue.len());
-            let count = available.min(samples.len() - offset);
-            queue.extend(samples[offset..offset + count].iter().copied());
-            count
-        };
+        let generation = shared.buffer_generation();
+        let count = producer.slots().min(samples.len() - offset);
+        let mut written = 0;
+        for sample in &samples[offset..offset + count] {
+            if producer
+                .push(QueuedSample {
+                    generation,
+                    value: *sample,
+                })
+                .is_err()
+            {
+                break;
+            }
+            written += 1;
+        }
 
         offset += written;
         if written == 0 {
@@ -966,29 +1035,75 @@ fn publish_progress_if_due(
     });
 }
 
-fn render_output_f32(data: &mut [f32], shared: &PlaybackShared) {
-    render_output(data, shared, |sample, value| *sample = value);
+fn render_output_f32(
+    data: &mut [f32],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| *sample = value,
+    );
 }
 
-fn render_output_f64(data: &mut [f64], shared: &PlaybackShared) {
-    render_output(data, shared, |sample, value| *sample = f64::from(value));
+fn render_output_f64(
+    data: &mut [f64],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| *sample = f64::from(value),
+    );
 }
 
-fn render_output_i16(data: &mut [i16], shared: &PlaybackShared) {
-    render_output(data, shared, |sample, value| {
-        *sample = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-    });
+fn render_output_i16(
+    data: &mut [i16],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        },
+    );
 }
 
-fn render_output_u16(data: &mut [u16], shared: &PlaybackShared) {
-    render_output(data, shared, |sample, value| {
-        *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
-    });
+fn render_output_u16(
+    data: &mut [u16],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+        },
+    );
 }
 
 fn render_output<T>(
     data: &mut [T],
     shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u64,
     mut write_sample: impl FnMut(&mut T, f32),
 ) {
     if shared.stopped.load(Ordering::Acquire) || shared.paused.load(Ordering::Acquire) {
@@ -999,18 +1114,28 @@ fn render_output<T>(
     }
 
     let volume = shared.volume();
+    let current_generation = shared.buffer_generation();
+    if current_generation != *observed_generation {
+        *observed_generation = current_generation;
+    }
+
     let mut consumed = 0_usize;
-    {
-        let mut queue = shared.queue.lock();
-        for sample in data.iter_mut() {
-            let Some(value) = queue.pop_front() else {
-                write_sample(sample, 0.0);
-                continue;
-            };
+    for sample in data.iter_mut() {
+        let mut has_sample = false;
+        let value = loop {
+            match consumer.pop() {
+                Ok(queued) if queued.generation == *observed_generation => {
+                    has_sample = true;
+                    break queued.value;
+                }
+                Ok(_) => continue,
+                Err(_) => break 0.0,
+            }
+        };
+        if has_sample {
             consumed += 1;
-            let value = value * volume;
-            write_sample(sample, value);
         }
+        write_sample(sample, value * volume);
     }
 
     let frames = consumed / shared.output_channels.max(1);

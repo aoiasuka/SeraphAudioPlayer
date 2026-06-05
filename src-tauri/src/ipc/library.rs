@@ -1774,7 +1774,7 @@ fn looks_like_utf16_be(bytes: &[u8]) -> bool {
 }
 
 fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
-    if bytes.len() < 8 || bytes.len() % 2 != 0 {
+    if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
         return false;
     }
 
@@ -1805,9 +1805,7 @@ fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
 fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
     let normalized = text
         .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\u{2028}', "\n")
-        .replace('\u{2029}', "\n");
+        .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
     let mut offset_ms = 0_i64;
     let mut timed = Vec::new();
     let mut unsynced = Vec::new();
@@ -1868,10 +1866,7 @@ fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
     let mut rest = line.trim_start();
     let mut times = Vec::new();
 
-    loop {
-        let Some(stripped) = rest.strip_prefix('[') else {
-            break;
-        };
+    while let Some(stripped) = rest.strip_prefix('[') {
         let Some(end) = stripped.find(']') else {
             break;
         };
@@ -1952,8 +1947,7 @@ fn is_lrc_metadata_line(line: &str) -> bool {
 
 fn clean_lyric_text(value: &str) -> Option<String> {
     let text = strip_inline_time_tags(value)
-        .replace('\u{3000}', " ")
-        .replace('\t', " ")
+        .replace(['\u{3000}', '\t'], " ")
         .replace("<br>", " ")
         .replace("<br/>", " ")
         .replace("<br />", " ")
@@ -2115,9 +2109,9 @@ fn sample_rate_label(sample_rate: u32) -> Option<String> {
     }
 
     if sample_rate >= 1000 {
-        let mut khz = if sample_rate % 1000 == 0 {
+        let mut khz = if sample_rate.is_multiple_of(1000) {
             format!("{}", sample_rate / 1000)
-        } else if sample_rate % 100 == 0 {
+        } else if sample_rate.is_multiple_of(100) {
             format!("{:.1}", sample_rate as f64 / 1000.0)
         } else {
             format!("{:.3}", sample_rate as f64 / 1000.0)

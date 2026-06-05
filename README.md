@@ -4,7 +4,7 @@ Premium local HiFi audio player — Rust + Tauri + React.
 
 参考 `初始化.md` 中确定的架构：放弃 Qt/C++，以 Rust 重写底层、Tauri 做系统壳、React 做 UI，WASAPI Exclusive + DSD 保留。
 
-> 当前音频路径已接入：本地文件会经 Rust 解码、重采样/声道适配后进入输出线程。DSD 目前使用 PCM Conversion；DoP、Native DSD 和 bit-perfect 路径尚未开启。
+> 当前音频路径已接入：本地文件会经 Rust 解码、重采样/声道适配后进入无锁 ring buffer，再由系统共享输出或 WASAPI Exclusive 渲染线程消费。DSD 目前使用 PCM Conversion；DoP、Native DSD、ASIO 和 bit-perfect 旁路尚未开放。
 
 ## 技术栈
 
@@ -14,7 +14,7 @@ Premium local HiFi audio player — Rust + Tauri + React.
 | 音频核心 | Rust workspace（多 crate） |
 | 解码 | Symphonia 主解码 + FFmpeg CLI fallback |
 | 重采样 | 窗口化 sinc 重采样（线性重采样保留为 fallback） |
-| 输出 | WASAPI Exclusive / 系统共享输出 |
+| 输出 | WASAPI Exclusive / 系统共享输出（ASIO 尚未开放） |
 | 前端 | React 18 + TypeScript + Vite |
 | 样式 | Tailwind CSS v3 + shadcn/ui |
 | 动画 | Framer Motion |
@@ -84,8 +84,9 @@ cargo build
 1. 完善 bit-perfect PCM 路径：音量旁路、格式锁定、避免不必要的 f32/重采样转换
 2. DSD 分模式实现：PCM Conversion / DoP / Native DSD
 3. Gapless 与 Device Lost 恢复
-4. ASIO 输出路径
-5. 更完整的真实音频格式回归测试
+4. 将 WASAPI backend trait 与当前渲染 worker 收口
+5. ASIO 输出路径
+6. 更完整的真实音频格式回归测试
 
 ## 参考文件
 

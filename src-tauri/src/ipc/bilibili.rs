@@ -7,6 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::{
     header::{
@@ -185,13 +188,27 @@ struct NavData {
     face: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BilibiliSession {
+    #[serde(default)]
     cookies: BTreeMap<String, String>,
+    #[serde(default)]
+    has_secure_cookies: bool,
     saved_at: u64,
     username: Option<String>,
     mid: Option<u64>,
     face: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BilibiliSessionFile<'a> {
+    saved_at: u64,
+    username: &'a Option<String>,
+    mid: Option<u64>,
+    face: &'a Option<String>,
+    has_secure_cookies: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cookies: Option<&'a BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +407,7 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
 #[tauri::command]
 pub fn bilibili_logout(app: AppHandle) -> Result<(), String> {
     let path = session_path(&app)?;
+    delete_secure_bilibili_cookies()?;
     if path.is_file() {
         fs::remove_file(&path)
             .map_err(|err| format!("无法删除 B 站登录会话 {}: {err}", path.display()))?;
@@ -1006,21 +1024,216 @@ fn load_session(app: &AppHandle) -> Result<Option<BilibiliSession>, String> {
 
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read bilibili session {}: {err}", path.display()))?;
-    let session = serde_json::from_slice(&bytes)
+    let mut session: BilibiliSession = serde_json::from_slice(&bytes)
         .map_err(|err| format!("failed to parse bilibili session {}: {err}", path.display()))?;
+    if let Some(cookies) = load_secure_bilibili_cookies()? {
+        session.cookies = cookies;
+        session.has_secure_cookies = true;
+    } else if !session.cookies.is_empty() {
+        save_secure_bilibili_cookies(&session.cookies)?;
+        session.has_secure_cookies = true;
+        write_session_file(app, &session, false)?;
+    }
     Ok(Some(session))
 }
 
 fn save_session(app: &AppHandle, session: &BilibiliSession) -> Result<(), String> {
+    if !session.cookies.is_empty() {
+        save_secure_bilibili_cookies(&session.cookies)?;
+    }
+    write_session_file(app, session, false)
+}
+
+fn write_session_file(
+    app: &AppHandle,
+    session: &BilibiliSession,
+    include_cookies: bool,
+) -> Result<(), String> {
     let path = session_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create bilibili session dir: {err}"))?;
     }
-    let bytes = serde_json::to_vec_pretty(session)
+    let disk_session = BilibiliSessionFile {
+        saved_at: session.saved_at,
+        username: &session.username,
+        mid: session.mid,
+        face: &session.face,
+        has_secure_cookies: session.has_secure_cookies || !session.cookies.is_empty(),
+        cookies: include_cookies.then_some(&session.cookies),
+    };
+    let bytes = serde_json::to_vec(&disk_session)
         .map_err(|err| format!("failed to serialize bilibili session: {err}"))?;
     fs::write(&path, bytes)
-        .map_err(|err| format!("failed to write bilibili session {}: {err}", path.display()))
+        .map_err(|err| format!("failed to write bilibili session {}: {err}", path.display()))?;
+    restrict_session_file_permissions(&path)?;
+    Ok(())
+}
+
+const BILIBILI_CREDENTIAL_TARGET: &str = "SeraphAudioPlayer/BilibiliSession";
+const BILIBILI_CREDENTIAL_USER: &str = "bilibili";
+
+fn load_secure_bilibili_cookies() -> Result<Option<BTreeMap<String, String>>, String> {
+    let Some(bytes) = windows_read_credential(BILIBILI_CREDENTIAL_TARGET)? else {
+        return Ok(None);
+    };
+    let cookies = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("failed to parse secure bilibili cookies: {err}"))?;
+    Ok(Some(cookies))
+}
+
+fn save_secure_bilibili_cookies(cookies: &BTreeMap<String, String>) -> Result<(), String> {
+    if cookies.is_empty() {
+        return delete_secure_bilibili_cookies();
+    }
+    let bytes = serde_json::to_vec(cookies)
+        .map_err(|err| format!("failed to serialize secure bilibili cookies: {err}"))?;
+    windows_write_credential(BILIBILI_CREDENTIAL_TARGET, BILIBILI_CREDENTIAL_USER, &bytes)
+}
+
+fn delete_secure_bilibili_cookies() -> Result<(), String> {
+    windows_delete_credential(BILIBILI_CREDENTIAL_TARGET)
+}
+
+#[cfg(windows)]
+fn windows_read_credential(target: &str) -> Result<Option<Vec<u8>>, String> {
+    use std::{ptr, slice};
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_NOT_FOUND},
+        Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC},
+    };
+
+    let target = wide_null(target);
+    let mut credential: *mut CREDENTIALW = ptr::null_mut();
+    let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        return Err(format!("failed to read bilibili credential: {err}"));
+    }
+
+    let bytes = unsafe {
+        let credential_ref = &*credential;
+        let blob = slice::from_raw_parts(
+            credential_ref.CredentialBlob,
+            credential_ref.CredentialBlobSize as usize,
+        );
+        let bytes = blob.to_vec();
+        CredFree(credential.cast());
+        bytes
+    };
+    Ok(Some(bytes))
+}
+
+#[cfg(not(windows))]
+fn windows_read_credential(_target: &str) -> Result<Option<Vec<u8>>, String> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn windows_write_credential(target: &str, user: &str, secret: &[u8]) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::GetLastError,
+        Security::Credentials::{
+            CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+        },
+    };
+
+    let mut target = wide_null(target);
+    let mut user = wide_null(user);
+    let mut secret = secret.to_vec();
+    let credential = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_mut_ptr(),
+        UserName: user.as_mut_ptr(),
+        CredentialBlobSize: secret.len() as u32,
+        CredentialBlob: secret.as_mut_ptr(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        ..Default::default()
+    };
+
+    let ok = unsafe { CredWriteW(&credential, 0) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(format!("failed to write bilibili credential: {err}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn windows_write_credential(_target: &str, _user: &str, _secret: &[u8]) -> Result<(), String> {
+    Err("secure credential storage is only implemented on Windows".into())
+}
+
+#[cfg(windows)]
+fn windows_delete_credential(target: &str) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_NOT_FOUND},
+        Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC},
+    };
+
+    let target = wide_null(target);
+    let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if err != ERROR_NOT_FOUND {
+            return Err(format!("failed to delete bilibili credential: {err}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn windows_delete_credential(_target: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            format!(
+                "failed to restrict bilibili session permissions {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".into());
+        let status = Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:F"))
+            .arg("/remove:g")
+            .arg("Users")
+            .arg("Everyone")
+            .output();
+
+        match status {
+            Ok(output) if !output.status.success() => {
+                tracing::warn!(
+                    "failed to restrict bilibili session permissions with icacls: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(err) => {
+                tracing::warn!("failed to run icacls for bilibili session permissions: {err}");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn merge_set_cookie_headers(headers: &HeaderMap, cookies: &mut BTreeMap<String, String>) {
@@ -1095,10 +1308,7 @@ fn extract_media_id(input: &str) -> Option<String> {
 fn query_value(input: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=");
     let start = input.find(&marker)? + marker.len();
-    let value = input[start..]
-        .split(|ch| ch == '&' || ch == '#' || ch == '?' || ch == '/')
-        .next()?
-        .trim();
+    let value = input[start..].split(['&', '#', '?', '/']).next()?.trim();
     if value.chars().all(|ch| ch.is_ascii_digit()) && !value.is_empty() {
         Some(value.to_string())
     } else {

@@ -1,4 +1,7 @@
-//! WASAPI Exclusive 模式占位实现。
+//! WASAPI backend trait adapter placeholder.
+//!
+//! 当前可播放的 WASAPI Exclusive 路径在 [`crate::engine`] 的渲染 worker 中，
+//! 这里保留给未来把平台输出统一收口到 [`AudioBackend`] trait。
 //!
 //! TODO:
 //! - 接入 `windows` crate（Win32_Media_Audio + Win32_System_Com）

@@ -74,7 +74,7 @@ impl DsdConverter for DopConverter {
 
     fn convert(&mut self, input: &[u8], output: &mut Vec<u8>) -> Result<(), DsdError> {
         let bytes_per_dop_frame = self.channels * 2;
-        if input.len() % bytes_per_dop_frame != 0 {
+        if !input.len().is_multiple_of(bytes_per_dop_frame) {
             return Err(DsdError::InvalidInputLength);
         }
 
@@ -104,7 +104,7 @@ impl DsdToPcmConverter {
         if channels == 0 {
             return Err(DsdError::InvalidChannelCount);
         }
-        if decimation_bits == 0 || decimation_bits % 8 != 0 {
+        if decimation_bits == 0 || !decimation_bits.is_multiple_of(8) {
             return Err(DsdError::InvalidInputLength);
         }
 
@@ -127,7 +127,7 @@ impl DsdConverter for DsdToPcmConverter {
     fn convert(&mut self, input: &[u8], output: &mut Vec<u8>) -> Result<(), DsdError> {
         let dsd_bytes_per_pcm_frame = self.decimation_bits / 8;
         let input_stride = self.channels * dsd_bytes_per_pcm_frame;
-        if input.len() % input_stride != 0 {
+        if !input.len().is_multiple_of(input_stride) {
             return Err(DsdError::InvalidInputLength);
         }
 

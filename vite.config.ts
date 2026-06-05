@@ -29,7 +29,7 @@ export default defineConfig(async () => ({
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {
-    target: ["es2021", "chrome105", "safari13"],
+    target: "esnext",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },

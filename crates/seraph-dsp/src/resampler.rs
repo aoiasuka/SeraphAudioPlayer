@@ -99,7 +99,7 @@ pub fn resample_interleaved_linear(
     if input_rate == 0 || output_rate == 0 {
         return Err(ResamplerError::InvalidSampleRate);
     }
-    if input.len() % channels != 0 {
+    if !input.len().is_multiple_of(channels) {
         return Err(ResamplerError::InvalidInputLength);
     }
     if input.is_empty() {
@@ -163,7 +163,7 @@ pub fn resample_interleaved_sinc_with_radius(
     if input_rate == 0 || output_rate == 0 {
         return Err(ResamplerError::InvalidSampleRate);
     }
-    if input.len() % channels != 0 {
+    if !input.len().is_multiple_of(channels) {
         return Err(ResamplerError::InvalidInputLength);
     }
     if input.is_empty() {

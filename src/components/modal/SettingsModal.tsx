@@ -14,16 +14,22 @@ import { invoke } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { DriverKind } from "@/types/track";
 
-const drivers: { value: DriverKind; label: string; hint: string }[] = [
+const drivers: {
+  value: DriverKind;
+  label: string;
+  hint: string;
+  disabled?: boolean;
+}[] = [
   {
     value: "wasapi",
     label: "WASAPI 独占",
-    hint: "以当前 PCM 输出格式打开 Windows WASAPI 独占设备，失败时提示，不静默降级。",
+    hint: "已接入 Windows 独占输出；当前仍经过 PCM 混音链路，bit-perfect 旁路尚未开放。",
   },
   {
     value: "asio",
-    label: "ASIO 专业驱动",
-    hint: "尚未实现，选择后播放会提示暂不支持。",
+    label: "ASIO 专业驱动（未开放）",
+    hint: "ASIO 后端尚未实现，发布前不会作为可选输出路径开放。",
+    disabled: true,
   },
   {
     value: "direct",
@@ -215,7 +221,11 @@ export function SettingsModal() {
             className="w-full bg-[#f1f5f9] border border-black/5 rounded-lg p-2 text-xs text-slate-700 focus:outline-none focus:border-cyan-600"
           >
             {drivers.map((driver) => (
-              <option key={driver.value} value={driver.value}>
+              <option
+                key={driver.value}
+                value={driver.value}
+                disabled={driver.disabled}
+              >
                 {driver.label}
               </option>
             ))}
@@ -369,10 +379,10 @@ export function SettingsModal() {
         <div className="p-3 bg-cyan-50 rounded-lg border border-cyan-500/10 space-y-1.5">
           <h4 className="text-xs font-semibold text-cyan-800 flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            输出链路已接入
+            当前输出能力
           </h4>
           <p className="text-[10px] text-slate-500 leading-relaxed">
-            本地解码、播放进度事件和系统输出设备已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP 与 Native DSD 尚未开启。
+            本地解码、播放进度事件、系统共享输出和 WASAPI 独占输出已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP、Native DSD、ASIO 与 bit-perfect 旁路尚未开放。
           </p>
         </div>
       </div>

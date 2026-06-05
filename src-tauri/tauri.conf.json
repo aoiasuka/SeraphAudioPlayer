@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost https://api.bilibili.com https://passport.bilibili.com https://www.bilibili.com https://music.163.com https://lyrics.kugou.com https://c.y.qq.com https://y.qq.com http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self' data:; media-src 'self' data: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
     }
   },
   "bundle": {

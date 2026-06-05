@@ -8,6 +8,9 @@ export function useHydratePlayerStore() {
       const hydration = usePlayerStore.persist.rehydrate();
       void Promise.resolve(hydration).then(() => {
         const state = usePlayerStore.getState();
+        if (state.driverKind === "asio") {
+          usePlayerStore.setState({ driverKind: "direct" });
+        }
         state.normalizeLibrary();
         void state.loadBackendLibrary();
         state.loadDevices();
