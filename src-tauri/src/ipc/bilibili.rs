@@ -10,6 +10,17 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Windows 上启动子进程时隐藏控制台窗口，避免点击曲目 / 后台 remux 时
+/// 出现 cmd 黑窗一闪而过。0x0800_0000 = CREATE_NO_WINDOW。
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::{
     header::{
@@ -40,6 +51,10 @@ const PLAY_URL_FNVAL: &str = "4048";
 const FAV_PAGE_SIZE: usize = 20;
 const FAV_MAX_ITEMS: usize = 200;
 const MAX_AVATAR_BYTES: usize = 512 * 1024;
+/// 单次音频下载上限。普通 m4a < 50 MB，FLAC 流可达数百 MB，给到 1.5 GB 已远超合理上限。
+const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
+/// B 站视频页 HTML 抓取上限：BVID 一般在前若干 KB 出现，给 1 MB 防御性裁剪。
+const MAX_HTML_BYTES: u64 = 1 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
@@ -193,6 +208,10 @@ struct BilibiliSession {
     #[serde(default)]
     cookies: BTreeMap<String, String>,
     #[serde(default)]
+    /// Set-Cookie 解析出的过期时间（Unix 秒）。
+    /// 没有 expires/max-age 信息的 cookie 不会出现在这个映射里——按 session cookie 处理（永远不过期）。
+    cookie_expires: BTreeMap<String, u64>,
+    #[serde(default)]
     has_secure_cookies: bool,
     saved_at: u64,
     username: Option<String>,
@@ -318,7 +337,7 @@ pub async fn bilibili_poll_login(
 
     if api.code == 0 {
         let mut session = load_session(&app)?.unwrap_or_default();
-        merge_set_cookie_headers(&headers, &mut session.cookies);
+        merge_set_cookie_headers(&headers, &mut session.cookies, &mut session.cookie_expires);
         session.saved_at = now_secs();
         save_session(&app, &session)?;
 
@@ -484,11 +503,12 @@ async fn resolve_bvid(client: &Client, input: &str) -> Result<String, String> {
         return Ok(bvid);
     }
 
-    let body = response
-        .text()
+    // 限制 HTML 抓取大小：避免恶意服务器/重定向到大文件导致内存爆炸。
+    let body = read_bytes_capped(response, MAX_HTML_BYTES)
         .await
         .map_err(|err| format!("无法读取 B 站页面内容: {err}"))?;
-    extract_bvid(&body).ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
+    let body_str = String::from_utf8_lossy(&body);
+    extract_bvid(&body_str).ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
 }
 
 async fn resolve_audio(
@@ -754,12 +774,22 @@ async fn ensure_audio_file(
     path: &Path,
     ffmpeg_path: Option<&Path>,
 ) -> Result<(), String> {
+    // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
+    // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
+    let sentinel = ok_sentinel_path(path);
     if path.is_file()
+        && sentinel.is_file()
         && fs::metadata(path)
             .map(|meta| meta.len() > 0)
             .unwrap_or(false)
     {
         return Ok(());
+    }
+
+    // 清理可能残留的不完整文件 + 旧 sentinel
+    let _ = fs::remove_file(&sentinel);
+    if path.is_file() {
+        let _ = fs::remove_file(path);
     }
 
     if let Some(parent) = path.parent() {
@@ -772,6 +802,9 @@ async fn ensure_audio_file(
         match download_audio_bytes(client, audio_url).await {
             Ok(bytes) => {
                 write_audio_file(path, &bytes, ffmpeg_path)?;
+                // 写一个零字节 sentinel 标记缓存完整可用；
+                // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
+                let _ = fs::write(&sentinel, b"");
                 return Ok(());
             }
             Err(err) => last_error = Some(err),
@@ -781,19 +814,38 @@ async fn ensure_audio_file(
     Err(last_error.unwrap_or_else(|| "bilibili response has no audio download url".into()))
 }
 
+fn ok_sentinel_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bilibili-audio");
+    path.with_file_name(format!(".{file_name}.ok"))
+}
+
 async fn download_audio_bytes(client: &Client, audio_url: &str) -> Result<Vec<u8>, String> {
     if audio_url.trim().is_empty() {
         return Err("empty bilibili audio url".into());
     }
 
-    let bytes = client
+    let response = client
         .get(audio_url)
         .send()
         .await
         .map_err(|err| format!("failed to download bilibili audio: {err}"))?
         .error_for_status()
-        .map_err(|err| format!("bilibili audio download failed: {err}"))?
-        .bytes()
+        .map_err(|err| format!("bilibili audio download failed: {err}"))?;
+
+    // 提前检查 Content-Length；超出上限直接拒绝，避免下载到一半才发现。
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_AUDIO_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bilibili audio too large: declared {} bytes (limit {})",
+                content_length, MAX_AUDIO_DOWNLOAD_BYTES
+            ));
+        }
+    }
+
+    let bytes = read_bytes_capped(response, MAX_AUDIO_DOWNLOAD_BYTES)
         .await
         .map_err(|err| format!("failed to read bilibili audio bytes: {err}"))?;
 
@@ -801,7 +853,27 @@ async fn download_audio_bytes(client: &Client, audio_url: &str) -> Result<Vec<u8
         return Err("downloaded bilibili audio is empty".into());
     }
 
-    Ok(bytes.to_vec())
+    Ok(bytes)
+}
+
+/// 增量读取响应体，超出上限即截断并报错；
+/// 避免恶意服务器或异常重定向把进程内存撑爆。
+async fn read_bytes_capped(
+    mut response: reqwest::Response,
+    cap: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("network read error: {err}"))?
+    {
+        if (buf.len() as u64).saturating_add(chunk.len() as u64) > cap {
+            return Err(format!("response body exceeded {cap} bytes; aborted"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<String>, String> {
@@ -873,7 +945,9 @@ fn write_audio_file(path: &Path, bytes: &[u8], ffmpeg_path: Option<&Path>) -> Re
 }
 
 fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
-    let result = Command::new(ffmpeg_path)
+    let mut command = Command::new(ffmpeg_path);
+    hide_console_window(&mut command);
+    let result = command
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -1208,16 +1282,29 @@ fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        let user = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".into());
-        let status = Command::new("icacls")
-            .arg(path)
-            .arg("/inheritance:r")
-            .arg("/grant:r")
-            .arg(format!("{user}:F"))
-            .arg("/remove:g")
-            .arg("Users")
-            .arg("Everyone")
-            .output();
+        // 用户名可能含空格/中文/特殊字符；icacls 的 /grant 接受 "User:F" 形式，
+        // 用引号包裹更稳妥。若 USERNAME 未设置则退到 SID S-1-5-32-545（Users），
+        // 至少保留可访问性，不让权限设置直接失败。
+        let user = std::env::var("USERNAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty());
+        let grant_arg = match &user {
+            Some(name) => format!("\"{name}\":F"),
+            None => "*S-1-5-32-545:F".to_string(),
+        };
+        let status = {
+            let mut command = Command::new("icacls");
+            hide_console_window(&mut command);
+            command
+                .arg(path)
+                .arg("/inheritance:r")
+                .arg("/grant:r")
+                .arg(grant_arg)
+                .arg("/remove:g")
+                .arg("Users")
+                .arg("Everyone")
+                .output()
+        };
 
         match status {
             Ok(output) if !output.status.success() => {
@@ -1236,24 +1323,111 @@ fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn merge_set_cookie_headers(headers: &HeaderMap, cookies: &mut BTreeMap<String, String>) {
+fn merge_set_cookie_headers(
+    headers: &HeaderMap,
+    cookies: &mut BTreeMap<String, String>,
+    expires: &mut BTreeMap<String, u64>,
+) {
+    let now = now_secs();
     for value in headers.get_all(SET_COOKIE).iter() {
         let Ok(value) = value.to_str() else {
             continue;
         };
-        let Some((name, cookie_value)) = value
-            .split(';')
-            .next()
-            .and_then(|part| part.split_once('='))
-        else {
+        // Set-Cookie: <name>=<value>; Expires=...; Max-Age=...; Path=/; ...
+        let mut parts = value.split(';');
+        let Some((name, cookie_value)) = parts.next().and_then(|part| part.split_once('=')) else {
             continue;
         };
         let name = name.trim();
         let cookie_value = cookie_value.trim();
-        if !name.is_empty() && !cookie_value.is_empty() {
-            cookies.insert(name.to_string(), cookie_value.to_string());
+        if name.is_empty() || cookie_value.is_empty() {
+            continue;
+        }
+
+        // 解析 Max-Age / Expires 任意一项
+        let mut expire_at: Option<u64> = None;
+        for attr in parts {
+            let attr = attr.trim();
+            if let Some(rest) = attr.strip_prefix(|c: char| c.eq_ignore_ascii_case(&'M')) {
+                // 简化：用 to_ascii_lowercase 再判前缀更可靠
+                let _ = rest;
+            }
+            let lower = attr.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("max-age=") {
+                if let Ok(seconds) = rest.trim().parse::<i64>() {
+                    if seconds <= 0 {
+                        // 立即过期：跳过这个 cookie
+                        cookies.remove(name);
+                        expires.remove(name);
+                        expire_at = Some(0);
+                        break;
+                    }
+                    expire_at = Some(now.saturating_add(seconds as u64));
+                }
+            } else if let Some(rest) = lower.strip_prefix("expires=") {
+                // 仅在没有 Max-Age 时考虑（Max-Age 优先）；这里如果已设过则跳过
+                if expire_at.is_some() {
+                    continue;
+                }
+                if let Some(timestamp) = parse_http_date_to_unix(rest.trim()) {
+                    expire_at = Some(timestamp);
+                }
+            }
+        }
+
+        match expire_at {
+            Some(0) => {
+                // 已被立即过期处理掉了
+            }
+            Some(ts) if ts <= now => {
+                // 显式已过期：清掉
+                cookies.remove(name);
+                expires.remove(name);
+            }
+            Some(ts) => {
+                cookies.insert(name.to_string(), cookie_value.to_string());
+                expires.insert(name.to_string(), ts);
+            }
+            None => {
+                // session cookie，无过期时间
+                cookies.insert(name.to_string(), cookie_value.to_string());
+                expires.remove(name);
+            }
         }
     }
+}
+
+/// 解析 RFC 7231 IMF-fixdate / RFC 850 / asctime 三种 HTTP 日期为 Unix 秒。
+/// 这里仅做最小可用实现（IMF-fixdate 走 chrono-free 手解析）。失败返回 None。
+fn parse_http_date_to_unix(text: &str) -> Option<u64> {
+    // 例：Sun, 06 Nov 1994 08:49:37 GMT
+    let mut iter = text.split_whitespace();
+    let _weekday = iter.next()?;
+    let day: u32 = iter.next()?.trim_end_matches(',').parse().ok()?;
+    let month_str = iter.next()?;
+    let year: i32 = iter.next()?.parse().ok()?;
+    let time = iter.next()?;
+    let mut t = time.split(':');
+    let h: u32 = t.next()?.parse().ok()?;
+    let m: u32 = t.next()?.parse().ok()?;
+    let s: u32 = t.next()?.parse().ok()?;
+    let month: u32 = match month_str {
+        "Jan" => 1, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
+        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        _ => return None,
+    };
+    // 计算自 1970-01-01 起的天数（Howard Hinnant 算法）
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146097 + doe as i64 - 719468;
+    if days < 0 {
+        return None;
+    }
+    let secs = days as u64 * 86_400 + h as u64 * 3600 + m as u64 * 60 + s as u64;
+    Some(secs)
 }
 
 fn now_secs() -> u64 {
@@ -1479,10 +1653,13 @@ impl AudioStream {
     }
 
     fn output_extension(&self, remuxed: bool) -> &'static str {
+        // 即使未 remux 也按真实编码落扩展名，避免 FLAC stream 被命名为 .m4a
+        // 导致后续元数据探测失败 (M-2)。
         match self.format_label() {
-            "FLAC" if remuxed => "flac",
-            "OPUS" if remuxed => "opus",
+            "FLAC" => "flac",
+            "OPUS" => "opus",
             "EAC3" if remuxed => "eac3",
+            "EAC3" => "eac3",
             _ => "m4a",
         }
     }
@@ -1494,13 +1671,25 @@ impl BilibiliSession {
             return None;
         }
 
-        Some(
-            self.cookies
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
+        let now = now_secs();
+        let parts: Vec<String> = self
+            .cookies
+            .iter()
+            .filter(|(name, _)| {
+                // 有过期时间且已过期的跳过；session cookie（无 expires 记录）默认保留
+                match self.cookie_expires.get(*name) {
+                    Some(ts) => *ts > now,
+                    None => true,
+                }
+            })
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("; "))
+        }
     }
 }
 

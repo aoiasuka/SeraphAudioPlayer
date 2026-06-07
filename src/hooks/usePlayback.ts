@@ -21,8 +21,10 @@ export function usePlayback() {
             : typeof event.trackId === "string"
               ? event.trackId
               : undefined;
+        // M-10: 事件 trackId 与当前曲目不一致时，先把进度复位到 0，
+        // 避免上一首的尾段 progress 与新曲目的 PlaybackStarted 之间 UI 卡在错误时间。
         if (eventTrackId && track?.id && eventTrackId !== track.id) {
-          return {};
+          return state.currentTime > 0 ? { currentTime: 0 } : {};
         }
         const duration = track?.duration ?? Number.POSITIVE_INFINITY;
         return { currentTime: Math.max(0, Math.min(seconds, duration)) };

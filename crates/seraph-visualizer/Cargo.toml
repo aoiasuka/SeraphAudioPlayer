@@ -12,6 +12,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 rtrb = { workspace = true }
-
-# TODO: 真正实现 FFT 时启用
-# rustfft = "6"
+rustfft = { workspace = true }

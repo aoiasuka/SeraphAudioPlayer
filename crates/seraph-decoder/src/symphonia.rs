@@ -24,6 +24,8 @@ pub struct SymphoniaDecoder {
     track_id: Option<u32>,
     time_base: Option<TimeBase>,
     sample_rate: u32,
+    // L-6: 复用 SampleBuffer 以避免每包重新分配
+    sample_buffer: Option<SampleBuffer<f32>>,
 }
 
 impl SymphoniaDecoder {
@@ -35,6 +37,7 @@ impl SymphoniaDecoder {
             track_id: None,
             time_base: None,
             sample_rate: 0,
+            sample_buffer: None,
         }
     }
 }
@@ -157,11 +160,21 @@ impl Decoder for SymphoniaDecoder {
                 Err(err) => return Err(map_symphonia_error(err)),
             };
 
-            let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-            samples.copy_interleaved_ref(decoded);
+            let spec = *decoded.spec();
+            let frames = decoded.capacity() as u64;
+            let buffer = match self.sample_buffer.as_mut() {
+                Some(buffer) if buffer.capacity() >= (frames as usize) * spec.channels.count() => {
+                    buffer
+                }
+                _ => {
+                    self.sample_buffer = Some(SampleBuffer::<f32>::new(frames, spec));
+                    self.sample_buffer.as_mut().unwrap()
+                }
+            };
+            buffer.copy_interleaved_ref(decoded);
 
             return Ok(Some(Packet {
-                samples: samples.samples().to_vec(),
+                samples: buffer.samples().to_vec(),
                 timestamp_seconds,
             }));
         }
@@ -193,6 +206,8 @@ impl Decoder for SymphoniaDecoder {
         if let Some(decoder) = self.decoder.as_mut() {
             decoder.reset();
         }
+        // L-6: seek 后 spec 可能变（不同 track），保险起见清掉复用缓冲
+        self.sample_buffer = None;
         Ok(())
     }
 }

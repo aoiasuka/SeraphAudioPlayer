@@ -385,6 +385,7 @@ function StreamingPage() {
     if (!loginQr?.qrcodeKey) return;
 
     let stopped = false;
+    // L-9: 拉长到 3.5s 降低 B 站风控风险；登录成功 / 二维码过期会立即停止
     const timer = window.setInterval(() => {
       void invoke<BilibiliLoginPollResult>("bilibili_poll_login", {
         qrcodeKey: loginQr.qrcodeKey,
@@ -411,7 +412,7 @@ function StreamingPage() {
           console.warn("Tauri command failed: bilibili_poll_login", err);
           setLoginPollMessage("登录轮询失败");
         });
-    }, 1800);
+    }, 3500);
 
     return () => {
       stopped = true;

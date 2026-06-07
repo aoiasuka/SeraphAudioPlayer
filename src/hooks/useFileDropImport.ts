@@ -31,6 +31,18 @@ export function useFileDropImport() {
     let unlistenAll: Array<() => void> = [];
 
     const preventDefault = (event: DragEvent) => {
+      // M-9: 只拦截 window 顶层；让输入框 / contenteditable 等元素能继续接收文本拖拽。
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          target.isContentEditable === true
+        ) {
+          return;
+        }
+      }
       event.preventDefault();
     };
 

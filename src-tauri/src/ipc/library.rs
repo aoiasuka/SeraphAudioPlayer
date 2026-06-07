@@ -171,6 +171,17 @@ pub fn save_track_lyrics(
         return Err("lyrics file is empty".into());
     }
 
+    // 后端独立校验大小：前端虽然限制了 2MB，但 IPC 可被绕过；
+    // 设为 4MB 留余量，同时阻挡明显异常输入。
+    const MAX_LYRICS_BYTES: usize = 4 * 1024 * 1024;
+    if lyrics_bytes.len() > MAX_LYRICS_BYTES {
+        return Err(format!(
+            "lyrics file too large: {} bytes (limit {})",
+            lyrics_bytes.len(),
+            MAX_LYRICS_BYTES
+        ));
+    }
+
     let lyrics = parse_lyrics_bytes(&lyrics_bytes);
     if lyrics.is_empty() {
         return Err("lyrics file has no usable text".into());
@@ -608,24 +619,31 @@ fn dedupe_online_lyrics_candidates(
             continue;
         }
 
-        let first = candidate
-            .lyrics
-            .first()
-            .map(|line| line.text.to_lowercase())
-            .unwrap_or_default();
-        let key = format!(
-            "{}:{}:{}:{}",
-            candidate.source,
-            candidate.title.to_lowercase(),
-            candidate.artist.to_lowercase(),
-            first
-        );
+        // L-5: 用「行数 + 总字符 + 前 3 行 hash + 时长」作为指纹，
+        // 同首歌不同来源即使翻译字段不同也能识别为同一份。
+        let mut hasher = DefaultHasher::new();
+        candidate.lyrics.len().hash(&mut hasher);
+        let total_chars: usize = candidate.lyrics.iter().map(|l| l.text.chars().count()).sum();
+        total_chars.hash(&mut hasher);
+        for line in candidate.lyrics.iter().take(3) {
+            normalize_text(&line.text).hash(&mut hasher);
+        }
+        candidate.duration.unwrap_or_default().hash(&mut hasher);
+        let key = hasher.finish();
         if seen.insert(key) {
             deduped.push(candidate);
         }
     }
 
     deduped
+}
+
+fn normalize_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 fn value_string(item: &Value, key: &str) -> Option<String> {
@@ -766,7 +784,12 @@ pub(super) fn mark_tracks_cache_missing_by_paths(
     let updated = tracks
         .into_iter()
         .map(|mut track| {
-            if removed.contains(&import_track_key(&track)) && track.source_url.is_some() {
+            // 缓存清理传来的是 *实际磁盘文件路径*。
+            // 之前用 `import_track_key(&track)` 比对，但对于 Bilibili 曲目
+            // 它返回的是 `source-id:bv...` 而非文件路径，永远无法命中。
+            // 改用 track.path 直接归一化，确保物理路径匹配。
+            let track_key = import_dedupe_key(Path::new(&track.path));
+            if removed.contains(&track_key) && track.source_url.is_some() {
                 track.cache_missing = true;
                 track.size = "0 MB".into();
             }
@@ -1052,12 +1075,24 @@ fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
     let mut hasher = DefaultHasher::new();
     path_string.to_ascii_lowercase().hash(&mut hasher);
     let hash = hasher.finish();
-    let format = audio_format_label(path);
+    // L-2: 一次性探测 magic（带最多 64 字节读取），后续 format/is_dsd 沿用结果。
+    let magic_format = audio_format_from_magic(path);
+    let ext_format = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .and_then(audio_format_from_extension);
+    let format = magic_format
+        .or(ext_format)
+        .unwrap_or("AUDIO")
+        .to_string();
     let stem = path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("Unknown Track");
-    let audio_metadata = parse_audio_metadata(path);
+    let is_dsd = magic_format
+        .map(is_dsd_format)
+        .unwrap_or_else(|| ext_format.is_some_and(is_dsd_format));
+    let audio_metadata = parse_audio_metadata_with_dsd_hint(path, is_dsd);
     let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| audio_metadata.lyrics.clone());
     let filename_metadata = parse_filename_metadata(stem);
     let title = audio_metadata
@@ -1102,6 +1137,83 @@ fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
         glow2,
         lyrics,
     })
+}
+
+fn parse_audio_metadata_with_dsd_hint(path: &Path, is_dsd_hint: bool) -> ParsedAudioMetadata {
+    let Ok(tagged_file) = lofty::read_from_path(path) else {
+        let mut parsed = ParsedAudioMetadata::default();
+        enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
+        return parsed;
+    };
+
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
+    let properties = tagged_file.properties();
+    let duration = properties.duration().as_secs();
+
+    let mut parsed = ParsedAudioMetadata {
+        duration: (duration > 0).then_some(duration),
+        bitrate: properties
+            .audio_bitrate()
+            .or_else(|| properties.overall_bitrate()),
+        sample_rate: properties.sample_rate(),
+        bit_depth: properties.bit_depth(),
+        channels: properties.channels(),
+        ..ParsedAudioMetadata::default()
+    };
+
+    if let Some(tag) = tag {
+        parsed.title = tag
+            .title()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.artist = tag
+            .artist()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.album = tag
+            .album()
+            .and_then(|value| clean_metadata_text(value.as_ref()));
+        parsed.album_year = tag
+            .date()
+            .and_then(|value| (value.year > 0).then(|| value.year.to_string()));
+    }
+
+    parsed.lyrics = lyrics_from_tags(tagged_file.tags());
+    enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
+
+    parsed
+}
+
+fn enrich_with_decoder_probe_dsd(
+    path: &Path,
+    parsed: &mut ParsedAudioMetadata,
+    is_dsd_hint: bool,
+) {
+    if parsed.duration.is_some()
+        && parsed.bit_depth.is_some()
+        && parsed.sample_rate.is_some()
+        && parsed.channels.is_some()
+        && !is_dsd_hint
+    {
+        return;
+    }
+
+    let Ok(info) = probe_stream_info(path) else {
+        return;
+    };
+
+    if parsed.duration.is_none() && info.duration_seconds > 0.0 {
+        parsed.duration = Some(info.duration_seconds.round() as u64);
+    }
+    if parsed.bit_depth.is_none() && info.bit_depth.0 <= u8::MAX as u16 {
+        parsed.bit_depth = Some(info.bit_depth.0 as u8);
+    }
+    if parsed.sample_rate.is_none() && info.sample_rate.0 > 0 {
+        parsed.sample_rate = Some(info.sample_rate.0);
+    }
+    if parsed.channels.is_none() && info.channels.0 <= u8::MAX as u16 {
+        parsed.channels = Some(info.channels.0 as u8);
+    }
 }
 
 fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
@@ -1370,11 +1482,21 @@ fn qmc1_decrypt(data: &mut [u8]) {
 }
 
 fn inflate_zlib_utf8(bytes: &[u8]) -> Result<String, String> {
-    let mut decoder = ZlibDecoder::new(bytes);
+    // 防御 zlib bomb：解压超过 8MB 即视为异常输入。
+    // 正常歌词解压后通常 < 100 KB；保留一个安全余量。
+    const MAX_INFLATED_BYTES: u64 = 8 * 1024 * 1024;
+    let decoder = ZlibDecoder::new(bytes);
+    let mut limited = decoder.take(MAX_INFLATED_BYTES);
     let mut text = String::new();
-    decoder
+    limited
         .read_to_string(&mut text)
         .map_err(|err| err.to_string())?;
+    // 命中上限：极有可能是 zlib bomb，拒绝继续。
+    if text.len() as u64 >= MAX_INFLATED_BYTES {
+        return Err(format!(
+            "lyrics inflated payload exceeds {MAX_INFLATED_BYTES} bytes; rejected"
+        ));
+    }
     Ok(text)
 }
 

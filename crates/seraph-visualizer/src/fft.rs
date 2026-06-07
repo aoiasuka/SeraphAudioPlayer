@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
-use std::{collections::VecDeque, f32::consts::PI, time::Instant};
+use rustfft::{num_complex::Complex32, FftPlanner};
+use std::{collections::VecDeque, f32::consts::PI, sync::Arc, time::Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,7 +28,6 @@ pub trait Visualizer: Send + Sync {
     fn fft_size(&self) -> usize;
 }
 
-#[derive(Debug)]
 pub struct SimpleVisualizer {
     fft_size: usize,
     bin_count: usize,
@@ -35,6 +35,18 @@ pub struct SimpleVisualizer {
     started_at: Instant,
     mono_buffer: Mutex<VecDeque<f32>>,
     latest: Mutex<Option<SpectrumFrame>>,
+    fft: Arc<dyn rustfft::Fft<f32>>,
+    window: Vec<f32>,
+}
+
+impl std::fmt::Debug for SimpleVisualizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimpleVisualizer")
+            .field("fft_size", &self.fft_size)
+            .field("bin_count", &self.bin_count)
+            .field("channels", &self.channels)
+            .finish()
+    }
 }
 
 impl SimpleVisualizer {
@@ -47,6 +59,10 @@ impl SimpleVisualizer {
             return Err(VisualizerError::InvalidConfig);
         }
 
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let window = (0..fft_size).map(|i| hann_window(i, fft_size)).collect();
+
         Ok(Self {
             fft_size,
             bin_count,
@@ -54,6 +70,8 @@ impl SimpleVisualizer {
             started_at: Instant::now(),
             mono_buffer: Mutex::new(VecDeque::with_capacity(fft_size)),
             latest: Mutex::new(None),
+            fft,
+            window,
         })
     }
 
@@ -73,26 +91,31 @@ impl Visualizer for SimpleVisualizer {
             return Ok(());
         }
 
-        let mut buffer = self.mono_buffer.lock();
-        for sample in mono {
-            if buffer.len() == self.fft_size {
+        // L-16: 单次加锁批量 extend，避免每个 sample 抢锁。
+        let buffer_snapshot = {
+            let mut buffer = self.mono_buffer.lock();
+            // 把 mono 整体推入，再裁掉超出 fft_size 的旧样本
+            buffer.extend(mono.iter().copied());
+            let excess = buffer.len().saturating_sub(self.fft_size);
+            for _ in 0..excess {
                 buffer.pop_front();
             }
-            buffer.push_back(sample);
-        }
+            if buffer.len() < self.fft_size {
+                return Ok(());
+            }
+            // 复制出来后立刻释放锁，再去跑 FFT
+            buffer.iter().copied().collect::<Vec<f32>>()
+        };
 
-        if buffer.len() < self.fft_size {
-            return Ok(());
-        }
-
-        let windowed: Vec<f32> = buffer
+        // L-1: 用 rustfft 计算频谱（O(N log N) 而非旧的 O(N²) 朴素 DFT）。
+        let mut data: Vec<Complex32> = buffer_snapshot
             .iter()
-            .enumerate()
-            .map(|(index, sample)| sample * hann_window(index, self.fft_size))
+            .zip(self.window.iter())
+            .map(|(sample, win)| Complex32::new(sample * win, 0.0))
             .collect();
-        drop(buffer);
+        self.fft.process(&mut data);
 
-        let bins = spectrum_bins(&windowed, self.bin_count);
+        let bins = spectrum_bins_from_fft(&data, self.bin_count, self.fft_size);
         *self.latest.lock() = Some(SpectrumFrame {
             bins,
             peak_left,
@@ -143,21 +166,42 @@ fn hann_window(index: usize, len: usize) -> f32 {
     0.5 - 0.5 * ((2.0 * PI * index as f32) / (len - 1) as f32).cos()
 }
 
-fn spectrum_bins(samples: &[f32], bin_count: usize) -> Vec<f32> {
-    let len = samples.len();
+/// 把 FFT 输出按 log 频率聚合到 `bin_count` 个频段，便于 UI 直接绘制。
+fn spectrum_bins_from_fft(
+    fft_output: &[Complex32],
+    bin_count: usize,
+    fft_size: usize,
+) -> Vec<f32> {
+    let nyquist = fft_size / 2;
+    if nyquist == 0 || bin_count == 0 {
+        return vec![0.0; bin_count];
+    }
+    // log 间隔分箱：低频区分辨率高，高频区聚合，符合人耳感受。
+    let min_bin = 1.0_f32; // 跳过 DC
+    let max_bin = nyquist as f32;
+    let log_min = min_bin.ln();
+    let log_max = max_bin.ln();
+    let log_step = (log_max - log_min) / bin_count as f32;
     let mut bins = Vec::with_capacity(bin_count);
-    for bin in 0..bin_count {
-        let frequency_bin = bin + 1;
-        let mut re = 0.0_f32;
-        let mut im = 0.0_f32;
-        for (index, sample) in samples.iter().enumerate() {
-            let phase = 2.0 * PI * frequency_bin as f32 * index as f32 / len as f32;
-            re += sample * phase.cos();
-            im -= sample * phase.sin();
-        }
 
-        let magnitude = (re.mul_add(re, im * im).sqrt() / len as f32).min(1.0);
-        bins.push(magnitude);
+    for b in 0..bin_count {
+        let lo_log = log_min + log_step * b as f32;
+        let hi_log = log_min + log_step * (b + 1) as f32;
+        let lo = lo_log.exp().floor() as usize;
+        let hi = hi_log.exp().ceil() as usize;
+        let lo = lo.max(1).min(nyquist);
+        let hi = hi.max(lo + 1).min(nyquist + 1);
+
+        let mut max_mag = 0.0_f32;
+        for k in lo..hi {
+            let c = fft_output[k];
+            let mag = (c.re * c.re + c.im * c.im).sqrt();
+            if mag > max_mag {
+                max_mag = mag;
+            }
+        }
+        // 归一化到 [0, 1]：除以 fft_size / 2，再 clamp
+        bins.push((max_mag / (fft_size as f32 * 0.5)).clamp(0.0, 1.0));
     }
 
     normalize_bins(bins)

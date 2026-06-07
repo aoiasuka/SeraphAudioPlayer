@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,8 @@ pub fn update_cache_settings(
         let cache_dir = cache_dir.trim();
         if !cache_dir.is_empty() {
             let path = PathBuf::from(cache_dir);
-            validate_cache_dir(&path)?;
+            // 用户主动设置目录时执行严格校验：非空且无 marker → 拒绝
+            ensure_cache_dir_safe(&path)?;
             current.cache_dir = path.to_string_lossy().to_string();
         }
     }
@@ -92,6 +93,7 @@ pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
     let settings = load_cache_settings(&app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
     ensure_cache_dir(&cache_dir)?;
+    require_managed_cache_dir(&cache_dir)?;
 
     let entries = collect_cache_files(&cache_dir)?;
     let mut removed_paths = Vec::new();
@@ -125,6 +127,8 @@ pub(super) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let settings = load_cache_settings(app)?;
     let path = PathBuf::from(settings.cache_dir);
     ensure_cache_dir(&path)?;
+    // 每次拿 cache_dir 时机会成本极低地扫一次孤儿 .download/.tmp
+    let _ = sweep_orphan_temp_files(&path);
     Ok(path)
 }
 
@@ -146,6 +150,7 @@ fn enforce_cache_limit_inner(
     let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
     ensure_cache_dir(&cache_dir)?;
+    require_managed_cache_dir(&cache_dir)?;
 
     if !settings.auto_cleanup || settings.max_size_mb == 0 {
         return Ok(CacheCleanupResult {
@@ -307,7 +312,43 @@ fn validate_cache_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验目录可作为缓存目录使用：
+/// - 不存在：允许，会被创建并写入 marker
+/// - 存在但为空：允许，写 marker
+/// - 存在且非空但无 marker：拒绝（保护用户已有文件不被自动清理误删）
+/// - 存在且有 marker：允许
+fn ensure_cache_dir_safe(path: &Path) -> Result<(), String> {
+    validate_cache_dir(path)?;
+
+    if path.exists() && path.is_dir() {
+        let marker = path.join(CACHE_MARKER_FILE);
+        if !marker.is_file() {
+            let has_entries = fs::read_dir(path)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+            if has_entries {
+                return Err(format!(
+                    "目录 {} 已包含其他文件，且缺少 Seraph 缓存标记 ({})，\
+                     为防止误删请改用空目录或新建子目录作为缓存路径。",
+                    path.display(),
+                    CACHE_MARKER_FILE
+                ));
+            }
+        }
+    }
+
+    fs::create_dir_all(path)
+        .map_err(|err| format!("failed to create cache dir {}: {err}", path.display()))?;
+    let marker = path.join(CACHE_MARKER_FILE);
+    if !marker.is_file() {
+        fs::write(&marker, b"Seraph Audio Player managed cache\n")
+            .map_err(|err| format!("failed to write cache marker {}: {err}", marker.display()))?;
+    }
+    Ok(())
+}
+
 fn ensure_cache_dir(path: &Path) -> Result<(), String> {
+    // 内部调用：默认目录已确认安全，跳过保护检查。
     validate_cache_dir(path)?;
     fs::create_dir_all(path)
         .map_err(|err| format!("failed to create cache dir {}: {err}", path.display()))?;
@@ -315,6 +356,21 @@ fn ensure_cache_dir(path: &Path) -> Result<(), String> {
     if !marker.is_file() {
         fs::write(&marker, b"Seraph Audio Player managed cache\n")
             .map_err(|err| format!("failed to write cache marker {}: {err}", marker.display()))?;
+    }
+    Ok(())
+}
+
+/// 缓存清理 / 扫描的前置检查：若目标目录缺少 marker，拒绝继续。
+/// 防止用户误把缓存目录指到本地音乐文件夹后又执行清理操作时，
+/// 用扩展名白名单按 mtime 批量删除真实音乐文件。
+fn require_managed_cache_dir(path: &Path) -> Result<(), String> {
+    let marker = path.join(CACHE_MARKER_FILE);
+    if !marker.is_file() {
+        return Err(format!(
+            "拒绝在未标记为 Seraph 缓存的目录 {} 上执行清理操作；\
+             请到设置里重新指定一个由 Seraph 管理的缓存目录。",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -372,6 +428,45 @@ fn is_managed_cache_file(path: &Path) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// 扫描已知缓存目录下，长时间未被修改的 `.download` / `.tmp`，删除掉孤儿临时文件，
+/// 防止下载中断 / ffmpeg 崩溃后的残骸不停堆积。仅在 marker 目录内执行。
+fn sweep_orphan_temp_files(path: &Path) -> std::io::Result<()> {
+    let marker = path.join(CACHE_MARKER_FILE);
+    if !marker.is_file() {
+        return Ok(());
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(60 * 60))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if !candidate.is_file() {
+            continue;
+        }
+        let is_temp = candidate
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("download") || ext.eq_ignore_ascii_case("tmp"))
+            .unwrap_or(false);
+        if !is_temp {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if modified < cutoff {
+            let _ = fs::remove_file(&candidate);
+        }
+    }
+    Ok(())
 }
 
 struct CacheFile {

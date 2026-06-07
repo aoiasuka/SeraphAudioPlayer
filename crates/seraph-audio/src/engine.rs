@@ -154,7 +154,7 @@ struct PlaybackShared {
     stopped: AtomicBool,
     frame_position: AtomicU64,
     volume_bits: AtomicU32,
-    buffer_generation: AtomicU64,
+    buffer_generation: AtomicU32,
     output_rate: u32,
     output_channels: usize,
     max_buffer_samples: usize,
@@ -162,7 +162,10 @@ struct PlaybackShared {
 
 #[derive(Clone, Copy)]
 struct QueuedSample {
-    generation: u64,
+    // L-4: generation 用 u32 而非 u64，配合 f32 value 后单样本 8 字节（vs 16 字节）。
+    // 768kHz×2ch×3s 缓冲下，内存占用从 ~72MB 降到 ~36MB；普通 192kHz×2×3s 从 ~18MB → ~9MB。
+    // u32 可表示 ~42 亿个 seek/clear，远超合理使用次数（折算到 1ms 一次也要 49 天）。
+    generation: u32,
     value: f32,
 }
 
@@ -209,25 +212,53 @@ impl PlaybackEngine {
     }
 
     pub fn play_file(&mut self, path: PathBuf, track_id: String, start_seconds: f64) -> Result<()> {
-        if self.session.as_ref().is_some_and(|session| {
+        // 同一首歌「无缝」复用 session 的优化路径：
+        // 仅当 worker 仍存活、track 未结束时才走 resume；否则一律重建 session，
+        // 避免 H-3 描述的「UI 显示在播但 worker 已退出」假象。
+        let can_resume = self.session.as_ref().is_some_and(|session| {
             session.path == path
                 && session.track_id == track_id
                 && !session.shared.stopped.load(Ordering::Acquire)
-        }) {
+                && session
+                    .decode_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+        });
+        if can_resume {
             if start_seconds > 0.0 {
                 self.seek(start_seconds)?;
             }
             return self.resume();
         }
 
-        let decoder =
-            open_decoder(&path).map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
-        let info = decoder
-            .info()
-            .cloned()
-            .ok_or_else(|| BackendError::Internal("decoder opened without stream info".into()))?;
-        let duration_seconds = info.duration_seconds;
+        // 先停旧 session，再 open 解码器：
+        // 即使 open 失败也保证旧的播放真的停了（否则前端 UI 已切歌但实际仍在播旧曲）。
         self.stop_session();
+
+        let decoder = match open_decoder(&path) {
+            Ok(decoder) => decoder,
+            Err(err) => {
+                let backend_err = BackendError::UnsupportedFormat(err.to_string());
+                self.event_bus.publish(PlayerEvent::Error {
+                    message: backend_err.to_string(),
+                });
+                self.event_bus.publish(PlayerEvent::PlaybackStopped);
+                return Err(backend_err);
+            }
+        };
+        let info = match decoder.info().cloned() {
+            Some(info) => info,
+            None => {
+                let backend_err =
+                    BackendError::Internal("decoder opened without stream info".into());
+                self.event_bus.publish(PlayerEvent::Error {
+                    message: backend_err.to_string(),
+                });
+                self.event_bus.publish(PlayerEvent::PlaybackStopped);
+                return Err(backend_err);
+            }
+        };
+        let duration_seconds = info.duration_seconds;
 
         if self.driver == OutputDriver::Asio {
             return Err(BackendError::NotImplemented);
@@ -456,7 +487,7 @@ impl PlaybackShared {
             stopped: AtomicBool::new(false),
             frame_position: AtomicU64::new(0),
             volume_bits: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
-            buffer_generation: AtomicU64::new(0),
+            buffer_generation: AtomicU32::new(0),
             output_rate,
             output_channels,
             max_buffer_samples,
@@ -472,7 +503,7 @@ impl PlaybackShared {
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
-    fn buffer_generation(&self) -> u64 {
+    fn buffer_generation(&self) -> u32 {
         self.buffer_generation.load(Ordering::Acquire)
     }
 
@@ -596,26 +627,36 @@ fn spawn_wasapi_exclusive_render_worker(
     consumer: Consumer<QueuedSample>,
 ) -> Result<JoinHandle<Result<()>>> {
     let (ready_tx, ready_rx) = mpsc::channel();
+    let shared_for_worker = shared.clone();
     let worker = thread::spawn(move || {
-        let result = run_wasapi_exclusive_render_worker(
+        run_wasapi_exclusive_render_worker(
             selected_device_id,
             device_name,
             config,
             sample_format,
-            shared,
+            shared_for_worker,
             consumer,
-        );
-        let _ = ready_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        result
+            ready_tx,
+        )
     });
 
-    match ready_rx.recv_timeout(Duration::from_secs(3)) {
+    // 等待 worker 完成 IAudioClient::Initialize + start_stream。
+    // 慢速 DAC / 高采样率独占协商可能需要数秒，给 8 秒上限。
+    match ready_rx.recv_timeout(Duration::from_secs(8)) {
         Ok(Ok(())) => Ok(worker),
         Ok(Err(message)) => {
+            shared.stopped.store(true, Ordering::Release);
             let _ = worker.join();
             Err(BackendError::ExclusiveModeUnavailable(message))
         }
-        Err(_) => Ok(worker),
+        Err(_) => {
+            // 超时：视为启动失败，让 worker 优雅退出
+            shared.stopped.store(true, Ordering::Release);
+            let _ = worker.join();
+            Err(BackendError::ExclusiveModeUnavailable(
+                "WASAPI exclusive stream init timed out".into(),
+            ))
+        }
     }
 }
 
@@ -641,103 +682,132 @@ fn run_wasapi_exclusive_render_worker(
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
     mut consumer: Consumer<QueuedSample>,
+    ready_tx: Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
     use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
-    wasapi::initialize_mta()
-        .ok()
-        .map_err(|err| BackendError::Internal(err.to_string()))?;
-
-    let enumerator =
-        wasapi::DeviceEnumerator::new().map_err(|err| BackendError::Internal(err.to_string()))?;
-    let device = if selected_device_id.is_some() {
-        enumerator
-            .get_device_collection(&Direction::Render)
-            .and_then(|collection| collection.get_device_with_name(&device_name))
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?
-    } else {
-        enumerator
-            .get_default_device(&Direction::Render)
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+    // 任何提前 return 都通过这个 helper 把失败原因送回主线程，
+    // 避免 spawn_wasapi_exclusive_render_worker 在 recv_timeout 处永远等待。
+    let signal_err = |tx: &Sender<std::result::Result<(), String>>, err: &BackendError| {
+        let _ = tx.send(Err(err.to_string()));
     };
 
-    let mut audio_client = device
-        .get_iaudioclient()
-        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-    let sample_type = match sample_format {
-        SampleFormat::I16 | SampleFormat::I32 => SampleType::Int,
-        SampleFormat::F32 => SampleType::Float,
-        other => {
-            return Err(BackendError::UnsupportedFormat(format!(
-                "exclusive output sample format {other:?}"
-            )));
+    let init_result: Result<(
+        wasapi::AudioClient,
+        wasapi::AudioRenderClient,
+        u32,
+        Duration,
+    )> = (|| {
+        wasapi::initialize_mta()
+            .ok()
+            .map_err(|err| BackendError::Internal(err.to_string()))?;
+
+        let enumerator = wasapi::DeviceEnumerator::new()
+            .map_err(|err| BackendError::Internal(err.to_string()))?;
+        let device = if selected_device_id.is_some() {
+            enumerator
+                .get_device_collection(&Direction::Render)
+                .and_then(|collection| collection.get_device_with_name(&device_name))
+                .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+        } else {
+            enumerator
+                .get_default_device(&Direction::Render)
+                .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+        };
+
+        let mut audio_client = device
+            .get_iaudioclient()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let sample_type = match sample_format {
+            SampleFormat::I16 | SampleFormat::I32 => SampleType::Int,
+            SampleFormat::F32 => SampleType::Float,
+            other => {
+                return Err(BackendError::UnsupportedFormat(format!(
+                    "exclusive output sample format {other:?}"
+                )));
+            }
+        };
+        let valid_bits = match sample_format {
+            SampleFormat::I16 => 16,
+            SampleFormat::I32 => 24,
+            SampleFormat::F32 => 32,
+            _ => 32,
+        };
+        let store_bits = if sample_format == SampleFormat::I16 {
+            16
+        } else {
+            32
+        };
+        let desired_format = WaveFormat::new(
+            store_bits,
+            valid_bits,
+            &sample_type,
+            config.sample_rate.0 as usize,
+            usize::from(config.channels),
+            None,
+        );
+        let desired_format = audio_client
+            .is_supported_exclusive_with_quirks(&desired_format)
+            .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
+        let desired_period = wasapi::calculate_period_100ns(
+            i64::from(DEFAULT_EXCLUSIVE_PERIOD_FRAMES),
+            i64::from(desired_format.get_samplespersec()),
+        );
+        let period = audio_client
+            .calculate_aligned_period_near(desired_period, Some(128), &desired_format)
+            .unwrap_or(desired_period);
+        let mode = StreamMode::PollingExclusive {
+            period_hns: period,
+            buffer_duration_hns: 16 * period,
+        };
+
+        audio_client
+            .initialize_client(&desired_format, &Direction::Render, &mode)
+            .or_else(|err| {
+                let buffer_size = audio_client.get_buffer_size()?;
+                let aligned_period = wasapi::calculate_period_100ns(
+                    i64::from(buffer_size),
+                    i64::from(desired_format.get_samplespersec()),
+                );
+                audio_client = device.get_iaudioclient()?;
+                let mode = StreamMode::PollingExclusive {
+                    period_hns: aligned_period,
+                    buffer_duration_hns: 16 * aligned_period,
+                };
+                audio_client
+                    .initialize_client(&desired_format, &Direction::Render, &mode)
+                    .map_err(|_| err)
+            })
+            .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
+
+        let render_client = audio_client
+            .get_audiorenderclient()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let buffer_frames = audio_client
+            .get_buffer_size()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let sleep_period = Duration::from_millis(
+            (500 * u64::from(buffer_frames) / u64::from(config.sample_rate.0.max(1))).max(1),
+        );
+        audio_client
+            .start_stream()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+
+        Ok((audio_client, render_client, buffer_frames, sleep_period))
+    })();
+
+    let (audio_client, render_client, _buffer_frames, sleep_period) = match init_result {
+        Ok(parts) => {
+            // 启动成功才通知主线程：避免 H-2 描述的「先 Started 后 Error」乱序
+            let _ = ready_tx.send(Ok(()));
+            parts
+        }
+        Err(err) => {
+            signal_err(&ready_tx, &err);
+            return Err(err);
         }
     };
-    let valid_bits = match sample_format {
-        SampleFormat::I16 => 16,
-        SampleFormat::I32 => 24,
-        SampleFormat::F32 => 32,
-        _ => 32,
-    };
-    let store_bits = if sample_format == SampleFormat::I16 {
-        16
-    } else {
-        32
-    };
-    let desired_format = WaveFormat::new(
-        store_bits,
-        valid_bits,
-        &sample_type,
-        config.sample_rate.0 as usize,
-        usize::from(config.channels),
-        None,
-    );
-    let desired_format = audio_client
-        .is_supported_exclusive_with_quirks(&desired_format)
-        .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
-    let desired_period = wasapi::calculate_period_100ns(
-        i64::from(DEFAULT_EXCLUSIVE_PERIOD_FRAMES),
-        i64::from(desired_format.get_samplespersec()),
-    );
-    let period = audio_client
-        .calculate_aligned_period_near(desired_period, Some(128), &desired_format)
-        .unwrap_or(desired_period);
-    let mode = StreamMode::PollingExclusive {
-        period_hns: period,
-        buffer_duration_hns: 16 * period,
-    };
 
-    audio_client
-        .initialize_client(&desired_format, &Direction::Render, &mode)
-        .or_else(|err| {
-            let buffer_size = audio_client.get_buffer_size()?;
-            let aligned_period = wasapi::calculate_period_100ns(
-                i64::from(buffer_size),
-                i64::from(desired_format.get_samplespersec()),
-            );
-            audio_client = device.get_iaudioclient()?;
-            let mode = StreamMode::PollingExclusive {
-                period_hns: aligned_period,
-                buffer_duration_hns: 16 * aligned_period,
-            };
-            audio_client
-                .initialize_client(&desired_format, &Direction::Render, &mode)
-                .map_err(|_| err)
-        })
-        .map_err(|err| exclusive_mode_unavailable(err.to_string()))?;
-
-    let render_client = audio_client
-        .get_audiorenderclient()
-        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-    let buffer_frames = audio_client
-        .get_buffer_size()
-        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-    let sleep_period = Duration::from_millis(
-        (500 * u64::from(buffer_frames) / u64::from(config.sample_rate.0.max(1))).max(1),
-    );
-    audio_client
-        .start_stream()
-        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
     let mut observed_generation = shared.buffer_generation();
 
     while !shared.stopped.load(Ordering::Acquire) {
@@ -772,7 +842,7 @@ fn render_wasapi_output_bytes(
     sample_format: SampleFormat,
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
 ) -> Vec<u8> {
     let channels = shared.output_channels.max(1);
     let sample_count = frames * channels;
@@ -926,7 +996,7 @@ fn run_decode_worker(
             input_channels,
             shared.output_rate,
             shared.output_channels,
-        );
+        )?;
         push_samples(
             &samples,
             shared,
@@ -940,6 +1010,11 @@ fn run_decode_worker(
     }
 
     while !shared.stopped.load(Ordering::Acquire) && producer.slots() < shared.max_buffer_samples {
+        // paused 时 render 不消费 ring，slots 永远填不回去，会无限空转 (M-1)；
+        // 此时直接 break，由后续 stop / resume 接管。
+        if shared.paused.load(Ordering::Acquire) {
+            break;
+        }
         publish_progress_if_due(
             track_id,
             shared,
@@ -1039,7 +1114,7 @@ fn render_output_f32(
     data: &mut [f32],
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
 ) {
     render_output(
         data,
@@ -1054,7 +1129,7 @@ fn render_output_f64(
     data: &mut [f64],
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
 ) {
     render_output(
         data,
@@ -1069,7 +1144,7 @@ fn render_output_i16(
     data: &mut [i16],
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
 ) {
     render_output(
         data,
@@ -1086,7 +1161,7 @@ fn render_output_u16(
     data: &mut [u16],
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
 ) {
     render_output(
         data,
@@ -1103,7 +1178,7 @@ fn render_output<T>(
     data: &mut [T],
     shared: &PlaybackShared,
     consumer: &mut Consumer<QueuedSample>,
-    observed_generation: &mut u64,
+    observed_generation: &mut u32,
     mut write_sample: impl FnMut(&mut T, f32),
 ) {
     if shared.stopped.load(Ordering::Acquire) || shared.paused.load(Ordering::Acquire) {
@@ -1152,21 +1227,21 @@ fn adapt_samples(
     input_channels: usize,
     output_rate: u32,
     output_channels: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>> {
     let input_channels = input_channels.max(1);
     let output_channels = output_channels.max(1);
     if input.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let input_frames = input.len() / input_channels;
     if input_frames == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let remapped = remap_channels(input, input_channels, output_channels);
     if input_rate == output_rate {
-        return remapped;
+        return Ok(remapped);
     }
 
     let mut output = Vec::new();
@@ -1177,8 +1252,8 @@ fn adapt_samples(
         output_rate.max(1),
         &mut output,
     ) {
-        Ok(()) => output,
-        Err(_) => {
+        Ok(()) => Ok(output),
+        Err(sinc_err) => {
             let mut fallback = Vec::new();
             match resample_interleaved_linear(
                 &remapped,
@@ -1187,8 +1262,11 @@ fn adapt_samples(
                 output_rate.max(1),
                 &mut fallback,
             ) {
-                Ok(()) => fallback,
-                Err(_) => remapped,
+                Ok(()) => Ok(fallback),
+                Err(linear_err) => Err(BackendError::Internal(format!(
+                    "resampler failed ({input_rate} Hz -> {output_rate} Hz, {output_channels} ch): \
+                     sinc={sinc_err}; linear={linear_err}"
+                ))),
             }
         }
     }
@@ -1233,19 +1311,19 @@ mod tests {
 
     #[test]
     fn adapts_mono_to_stereo_without_resampling() {
-        let output = adapt_samples(&[0.25, -0.5], 44_100, 1, 44_100, 2);
+        let output = adapt_samples(&[0.25, -0.5], 44_100, 1, 44_100, 2).unwrap();
         assert_eq!(output, vec![0.25, 0.25, -0.5, -0.5]);
     }
 
     #[test]
     fn adapts_stereo_to_mono_by_averaging_channels() {
-        let output = adapt_samples(&[0.25, 0.75, -0.5, 0.5], 44_100, 2, 44_100, 1);
+        let output = adapt_samples(&[0.25, 0.75, -0.5, 0.5], 44_100, 2, 44_100, 1).unwrap();
         assert_eq!(output, vec![0.5, 0.0]);
     }
 
     #[test]
     fn resamples_to_target_rate() {
-        let output = adapt_samples(&[0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1);
+        let output = adapt_samples(&[0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1).unwrap();
         assert_eq!(output.len(), 2);
         assert!(output.iter().all(|sample| sample.is_finite()));
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));

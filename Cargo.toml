@@ -27,6 +27,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 rtrb = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+rustfft = "6"
 
 seraph-core = { path = "crates/seraph-core" }
 seraph-audio = { path = "crates/seraph-audio" }

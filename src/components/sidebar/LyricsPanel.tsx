@@ -126,12 +126,16 @@ export function LyricsPanel() {
     if (activeIdx < 0) return;
     const active = lineRefs.current[activeIdx];
     if (!container || !active) return;
-    const top =
-      active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
-    container.scrollTo({
-      top: Math.max(0, top),
-      behavior: "smooth",
-    });
+    // L-10: 节流到 200ms，避免连续切换 group 时 smooth-scroll 互相打断
+    const handle = window.setTimeout(() => {
+      const top =
+        active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
+      container.scrollTo({
+        top: Math.max(0, top),
+        behavior: "smooth",
+      });
+    }, 200);
+    return () => window.clearTimeout(handle);
   }, [activeIdx, centerPadding, trackId]);
 
   useEffect(() => {

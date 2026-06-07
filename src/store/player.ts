@@ -3,6 +3,7 @@ import { persist, type PersistStorage } from "zustand/middleware";
 import { mockDevices, mockPlaylist } from "@/data/mock-playlist";
 import { invoke } from "@/lib/tauri";
 import type {
+  DriverKind,
   LibraryView,
   LyricLine,
   OnlineLyricsCandidate,
@@ -49,9 +50,8 @@ interface PersistedPlayerState {
   loopMode: boolean;
   liked: Record<string, boolean>;
   userPlaylists: UserPlaylist[];
-  playlist: Track[];
   currentDeviceId: string;
-  driverKind: "wasapi" | "asio" | "direct";
+  driverKind: DriverKind;
   activeView: LibraryView;
 }
 
@@ -70,7 +70,7 @@ interface PlayerStore {
   userPlaylists: UserPlaylist[];
   devices: OutputDevice[];
   currentDeviceId: string;
-  driverKind: "wasapi" | "asio" | "direct";
+  driverKind: DriverKind;
   activeView: LibraryView;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
@@ -110,7 +110,7 @@ interface PlayerStore {
   applyOnlineLyricsForCurrentTrack: (lyrics: LyricLine[]) => Promise<boolean>;
   loadDevices: () => void;
   selectDevice: (id: string) => void;
-  setDriver: (k: "wasapi" | "asio" | "direct") => void;
+  setDriver: (k: DriverKind) => void;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;
@@ -119,20 +119,18 @@ interface PlayerStore {
 }
 
 let notificationCounter = 0;
-let volumeCommandTimer: number | null = null;
-let pendingVolumeCommand: number | null = null;
 const MAX_LYRIC_FILE_BYTES = 2 * 1024 * 1024;
+
+// M-12: 音量去抖状态绑到 store 实例上，HMR 重新加载模块时也会随 store 重置，
+// 不再因模块级残留 timer 造成「重复 set_volume」。
+interface VolumeDebounceState {
+  timer: number | null;
+  pending: number | null;
+}
+const volumeDebounce: VolumeDebounceState = { timer: null, pending: null };
 
 function withRecentTrack(ids: string[], trackId: string) {
   return [trackId, ...ids.filter((id) => id !== trackId)].slice(0, 12);
-}
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash;
 }
 
 function nextSequentialTrackIndex(playlist: Track[], currentTrackIndex: number) {
@@ -160,9 +158,9 @@ function nextShuffleTrackIndex(
     (index) => !recentTrackIds.includes(playlist[index].id)
   );
   const pool = freshCandidates.length > 0 ? freshCandidates : candidates;
-  const currentId = playlist[currentTrackIndex]?.id ?? String(currentTrackIndex);
-  const seed = `${currentId}:${recentTrackIds.join("|")}:${playlist.length}`;
-  return pool[hashString(seed) % pool.length];
+  // 用 Math.random 替代 hashString —— 旧实现是确定性的，同样的输入永远选同一首，
+  // 用户感受到的是「随机播放」退化为「固定顺序」。
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function nextTrackIndex(
@@ -314,12 +312,33 @@ function dedupeTracks(tracks: Track[]) {
 }
 
 function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) {
+  // L-14: 一次迭代里同时算 dedupe + liked carry-over，避免对大曲库重复遍历。
+  const byKey = new Map<string, Track>();
+  const orderedKeys: string[] = [];
   const likedByKey = new Set<string>();
+
   for (const track of tracks) {
-    if (liked[track.id]) likedByKey.add(trackMergeKey(track));
+    const key = trackMergeKey(track);
+    if (liked[track.id]) likedByKey.add(key);
+
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, track);
+      orderedKeys.push(key);
+      continue;
+    }
+
+    const preferred =
+      existing.cacheMissing && !track.cacheMissing
+        ? mergeIncomingTrack(existing, track)
+        : mergeIncomingTrack(track, existing);
+    byKey.set(key, preferred);
   }
 
-  const playlist = dedupeTracks(tracks);
+  const playlist = orderedKeys
+    .map((key) => byKey.get(key))
+    .filter((track): track is Track => !!track);
+
   const nextLiked: Record<string, boolean> = {};
   for (const track of playlist) {
     if (liked[track.id] || likedByKey.has(trackMergeKey(track))) {
@@ -516,11 +535,11 @@ function clampVolume(volume: number) {
 }
 
 function cancelQueuedVolumeCommand() {
-  if (volumeCommandTimer !== null) {
-    window.clearTimeout(volumeCommandTimer);
-    volumeCommandTimer = null;
+  if (volumeDebounce.timer !== null) {
+    window.clearTimeout(volumeDebounce.timer);
+    volumeDebounce.timer = null;
   }
-  pendingVolumeCommand = null;
+  volumeDebounce.pending = null;
 }
 
 function sendVolumeCommandNow(volume: number) {
@@ -529,16 +548,16 @@ function sendVolumeCommandNow(volume: number) {
 }
 
 function queueVolumeCommand(volume: number) {
-  pendingVolumeCommand = volume;
-  if (volumeCommandTimer !== null) return;
+  volumeDebounce.pending = volume;
+  if (volumeDebounce.timer !== null) return;
 
   sendCommand("set_volume", { volume });
-  pendingVolumeCommand = null;
-  volumeCommandTimer = window.setTimeout(() => {
-    volumeCommandTimer = null;
-    if (pendingVolumeCommand !== null) {
-      const nextVolume = pendingVolumeCommand;
-      pendingVolumeCommand = null;
+  volumeDebounce.pending = null;
+  volumeDebounce.timer = window.setTimeout(() => {
+    volumeDebounce.timer = null;
+    if (volumeDebounce.pending !== null) {
+      const nextVolume = volumeDebounce.pending;
+      volumeDebounce.pending = null;
       queueVolumeCommand(nextVolume);
     }
   }, 80);
@@ -558,7 +577,6 @@ function isSamePersistedState(
     previous.loopMode === next.loopMode &&
     previous.liked === next.liked &&
     previous.userPlaylists === next.userPlaylists &&
-    previous.playlist === next.playlist &&
     previous.currentDeviceId === next.currentDeviceId &&
     previous.driverKind === next.driverKind &&
     previous.activeView === next.activeView
@@ -612,7 +630,17 @@ function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {
       const serialized = JSON.stringify(value);
       const localStorage = storage();
       if (localStorage) {
-        localStorage.setItem(name, serialized);
+        try {
+          localStorage.setItem(name, serialized);
+        } catch (err) {
+          // QuotaExceededError / SecurityError 等：回退到内存存储，避免崩溃
+          // eslint-disable-next-line no-console
+          console.warn(
+            "localStorage.setItem failed, falling back to memory storage",
+            err
+          );
+          memoryStorage.set(name, serialized);
+        }
       } else {
         memoryStorage.set(name, serialized);
       }
@@ -1251,8 +1279,26 @@ export const usePlayerStore = create<PlayerStore>()(
       return;
     }
     if (get().driverKind === k) return;
+    // M-7: 切换 driver 前先停掉正在播的 session，避免后端 same-track 优化路径
+    // 残留旧 driver 配置，导致用户切换后偶发音轨不切换。
+    const wasPlaying = get().isPlaying;
+    sendCommand("stop");
     sendCommand("set_output_driver", { driver: k });
-    set({ driverKind: k });
+    set({ driverKind: k, isPlaying: false, currentTime: 0 });
+
+    // 若刚才在播，driver 切换后自动从头继续播放当前曲目，体验上无感
+    if (wasPlaying) {
+      const track = get().currentTrack();
+      if (track) {
+        void sendPlayCommand(track, 0)
+          .then(() => set({ isPlaying: true }))
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("Failed to resume after driver switch", err);
+            get().showNotification(playbackErrorMessage(err));
+          });
+      }
+    }
   },
 
   toggleDeviceMenu: () => {
@@ -1269,8 +1315,10 @@ export const usePlayerStore = create<PlayerStore>()(
   toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),
 
   showNotification: (text) => {
+    // L-15: 用计数器 + 高 32 位时间戳组合，HMR 模块重载后计数器重置也不会撞 id。
     notificationCounter += 1;
-    set({ notification: { id: notificationCounter, text } });
+    const id = notificationCounter + Date.now() * 1000;
+    set({ notification: { id, text } });
   },
 
       dismissNotification: () => {
@@ -1292,7 +1340,8 @@ export const usePlayerStore = create<PlayerStore>()(
         loopMode: state.loopMode,
         liked: state.liked,
         userPlaylists: state.userPlaylists,
-        playlist: state.playlist,
+        // playlist 不进持久化：曲库由 Rust 侧 library-cache.json 维护，
+        // 启动时通过 loadBackendLibrary() 还原；写 localStorage 会超 5MB 限额。
         currentDeviceId: state.currentDeviceId,
         driverKind: state.driverKind,
         activeView: state.activeView,

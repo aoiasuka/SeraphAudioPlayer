@@ -10,11 +10,17 @@ const CYAN_RGB = CYAN.join(", ");
 const SLATE_RGB = SLATE.join(", ");
 
 function getWaveformShape(trackId: string, barCount: number, h: number) {
-  const seed = trackId === "track-1" ? 1.0 : 1.8;
+  // L-11: 用完整 trackId hash 生成多样化 seed，避免所有曲目共用同一形状。
+  let hash = 0;
+  for (let i = 0; i < trackId.length; i += 1) {
+    hash = (hash * 31 + trackId.charCodeAt(i)) >>> 0;
+  }
+  const seed = 0.8 + ((hash >>> 8) & 0xff) / 255 * 1.4; // 0.8 ~ 2.2 之间
+  const phase = (hash & 0xff) / 255 * Math.PI;
   const shape: number[] = [];
   for (let i = 0; i < barCount; i++) {
     const envelope = Math.sin((i / barCount) * Math.PI);
-    const peak1 = Math.sin(i * 0.15 * seed) * 0.28;
+    const peak1 = Math.sin(i * 0.15 * seed + phase) * 0.28;
     const peak2 = Math.cos(i * 0.35 + seed) * 0.14;
     const detail = Math.sin(i * 0.85) * 0.05;
     let amp = (0.35 + peak1 + peak2 + detail) * envelope;

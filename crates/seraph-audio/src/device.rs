@@ -1,6 +1,7 @@
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::hash::{Hash, Hasher};
 
 use crate::backend::{BackendError, Result};
 use cpal::{
@@ -43,14 +44,28 @@ pub fn list_output_devices() -> Result<Vec<AudioDevice>> {
         .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
 
     let mut output = Vec::new();
+    let mut id_dedupe = std::collections::HashMap::<String, usize>::new();
+    // default 设备只标记一次：第一个名字匹配的设备
+    let mut default_assigned = false;
     for (index, device) in devices.enumerate() {
         let name = device
             .name()
             .unwrap_or_else(|_| format!("Output Device {}", index + 1));
         let capabilities = capabilities_from_device(&device);
+        let mut id = device_id_for(&name);
+        // 极少数情况下两个设备同名 sanitize 后相同；附加序号避免撞 key
+        let count = id_dedupe.entry(id.clone()).or_insert(0);
+        if *count > 0 {
+            id = format!("{id}-{count}");
+        }
+        *count += 1;
+        let is_default = !default_assigned && default_name.as_deref() == Some(name.as_str());
+        if is_default {
+            default_assigned = true;
+        }
         output.push(AudioDevice {
-            id: device_id_for(index, &name),
-            is_default: default_name.as_deref() == Some(name.as_str()),
+            id,
+            is_default,
             name,
             capabilities,
         });
@@ -69,11 +84,20 @@ pub(crate) fn output_device_by_id(device_id: &str) -> Result<cpal::Device> {
         .output_devices()
         .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
 
+    let mut seen = std::collections::HashMap::<String, usize>::new();
     for (index, device) in devices.enumerate() {
         let name = device
             .name()
             .unwrap_or_else(|_| format!("Output Device {}", index + 1));
-        if device_id_for(index, &name) == device_id {
+        let base_id = device_id_for(&name);
+        let count = seen.entry(base_id.clone()).or_insert(0);
+        let candidate_id = if *count == 0 {
+            base_id.clone()
+        } else {
+            format!("{base_id}-{count}")
+        };
+        *count += 1;
+        if candidate_id == device_id {
             return Ok(device);
         }
     }
@@ -139,8 +163,14 @@ fn bit_depth_from_sample_format(format: SampleFormat) -> Option<u16> {
     }
 }
 
-fn device_id_for(index: usize, name: &str) -> String {
-    format!("cpal:{index}:{}", sanitize_device_id(name))
+fn device_id_for(name: &str) -> String {
+    // 旧实现 `cpal:{enum-index}:{name}` 在设备增删后枚举顺序变化时
+    // 会让持久化的 device_id 失效。改用 name hash 作为稳定主键。
+    let sanitized = sanitize_device_id(name);
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("cpal:{hash:016x}:{sanitized}")
 }
 
 fn sanitize_device_id(name: &str) -> String {
@@ -176,9 +206,17 @@ mod tests {
     #[test]
     fn sanitizes_device_names_for_stable_ids() {
         assert_eq!(sanitize_device_id("USB DAC (WASAPI)"), "usb-dac-wasapi");
-        assert_eq!(
-            device_id_for(2, "USB DAC (WASAPI)"),
-            "cpal:2:usb-dac-wasapi"
+        // 同一个 name 永远产出相同 id
+        let id_a = device_id_for("USB DAC (WASAPI)");
+        let id_b = device_id_for("USB DAC (WASAPI)");
+        assert_eq!(id_a, id_b);
+        // 不同 name 不同 id
+        assert_ne!(
+            device_id_for("USB DAC (WASAPI)"),
+            device_id_for("Built-in Output")
         );
+        // id 形如 cpal:<hex>:<sanitized>
+        assert!(id_a.starts_with("cpal:"));
+        assert!(id_a.ends_with(":usb-dac-wasapi"));
     }
 }

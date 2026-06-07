@@ -12,6 +12,17 @@ use std::{
 
 const PACKET_FRAMES: usize = 2048;
 
+/// Windows 上启动子进程时隐藏控制台窗口，避免 cmd 黑窗一闪而过。
+/// 0x0800_0000 = CREATE_NO_WINDOW（来自 winbase.h，纯 u32 常量，无 winapi 依赖）。
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
 static EXTRA_TOOL_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
 
 pub struct FfmpegDecoder {
@@ -43,6 +54,7 @@ impl FfmpegDecoder {
             .ok_or_else(|| DecoderError::Internal("ffmpeg decoder is not open".into()))?;
 
         let mut command = Command::new(ffmpeg_command_path());
+        hide_console_window(&mut command);
         command.arg("-v").arg("error");
         if start_seconds > 0.0 {
             command.arg("-ss").arg(format!("{start_seconds:.6}"));
@@ -153,12 +165,53 @@ impl Decoder for FfmpegDecoder {
     }
 
     fn seek(&mut self, seconds: f64) -> Result<(), DecoderError> {
-        self.start_process(seconds.max(0.0))
+        // L-3: 近距向前 seek（<2s）跳过重启 ffmpeg 进程，改为读丢中间样本。
+        // 频繁拖动进度条时启动新进程要 ~50–100ms，体验明显卡顿。
+        let target = seconds.max(0.0);
+        let current = self.base_seconds
+            + self
+                .info
+                .as_ref()
+                .map(|info| self.frames_read as f64 / f64::from(info.sample_rate.0.max(1)))
+                .unwrap_or(0.0);
+        let delta = target - current;
+        if self.stdout.is_some() && delta >= 0.0 && delta < 2.0 {
+            if let Some(info) = self.info.as_ref() {
+                let channels = usize::from(info.channels.0).max(1);
+                let frames_to_skip = (delta * f64::from(info.sample_rate.0.max(1))).round() as u64;
+                let bytes_to_skip = frames_to_skip
+                    .saturating_mul(channels as u64)
+                    .saturating_mul(std::mem::size_of::<f32>() as u64);
+                if bytes_to_skip == 0 {
+                    return Ok(());
+                }
+                let mut remaining = bytes_to_skip;
+                let mut sink = [0_u8; 8192];
+                if let Some(stdout) = self.stdout.as_mut() {
+                    while remaining > 0 {
+                        let chunk = remaining.min(sink.len() as u64) as usize;
+                        match stdout.read(&mut sink[..chunk]) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                remaining = remaining.saturating_sub(n as u64);
+                                self.frames_read += (n / (channels * std::mem::size_of::<f32>())) as u64;
+                            }
+                            Err(err) => return Err(DecoderError::Io(err)),
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        // 远距 / 反向 seek：重启 ffmpeg 进程到目标时间
+        self.start_process(target)
     }
 }
 
 fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
-    let output = Command::new(ffprobe_command_path())
+    let mut command = Command::new(ffprobe_command_path());
+    hide_console_window(&mut command);
+    let output = command
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
