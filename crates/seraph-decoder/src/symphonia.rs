@@ -5,7 +5,7 @@ use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::{fs::File, path::Path};
 use symphonia::{
     core::{
-        audio::SampleBuffer,
+        audio::{SampleBuffer, SignalSpec},
         codecs::{Decoder as SymphoniaCodecDecoder, DecoderOptions, CODEC_TYPE_NULL},
         errors::Error as SymphoniaError,
         formats::{FormatOptions, FormatReader, SeekMode, SeekTo},
@@ -17,6 +17,8 @@ use symphonia::{
     default::{get_codecs, get_probe},
 };
 
+const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 16;
+
 pub struct SymphoniaDecoder {
     info: Option<StreamInfo>,
     format: Option<Box<dyn FormatReader>>,
@@ -26,6 +28,12 @@ pub struct SymphoniaDecoder {
     sample_rate: u32,
     // L-6: 复用 SampleBuffer 以避免每包重新分配
     sample_buffer: Option<SampleBuffer<f32>>,
+    // L-6 修订：缓存对应的 spec/frames，
+    // 包间 spec 漂移（VBR、可变声道 mapping）时强制重建，
+    // 避免 copy_interleaved_ref 把新数据写进旧布局缓冲。
+    buffer_spec: Option<SignalSpec>,
+    buffer_frames: u64,
+    consecutive_decode_errors: u32,
 }
 
 impl SymphoniaDecoder {
@@ -38,6 +46,9 @@ impl SymphoniaDecoder {
             time_base: None,
             sample_rate: 0,
             sample_buffer: None,
+            buffer_spec: None,
+            buffer_frames: 0,
+            consecutive_decode_errors: 0,
         }
     }
 }
@@ -148,8 +159,21 @@ impl Decoder for SymphoniaDecoder {
                 .ok_or_else(|| DecoderError::Internal("decoder is not open".into()))?
                 .decode(&packet)
             {
-                Ok(decoded) => decoded,
-                Err(SymphoniaError::DecodeError(_)) => continue,
+                Ok(decoded) => {
+                    self.consecutive_decode_errors = 0;
+                    decoded
+                }
+                Err(SymphoniaError::DecodeError(message)) => {
+                    // 单包坏不致命，但连续 N 次失败说明流损坏，必须报错避免 CPU 空转。
+                    self.consecutive_decode_errors += 1;
+                    if self.consecutive_decode_errors >= MAX_CONSECUTIVE_DECODE_ERRORS {
+                        return Err(DecoderError::Internal(format!(
+                            "too many consecutive decode errors ({} packets): {message}",
+                            self.consecutive_decode_errors
+                        )));
+                    }
+                    continue;
+                }
                 Err(SymphoniaError::ResetRequired) => {
                     self.decoder
                         .as_mut()
@@ -162,15 +186,22 @@ impl Decoder for SymphoniaDecoder {
 
             let spec = *decoded.spec();
             let frames = decoded.capacity() as u64;
-            let buffer = match self.sample_buffer.as_mut() {
-                Some(buffer) if buffer.capacity() >= (frames as usize) * spec.channels.count() => {
-                    buffer
-                }
-                _ => {
-                    self.sample_buffer = Some(SampleBuffer::<f32>::new(frames, spec));
-                    self.sample_buffer.as_mut().unwrap()
-                }
-            };
+            // 关键：必须把 spec（采样率 + 声道布局）一起做命中校验。
+            // 仅看 capacity 在 VBR/Opus channel-mapping 变化时会把新 spec 数据
+            // 写进旧 spec 的缓冲，导致输出错位且无 panic。
+            let cache_hit = self
+                .buffer_spec
+                .map(|cached| cached == spec && self.buffer_frames >= frames)
+                .unwrap_or(false);
+            if !cache_hit {
+                self.sample_buffer = Some(SampleBuffer::<f32>::new(frames, spec));
+                self.buffer_spec = Some(spec);
+                self.buffer_frames = frames;
+            }
+            let buffer = self
+                .sample_buffer
+                .as_mut()
+                .expect("sample buffer must exist after rebuild");
             buffer.copy_interleaved_ref(decoded);
 
             return Ok(Some(Packet {
@@ -208,6 +239,9 @@ impl Decoder for SymphoniaDecoder {
         }
         // L-6: seek 后 spec 可能变（不同 track），保险起见清掉复用缓冲
         self.sample_buffer = None;
+        self.buffer_spec = None;
+        self.buffer_frames = 0;
+        self.consecutive_decode_errors = 0;
         Ok(())
     }
 }

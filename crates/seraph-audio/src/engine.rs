@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use rtrb::{Consumer, Producer, RingBuffer};
 use seraph_core::{EventBus, PlayerEvent};
 use seraph_decoder::{open_decoder, Decoder, StreamInfo};
-use seraph_dsp::{resample_interleaved_linear, resample_interleaved_sinc};
+use seraph_dsp::{resample_interleaved_linear, StatefulSincResampler};
 use seraph_visualizer::{SimpleVisualizer, Visualizer};
 use std::{
     path::PathBuf,
@@ -946,17 +946,26 @@ fn run_decode_worker(
 
     let input_rate = info.sample_rate.0.max(1);
     let input_channels = usize::from(info.channels.0).max(1);
+    // 持久化 sinc 重采样器：跨包保留 history，
+    // 消除"每包独立计算 → 包边界 click"的旧 bug，并复用一份内存。
+    let mut resampler =
+        StatefulSincResampler::new(input_rate, shared.output_rate, shared.output_channels)
+            .map_err(|err| BackendError::Internal(err.to_string()))?;
     let visualizer =
         SimpleVisualizer::new(SPECTRUM_FFT_SIZE, SPECTRUM_BINS, shared.output_channels)
             .map_err(|err| BackendError::Internal(err.to_string()))?;
     let mut last_progress = Instant::now();
     let mut last_spectrum = Instant::now();
+    let mut remap_scratch: Vec<f32> = Vec::new();
+    let mut output_scratch: Vec<f32> = Vec::new();
 
     while !shared.stopped.load(Ordering::Acquire) {
         if let Some(seconds) = shared.seek_request.lock().take() {
             decoder
                 .seek(seconds)
                 .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+            // seek 后 resampler 内部 history 已属过去时间段，必须 reset
+            resampler.reset();
         }
 
         if shared.paused.load(Ordering::Acquire) {
@@ -990,15 +999,16 @@ fn run_decode_worker(
             break;
         };
 
-        let samples = adapt_samples(
+        adapt_samples_into(
             &packet.samples,
-            input_rate,
             input_channels,
-            shared.output_rate,
             shared.output_channels,
+            &mut resampler,
+            &mut remap_scratch,
+            &mut output_scratch,
         )?;
         push_samples(
-            &samples,
+            &output_scratch,
             shared,
             event_bus,
             track_id,
@@ -1006,15 +1016,13 @@ fn run_decode_worker(
             &mut last_progress,
             &mut producer,
         );
-        publish_spectrum_if_due(&visualizer, &samples, event_bus, &mut last_spectrum)?;
+        publish_spectrum_if_due(&visualizer, &output_scratch, event_bus, &mut last_spectrum)?;
     }
 
+    // EOF 后 drain：等 ring 被 render 消费完才声明真正结束。
+    // 注意：paused 时不 break（旧 bug #5：暂停 EOF 会把 ring 剩余样本吞掉），
+    // 等用户 resume 或 stop 再前进；只有外部 stop 才退出。
     while !shared.stopped.load(Ordering::Acquire) && producer.slots() < shared.max_buffer_samples {
-        // paused 时 render 不消费 ring，slots 永远填不回去，会无限空转 (M-1)；
-        // 此时直接 break，由后续 stop / resume 接管。
-        if shared.paused.load(Ordering::Acquire) {
-            break;
-        }
         publish_progress_if_due(
             track_id,
             shared,
@@ -1221,60 +1229,70 @@ fn render_output<T>(
     }
 }
 
-fn adapt_samples(
+/// 把单包样本走完：channel remap → 跨包 sinc 重采样 → 写入 output scratch。
+/// 用持久化 `StatefulSincResampler` 避免每包独立计算（旧 #7 包边界 click）+ 减少分配。
+/// sinc 失败时降级为无状态线性重采样（fallback path，仅保人间）。
+fn adapt_samples_into(
     input: &[f32],
-    input_rate: u32,
     input_channels: usize,
-    output_rate: u32,
     output_channels: usize,
-) -> Result<Vec<f32>> {
+    resampler: &mut StatefulSincResampler,
+    remap_scratch: &mut Vec<f32>,
+    output_scratch: &mut Vec<f32>,
+) -> Result<()> {
     let input_channels = input_channels.max(1);
     let output_channels = output_channels.max(1);
+    output_scratch.clear();
+
     if input.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
+    }
+    if !input.len().is_multiple_of(input_channels) {
+        return Err(BackendError::Internal(format!(
+            "decoder packet length {} not multiple of {input_channels} channels",
+            input.len()
+        )));
     }
 
-    let input_frames = input.len() / input_channels;
-    if input_frames == 0 {
-        return Ok(Vec::new());
+    remap_scratch.clear();
+    remap_channels_into(input, input_channels, output_channels, remap_scratch);
+
+    if resampler.input_rate() == resampler.output_rate() {
+        output_scratch.extend_from_slice(remap_scratch);
+        return Ok(());
     }
 
-    let remapped = remap_channels(input, input_channels, output_channels);
-    if input_rate == output_rate {
-        return Ok(remapped);
-    }
-
-    let mut output = Vec::new();
-    match resample_interleaved_sinc(
-        &remapped,
-        output_channels,
-        input_rate.max(1),
-        output_rate.max(1),
-        &mut output,
-    ) {
-        Ok(()) => Ok(output),
+    match resampler.process(remap_scratch, output_scratch) {
+        Ok(()) => Ok(()),
         Err(sinc_err) => {
-            let mut fallback = Vec::new();
-            match resample_interleaved_linear(
-                &remapped,
+            output_scratch.clear();
+            resample_interleaved_linear(
+                remap_scratch,
                 output_channels,
-                input_rate.max(1),
-                output_rate.max(1),
-                &mut fallback,
-            ) {
-                Ok(()) => Ok(fallback),
-                Err(linear_err) => Err(BackendError::Internal(format!(
-                    "resampler failed ({input_rate} Hz -> {output_rate} Hz, {output_channels} ch): \
-                     sinc={sinc_err}; linear={linear_err}"
-                ))),
-            }
+                resampler.input_rate().max(1),
+                resampler.output_rate().max(1),
+                output_scratch,
+            )
+            .map_err(|linear_err| {
+                BackendError::Internal(format!(
+                    "resampler failed ({} Hz -> {} Hz, {} ch): sinc={sinc_err}; linear={linear_err}",
+                    resampler.input_rate(),
+                    resampler.output_rate(),
+                    output_channels
+                ))
+            })
         }
     }
 }
 
-fn remap_channels(input: &[f32], input_channels: usize, output_channels: usize) -> Vec<f32> {
+fn remap_channels_into(
+    input: &[f32],
+    input_channels: usize,
+    output_channels: usize,
+    output: &mut Vec<f32>,
+) {
     let input_frames = input.len() / input_channels;
-    let mut output = Vec::with_capacity(input_frames * output_channels);
+    output.reserve(input_frames * output_channels);
 
     for frame in 0..input_frames {
         let offset = frame * input_channels;
@@ -1293,8 +1311,6 @@ fn remap_channels(input: &[f32], input_channels: usize, output_channels: usize) 
             output.push(input[offset + mapped]);
         }
     }
-
-    output
 }
 
 fn seconds_to_frames(seconds: f64, sample_rate: u32) -> u64 {
@@ -1309,22 +1325,31 @@ fn map_build_stream_error(err: cpal::BuildStreamError) -> BackendError {
 mod tests {
     use super::*;
 
+    fn adapt(input: &[f32], in_rate: u32, in_ch: usize, out_rate: u32, out_ch: usize) -> Vec<f32> {
+        let mut resampler = StatefulSincResampler::new(in_rate.max(1), out_rate.max(1), out_ch.max(1))
+            .expect("resampler");
+        let mut remap = Vec::new();
+        let mut out = Vec::new();
+        adapt_samples_into(input, in_ch, out_ch, &mut resampler, &mut remap, &mut out)
+            .expect("adapt");
+        out
+    }
+
     #[test]
     fn adapts_mono_to_stereo_without_resampling() {
-        let output = adapt_samples(&[0.25, -0.5], 44_100, 1, 44_100, 2).unwrap();
+        let output = adapt(&[0.25, -0.5], 44_100, 1, 44_100, 2);
         assert_eq!(output, vec![0.25, 0.25, -0.5, -0.5]);
     }
 
     #[test]
     fn adapts_stereo_to_mono_by_averaging_channels() {
-        let output = adapt_samples(&[0.25, 0.75, -0.5, 0.5], 44_100, 2, 44_100, 1).unwrap();
+        let output = adapt(&[0.25, 0.75, -0.5, 0.5], 44_100, 2, 44_100, 1);
         assert_eq!(output, vec![0.5, 0.0]);
     }
 
     #[test]
     fn resamples_to_target_rate() {
-        let output = adapt_samples(&[0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1).unwrap();
-        assert_eq!(output.len(), 2);
+        let output = adapt(&[0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1);
         assert!(output.iter().all(|sample| sample.is_finite()));
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));
     }

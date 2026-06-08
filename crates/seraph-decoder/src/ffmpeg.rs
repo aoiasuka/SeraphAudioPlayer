@@ -6,11 +6,14 @@ use std::{
     env,
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, ChildStdout, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    process::{Child, ChildStderr, ChildStdout, Command, Stdio},
+    sync::{Arc, Mutex, OnceLock},
+    thread,
 };
 
 const PACKET_FRAMES: usize = 2048;
+/// 收集 stderr 的尾部限额（字节）。ffmpeg 失败时只需最后几条诊断信息。
+const STDERR_TAIL_LIMIT: usize = 4096;
 
 /// Windows 上启动子进程时隐藏控制台窗口，避免 cmd 黑窗一闪而过。
 /// 0x0800_0000 = CREATE_NO_WINDOW（来自 winbase.h，纯 u32 常量，无 winapi 依赖）。
@@ -30,8 +33,11 @@ pub struct FfmpegDecoder {
     info: Option<StreamInfo>,
     child: Option<Child>,
     stdout: Option<ChildStdout>,
+    stderr_tail: Option<Arc<Mutex<Vec<u8>>>>,
+    stderr_thread: Option<thread::JoinHandle<()>>,
     frames_read: u64,
     base_seconds: f64,
+    sample_scratch: Vec<f32>,
 }
 
 impl FfmpegDecoder {
@@ -41,8 +47,11 @@ impl FfmpegDecoder {
             info: None,
             child: None,
             stdout: None,
+            stderr_tail: None,
+            stderr_thread: None,
             frames_read: 0,
             base_seconds: 0.0,
+            sample_scratch: Vec::new(),
         }
     }
 
@@ -57,6 +66,9 @@ impl FfmpegDecoder {
         hide_console_window(&mut command);
         command.arg("-v").arg("error");
         if start_seconds > 0.0 {
+            // -ss 放在 -i 之前是 fast seek（关键帧粒度）。对 VBR mp3/AAC
+            // 这可能差几十毫秒。准确 seek 需要 -ss 放 -i 之后（重新编码全程），
+            // 但代价是数秒延迟，不适合实时拖动进度条。这里牺牲精度换流畅。
             command.arg("-ss").arg(format!("{start_seconds:.6}"));
         }
         command
@@ -72,15 +84,23 @@ impl FfmpegDecoder {
             .arg("-")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         let mut child = command.spawn().map_err(map_tool_spawn_error)?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| DecoderError::Internal("ffmpeg stdout is unavailable".into()))?;
+        let stderr = child.stderr.take();
+        let stderr_tail: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_thread = stderr.map(|mut stderr| {
+            let sink = stderr_tail.clone();
+            thread::spawn(move || drain_stderr(&mut stderr, sink))
+        });
         self.child = Some(child);
         self.stdout = Some(stdout);
+        self.stderr_tail = Some(stderr_tail);
+        self.stderr_thread = stderr_thread;
         self.frames_read = 0;
         self.base_seconds = start_seconds.max(0.0);
         Ok(())
@@ -92,6 +112,36 @@ impl FfmpegDecoder {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(thread) = self.stderr_thread.take() {
+            let _ = thread.join();
+        }
+        self.stderr_tail = None;
+    }
+
+    /// 检查 ffmpeg 进程是否非正常退出，返回收集到的 stderr 尾部信息（如果有）。
+    fn take_stderr_tail(&mut self) -> Option<String> {
+        if let Some(thread) = self.stderr_thread.take() {
+            let _ = thread.join();
+        }
+        let tail = self.stderr_tail.take()?;
+        let bytes = tail.lock().ok()?.clone();
+        if bytes.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&bytes).trim().to_string())
+        }
+    }
+
+    /// EOF 时调用：若子进程已退出且 exit_code != 0，把 stderr 尾部当成失败原因返回。
+    /// 正常播完返回 None。
+    fn detect_crash(&mut self) -> Option<String> {
+        let child = self.child.as_mut()?;
+        let status = child.try_wait().ok().flatten()?;
+        if status.success() {
+            return None;
+        }
+        self.take_stderr_tail()
+            .or_else(|| Some(format!("ffmpeg exited with status {status}")))
     }
 }
 
@@ -130,7 +180,8 @@ impl Decoder for FfmpegDecoder {
             .as_ref()
             .ok_or_else(|| DecoderError::Internal("ffmpeg decoder is not open".into()))?;
         let channels = usize::from(info.channels.0).max(1);
-        let bytes_per_packet = PACKET_FRAMES * channels * std::mem::size_of::<f32>();
+        let frame_bytes = channels * std::mem::size_of::<f32>();
+        let bytes_per_packet = PACKET_FRAMES * frame_bytes;
         let mut bytes = vec![0_u8; bytes_per_packet];
         let mut filled = 0;
 
@@ -148,18 +199,34 @@ impl Decoder for FfmpegDecoder {
         }
 
         if filled == 0 {
+            // EOF：检查进程退出码区分"正常播完"与"中途崩溃"
+            let crash_reason = self.detect_crash();
             self.stop_process();
+            if let Some(reason) = crash_reason {
+                return Err(DecoderError::Internal(format!("ffmpeg aborted: {reason}")));
+            }
             return Ok(None);
         }
 
-        bytes.truncate(filled - (filled % 4));
+        // 关键修复：filled 截断必须按"声道 × 4 字节"对齐，
+        // 否则末包字节数不是声道整数倍 → 后续帧串扰。
+        let aligned = filled - (filled % frame_bytes);
+        if aligned == 0 {
+            self.stop_process();
+            return Ok(None);
+        }
+        bytes.truncate(aligned);
+
         let timestamp_seconds =
             self.base_seconds + self.frames_read as f64 / f64::from(info.sample_rate.0.max(1));
-        let samples = bytes_to_f32_samples(&bytes);
-        self.frames_read += (samples.len() / channels) as u64;
+        let sample_count = aligned / std::mem::size_of::<f32>();
+        self.sample_scratch.clear();
+        self.sample_scratch.reserve(sample_count);
+        bytes_to_f32_into(&bytes, &mut self.sample_scratch);
+        self.frames_read += (sample_count / channels) as u64;
 
         Ok(Some(Packet {
-            samples,
+            samples: std::mem::take(&mut self.sample_scratch),
             timestamp_seconds,
         }))
     }
@@ -236,11 +303,13 @@ fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
 }
 
 fn parse_ffprobe_output(output: &str) -> Result<StreamInfo, DecoderError> {
+    // ffprobe `-of default=noprint_wrappers=1` 输出 stream 段后跟 format 段，
+    // 两段都用 `duration=xxx`（没有 section 前缀）。优先取 stream，
+    // 再 fallback 到 format 或 TAG:DURATION（FLAC/MKV 容器才有）。
     let mut sample_rate = None;
     let mut channels = None;
     let mut bit_depth = None;
-    let mut stream_duration = None;
-    let mut format_duration = None;
+    let mut duration = None;
 
     for line in output.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -253,17 +322,10 @@ fn parse_ffprobe_output(output: &str) -> Result<StreamInfo, DecoderError> {
             "bits_per_raw_sample" | "bits_per_sample" if value != "N/A" => {
                 bit_depth = value.parse::<u16>().ok()
             }
-            "duration" if stream_duration.is_none() => {
-                stream_duration = parse_duration(value);
+            "duration" | "TAG:DURATION" if duration.is_none() => {
+                duration = parse_duration(value);
             }
-            "TAG:DURATION" if stream_duration.is_none() => {
-                stream_duration = parse_duration(value);
-            }
-            _ => {
-                if key.trim() == "format.duration" {
-                    format_duration = parse_duration(value);
-                }
-            }
+            _ => {}
         }
     }
 
@@ -278,7 +340,7 @@ fn parse_ffprobe_output(output: &str) -> Result<StreamInfo, DecoderError> {
         sample_rate: SampleRate(sample_rate),
         bit_depth: BitDepth(bit_depth.unwrap_or(16)),
         channels: Channels(channels),
-        duration_seconds: stream_duration.or(format_duration).unwrap_or(0.0),
+        duration_seconds: duration.unwrap_or(0.0),
     })
 }
 
@@ -286,11 +348,28 @@ fn parse_duration(value: &str) -> Option<f64> {
     value.parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
-fn bytes_to_f32_samples(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+/// 把 little-endian f32 字节流写入 output buffer，复用调用方的 Vec 避免分配。
+fn bytes_to_f32_into(bytes: &[u8], output: &mut Vec<f32>) {
+    for chunk in bytes.chunks_exact(4) {
+        output.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+}
+
+/// 后台读取 ffmpeg stderr，保留尾部 STDERR_TAIL_LIMIT 字节供失败诊断。
+fn drain_stderr(stderr: &mut ChildStderr, sink: Arc<Mutex<Vec<u8>>>) {
+    let mut buffer = [0_u8; 1024];
+    while let Ok(read) = stderr.read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        if let Ok(mut tail) = sink.lock() {
+            tail.extend_from_slice(&buffer[..read]);
+            let overflow = tail.len().saturating_sub(STDERR_TAIL_LIMIT);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+        }
+    }
 }
 
 fn map_tool_spawn_error(err: std::io::Error) -> DecoderError {
@@ -310,24 +389,63 @@ where
     I: IntoIterator<Item = P>,
     P: Into<PathBuf>,
 {
-    let mut stored = EXTRA_TOOL_DIRS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .expect("ffmpeg search dirs mutex poisoned");
-    for dir in dirs {
-        let dir = dir.into();
-        if !stored.iter().any(|existing| existing == &dir) {
-            stored.push(dir);
+    let mut changed = false;
+    {
+        let mut stored = EXTRA_TOOL_DIRS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("ffmpeg search dirs mutex poisoned");
+        for dir in dirs {
+            let dir = dir.into();
+            if !stored.iter().any(|existing| existing == &dir) {
+                stored.push(dir);
+                changed = true;
+            }
         }
+    }
+    if changed {
+        invalidate_tool_cache();
     }
 }
 
 pub fn find_ffmpeg() -> Option<PathBuf> {
-    find_tool("ffmpeg")
+    cached_tool_path("ffmpeg", &FFMPEG_CACHE)
 }
 
 pub fn find_ffprobe() -> Option<PathBuf> {
-    find_tool("ffprobe")
+    cached_tool_path("ffprobe", &FFPROBE_CACHE)
+}
+
+static FFMPEG_CACHE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static FFPROBE_CACHE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+/// 缓存工具路径：每次 open/seek 都会走 ffmpeg/ffprobe，
+/// 重复遍历 PATH+candidate dirs+stat 每个候选 5–10 ms，热路径上无意义。
+fn cached_tool_path(tool: &str, cache: &OnceLock<Mutex<Option<PathBuf>>>) -> Option<PathBuf> {
+    let mutex = cache.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().ok()?;
+    if let Some(path) = guard.as_ref() {
+        if path.is_file() {
+            return Some(path.clone());
+        }
+    }
+    let resolved = find_tool(tool);
+    *guard = resolved.clone();
+    resolved
+}
+
+/// 任何对 EXTRA_TOOL_DIRS 的修改都应失效缓存，否则后注册的目录永远轮不到。
+fn invalidate_tool_cache() {
+    if let Some(mutex) = FFMPEG_CACHE.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(mutex) = FFPROBE_CACHE.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn ffmpeg_command_path() -> PathBuf {
@@ -422,7 +540,8 @@ mod tests {
     #[test]
     fn converts_f32le_bytes_to_samples() {
         let bytes = [0.25_f32.to_le_bytes(), (-0.5_f32).to_le_bytes()].concat();
-        let samples = bytes_to_f32_samples(&bytes);
+        let mut samples = Vec::new();
+        bytes_to_f32_into(&bytes, &mut samples);
 
         assert_eq!(samples, vec![0.25, -0.5]);
     }

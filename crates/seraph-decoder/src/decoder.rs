@@ -48,15 +48,32 @@ pub fn open_decoder(path: &Path) -> Result<Box<dyn Decoder>, DecoderError> {
         let mut decoder = crate::dsd::DsdDecoder::new();
         match decoder.open(path) {
             Ok(()) => return Ok(Box::new(decoder)),
-            Err(err) => return open_ffmpeg_fallback(path).or(Err(err)),
+            Err(primary) => {
+                return open_ffmpeg_fallback(path)
+                    .map_err(|fallback| merge_open_errors("dsd", primary, fallback));
+            }
         }
     }
 
     let mut decoder = crate::symphonia::SymphoniaDecoder::new();
     match decoder.open(path) {
         Ok(()) => Ok(Box::new(decoder)),
-        Err(err) => open_ffmpeg_fallback(path).or(Err(err)),
+        Err(primary) => open_ffmpeg_fallback(path)
+            .map_err(|fallback| merge_open_errors("symphonia", primary, fallback)),
     }
+}
+
+/// 把主解码器错误 + ffmpeg fallback 错误合并成一条 message，
+/// 避免静默吞掉真正的失败原因（典型场景：fallback 报"ffmpeg not found"
+/// 但日志里只看到 Symphonia 的 "unknown format"）。
+fn merge_open_errors(
+    primary_name: &str,
+    primary: DecoderError,
+    fallback: DecoderError,
+) -> DecoderError {
+    DecoderError::UnsupportedFormat(format!(
+        "{primary_name}: {primary}; ffmpeg fallback: {fallback}"
+    ))
 }
 
 pub fn probe_stream_info(path: &Path) -> Result<StreamInfo, DecoderError> {

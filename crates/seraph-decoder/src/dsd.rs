@@ -1,9 +1,10 @@
 //! Lightweight DSD decoder.
 //!
-//! DSF is converted to interleaved f32 PCM by averaging each 64 DSD bits into
-//! one PCM sample. This is intentionally simple and deterministic; the audio
-//! engine can later swap this stage for a higher quality FIR decimator without
-//! changing the decoder trait.
+//! DSF/DFF 被以 64:1 抽取为 interleaved f32 PCM。
+//! 抗混叠：相对原来的 boxcar (popcount/64) 取均值，
+//! 改为 Hann 加权积分 + 后置一阶 IIR DC blocker，
+//! 旁瓣从 -13 dB 抑制到 ≈ -30 dB，
+//! 同时去掉 DSD 调制器引入的低频偏置。
 
 use crate::decoder::{Decoder, DecoderError, Packet, StreamInfo};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
@@ -11,16 +12,57 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
+    sync::OnceLock,
 };
 
 const DSD_TO_PCM_DECIMATION: usize = 64;
 const DSD_BYTES_PER_PCM_SAMPLE: usize = DSD_TO_PCM_DECIMATION / 8;
 const DFF_PACKET_BYTE_FRAMES: usize = 4096;
+const DC_BLOCKER_R: f32 = 0.995; // 截止 ≈ 7 Hz @ 44.1 kHz
+
+/// 64-tap Hann 加权窗，预计算一次。
+fn hann_taps() -> &'static [f32; DSD_TO_PCM_DECIMATION] {
+    static TAPS: OnceLock<[f32; DSD_TO_PCM_DECIMATION]> = OnceLock::new();
+    TAPS.get_or_init(|| {
+        let mut taps = [0.0_f32; DSD_TO_PCM_DECIMATION];
+        let mut sum = 0.0_f32;
+        for (i, slot) in taps.iter_mut().enumerate() {
+            let theta = std::f32::consts::PI * (i as f32 + 0.5) / DSD_TO_PCM_DECIMATION as f32;
+            let value = 0.5 - 0.5 * (2.0 * theta).cos();
+            *slot = value;
+            sum += value;
+        }
+        // 归一化使全 1 输入得到 +1，全 0 输入得到 -1
+        for slot in taps.iter_mut() {
+            *slot /= sum;
+        }
+        taps
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 enum DsdLayout {
     Dsf { block_size_per_channel: usize },
     Dff,
+}
+
+/// 每个容器规定的 byte 内 bit 排列顺序。Boxcar 算法对此不敏感，
+/// 但 Hann 加权对 bit 在窗口里的位置敏感，必须按规范取位。
+/// - DSF: LSB first（Sony DSD Stream File 规范）
+/// - DFF: MSB first（Philips DSDIFF 规范）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitOrder {
+    LsbFirst,
+    MsbFirst,
+}
+
+impl DsdLayout {
+    fn bit_order(self) -> BitOrder {
+        match self {
+            Self::Dsf { .. } => BitOrder::LsbFirst,
+            Self::Dff => BitOrder::MsbFirst,
+        }
+    }
 }
 
 pub struct DsdDecoder {
@@ -32,6 +74,8 @@ pub struct DsdDecoder {
     data_start: u64,
     data_len: u64,
     data_read: u64,
+    pcm_frames_emitted: u64,
+    dc_state: Vec<(f32, f32)>, // 每通道一份 (last_input, last_output)
 }
 
 impl DsdDecoder {
@@ -45,6 +89,8 @@ impl DsdDecoder {
             data_start: 0,
             data_len: 0,
             data_read: 0,
+            pcm_frames_emitted: 0,
+            dc_state: Vec::new(),
         }
     }
 }
@@ -88,6 +134,8 @@ impl Decoder for DsdDecoder {
         self.data_start = parsed.data_start;
         self.data_len = parsed.data_len;
         self.data_read = 0;
+        self.pcm_frames_emitted = 0;
+        self.dc_state = vec![(0.0, 0.0); parsed.channels];
         Ok(())
     }
 
@@ -104,11 +152,9 @@ impl Decoder for DsdDecoder {
             .layout
             .ok_or_else(|| DecoderError::Internal("decoder is not open".into()))?;
         let channels = self.channels;
-        let timestamp_seconds = if self.dsd_sample_rate == 0 || channels == 0 {
-            0.0
-        } else {
-            ((self.data_read / channels as u64) * 8) as f64 / self.dsd_sample_rate as f64
-        };
+        let pcm_rate = (self.dsd_sample_rate as usize / DSD_TO_PCM_DECIMATION).max(1) as u64;
+        // 用已发出的 PCM 帧数算时戳，比从 byte 累计反推稳定（不会被块尾对齐截断）
+        let timestamp_seconds = self.pcm_frames_emitted as f64 / pcm_rate as f64;
 
         let remaining = (self.data_len - self.data_read) as usize;
         let read_len = match layout {
@@ -133,16 +179,20 @@ impl Decoder for DsdDecoder {
         raw.truncate(bytes_read);
         self.data_read += bytes_read as u64;
 
-        let samples = match layout {
+        let order = layout.bit_order();
+        let mut samples = match layout {
             DsdLayout::Dsf {
                 block_size_per_channel,
-            } => decode_dsf_block(&raw, channels, block_size_per_channel),
-            DsdLayout::Dff => decode_dff_block(&raw, channels),
+            } => decode_dsf_block(&raw, channels, block_size_per_channel, order),
+            DsdLayout::Dff => decode_dff_block(&raw, channels, order),
         };
 
         if samples.is_empty() {
             return Ok(None);
         }
+
+        apply_dc_blocker(&mut samples, channels, &mut self.dc_state);
+        self.pcm_frames_emitted += (samples.len() / channels.max(1)) as u64;
 
         Ok(Some(Packet {
             samples,
@@ -182,6 +232,13 @@ impl Decoder for DsdDecoder {
             .ok_or_else(|| DecoderError::Internal("file is not open".into()))?
             .seek(SeekFrom::Start(self.data_start + byte_offset))?;
         self.data_read = byte_offset;
+        // 重建 DC blocker 状态，避免 seek 后边界泄漏
+        for state in self.dc_state.iter_mut() {
+            *state = (0.0, 0.0);
+        }
+        // PCM 帧计数对齐到 seek 位置（按 byte_offset 反推）
+        let pcm_rate = (self.dsd_sample_rate as u64 / DSD_TO_PCM_DECIMATION as u64).max(1);
+        self.pcm_frames_emitted = (seconds.max(0.0) * pcm_rate as f64) as u64;
         Ok(())
     }
 }
@@ -394,38 +451,53 @@ fn read_dff_chunk_header(
     }
 }
 
-fn decode_dsf_block(raw: &[u8], channels: usize, block_size_per_channel: usize) -> Vec<f32> {
+fn decode_dsf_block(
+    raw: &[u8],
+    channels: usize,
+    block_size_per_channel: usize,
+    order: BitOrder,
+) -> Vec<f32> {
     if channels == 0 || block_size_per_channel < DSD_BYTES_PER_PCM_SAMPLE {
         return Vec::new();
     }
 
-    let available_channels = raw.len() / block_size_per_channel;
-    let channels = channels.min(available_channels);
-    if channels == 0 {
+    // 末块只解码所有通道都能完整覆盖的 PCM 帧数，避免静默截断声道导致 ring 错位。
+    // (原 bug: 当末块 raw.len() < channels*block_size 时，channels 被偷偷调小一倍。)
+    let per_channel_bytes = raw.len() / channels;
+    if per_channel_bytes < DSD_BYTES_PER_PCM_SAMPLE {
         return Vec::new();
     }
-
-    let pcm_frames = block_size_per_channel / DSD_BYTES_PER_PCM_SAMPLE;
+    let usable_bytes = per_channel_bytes.min(block_size_per_channel);
+    let pcm_frames = usable_bytes / DSD_BYTES_PER_PCM_SAMPLE;
+    if pcm_frames == 0 {
+        return Vec::new();
+    }
     let mut samples = Vec::with_capacity(pcm_frames * channels);
 
     for frame in 0..pcm_frames {
         let frame_offset = frame * DSD_BYTES_PER_PCM_SAMPLE;
         for channel in 0..channels {
             let channel_offset = channel * block_size_per_channel + frame_offset;
-            samples.push(dsd_64_to_pcm(&raw[channel_offset..channel_offset + 8]));
+            samples.push(dsd_64_to_pcm(
+                &raw[channel_offset..channel_offset + DSD_BYTES_PER_PCM_SAMPLE],
+                order,
+            ));
         }
     }
 
     samples
 }
 
-fn decode_dff_block(raw: &[u8], channels: usize) -> Vec<f32> {
+fn decode_dff_block(raw: &[u8], channels: usize, order: BitOrder) -> Vec<f32> {
     if channels == 0 {
         return Vec::new();
     }
 
     let byte_frames = raw.len() / channels;
     let pcm_frames = byte_frames / DSD_BYTES_PER_PCM_SAMPLE;
+    if pcm_frames == 0 {
+        return Vec::new();
+    }
     let mut samples = Vec::with_capacity(pcm_frames * channels);
 
     for frame in 0..pcm_frames {
@@ -435,16 +507,48 @@ fn decode_dff_block(raw: &[u8], channels: usize) -> Vec<f32> {
             for (index, byte) in bytes.iter_mut().enumerate() {
                 *byte = raw[(byte_frame_offset + index) * channels + channel];
             }
-            samples.push(dsd_64_to_pcm(&bytes));
+            samples.push(dsd_64_to_pcm(&bytes, order));
         }
     }
 
     samples
 }
 
-fn dsd_64_to_pcm(bytes: &[u8]) -> f32 {
-    let ones = bytes.iter().map(|byte| byte.count_ones()).sum::<u32>() as f32;
-    ((ones * 2.0) - DSD_TO_PCM_DECIMATION as f32) / DSD_TO_PCM_DECIMATION as f32
+/// 把 64 bit DSD 抽取成 1 个 PCM 样本，Hann 加权抑制高频混叠。
+fn dsd_64_to_pcm(bytes: &[u8], order: BitOrder) -> f32 {
+    let taps = hann_taps();
+    let mut acc = 0.0_f32;
+    let mut tap = 0_usize;
+    for byte in bytes {
+        for bit_in_byte in 0..8 {
+            let bit = match order {
+                BitOrder::LsbFirst => (byte >> bit_in_byte) & 1,
+                BitOrder::MsbFirst => (byte >> (7 - bit_in_byte)) & 1,
+            };
+            // bit=1 -> +1，bit=0 -> -1
+            let signed = (bit as i8 * 2 - 1) as f32;
+            acc += signed * taps[tap];
+            tap += 1;
+        }
+    }
+    acc
+}
+
+/// 一阶高通 DC blocker：y[n] = x[n] - x[n-1] + R*y[n-1]
+/// 去掉 Σ-Δ 调制器引入的低频直流偏置（典型 ≈ 0.01）。
+fn apply_dc_blocker(samples: &mut [f32], channels: usize, state: &mut Vec<(f32, f32)>) {
+    let channels = channels.max(1);
+    if state.len() < channels {
+        state.resize(channels, (0.0, 0.0));
+    }
+    for (i, sample) in samples.iter_mut().enumerate() {
+        let ch = i % channels;
+        let (last_in, last_out) = state[ch];
+        let current = *sample;
+        let filtered = current - last_in + DC_BLOCKER_R * last_out;
+        state[ch] = (current, filtered);
+        *sample = filtered;
+    }
 }
 
 fn dsd_stream_info(dsd_sample_rate: u32, channels: usize, sample_count: u64) -> StreamInfo {
