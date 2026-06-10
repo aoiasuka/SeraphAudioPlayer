@@ -1,265 +1,156 @@
-# Seraph Audio Player — 代码深度审计（BUG 与逻辑性问题）
+# Seraph Audio Player — Bug 筛查报告
 
-> 审计范围：`src-tauri/`、`crates/seraph-*`、`src/`（store/hooks/components）。
-> 等级说明：**严重** 可能导致用户数据丢失/崩溃/安全风险；**高** 影响核心功能；**中** 边界条件触发；**低** 性能/体验/代码质量。
-
----
-
-## 🔴 严重（Critical）
-
-### C-1 缓存目录可指向用户音乐文件夹 → 自动清理会删除用户文件
-- 位置：`src-tauri/src/ipc/cache.rs:300-374`
-- 现象：`validate_cache_dir` 只拒绝空字符串和磁盘根目录；`is_managed_cache_file` 仅按扩展名（`m4a/flac/opus/aac/mp3/download/tmp`）白名单。
-- 触发：用户在「缓存路径」里选择自己平时存放本地音乐的目录（例如 `D:\Music`），随后 `clear_cache` 或 `enforce_cache_limit`（自动清理开启时）会扫描整个目录树，按 mtime 删除符合扩展名的文件。
-- 影响：用户本地 FLAC/MP3 等无损/有损音乐被无声删除，**不可恢复**。
-- 修复建议：
-  1. 在 `ensure_cache_dir` 写入 `.seraph-cache` 标记文件，**只对包含该标记的目录执行清理/删除**；现在 marker 只是写入但不参与校验。
-  2. `validate_cache_dir` 增加：父目录是 AppData / 临时目录 / 用户显式确认过的白名单。
-  3. 切换缓存目录后立刻校验旧目录是否仍有 marker，否则跳过迁移/清理。
-
-### C-2 重采样全部失败时 fallback 返回未重采样的样本 → 严重音调失真
-- 位置：`crates/seraph-audio/src/engine.rs:1171-1194 adapt_samples`
-- 现象：当 `resample_interleaved_sinc` 失败时退到 `resample_interleaved_linear`，两者再都失败时 `return remapped`（仍是输入采样率的样本），但下游按 `output_rate` 喂给 WASAPI/cpal。
-- 触发：理论上仅在 sample/channel/rate 不合法时；但只要触发，比如某些边角格式或异常包，会以**变速/变调**播放，且 RingBuffer 与 `frame_position` 错位累积。
-- 影响：长时间播放失真，进度条与实际播放不同步。
-- 修复建议：兜底失败时返回 `Err`，由 worker `publish(Error)` + `PlaybackStopped`，前端有明确提示。
-
-### C-3 `mark_tracks_cache_missing_by_paths` 对 Bilibili 缓存永远不命中
-- 位置：`src-tauri/src/ipc/library.rs:753-777`
-- 现象：构建 `removed = removed_paths.iter().map(import_dedupe_key)`（→ 形如 `d:\cache\bvxx-cid.flac`），再用 `removed.contains(&import_track_key(&track))` 判断。但 `import_track_key`（同文件 922 行）对带 `source_id` 的 Bilibili 曲目返回 `source-id:bvxx`，对 `source_url` 的返回 `source-url:...`。两者形如完全不同的 key，**永不相等**。
-- 触发：在「设置」里点「清理缓存」，或自动清理触发后。
-- 影响：Bilibili 流媒体缓存被删但 `cache_missing` 标志不会被置上 → 列表里仍显示「正常」，点击播放才真正失败。`ensurePlayableTrack` 走不到重新缓存分支。
-- 修复建议：两边用同一 key 体系——removed_paths 端额外算 `source-id:` 形式的 key（从文件名提取 BVID），或扫描 cache 时同时返回 BVID/CID 元信息。
-
-### C-4 整份 `playlist` 进入 localStorage 持久化 → 易爆 QuotaExceededError
-- 位置：`src/store/player.ts:1286-1300 partialize`、`createPlayerPersistStorage`
-- 现象：`playlist` 完整序列化写 `localStorage`（5–10 MB 限额）。`setItem` 直接调用，未捕获 `QuotaExceededError`。每次播放、导入、点赞等都触发整体 setItem。
-- 触发：导入数百首 Bilibili 视频（含 Bilibili 封面 URL + 元数据，每首 ~1KB），或本地大库扫描后。
-- 影响：写入失败抛出未捕获异常，可能让 hydration 状态损坏；旧版本浏览器内存压力大。
-- 修复建议：
-  - `playlist` 不进持久化，启动时由后端 `get_playlist` 重建（Rust 端已有 `library-cache.json`）。
-  - 至少包一层 try/catch，setItem 失败时降级到 IndexedDB 或仅持久关键状态。
+> 审查时间：2026-06-10
+> 范围：`src/`（React 前端）、`crates/`（Rust 音频核心）、`src-tauri/`（Tauri 后端），共约 1.1 万行源码逐文件人工审查。
+> 严重程度：🔴 高（功能错误/崩溃/假死） · 🟠 中（明显可感知的行为错误） · 🟡 低（边缘场景/一致性/性能）
 
 ---
 
-## 🟠 高（High）
+## 🔴 高严重度
 
-### H-1 设备 ID 用枚举顺序生成 → 设备插拔后 ID 漂移
-- 位置：`crates/seraph-audio/src/device.rs:142-144 device_id_for`
-- 现象：`format!("cpal:{index}:{}", sanitize_device_id(name))`，`index` 是 cpal `output_devices()` 的迭代序号。
-- 触发：拔插 USB DAC / 蓝牙耳机 / 系统增删音频设备。
-- 影响：上次记住的 device_id（前端 `currentDeviceId` 进 persist）下次找不到匹配，`output_device_by_id` 返回 `DeviceNotFound`；选择设备失败。前端的 fallback 是「找到默认」，但用户原选的设备会静默切换。
-- 修复建议：ID 用 `sanitize_device_id(name)` 单独作为稳定主键，或拿设备的 endpoint id（Windows 上 `IMMDevice::GetId`）作为持久化 key。
+### 1. 播放中 seek 请求被解码线程"吞掉"，解码器从未真正跳转
+**文件**：`crates/seraph-audio/src/engine.rs:1069-1076`（`push_samples`）、`engines.rs:962-968`（`run_decode_worker` 循环顶部）
 
-### H-2 WASAPI 渲染 worker 启动握手 3 秒超时假阳性
-- 位置：`crates/seraph-audio/src/engine.rs:597-619 spawn_wasapi_exclusive_render_worker`
-- 现象：用 `mpsc::channel + recv_timeout(3s)`：worker 内部 `run_wasapi_exclusive_render_worker` 完成 `initialize_client` + `start_stream` 后才会发送 ready。3 秒内未收到就直接 `Ok(worker)`，认为启动成功。
-- 触发：慢速 DAC / 独占模式协商较久的高采样率（DSD-PCM 转换 + 768kHz）。
-- 影响：`PlaybackEngine::play_file` 返回 Ok 并把 session 存上、发 `PlaybackStarted`；但 worker 实际还在 init 或正在失败，事件流出现「先 Started 再 Error+Stopped」的乱序，UI 闪烁。
-- 修复建议：要么阻塞等待真实 ready，要么把 ready 作为 mandatory，超时即认为失败并 join worker。
+`engine.seek()` 把目标秒数写入 `shared.seek_request`，本应由 `run_decode_worker` 循环顶部取出并调用 `decoder.seek()`。但稳态播放时（3 秒环形缓冲已满），解码线程几乎总是阻塞在 `push_samples` 内部的 sleep 循环里；`push_samples` 在第 1070 行 `seek_request.lock().take()` **消费掉了请求**，只更新了 `frame_position` 就 `return`，既没有调 `decoder.seek()`，也没有把请求放回去。回到主循环时 `seek_request` 已经是 `None`。
 
-### H-3 same-track resume 时若上次因错误自停 → UI 显示在播但无声
-- 位置：`crates/seraph-audio/src/engine.rs:211-221`
-- 现象：`play_file` 检查 path/track_id 相同且 `!stopped`；但若上一次播放报错后 `shared.stopped = true`，分支不进入；走的是新建 session 路径。但若上一次只是 `paused` 而后台 worker 已退出（如 decoder EOF 后等 drain 阶段被强 stop），`stopped` 可能未置 true。
-- 触发：网络流卡顿 → decoder 报错 publish 但 session 未被显式 stop_session。
-- 影响：紧接着触发 resume 会调用 `seek + resume`，但 worker thread 已 join → 没有线程消费 ring，播放假在播。
-- 修复建议：resume 前检查 worker 是否仍在跑（保留一个 `worker_alive` AtomicBool），否则强制走重新打开路径。
+**后果**：拖动进度条后，UI 显示新位置，但实际播放的是解码器旧位置继续解出的音频（最多偏差 ≈3 秒缓冲量），音画严重不符。
 
-### H-4 `play_file` 解码失败时旧 session 未停止
-- 位置：`crates/seraph-audio/src/engine.rs:222-230`
-- 现象：`open_decoder(&path)?` 在 `self.stop_session()` 之前。`?` 短路返回，则当前 session 仍在播放，但前端已发命令以为切歌。
-- 触发：用户切到一个损坏 / 不支持的文件。
-- 影响：状态机错位：前端 `loadTrack` 已更新 `currentTrackIndex`，但实际播的还是上一首；用户看到「下一首」标题已变，听到的是上一首。
-- 修复建议：错误时显式 `event_bus.publish(Error{...})`，或先 stop_session 再 open_decoder。
-
-### H-5 Bilibili 下载/页面抓取无响应大小限制
-- 位置：`src-tauri/src/ipc/bilibili.rs:474-491` （HTML 抓取）、`784-805` （音频流）
-- 现象：`response.bytes().await` 把响应一次性读入 `Vec<u8>`，没有 `content_length` 检查，也没有 chunk 限流。
-- 触发：恶意/异常服务器返回超大响应；或用户粘贴非 Bilibili 域名链接、跳到大文件。
-- 影响：内存峰值可达数 GB → OOM、UI 卡死。
-- 修复建议：
-  - HTML 解析仅需抓取头部 256 KB 找 BVID；用 `bytes_stream()` 截断。
-  - 音频流逐 chunk 写盘，限制总大小（例如 < 1.5 GB），超出即 abort。
-
-### H-6 `ensure_audio_file` 重命名失败/中断时可能留下 0 字节文件
-- 位置：`src-tauri/src/ipc/bilibili.rs:853-873 write_audio_file`
-- 现象：`fs::write(&temp_path, bytes)` 后 `fs::rename(&temp_path, path)`，rename 失败时 `temp_path` 留盘。下次重试 `ensure_audio_file` 见到 `path` 不存在或长度 0 会重下载，但 `.download` 临时文件会成孤儿堆积。
-- 影响：缓存目录被垃圾文件污染，`is_managed_cache_file` 把 `.download` 计入用量。
-- 修复建议：startup / 任意 cache 操作时清理孤儿 `.download` / `.tmp`。
+**修复建议**：`push_samples` 里检测到 seek 请求时不要 `take()`，而是把请求**留在原位**（或重新 `*lock = Some(seconds)`）后提前返回，让主循环统一执行 `decoder.seek()` + `resampler.reset()`。
 
 ---
 
-## 🟡 中（Medium）
+### 2. WASAPI 独占渲染线程出错后静默退出，UI 永久假死在"播放中"
+**文件**：`crates/seraph-audio/src/engine.rs:813-833`（渲染循环）、`engine.rs:467-471`（`stop_session`）
 
-### M-1 `decode_worker` 在 paused + EOF 时空转
-- 位置：`crates/seraph-audio/src/engine.rs:942-951`
-- 现象：decoder EOF 后进入 drain 阶段：`while !stopped && producer.slots() < max_buffer_samples { sleep(5ms) }`。若此时正好 `paused = true`，render 不消费，producer.slots 不变 → 永远不退出，直到 stop。
-- 影响：线程占用直到用户显式 stop / 切歌；CPU 低，但 `shared` 的 Arc 计数不释放。
-- 修复建议：drain 循环增加 paused 检查，paused 时直接 break。
+独占模式渲染 worker 在 `get_available_space_in_frames` / `write_to_device` 失败（典型场景：拔掉 USB DAC、设备被其他独占程序抢占）时直接 `return Err(...)`，这个错误**只有**在下一次 `stop_session` join 时被 `warn!` 打一条日志，从不向 `EventBus` 发布 `Error` / `PlaybackStopped` 事件。解码线程随后把环形缓冲填满后永久 sleep。
 
-### M-2 `select_audio_stream` 选规则反直觉
-- 位置：`src-tauri/src/ipc/bilibili.rs:556-595`
-- 现象：先按用户偏好把 Atmos、FLAC、普通流全装入候选，最后用 `max_by_key((kind_rank, bandwidth))` 选。问题是即使用户关闭 `prefer_dolby_atmos`，仍可能选到 Dolby（因为 Normal 也按 bandwidth 比较，但 Dolby 已经不进候选了）。但若用户关闭 `prefer_flac` 同时关闭 `prefer_dolby_atmos`，只剩 Normal——这是预期。问题在「FLAC 被选中但 ffmpeg 不可用」时 `output_extension` 仍是 `m4a`（见 1483-1488）——文件名带 `.m4a` 但里面是 FLAC 原始流，元数据探测会失败 → bitdepth/采样率显示「Unknown」。
-- 影响：UI 标签和真实格式不符；后续解码可能走 FFmpeg fallback，慢。
-- 修复建议：未 remux 的 FLAC 直接落 `.flac` 扩展（或落 `.fmp4`），并在元数据栏标记 stream 类型。
+**后果**：设备丢失后无声、进度条冻结、播放按钮仍显示"暂停"图标，用户无任何错误提示。共享模式（cpal）的 `err_fn` 同样只 `warn!`（`engine.rs:526`），存在同类问题。
 
-### M-3 `apply_online_lyrics` / `save_track_lyrics` 缺大小校验
-- 位置：`src-tauri/src/ipc/library.rs:160-189, 212-236`
-- 现象：前端 `MAX_LYRIC_FILE_BYTES = 2MB` 限制，但 Rust 端没限。任意通过 IPC 直接调用（或前端被改）都能传巨型 `lyrics_bytes`。
-- 影响：内存峰值；恶意 zlib bomb 在 QRC/KRC 解密路径展开 → 解压无上限。
-- 修复建议：服务端二次校验 `lyrics_bytes.len() <= 4*1024*1024`；`inflate_zlib_utf8` 用 `take(N)` 限制解压上限。
-
-### M-4 `cookie_header()` 不区分过期 cookie
-- 位置：`src-tauri/src/ipc/bilibili.rs:1239-1257 merge_set_cookie_headers` + `1492-1504`
-- 现象：只解析 `name=value`，忽略 `expires`/`max-age`。一旦写入 `BTreeMap` 永不清理。
-- 触发：长期使用后 cookie 可能持有过期 token，登录态间歇失效又被「恢复」。
-- 影响：登录态校验偶发异常，难以诊断。
-- 修复建议：解析 `expires`/`max-age` 并在 cookie_header 输出前剔除过期项。
-
-### M-5 设备 `is_default` 判定脆弱
-- 位置：`crates/seraph-audio/src/device.rs:38-53`
-- 现象：先单独取 `host.default_output_device().and_then(|d| d.name())`，再在枚举里按 name 字符串相等比较。多个设备同名（笔记本扬声器 + USB 同名 DAC）时全都标 default。
-- 影响：UI 误标 default；保存设备 id 也可能错。
-- 修复建议：在 cpal 上比较 device 句柄（cpal 没暴露稳定 id，可在 Windows 上接 wasapi crate 取 endpoint id）。
-
-### M-6 `ensure_audio_file` 已存在判定过宽
-- 位置：`src-tauri/src/ipc/bilibili.rs:757-762`
-- 现象：`path.is_file() && len > 0` 即认为可用。但 ffmpeg remux 半途崩溃留下的非法 FLAC（>0 bytes）会被复用。
-- 修复建议：写文件结束后落一个 `.ok` sentinel，或在 path 同名记 sha256，启动时校验。
-
-### M-7 前端 `play` 命令链时序：driver 切换可能打断当前播放
-- 位置：`src/store/player.ts:210-228 applyOutputConfiguration` + `sendPlayCommand`
-- 现象：每次 `sendPlayCommand` 都先 `set_output_driver`、再 `select_output_device`，最后 `play`。如果 driver 实际未变（Rust 端 `if self.driver == next { return }`）尚 OK；但 `select_output_device` 在已选中相同 device 时也直接 return，不会重启 session。问题在 `play_file` 内分支：若 path/track_id 一致 → resume；driver 不变 → 不重建 session。**但** 如果上一首失败后 path 已变更，再次「同曲恢复」可能错误地走 resume 路径。
-- 影响：用户切设备/驱动后偶发音轨没切换。
-- 修复建议：保持当前结构，但在前端切换 driver 后强制 stop 再 play。
-
-### M-8 `nextShuffleTrackIndex` 用伪随机 hash → 不随机
-- 位置：`src/store/player.ts:149-167`
-- 现象：`hashString(currentId:recent:length) % pool.length`。同样 `currentId + recent` 永远选同一首。
-- 影响：「随机播放」在序列稳定时退化为周期播放。
-- 修复建议：用 `Math.random()` 或 crypto.getRandomValues。
-
-### M-9 `useFileDropImport` 注册全局 `dragover/drop` preventDefault → 拖入文本/链接受影响
-- 位置：`src/hooks/useFileDropImport.ts:33-39`
-- 现象：全局阻止 default，意味着任意输入框拖入文本也无法落 default。
-- 影响：输入框拖拽体验丢失（用户拖一段文本到输入框无法插入）。
-- 修复建议：只阻止 window 顶层；在 `<input>` 上 stop propagation。
-
-### M-10 `usePlayback` progress 事件 trackId 不匹配时直接吞掉
-- 位置：`src/hooks/usePlayback.ts:14-29`
-- 现象：返回 `{}` 让 zustand 不更新；但用户在 loadTrack 后下一首 Progress 早于 PlaybackStarted 到达时，UI 卡在上一首时间。
-- 影响：偶发进度跳动。
-- 修复建议：未匹配时仍重置 currentTime=0 直到 PlaybackStarted。
-
-### M-11 `WaveformProgress` 进度条 seek 精度受 mock baseline 影响
-- 位置：`src/hooks/useWaveform.ts`
-- 现象：波形 baseline 用 trackId hash 生成，与真实音频无关。只是装饰。OK 但与「在播位置」不对应，用户误解。
-- 影响：信任度低；非 bug。
-- 修复建议：长期接入真实 PCM peak data；短期加 "Waveform preview" label。
-
-### M-12 `cancel/queueVolumeCommand` 用全局可变量，跨实例污染
-- 位置：`src/store/player.ts:122-124, 519-546`
-- 现象：`volumeCommandTimer`、`pendingVolumeCommand` 是模块级变量。HMR / 多 store 实例时残留 timer。
-- 影响：开发环境偶现重复 set_volume；生产单实例无影响。
-- 修复建议：放进 store 内部 `getState()` ref，或绑到 store API。
+**修复建议**：给渲染 worker 传入 `EventBus`，出错时发布 `PlayerEvent::Error` + `PlaybackStopped` 并置 `shared.stopped = true`，让解码线程一并退出。
 
 ---
 
-## 🟢 低（Low / 性能 / 体验）
+## 🟠 中严重度
 
-### L-1 `seraph-visualizer::spectrum_bins` 是 O(N²) DFT，注释自称 FFT
-- 位置：`crates/seraph-visualizer/src/fft.rs:146-164`
-- 影响：1024 × 32 ≈ 32K sin/cos 每帧 (~66ms)，单核 ~5–10% CPU。
-- 建议：替换为真正 FFT（`rustfft` / `realfft`）。
+### 3. 曲尾缓冲期（EOF drain）内 seek 会直接"播完"整首歌
+**文件**：`crates/seraph-audio/src/engine.rs:1022-1034`
 
-### L-2 `audio_format_from_magic` 多次重复打开同一文件
-- 位置：`src-tauri/src/ipc/library.rs:949-973, 1225-1234, 1107-1150`
-- 影响：导入时一首歌可能被 open 3+ 次（is_audio_file + audio_format_label + is_dsd_file + parse_audio_metadata）。
-- 建议：在 `track_from_path` 入口探测一次 magic + extension，沿用结果。
+解码到 EOF 后进入 drain 循环等待环形缓冲被消费完，这个循环**完全不检查 `seek_request`**。此时用户往回拖进度条：`engine.seek()` 会 bump `buffer_generation`，渲染线程把剩余旧 generation 样本全部丢弃 → 缓冲瞬间清空 → drain 循环退出 → 发布 `PlaybackEnded` → 前端自动切下一曲。
 
-### L-3 `FfmpegDecoder::seek` 每次 spawn 新进程
-- 位置：`crates/seraph-decoder/src/ffmpeg.rs:155-157`
-- 影响：拖动进度条频繁 seek，启动新 ffmpeg 进程 ~50–100ms 延迟。
-- 建议：保留 ffmpeg 进程，通过 `stdin` 控制；或合并近距 seek。
+**后果**：在最后约 3 秒（缓冲长度）内任何回拖操作都会导致跳到下一首，而不是回放。
 
-### L-4 `engine.rs` ring buffer 用 `QueuedSample{generation,value}` 浪费 4× 内存
-- 位置：`crates/seraph-audio/src/engine.rs:163-167`
-- 现象：每个 f32 样本带一个 u64 generation，对齐后 16 字节/样本（vs. 4 字节）。
-- 影响：192kHz × 2 × 3s × 16B ≈ 18 MB；768kHz × 2 × 3s × 16B ≈ 72 MB。
-- 建议：generation 放 ring 外的 stamp（每个 batch 一个 generation），或用 packetized ring。
-
-### L-5 远程歌词 dedupe 用 first-line + title 字符串拼 key，弱
-- 位置：`src-tauri/src/ipc/library.rs:600-629 dedupe_online_lyrics_candidates`
-- 影响：同首歌不同来源若首行翻译不同，被当成两个候选。
-- 建议：用 N-gram 或时长 + 全文哈希。
-
-### L-6 `SymphoniaDecoder::next_packet` Re-allocates `SampleBuffer` 每次
-- 位置：`crates/seraph-decoder/src/symphonia.rs:160-166`
-- 影响：每个 packet 分配一次。
-- 建议：复用 SampleBuffer（state 里缓存 capacity）。
-
-### L-7 `device_id_for` 用 lower-case kebab，可能撞名
-- 位置：`crates/seraph-audio/src/device.rs:142-156`
-- 现象：「Speakers (Realtek(R) Audio)」与「Speakers (Realtek Audio)」清理后撞名（去括号？看代码：非 alphanumeric 替成 `-`，所以括号会被替；可能撞）。
-- 影响：选错设备。
-- 建议：见 H-1，结合 endpoint id 解决。
-
-### L-8 `useFluentHover` 未审计但默认导出
-- 位置：`src/hooks/useFluentHover.ts`（未读取）。
-- 建议：抽查；若未被组件使用，删除。
-
-### L-9 `MainPages.tsx StreamingPage` 二维码轮询频率 1.8s，B 站 rate-limit 风险
-- 影响：长期挂着登录窗口可能被风控。
-- 建议：拉长到 3–5s；登录成功后立即取消。
-
-### L-10 `LyricsPanel` 自动滚动 `scrollTo({behavior: smooth})` 高频触发
-- 位置：`src/components/sidebar/LyricsPanel.tsx:124-135`
-- 影响：每秒切换 activeIdx 可能多次触发 smooth 滚动，互相打断。
-- 建议：节流到 200ms；或仅当切换 group 时滚动。
-
-### L-11 `WaveformProgress` baseline 仅 `track-1` 区分
-- 位置：`src/hooks/useWaveform.ts:13`
-- 现象：`seed = trackId === "track-1" ? 1.0 : 1.8`，几乎所有曲目共用同一种形状。
-- 建议：基于完整 trackId hash 生成多样化 seed。
-
-### L-12 `restrict_session_file_permissions` Windows 路径未处理 `USERNAME` 含特殊字符
-- 位置：`src-tauri/src/ipc/bilibili.rs:1210-1234`
-- 现象：`%USERNAME%` 字面回退，且 user 名含空格/中文时 icacls 参数解析可能出错。
-- 建议：用 `whoami` crate 拿规范用户 SID。
-
-### L-13 RingBuffer drop 缓冲未 publish PlaybackEnded
-- 位置：`crates/seraph-audio/src/engine.rs:953`
-- 现象：drain 期间被 stop_session() 打断后，外层 PlaybackEnded 由后续 `if !stopped` 分支决定；正确路径 OK。但若 join 时 stop 信号先到，Ended 事件不会发送。
-- 建议：把 Ended 事件抽到 stop_session 外层，明确「自然结束」与「强制停止」。
-
-### L-14 `dedupeTracks` / `dedupeTracksWithLiked` 重复迭代
-- 位置：`src/store/player.ts:294-332`
-- 影响：N×log(N) 之上叠加多次 map 构造，导入大量曲目时 ~ms 级延迟。
-- 建议：合并为一次迭代。
-
-### L-15 Notification 计数器 `notificationCounter` 是模块级，HMR 重置后 id 撞
-- 位置：`src/store/player.ts:122 + 1272-1275`
-- 影响：开发环境偶现通知不重渲。
-- 建议：与 store reducer 内部 state 绑定。
-
-### L-16 `SimpleVisualizer` `mono_buffer.lock()` 高频抢锁
-- 位置：`crates/seraph-visualizer/src/fft.rs:76-101`
-- 现象：每个 sample 都做 lock。
-- 建议：批量化加锁，或 SPSC ring。
+**修复建议**：drain 循环中也检查 `seek_request`，命中时回到主解码循环（需要把主循环和 drain 合并或用状态标记）。
 
 ---
 
-## 总览
+### 4. 应用重启后引擎音量与 UI 音量不同步
+**文件**：`crates/seraph-audio/src/engine.rs:207`（默认 `volume: 0.7`）、`src/store/player.ts:207-216`（`applyOutputConfiguration`）、`src/hooks/useHydratePlayerStore.ts`
 
-| 等级 | 数量 |
-|------|------|
-| 严重 (Critical) | 4 |
-| 高 (High) | 6 |
-| 中 (Medium) | 12 |
-| 低 (Low) | 16 |
+前端把音量持久化到 localStorage，但 rehydrate 后（`useHydratePlayerStore`）以及每次播放前（`applyOutputConfiguration` 只发 `set_output_driver` / `select_output_device`）都**不会**向后端发送 `set_volume`。引擎侧默认 0.7。
 
-**优先修复顺序建议：**
-1. C-1（数据丢失）→ C-3（功能错位）→ C-2（音质）→ C-4（持久化）
-2. H-5（OOM 安全）→ H-1（设备稳定性）→ H-2/H-3/H-4（播放健壮性）
-3. M-3/M-4（安全/稳定）→ 其他 M
-4. L 等级可一并随重构推进
+**后果**：用户上次把音量调到 20% 并重启应用，UI 显示 20%，但实际播放音量是 70%——直到用户碰一下音量条才矫正。可能造成突然的大音量。
+
+**修复建议**：在 `applyOutputConfiguration()` 中追加 `set_volume`（取 `isMuted ? 0 : volume`），或 rehydrate 完成后立即同步一次。
+
+---
+
+### 5. 随机模式下"下一首播放"预览每次渲染都变，且与实际切歌结果不一致
+**文件**：`src/store/player.ts:146-164`（`nextShuffleTrackIndex` 使用 `Math.random`）、`player.ts:681-691`（`nextTrackPreview`）、`src/components/sidebar/UpNextCard.tsx:6`
+
+`nextTrackPreview()` 在 zustand selector 里直接调用，随机模式下每次 store 更新（包括每 250ms 的 progress 事件）都会重新 `Math.random()` 选一首：
+1. UpNext 卡片上的曲目名高频闪变；
+2. 用户点击"下一首"时 `nextTrack()` 又**独立**随机一次，实际播放的几乎从不等于预览显示的那首。
+
+**修复建议**：把"已抽中的下一首"缓存进 store（如 `pendingShuffleIndex`），`nextTrackPreview` 与 `nextTrack` 共用，曲目切换后再重新抽。
+
+---
+
+### 6. 截断/损坏的 DSF 文件可触发 slice 越界 panic
+**文件**：`crates/seraph-decoder/src/dsd.rs:454-488`（`decode_dsf_block`）、`dsd.rs:170-179`（`next_packet` 单次 `read` 短读）
+
+`next_packet` 用单次 `file.read()` 读取一个 block 组（未循环读满），且 `data_len`（头部声明）可能大于实际文件剩余字节。当末块短读时 `raw.len() < channels * block_size_per_channel`，`decode_dsf_block` 用 `per_channel_bytes = raw.len() / channels` 算可用帧数，但取样时 `channel_offset = channel * block_size_per_channel + frame_offset` 仍按**完整 block 步长**索引 —— 当 `block_size_per_channel > per_channel_bytes` 时，对第 2+ 声道的 `&raw[channel_offset..channel_offset+8]` 会越界 panic，导致解码线程 abort（panic in thread）。
+
+**修复建议**：读满 `read_len`（循环 read 或 `read_exact` 容错），并在 `decode_dsf_block` 中限制 `pcm_frames` 使 `(channels-1)*block_size + frames*8 <= raw.len()`，或直接丢弃不完整的末块组。
+
+---
+
+### 7. 未知时长（duration=0）的曲目进度永远显示 0:00
+**文件**：`crates/seraph-audio/src/engine.rs:1116`（`seconds.min(total_seconds.max(0.0))`）、`src/hooks/usePlayback.ts:29-30`（`duration = track?.duration ?? Infinity` 后 `Math.min(seconds, duration)`）
+
+后端把进度钳到 `total`（=0），前端又把进度钳到 `track.duration`（=0，非 nullish 不会落到 Infinity 分支）。双重钳制下，元数据探测不到时长的曲目（部分 ffprobe 失败的流、损坏头文件）进度条与时间标签永远停在 0:00，但音频在正常播放。
+
+**修复建议**：两侧都改为 `total > 0` 时才做 min 钳制。
+
+---
+
+### 8. `loadBackendLibrary` 合并曲库后 `currentTrackIndex` 不重映射
+**文件**：`src/store/player.ts:908-927`
+
+启动 rehydrate 时恢复了持久化的 `currentTrackIndex`，随后 `loadBackendLibrary()` 用 `mergeTracksByPath` + `dedupeTracksWithLiked` 生成的新 playlist 顺序/长度都可能与持久化时不同（去重、新增、排序变化），但 index 原样保留。
+
+**后果**：重启后"当前曲目"可能指向另一首歌；极端情况下（去重缩短列表）index 越界 → `currentTrack()` 返回 null。
+
+**修复建议**：合并前记录当前曲目 `id`，合并后用 `findIndex(t => t.id === prevId)` 重定位，找不到再回退 0。
+
+---
+
+## 🟡 低严重度
+
+### 9. LRC `[offset:]` 标签符号与通用约定相反
+**文件**：`src-tauri/src/ipc/library.rs:1941-1954`、测试 `library.rs:2586-2591`
+
+实现是 `time + offset`（正 offset 让歌词**变晚**）。LRC 通行约定是正 offset 让歌词**提前**（time - offset）。带 offset 标签的歌词文件会偏移 2×offset。
+
+### 10. ffmpeg 解码器近距 seek 时帧计数按 chunk 截断，多声道时间戳漂移
+**文件**：`crates/seraph-decoder/src/ffmpeg.rs:258-268`
+
+跳读循环里 `self.frames_read += (n / (channels * 4))` 对每个 read 返回值独立整除。声道数不能整除 8192 时（如 5.1 声道 frame_bytes=24），每个 chunk 丢弃余数，时间戳累计偏小。应累计字节数后一次性换算。
+
+### 11. B 站 cookie 过期时间不持久化，重启后过期 cookie "复活"
+**文件**：`src-tauri/src/ipc/bilibili.rs:222-231`（`BilibiliSessionFile` 无 `cookie_expires` 字段）、`bilibili.rs:1668-1694`
+
+`merge_set_cookie_headers` 精心维护的 `cookie_expires` 从不写入磁盘；重启加载后所有 cookie 都按"永不过期的 session cookie"处理，已过期凭证会继续被发送。
+
+### 12. 头像下载先全量读入内存再检查大小上限
+**文件**：`src-tauri/src/ipc/bilibili.rs:899-904`
+
+`response.bytes()` 无上限读取后才比较 `MAX_AVATAR_BYTES`，与同文件 `read_bytes_capped` 的防御姿态不一致。重定向到大文件时白白吃内存。
+
+### 13. B 站音频整体读入内存（上限 1.5 GB）后才落盘
+**文件**：`src-tauri/src/ipc/bilibili.rs:825-857`、`bilibili.rs:925-945`
+
+大体积 FLAC（数百 MB）会整块驻留内存，且 `write_audio_file` 再复制一次。建议流式写入 `.download` 临时文件。
+
+### 14. 目录导入递归无 symlink/junction 环路保护
+**文件**：`src-tauri/src/ipc/library.rs:702-726`（`collect_audio_files`）
+
+Windows 目录联接（junction）指向祖先目录时无限递归直至栈溢出/卡死。建议跟踪 canonicalize 后的已访问目录集合或限制递归深度。
+
+### 15. 可视化 FFT 每个解码包都全量计算，结果大多被丢弃
+**文件**：`crates/seraph-visualizer/src/fft.rs:84-126`、`crates/seraph-audio/src/engine.rs:1039-1057`
+
+`publish_spectrum_if_due` 每包都调用 `push_samples`（内部跑 1024 点 FFT），但只每 66ms 取一次结果。Hi-Res（384k/768k）下解码包频率很高，大量 FFT 是纯浪费。另：`Spectrum` 事件每 66ms 经 IPC 推到前端，但前端 `usePlayback` 根本没有处理 `spectrum` 类型 —— 纯无效流量。
+
+### 16. Notification 退场动画永远不可见
+**文件**：`src/App.tsx:83-87`（`hasNotification && <LazyNotification/>`）、`src/components/modal/Notification.tsx:17-18`
+
+组件内部设计了 2700ms 隐藏（滑出动画）+ 3200ms dismiss 的两段式退场，但 App 在 `notification` 置 null 的瞬间就卸载了整个组件，`translate-x-[120%]` 过渡从未播放，通知是"瞬间消失"的。
+
+### 17. WASAPI 独占模式按设备名匹配，同名设备可能选错
+**文件**：`crates/seraph-audio/src/engine.rs:707-712`、对比 `crates/seraph-audio/src/device.rs:81-106`
+
+设备枚举端用 name-hash + `-N` 后缀区分同名设备，但独占渲染 worker 用 `get_device_with_name(&device_name)` 仅按名字匹配，两个同名 DAC 时可能打开错误实例。
+
+### 18. ImportedTrack 元数据探测对每个文件都做磁盘 IO + 进程探测，导入大目录时阻塞 IPC
+**文件**：`src-tauri/src/ipc/library.rs:141-157`（`import_tracks` 为同步命令）
+
+每个文件要开文件读 magic、lofty 解析、必要时 `probe_stream_info`（可能拉起 ffprobe 子进程）。同步命令在 Tauri 调度线程上执行，导入上千文件的目录期间其他 IPC（含播放控制）会排队。建议改 `async` + `spawn_blocking`，并考虑分批返回进度。
+
+---
+
+## 备注（非 bug，但值得留意）
+
+- `src-tauri/src/ipc/playback.rs:60-68`：`next_track` / `prev_track` 是空实现，切歌完全靠前端再发 `play`，前端 `sendCommand("next_track")` 是无效调用（`src/store/player.ts:748,763`）。
+- `src-tauri/src/state.rs` 的 `player_state` 只写不读，是死状态。
+- `crates/seraph-audio/src/wasapi.rs` / `backend.rs` 的 `AudioBackend` trait 全部 `NotImplemented`，为占位骨架。
+- `seraph-visualizer` 的 `normalize_bins` 做逐帧归一化，安静段落会把底噪放大成满格频谱（视觉效果问题）。

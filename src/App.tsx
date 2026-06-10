@@ -44,10 +44,17 @@ function App() {
   const settingsOpen = usePlayerStore((s) => s.settingsOpen);
   const hasNotification = usePlayerStore((s) => s.notification !== null);
   const [effectsReady, setEffectsReady] = useState(false);
+  const [notificationMounted, setNotificationMounted] = useState(false);
 
   useEffect(() => {
     return runWhenIdle(() => setEffectsReady(true), 900);
   }, []);
+
+  useEffect(() => {
+    // M-16：出现过通知后保持组件挂载，让退场滑出动画能完整播放，
+    // 不再随 notification 置 null 而瞬间卸载导致动画从未出现。
+    if (hasNotification) setNotificationMounted(true);
+  }, [hasNotification]);
 
   return (
     <div className="h-full w-full overflow-hidden flex flex-col app-shell">
@@ -80,7 +87,7 @@ function App() {
           <LazyDragImportOverlay visible />
         </Suspense>
       )}
-      {hasNotification && (
+      {notificationMounted && (
         <Suspense fallback={null}>
           <LazyNotification />
         </Suspense>

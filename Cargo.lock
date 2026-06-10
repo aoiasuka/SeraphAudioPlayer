@@ -3356,7 +3356,6 @@ dependencies = [
  "seraph-core",
  "seraph-decoder",
  "seraph-dsp",
- "seraph-visualizer",
  "serde",
  "thiserror 1.0.69",
  "tracing",

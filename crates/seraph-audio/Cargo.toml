@@ -10,7 +10,6 @@ description = "Seraph audio player — audio backend abstraction (WASAPI, ASIO, 
 seraph-core = { workspace = true }
 seraph-decoder = { workspace = true }
 seraph-dsp = { workspace = true }
-seraph-visualizer = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

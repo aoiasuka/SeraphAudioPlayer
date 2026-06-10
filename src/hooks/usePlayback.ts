@@ -26,8 +26,12 @@ export function usePlayback() {
         if (eventTrackId && track?.id && eventTrackId !== track.id) {
           return state.currentTime > 0 ? { currentTime: 0 } : {};
         }
-        const duration = track?.duration ?? Number.POSITIVE_INFINITY;
-        return { currentTime: Math.max(0, Math.min(seconds, duration)) };
+        // M-7：仅在已知时长(>0)时才钳制，否则透传后端进度，
+        // 避免 duration 探测失败(=0)的曲目进度永远停在 0:00。
+        const duration = track?.duration;
+        const clamped =
+          duration && duration > 0 ? Math.min(seconds, duration) : seconds;
+        return { currentTime: Math.max(0, clamped) };
       });
       return;
     }

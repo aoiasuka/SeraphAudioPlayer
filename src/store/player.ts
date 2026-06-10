@@ -193,6 +193,50 @@ function prevTrackIndex(
     : prevSequentialTrackIndex(playlist, currentTrackIndex);
 }
 
+// M-5：缓存「下一首」索引。随机模式下只在曲目/模式/历史变化时重抽一次，
+// 避免 nextTrackPreview 在 selector 里每次渲染都 Math.random —— 旧实现会让
+// UpNext 卡片高频闪变，且 nextTrack 独立再抽一次导致预览与实际切歌不一致。
+let nextIndexCache: { key: string; index: number } | null = null;
+
+function nextIndexCacheKey(
+  playlist: Track[],
+  currentTrackIndex: number,
+  shuffleMode: boolean,
+  recentTrackIds: string[]
+) {
+  return [
+    playlist.length,
+    currentTrackIndex,
+    playlist[currentTrackIndex]?.id ?? "",
+    shuffleMode ? "s" : "o",
+    recentTrackIds.join(","),
+  ].join("|");
+}
+
+function resolveNextIndex(
+  playlist: Track[],
+  currentTrackIndex: number,
+  shuffleMode: boolean,
+  recentTrackIds: string[]
+) {
+  if (playlist.length === 0) return -1;
+  const key = nextIndexCacheKey(
+    playlist,
+    currentTrackIndex,
+    shuffleMode,
+    recentTrackIds
+  );
+  if (nextIndexCache && nextIndexCache.key === key) return nextIndexCache.index;
+  const index = nextTrackIndex(
+    playlist,
+    currentTrackIndex,
+    shuffleMode,
+    recentTrackIds
+  );
+  nextIndexCache = { key, index };
+  return index;
+}
+
 function sendCommand(cmd: string, args?: Record<string, unknown>) {
   void invoke(cmd, args).catch((err) => {
     // eslint-disable-next-line no-console
@@ -205,7 +249,8 @@ async function sendCommandAsync(cmd: string, args?: Record<string, unknown>) {
 }
 
 async function applyOutputConfiguration() {
-  const { currentDeviceId, devices, driverKind } = usePlayerStore.getState();
+  const { currentDeviceId, devices, driverKind, volume, isMuted } =
+    usePlayerStore.getState();
   await sendCommandAsync("set_output_driver", { driver: driverKind });
   if (
     devices !== mockDevices &&
@@ -213,6 +258,9 @@ async function applyOutputConfiguration() {
   ) {
     await sendCommandAsync("select_output_device", { deviceId: currentDeviceId });
   }
+  // M-4：每次播放前同步音量，避免重启后引擎停在默认 0.7 而 UI 显示其它值，
+  // 造成「UI 显示 20% 实际 70%」的突然大音量。
+  await sendCommandAsync("set_volume", { volume: isMuted ? 0 : volume });
 }
 
 async function sendPlayCommand(track: Track, startSeconds = 0) {
@@ -680,14 +728,13 @@ export const usePlayerStore = create<PlayerStore>()(
 
   nextTrackPreview: () => {
     const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
-    if (playlist.length === 0) return null;
-    const next = nextTrackIndex(
+    const next = resolveNextIndex(
       playlist,
       currentTrackIndex,
       shuffleMode,
       recentTrackIds
     );
-    return next >= 0 ? playlist[next] : null;
+    return next >= 0 ? playlist[next] ?? null : null;
   },
 
   togglePlayback: () => {
@@ -738,14 +785,14 @@ export const usePlayerStore = create<PlayerStore>()(
   nextTrack: () => {
     const { currentTrackIndex, playlist, recentTrackIds, shuffleMode } = get();
     if (playlist.length === 0) return;
-    const next = nextTrackIndex(
+    // M-5：与 nextTrackPreview 共用缓存的索引，保证「预览的那首 == 实际切到的那首」。
+    const next = resolveNextIndex(
       playlist,
       currentTrackIndex,
       shuffleMode,
       recentTrackIds
     );
     if (next < 0) return;
-    sendCommand("next_track");
     get().loadTrack(next);
     get().showNotification(`已切换到: ${playlist[next].title}`);
   },
@@ -760,7 +807,6 @@ export const usePlayerStore = create<PlayerStore>()(
       recentTrackIds
     );
     if (prev < 0) return;
-    sendCommand("prev_track");
     get().loadTrack(prev);
     get().showNotification(`已切换到: ${playlist[prev].title}`);
   },
@@ -910,16 +956,22 @@ export const usePlayerStore = create<PlayerStore>()(
       const cached = await invoke<Track[]>("get_playlist");
       if (!Array.isArray(cached) || cached.length === 0) return;
 
-      set((state) => ({
-        ...dedupeTracksWithLiked(
+      set((state) => {
+        const prevId = state.playlist[state.currentTrackIndex]?.id;
+        const merged = dedupeTracksWithLiked(
           mergeTracksByPath(state.playlist, cached),
           state.liked
-        ),
-        currentTrackIndex:
-          state.playlist.length === 0 && cached.length > 0
-            ? 0
-            : state.currentTrackIndex,
-      }));
+        );
+        // M-8：合并/去重会改变顺序与长度，按曲目 id 重定位当前曲目，
+        // 否则 currentTrackIndex 可能指向别的歌，甚至越界返回 null。
+        const remapped = prevId
+          ? merged.playlist.findIndex((track) => track.id === prevId)
+          : -1;
+        return {
+          ...merged,
+          currentTrackIndex: remapped >= 0 ? remapped : 0,
+        };
+      });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: get_playlist", err);

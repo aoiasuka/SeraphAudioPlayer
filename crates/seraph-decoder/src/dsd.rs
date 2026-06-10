@@ -168,16 +168,24 @@ impl Decoder for DsdDecoder {
         }
 
         let mut raw = vec![0_u8; read_len];
-        let bytes_read = self
+        let file = self
             .file
             .as_mut()
-            .ok_or_else(|| DecoderError::Internal("file is not open".into()))?
-            .read(&mut raw)?;
-        if bytes_read == 0 {
+            .ok_or_else(|| DecoderError::Internal("file is not open".into()))?;
+        // 单次 read 不保证读满 read_len（Read trait 允许短读）；循环读满直到 EOF，
+        // 配合 decode_dsf_block 的越界保护，彻底消除截断/损坏 DSF 的 panic 与错位。
+        let mut filled = 0usize;
+        while filled < read_len {
+            match file.read(&mut raw[filled..])? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        if filled == 0 {
             return Ok(None);
         }
-        raw.truncate(bytes_read);
-        self.data_read += bytes_read as u64;
+        raw.truncate(filled);
+        self.data_read += filled as u64;
 
         let order = layout.bit_order();
         let mut samples = match layout {
@@ -461,13 +469,16 @@ fn decode_dsf_block(
         return Vec::new();
     }
 
-    // 末块只解码所有通道都能完整覆盖的 PCM 帧数，避免静默截断声道导致 ring 错位。
-    // (原 bug: 当末块 raw.len() < channels*block_size 时，channels 被偷偷调小一倍。)
-    let per_channel_bytes = raw.len() / channels;
-    if per_channel_bytes < DSD_BYTES_PER_PCM_SAMPLE {
+    // DSF 数据按「每声道一整块 block_size_per_channel 字节」交错存放。
+    // 末块组可能因单次 read 短读 / 文件损坏而不足 channels*block_size：
+    // 必须以偏移最大的末声道(channel = channels-1)能覆盖的字节数来限制帧数，
+    // 否则按完整 block 步长索引第 2+ 声道会 slice 越界 panic（原 bug）。
+    let last_channel_start = (channels - 1) * block_size_per_channel;
+    if raw.len() <= last_channel_start {
+        // 末声道数据完全缺失，无法解出任何完整帧
         return Vec::new();
     }
-    let usable_bytes = per_channel_bytes.min(block_size_per_channel);
+    let usable_bytes = (raw.len() - last_channel_start).min(block_size_per_channel);
     let pcm_frames = usable_bytes / DSD_BYTES_PER_PCM_SAMPLE;
     if pcm_frames == 0 {
         return Vec::new();
@@ -639,6 +650,23 @@ mod tests {
         assert!(decoder.next_packet().unwrap().is_none());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn decode_dsf_block_truncated_last_channel_does_not_panic() {
+        // 复现旧越界 bug：channels=2, block_size=4096，末块组只短读到 5000 字节。
+        // 旧实现按完整 block 步长索引第 2 声道 → &raw[6584..6592] 越界 panic。
+        let raw = vec![0xaa_u8; 5000];
+        let samples = decode_dsf_block(&raw, 2, 4096, BitOrder::LsbFirst);
+        // 末声道起点 4096，仅剩 904 字节 → 113 帧 × 2 声道，且不 panic
+        assert_eq!(samples.len(), 113 * 2);
+    }
+
+    #[test]
+    fn decode_dsf_block_drops_block_with_missing_last_channel() {
+        // raw 不足以覆盖末声道起点（4096）→ 无完整帧，安全返回空
+        let raw = vec![0xaa_u8; 4096];
+        assert!(decode_dsf_block(&raw, 2, 4096, BitOrder::LsbFirst).is_empty());
     }
 
     fn write_test_dsf(path: &Path) {

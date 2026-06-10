@@ -39,7 +39,4 @@ pub enum PlayerEvent {
     Error {
         message: String,
     },
-    Spectrum {
-        bins: Vec<f32>,
-    },
 }

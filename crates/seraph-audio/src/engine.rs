@@ -1,6 +1,6 @@
 use crate::{
     backend::{BackendError, Result},
-    device::output_device_by_id,
+    device::{device_name_and_occurrence, output_device_by_id},
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -11,7 +11,6 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use seraph_core::{EventBus, PlayerEvent};
 use seraph_decoder::{open_decoder, Decoder, StreamInfo};
 use seraph_dsp::{resample_interleaved_linear, StatefulSincResampler};
-use seraph_visualizer::{SimpleVisualizer, Visualizer};
 use std::{
     path::PathBuf,
     sync::{
@@ -27,9 +26,6 @@ use tracing::{debug, warn};
 const TARGET_BUFFER_SECONDS: usize = 3;
 const QUEUE_SLEEP: Duration = Duration::from_millis(5);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
-const SPECTRUM_INTERVAL: Duration = Duration::from_millis(66);
-const SPECTRUM_FFT_SIZE: usize = 1024;
-const SPECTRUM_BINS: usize = 32;
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
 
 #[derive(Clone)]
@@ -284,19 +280,36 @@ impl PlaybackEngine {
 
         let (stream, render_worker) = match self.driver {
             OutputDriver::WasapiExclusive => {
+                // L-17：把所选 device_id 解析成「同名设备序号」，供 WASAPI 按序号精确匹配；
+                // 选了设备但解析失败退回 0（按名首个），未选设备(None)则用默认设备。
+                let device_occurrence = match self.selected_device_id.as_deref() {
+                    Some(id) => Some(
+                        device_name_and_occurrence(id)
+                            .map(|(_, occurrence)| occurrence)
+                            .unwrap_or(0),
+                    ),
+                    None => None,
+                };
                 let worker = spawn_wasapi_exclusive_render_worker(
-                    self.selected_device_id.clone(),
+                    device_occurrence,
                     device_name,
                     config.clone(),
                     sample_format,
                     shared.clone(),
                     consumer,
+                    self.event_bus.clone(),
                 )?;
                 (None, Some(worker))
             }
             OutputDriver::Shared => {
-                let stream =
-                    build_output_stream(&device, &config, sample_format, shared.clone(), consumer)?;
+                let stream = build_output_stream(
+                    &device,
+                    &config,
+                    sample_format,
+                    shared.clone(),
+                    consumer,
+                    self.event_bus.clone(),
+                )?;
                 stream
                     .play()
                     .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
@@ -516,14 +529,34 @@ impl PlaybackShared {
     }
 }
 
+/// 运行期渲染失败统一上报：置 stopped + 发 Error/PlaybackStopped（只发一次），
+/// 让解码线程退出，避免设备丢失（拔出/被独占抢占）后 UI 永久假死（H-2）。
+fn report_render_failure(event_bus: &EventBus, shared: &PlaybackShared, err: &BackendError) {
+    if !shared.stopped.swap(true, Ordering::AcqRel) {
+        event_bus.publish(PlayerEvent::Error {
+            message: err.to_string(),
+        });
+        event_bus.publish(PlayerEvent::PlaybackStopped);
+    }
+}
+
 fn build_output_stream(
     device: &cpal::Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
     mut consumer: Consumer<QueuedSample>,
+    event_bus: EventBus,
 ) -> Result<Stream> {
-    let err_fn = |err| warn!("audio output stream error: {err}");
+    let err_shared = shared.clone();
+    let err_fn = move |err: cpal::StreamError| {
+        warn!("audio output stream error: {err}");
+        report_render_failure(
+            &event_bus,
+            &err_shared,
+            &BackendError::DeviceLost(err.to_string()),
+        );
+    };
     let mut observed_generation = shared.buffer_generation();
     match sample_format {
         SampleFormat::F32 => device
@@ -619,24 +652,26 @@ fn select_output_config(
 
 #[cfg(windows)]
 fn spawn_wasapi_exclusive_render_worker(
-    selected_device_id: Option<String>,
+    device_occurrence: Option<usize>,
     device_name: String,
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
     consumer: Consumer<QueuedSample>,
+    event_bus: EventBus,
 ) -> Result<JoinHandle<Result<()>>> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let shared_for_worker = shared.clone();
     let worker = thread::spawn(move || {
         run_wasapi_exclusive_render_worker(
-            selected_device_id,
+            device_occurrence,
             device_name,
             config,
             sample_format,
             shared_for_worker,
             consumer,
             ready_tx,
+            event_bus,
         )
     });
 
@@ -662,12 +697,13 @@ fn spawn_wasapi_exclusive_render_worker(
 
 #[cfg(not(windows))]
 fn spawn_wasapi_exclusive_render_worker(
-    _selected_device_id: Option<String>,
+    _device_occurrence: Option<usize>,
     _device_name: String,
     _config: StreamConfig,
     _sample_format: SampleFormat,
     _shared: Arc<PlaybackShared>,
     _consumer: Consumer<QueuedSample>,
+    _event_bus: EventBus,
 ) -> Result<JoinHandle<Result<()>>> {
     Err(BackendError::ExclusiveModeUnavailable(
         "WASAPI exclusive output is only available on Windows".into(),
@@ -675,14 +711,37 @@ fn spawn_wasapi_exclusive_render_worker(
 }
 
 #[cfg(windows)]
+fn find_render_device_by_occurrence(
+    collection: &wasapi::DeviceCollection,
+    name: &str,
+    occurrence: usize,
+) -> Option<wasapi::Device> {
+    let count = collection.get_nbr_devices().ok()?;
+    let mut seen = 0usize;
+    for index in 0..count {
+        let Ok(device) = collection.get_device_at_index(index) else {
+            continue;
+        };
+        if device.get_friendlyname().ok().as_deref() == Some(name) {
+            if seen == occurrence {
+                return Some(device);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn run_wasapi_exclusive_render_worker(
-    selected_device_id: Option<String>,
+    device_occurrence: Option<usize>,
     device_name: String,
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
     mut consumer: Consumer<QueuedSample>,
     ready_tx: Sender<std::result::Result<(), String>>,
+    event_bus: EventBus,
 ) -> Result<()> {
     use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
@@ -704,15 +763,22 @@ fn run_wasapi_exclusive_render_worker(
 
         let enumerator = wasapi::DeviceEnumerator::new()
             .map_err(|err| BackendError::Internal(err.to_string()))?;
-        let device = if selected_device_id.is_some() {
-            enumerator
-                .get_device_collection(&Direction::Render)
-                .and_then(|collection| collection.get_device_with_name(&device_name))
-                .map_err(|err| BackendError::DeviceLost(err.to_string()))?
-        } else {
-            enumerator
+        let device = match device_occurrence {
+            Some(occurrence) => {
+                let collection = enumerator
+                    .get_device_collection(&Direction::Render)
+                    .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+                // L-17：同名设备按 0-based 序号取第 N 个；找不到回退按名首个，不弱于旧行为。
+                match find_render_device_by_occurrence(&collection, &device_name, occurrence) {
+                    Some(device) => device,
+                    None => collection
+                        .get_device_with_name(&device_name)
+                        .map_err(|err| BackendError::DeviceLost(err.to_string()))?,
+                }
+            }
+            None => enumerator
                 .get_default_device(&Direction::Render)
-                .map_err(|err| BackendError::DeviceLost(err.to_string()))?
+                .map_err(|err| BackendError::DeviceLost(err.to_string()))?,
         };
 
         let mut audio_client = device
@@ -811,9 +877,15 @@ fn run_wasapi_exclusive_render_worker(
     let mut observed_generation = shared.buffer_generation();
 
     while !shared.stopped.load(Ordering::Acquire) {
-        let frames = audio_client
-            .get_available_space_in_frames()
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let frames = match audio_client.get_available_space_in_frames() {
+            Ok(frames) => frames,
+            Err(err) => {
+                // H-2：运行期设备丢失（拔出/被独占抢占），通知前端并退出。
+                let err = BackendError::DeviceLost(err.to_string());
+                report_render_failure(&event_bus, &shared, &err);
+                return Err(err);
+            }
+        };
         if frames > 0 {
             let bytes = render_wasapi_output_bytes(
                 frames as usize,
@@ -822,9 +894,11 @@ fn run_wasapi_exclusive_render_worker(
                 &mut consumer,
                 &mut observed_generation,
             );
-            render_client
-                .write_to_device(frames as usize, &bytes, None)
-                .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+            if let Err(err) = render_client.write_to_device(frames as usize, &bytes, None) {
+                let err = BackendError::DeviceLost(err.to_string());
+                report_render_failure(&event_bus, &shared, &err);
+                return Err(err);
+            }
         }
         thread::sleep(sleep_period);
     }
@@ -951,24 +1025,91 @@ fn run_decode_worker(
     let mut resampler =
         StatefulSincResampler::new(input_rate, shared.output_rate, shared.output_channels)
             .map_err(|err| BackendError::Internal(err.to_string()))?;
-    let visualizer =
-        SimpleVisualizer::new(SPECTRUM_FFT_SIZE, SPECTRUM_BINS, shared.output_channels)
-            .map_err(|err| BackendError::Internal(err.to_string()))?;
     let mut last_progress = Instant::now();
-    let mut last_spectrum = Instant::now();
     let mut remap_scratch: Vec<f32> = Vec::new();
     let mut output_scratch: Vec<f32> = Vec::new();
 
-    while !shared.stopped.load(Ordering::Acquire) {
-        if let Some(seconds) = shared.seek_request.lock().take() {
-            decoder
-                .seek(seconds)
-                .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
-            // seek 后 resampler 内部 history 已属过去时间段，必须 reset
-            resampler.reset();
+    // 外层 session 循环：解码到 EOF 后进入 drain；drain 期间若收到 seek 请求，
+    // 回主循环重新 seek 并继续解码（H-3：避免曲尾回拖被误判为播放结束）。
+    'session: loop {
+        // ---- 主解码循环 ----
+        loop {
+            if shared.stopped.load(Ordering::Acquire) {
+                return Ok(());
+            }
+
+            if let Some(seconds) = shared.seek_request.lock().take() {
+                decoder
+                    .seek(seconds)
+                    .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+                // seek 后 resampler 内部 history 已属过去时间段，必须 reset
+                resampler.reset();
+            }
+
+            if shared.paused.load(Ordering::Acquire) {
+                publish_progress_if_due(
+                    track_id,
+                    shared,
+                    event_bus,
+                    info.duration_seconds,
+                    &mut last_progress,
+                );
+                thread::sleep(QUEUE_SLEEP);
+                continue;
+            }
+
+            if producer.slots() == 0 {
+                publish_progress_if_due(
+                    track_id,
+                    shared,
+                    event_bus,
+                    info.duration_seconds,
+                    &mut last_progress,
+                );
+                thread::sleep(QUEUE_SLEEP);
+                continue;
+            }
+
+            let Some(packet) = decoder
+                .next_packet()
+                .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?
+            else {
+                break; // EOF → 进入 drain
+            };
+
+            adapt_samples_into(
+                &packet.samples,
+                input_channels,
+                shared.output_channels,
+                &mut resampler,
+                &mut remap_scratch,
+                &mut output_scratch,
+            )?;
+            push_samples(
+                &output_scratch,
+                shared,
+                event_bus,
+                track_id,
+                info.duration_seconds,
+                &mut last_progress,
+                &mut producer,
+            );
         }
 
-        if shared.paused.load(Ordering::Acquire) {
+        // ---- EOF 后 drain：等 ring 被 render 消费完才声明真正结束 ----
+        // 注意：paused 时不 break（旧 bug #5：暂停 EOF 会把 ring 剩余样本吞掉），
+        // 等用户 resume 或 stop 再前进。drain 期间命中 seek 请求则回主循环（H-3）。
+        loop {
+            if shared.stopped.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if shared.seek_request.lock().is_some() {
+                // 留给主循环统一 take + decoder.seek + resampler.reset
+                continue 'session;
+            }
+            if producer.slots() >= shared.max_buffer_samples {
+                return Ok(());
+            }
             publish_progress_if_due(
                 track_id,
                 shared,
@@ -977,83 +1118,8 @@ fn run_decode_worker(
                 &mut last_progress,
             );
             thread::sleep(QUEUE_SLEEP);
-            continue;
         }
-
-        if producer.slots() == 0 {
-            publish_progress_if_due(
-                track_id,
-                shared,
-                event_bus,
-                info.duration_seconds,
-                &mut last_progress,
-            );
-            thread::sleep(QUEUE_SLEEP);
-            continue;
-        }
-
-        let Some(packet) = decoder
-            .next_packet()
-            .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?
-        else {
-            break;
-        };
-
-        adapt_samples_into(
-            &packet.samples,
-            input_channels,
-            shared.output_channels,
-            &mut resampler,
-            &mut remap_scratch,
-            &mut output_scratch,
-        )?;
-        push_samples(
-            &output_scratch,
-            shared,
-            event_bus,
-            track_id,
-            info.duration_seconds,
-            &mut last_progress,
-            &mut producer,
-        );
-        publish_spectrum_if_due(&visualizer, &output_scratch, event_bus, &mut last_spectrum)?;
     }
-
-    // EOF 后 drain：等 ring 被 render 消费完才声明真正结束。
-    // 注意：paused 时不 break（旧 bug #5：暂停 EOF 会把 ring 剩余样本吞掉），
-    // 等用户 resume 或 stop 再前进；只有外部 stop 才退出。
-    while !shared.stopped.load(Ordering::Acquire) && producer.slots() < shared.max_buffer_samples {
-        publish_progress_if_due(
-            track_id,
-            shared,
-            event_bus,
-            info.duration_seconds,
-            &mut last_progress,
-        );
-        thread::sleep(QUEUE_SLEEP);
-    }
-
-    Ok(())
-}
-
-fn publish_spectrum_if_due(
-    visualizer: &SimpleVisualizer,
-    samples: &[f32],
-    event_bus: &EventBus,
-    last_spectrum: &mut Instant,
-) -> Result<()> {
-    visualizer
-        .push_samples(samples)
-        .map_err(|err| BackendError::Internal(err.to_string()))?;
-    if last_spectrum.elapsed() < SPECTRUM_INTERVAL {
-        return Ok(());
-    }
-
-    *last_spectrum = Instant::now();
-    if let Some(frame) = visualizer.latest_frame() {
-        event_bus.publish(PlayerEvent::Spectrum { bins: frame.bins });
-    }
-    Ok(())
 }
 
 fn push_samples(
@@ -1067,11 +1133,10 @@ fn push_samples(
 ) {
     let mut offset = 0;
     while offset < samples.len() && !shared.stopped.load(Ordering::Acquire) {
-        if let Some(seconds) = shared.seek_request.lock().take() {
-            shared.frame_position.store(
-                seconds_to_frames(seconds, shared.output_rate),
-                Ordering::Relaxed,
-            );
+        // H-1：检测到 seek 请求立即让出本包，但**不消费**请求——
+        // 交由主解码循环统一执行 decoder.seek + resampler.reset。
+        // frame_position 已在 engine.seek() 中更新，这里无需重设。
+        if shared.seek_request.lock().is_some() {
             return;
         }
 
@@ -1111,9 +1176,16 @@ fn publish_progress_if_due(
     }
 
     *last_progress = Instant::now();
+    let progress = shared.progress_seconds();
     event_bus.publish(PlayerEvent::Progress {
         track_id: track_id.to_string(),
-        seconds: shared.progress_seconds().min(total_seconds.max(0.0)),
+        // M-7：仅在已知总时长(>0)时才钳制，否则透传真实进度，
+        // 避免 duration 探测失败的曲目进度永远停在 0:00。
+        seconds: if total_seconds > 0.0 {
+            progress.min(total_seconds)
+        } else {
+            progress
+        },
         total: total_seconds,
     });
 }

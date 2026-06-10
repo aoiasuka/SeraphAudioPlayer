@@ -105,6 +105,37 @@ pub(crate) fn output_device_by_id(device_id: &str) -> Result<cpal::Device> {
     Err(BackendError::DeviceNotFound)
 }
 
+/// 返回 device_id 对应输出设备的名字，及其在「同名设备」中的 0-based 序号。
+/// WASAPI 独占模式按设备名查找时用这个序号区分同名设备（L-17），
+/// 与 `output_device_by_id` 的 id 分配规则保持一致。
+pub(crate) fn device_name_and_occurrence(device_id: &str) -> Result<(String, usize)> {
+    let host = cpal::default_host();
+    let devices = host
+        .output_devices()
+        .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    for (index, device) in devices.enumerate() {
+        let name = device
+            .name()
+            .unwrap_or_else(|_| format!("Output Device {}", index + 1));
+        let base_id = device_id_for(&name);
+        let count = seen.entry(base_id.clone()).or_insert(0);
+        let occurrence = *count;
+        let candidate_id = if occurrence == 0 {
+            base_id.clone()
+        } else {
+            format!("{base_id}-{occurrence}")
+        };
+        *count += 1;
+        if candidate_id == device_id {
+            return Ok((name, occurrence));
+        }
+    }
+
+    Err(BackendError::DeviceNotFound)
+}
+
 fn capabilities_from_device(device: &cpal::Device) -> DeviceCapabilities {
     let mut sample_rates = BTreeSet::new();
     let mut bit_depths = BTreeSet::new();

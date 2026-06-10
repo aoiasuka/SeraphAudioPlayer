@@ -2,6 +2,7 @@ use std::{
     collections::{hash_map::DefaultHasher, BTreeMap},
     fs,
     hash::{Hash, Hasher},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -228,6 +229,8 @@ struct BilibiliSessionFile<'a> {
     has_secure_cookies: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     cookies: Option<&'a BTreeMap<String, String>>,
+    // L-11：持久化 cookie 过期时间，重启后不再把已过期 cookie 当永不过期的 session cookie。
+    cookie_expires: &'a BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -799,15 +802,19 @@ async fn ensure_audio_file(
 
     let mut last_error = None;
     for audio_url in audio_urls {
-        match download_audio_bytes(client, audio_url).await {
-            Ok(bytes) => {
-                write_audio_file(path, &bytes, ffmpeg_path)?;
+        let temp_path = temp_download_path(path);
+        match download_audio_to_file(client, audio_url, &temp_path).await {
+            Ok(()) => {
+                finalize_audio_file(&temp_path, path, ffmpeg_path)?;
                 // 写一个零字节 sentinel 标记缓存完整可用；
                 // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
                 let _ = fs::write(&sentinel, b"");
                 return Ok(());
             }
-            Err(err) => last_error = Some(err),
+            Err(err) => {
+                let _ = fs::remove_file(&temp_path);
+                last_error = Some(err);
+            }
         }
     }
 
@@ -822,12 +829,16 @@ fn ok_sentinel_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.ok"))
 }
 
-async fn download_audio_bytes(client: &Client, audio_url: &str) -> Result<Vec<u8>, String> {
+async fn download_audio_to_file(
+    client: &Client,
+    audio_url: &str,
+    temp_path: &Path,
+) -> Result<(), String> {
     if audio_url.trim().is_empty() {
         return Err("empty bilibili audio url".into());
     }
 
-    let response = client
+    let mut response = client
         .get(audio_url)
         .send()
         .await
@@ -845,15 +856,31 @@ async fn download_audio_bytes(client: &Client, audio_url: &str) -> Result<Vec<u8
         }
     }
 
-    let bytes = read_bytes_capped(response, MAX_AUDIO_DOWNLOAD_BYTES)
+    // L-13：流式写入临时文件，避免把整段 FLAC（数百 MB）整块驻留内存再二次复制。
+    let mut file = fs::File::create(temp_path)
+        .map_err(|err| format!("failed to create bilibili temp file: {err}"))?;
+    let mut written: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| format!("failed to read bilibili audio bytes: {err}"))?;
-
-    if bytes.is_empty() {
-        return Err("downloaded bilibili audio is empty".into());
+        .map_err(|err| format!("network read error: {err}"))?
+    {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > MAX_AUDIO_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bilibili audio exceeded {MAX_AUDIO_DOWNLOAD_BYTES} bytes; aborted"
+            ));
+        }
+        file.write_all(&chunk)
+            .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
     }
 
-    Ok(bytes)
+    if written == 0 {
+        return Err("downloaded bilibili audio is empty".into());
+    }
+    file.flush()
+        .map_err(|err| format!("failed to flush bilibili temp file: {err}"))?;
+    Ok(())
 }
 
 /// 增量读取响应体，超出上限即截断并报错；
@@ -896,11 +923,12 @@ async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<St
         .and_then(avatar_mime_type)
         .unwrap_or("image/jpeg")
         .to_string();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| format!("failed to read bilibili avatar bytes: {err}"))?;
-    if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
+    // L-12：增量读取并在超限时立即中止，避免重定向到大文件时白白吃内存。
+    let bytes = match read_bytes_capped(response, MAX_AVATAR_BYTES as u64).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    if bytes.is_empty() {
         return Ok(None);
     }
 
@@ -922,15 +950,16 @@ fn avatar_mime_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn write_audio_file(path: &Path, bytes: &[u8], ffmpeg_path: Option<&Path>) -> Result<(), String> {
-    let temp_path = temp_download_path(path);
-    fs::write(&temp_path, bytes)
-        .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
-
+fn finalize_audio_file(
+    temp_path: &Path,
+    path: &Path,
+    ffmpeg_path: Option<&Path>,
+) -> Result<(), String> {
+    // temp_path 已由 download_audio_to_file 流式写好；这里只做 remux 或就地改名。
     if let Some(ffmpeg_path) = ffmpeg_path {
-        match remux_audio(ffmpeg_path, &temp_path, path) {
+        match remux_audio(ffmpeg_path, temp_path, path) {
             Ok(()) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = fs::remove_file(temp_path);
                 return Ok(());
             }
             Err(_) => {
@@ -939,7 +968,7 @@ fn write_audio_file(path: &Path, bytes: &[u8], ffmpeg_path: Option<&Path>) -> Re
         }
     }
 
-    fs::rename(&temp_path, path)
+    fs::rename(temp_path, path)
         .map_err(|err| format!("failed to finalize bilibili audio file: {err}"))?;
     Ok(())
 }
@@ -1135,6 +1164,7 @@ fn write_session_file(
         face: &session.face,
         has_secure_cookies: session.has_secure_cookies || !session.cookies.is_empty(),
         cookies: include_cookies.then_some(&session.cookies),
+        cookie_expires: &session.cookie_expires,
     };
     let bytes = serde_json::to_vec(&disk_session)
         .map_err(|err| format!("failed to serialize bilibili session: {err}"))?;

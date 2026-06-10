@@ -253,6 +253,7 @@ impl Decoder for FfmpegDecoder {
                     return Ok(());
                 }
                 let mut remaining = bytes_to_skip;
+                let mut skipped = 0_u64;
                 let mut sink = [0_u8; 8192];
                 if let Some(stdout) = self.stdout.as_mut() {
                     while remaining > 0 {
@@ -261,12 +262,14 @@ impl Decoder for FfmpegDecoder {
                             Ok(0) => break,
                             Ok(n) => {
                                 remaining = remaining.saturating_sub(n as u64);
-                                self.frames_read += (n / (channels * std::mem::size_of::<f32>())) as u64;
+                                skipped += n as u64;
                             }
                             Err(err) => return Err(DecoderError::Io(err)),
                         }
                     }
                 }
+                // L-10：按累计跳过字节一次性换算帧数，避免逐 chunk 整除丢余数。
+                self.frames_read += frames_in_byte_run(skipped, channels);
                 return Ok(());
             }
         }
@@ -353,6 +356,14 @@ fn bytes_to_f32_into(bytes: &[u8], output: &mut Vec<f32>) {
     for chunk in bytes.chunks_exact(4) {
         output.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
+}
+
+/// 把跳读累计的总字节数换算成完整帧数。L-10：必须对**累计**字节做一次整除，
+/// 而不是对每个 read chunk 各自整除——多声道 frame_bytes 不整除读缓冲时，
+/// 逐 chunk 丢弃余数会让时间戳持续偏小漂移。
+fn frames_in_byte_run(byte_count: u64, channels: usize) -> u64 {
+    let frame_bytes = (channels.max(1) * std::mem::size_of::<f32>()) as u64;
+    byte_count / frame_bytes
 }
 
 /// 后台读取 ffmpeg stderr，保留尾部 STDERR_TAIL_LIMIT 字节供失败诊断。
@@ -544,5 +555,17 @@ mod tests {
         bytes_to_f32_into(&bytes, &mut samples);
 
         assert_eq!(samples, vec![0.25, -0.5]);
+    }
+
+    #[test]
+    fn frames_in_byte_run_accumulates_without_per_chunk_truncation() {
+        // 6 声道 f32：frame_bytes = 24，8192 % 24 = 8。三个 8192 chunk 的余数
+        // 累计到 24 = 整一帧。逐 chunk 整除会少算这一帧。
+        let channels = 6;
+        let total = 8192_u64 * 3; // 24576
+        assert_eq!(frames_in_byte_run(total, channels), 24576 / 24); // 1024
+        let per_chunk_sum = (8192 / 24) * 3; // 旧实现：1023
+        assert_eq!(per_chunk_sum, 1023);
+        assert_eq!(frames_in_byte_run(total, channels), 1024);
     }
 }

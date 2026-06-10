@@ -138,22 +138,35 @@ pub fn list_devices() -> Result<Vec<OutputDeviceInfo>, String> {
 }
 
 #[tauri::command]
-pub fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<ImportedTrack>, String> {
-    let mut tracks = Vec::new();
-    let mut seen_files = HashSet::new();
+pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<ImportedTrack>, String> {
+    // L-18：文件遍历 + lofty 解析 + 可能的 ffprobe 子进程都是阻塞 IO，
+    // 放到 spawn_blocking，避免占用 Tauri 命令调度线程、阻塞其它 IPC（含播放控制）。
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut tracks = Vec::new();
+        let mut seen_files = HashSet::new();
+        let mut visited_dirs = HashSet::new();
 
-    for path in paths {
-        collect_audio_files(PathBuf::from(path), &mut tracks, &mut seen_files)?;
-    }
+        for path in paths {
+            collect_audio_files(
+                PathBuf::from(path),
+                &mut tracks,
+                &mut seen_files,
+                &mut visited_dirs,
+                0,
+            )?;
+        }
 
-    if !tracks.is_empty() {
-        let cached = read_cached_tracks(&app).unwrap_or_default();
-        let merged = merge_cached_tracks(cached, &tracks);
-        write_cached_tracks(&app, &merged)?;
-        return Ok(imported_tracks_from_cache(&merged, &tracks));
-    }
+        if !tracks.is_empty() {
+            let cached = read_cached_tracks(&app).unwrap_or_default();
+            let merged = merge_cached_tracks(cached, &tracks);
+            write_cached_tracks(&app, &merged)?;
+            return Ok(imported_tracks_from_cache(&merged, &tracks));
+        }
 
-    Ok(tracks)
+        Ok(tracks)
+    })
+    .await
+    .map_err(|err| format!("import task panicked: {err}"))?
 }
 
 #[tauri::command]
@@ -699,18 +712,32 @@ fn provider_duration_ms(item: &Value) -> Option<u64> {
     None
 }
 
+const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
+
 fn collect_audio_files(
     path: PathBuf,
     tracks: &mut Vec<ImportedTrack>,
     seen_files: &mut HashSet<String>,
+    visited_dirs: &mut HashSet<PathBuf>,
+    depth: usize,
 ) -> Result<(), String> {
     if path.is_dir() {
+        // L-14：symlink / Windows junction 可能指向祖先目录导致无限递归栈溢出。
+        // 用 canonicalize 后的真实路径去重 + 递归深度上限双重防护。
+        if depth >= MAX_IMPORT_RECURSION_DEPTH {
+            return Ok(());
+        }
+        let real = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !visited_dirs.insert(real) {
+            return Ok(());
+        }
+
         let entries = fs::read_dir(&path)
             .map_err(|err| format!("failed to read directory {}: {err}", path.display()))?;
 
         for entry in entries {
             let entry = entry.map_err(|err| err.to_string())?;
-            collect_audio_files(entry.path(), tracks, seen_files)?;
+            collect_audio_files(entry.path(), tracks, seen_files, visited_dirs, depth + 1)?;
         }
         return Ok(());
     }
@@ -1947,7 +1974,8 @@ fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
         if !times.is_empty() {
             if let Some(text) = clean_lyric_text(body) {
                 for time in times {
-                    let shifted = ((time * 1000.0).round() as i64 + offset_ms).max(0);
+                    // L-9：LRC 通行约定——正 offset 让歌词提前显示（time - offset）。
+                    let shifted = ((time * 1000.0).round() as i64 - offset_ms).max(0);
                     timed.push(LyricLine {
                         time: shifted as f64 / 1000.0,
                         text: text.clone(),
@@ -2529,11 +2557,12 @@ mod tests {
         );
 
         assert_eq!(lyrics.len(), 3);
-        assert!((lyrics[0].time - 0.7).abs() < 0.001);
+        // L-9：OFFSET:-500（负 offset）让歌词延后 0.5s（time - offset = time + 0.5）。
+        assert!((lyrics[0].time - 1.7).abs() < 0.001);
         assert_eq!(lyrics[0].text, "comma");
-        assert!((lyrics[1].time - 0.734).abs() < 0.001);
+        assert!((lyrics[1].time - 1.734).abs() < 0.001);
         assert_eq!(lyrics[1].text, "krc");
-        assert!((lyrics[2].time - 1.5).abs() < 0.001);
+        assert!((lyrics[2].time - 2.5).abs() < 0.001);
         assert_eq!(lyrics[2].text, "a b c");
     }
 
@@ -2584,10 +2613,11 @@ mod tests {
 
     #[test]
     fn applies_lrc_offset() {
+        // L-9：正 offset 让歌词提前显示 → 1.00s 标签 - 0.5s offset = 0.5s
         let lyrics = parse_lyrics_text("[offset:500]\n[00:01.00]提前半秒");
 
         assert_eq!(lyrics.len(), 1);
-        assert!((lyrics[0].time - 1.5).abs() < 0.001);
+        assert!((lyrics[0].time - 0.5).abs() < 0.001);
     }
 
     #[test]
