@@ -599,6 +599,66 @@ fn build_output_stream(
                 None,
             )
             .map_err(map_build_stream_error),
+        SampleFormat::I8 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [i8], _| {
+                    render_output_i8(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
+        SampleFormat::U8 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [u8], _| {
+                    render_output_u8(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
+        SampleFormat::I32 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [i32], _| {
+                    render_output_i32(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
+        SampleFormat::U32 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [u32], _| {
+                    render_output_u32(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
+        SampleFormat::I64 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [i64], _| {
+                    render_output_i64(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
+        SampleFormat::U64 => device
+            .build_output_stream(
+                config,
+                move |data: &mut [u64], _| {
+                    render_output_u64(data, &shared, &mut consumer, &mut observed_generation)
+                },
+                err_fn,
+                None,
+            )
+            .map_err(map_build_stream_error),
         other => Err(BackendError::UnsupportedFormat(format!(
             "output sample format {other:?}"
         ))),
@@ -633,21 +693,50 @@ fn select_output_config(
     let desired_rate = CpalSampleRate(info.sample_rate.0.max(1));
     let desired_channels = info.channels.0.max(1);
 
-    for range in configs {
-        if range.channels() != desired_channels {
-            continue;
-        }
-        if let Some(config) = range.try_with_sample_rate(desired_rate) {
-            let sample_format = config.sample_format();
-            return Ok((sample_format, config.into()));
-        }
+    // 收集「声道匹配 + 能匹配目标采样率」的候选,只保留引擎能渲染的采样格式,
+    // 再按格式质量优先级(F32 > I32 > … > U8)挑最优。这样即使设备把 U8 之类的
+    // 低质量格式排在前面(常见于某些 Hi-Res 采样率只有低位深配置覆盖的情况),
+    // 也不会被误选,从而避免 build_output_stream 报 "unsupported format: ... U8"。
+    let best = configs
+        .filter(|range| range.channels() == desired_channels)
+        .filter_map(|range| range.try_with_sample_rate(desired_rate))
+        .filter(|config| is_engine_output_format(config.sample_format()))
+        .min_by_key(|config| output_format_priority(config.sample_format()));
+    if let Some(config) = best {
+        let sample_format = config.sample_format();
+        return Ok((sample_format, config.into()));
     }
 
+    // 没有「精确采样率 + 受支持格式」的组合(例如设备不支持该 Hi-Res 采样率):
+    // 退回设备默认输出配置(通常为 F32),由解码线程重采样到设备采样率后再输出。
     let supported_config = device
         .default_output_config()
         .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
     let sample_format = supported_config.sample_format();
     Ok((sample_format, supported_config.into()))
+}
+
+/// `build_output_stream` 能够渲染的输出采样格式。
+fn is_engine_output_format(format: SampleFormat) -> bool {
+    output_format_priority(format) != u8::MAX
+}
+
+/// 输出采样格式的选用优先级,数值越小越优先(F32 与引擎内部 f32 一致,优先级最高)。
+/// 引擎无法渲染的格式返回 `u8::MAX`,既表示「不支持」也使其排到最后。
+fn output_format_priority(format: SampleFormat) -> u8 {
+    match format {
+        SampleFormat::F32 => 0,
+        SampleFormat::I32 => 1,
+        SampleFormat::U32 => 2,
+        SampleFormat::I16 => 3,
+        SampleFormat::U16 => 4,
+        SampleFormat::F64 => 5,
+        SampleFormat::I64 => 6,
+        SampleFormat::U64 => 7,
+        SampleFormat::I8 => 8,
+        SampleFormat::U8 => 9,
+        _ => u8::MAX,
+    }
 }
 
 #[cfg(windows)]
@@ -1250,6 +1339,108 @@ fn render_output_u16(
         observed_generation,
         |sample, value| {
             *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+        },
+    );
+}
+
+fn render_output_i8(
+    data: &mut [i8],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = (value.clamp(-1.0, 1.0) * i8::MAX as f32) as i8;
+        },
+    );
+}
+
+fn render_output_u8(
+    data: &mut [u8],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u8::MAX as f32) as u8;
+        },
+    );
+}
+
+fn render_output_i32(
+    data: &mut [i32],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = (f64::from(value.clamp(-1.0, 1.0)) * i32::MAX as f64) as i32;
+        },
+    );
+}
+
+fn render_output_u32(
+    data: &mut [u32],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = ((f64::from(value.clamp(-1.0, 1.0)) * 0.5 + 0.5) * u32::MAX as f64) as u32;
+        },
+    );
+}
+
+fn render_output_i64(
+    data: &mut [i64],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = (f64::from(value.clamp(-1.0, 1.0)) * i64::MAX as f64) as i64;
+        },
+    );
+}
+
+fn render_output_u64(
+    data: &mut [u64],
+    shared: &PlaybackShared,
+    consumer: &mut Consumer<QueuedSample>,
+    observed_generation: &mut u32,
+) {
+    render_output(
+        data,
+        shared,
+        consumer,
+        observed_generation,
+        |sample, value| {
+            *sample = ((f64::from(value.clamp(-1.0, 1.0)) * 0.5 + 0.5) * u64::MAX as f64) as u64;
         },
     );
 }
