@@ -21,12 +21,12 @@ export function Dialog({ open, onClose, children, className }: DialogProps) {
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-md p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4"
       onClick={onClose}
     >
       <div
         className={cn(
-          "relative w-full max-w-md rounded-xl border border-black/10 bg-white p-6 shadow-2xl",
+          "relative w-full max-w-md border-2 border-ink bg-card p-6 shadow-[6px_6px_0_rgba(43,39,34,0.25)]",
           className
         )}
         onClick={(e) => e.stopPropagation()}

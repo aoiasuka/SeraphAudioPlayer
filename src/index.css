@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   Seraph · Archive 档案 / 打字机风格设计系统
+   ============================================================ */
+:root {
+  --paper: #f5f1e8; /* 牛皮纸白 */
+  --paper2: #ece6d8;
+  --card: #fbf9f3;
+  --ink: #2b2722;
+  --ink2: #6e675c;
+  --ink3: #aaa193;
+  --line: #d9d2c2;
+  --brown: #7a5c3e; /* 档案棕 */
+  --stamp: #b5482a; /* 印章红 */
+  --stamp-soft: #f3e2dc;
+  --tw: "Courier Prime", "Courier New", ui-monospace, monospace;
+  --serif: "Noto Serif SC", "Songti SC", serif;
+  --sans: "Noto Sans SC", "Segoe UI", -apple-system, sans-serif;
+}
+
 @layer base {
   html,
   body,
@@ -10,57 +29,62 @@
   }
 
   body {
-    font-family:
-      "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
-    color: #334155;
-    background: linear-gradient(
-      to bottom right,
-      #e9effd 0%,
-      #f1f3f9 50%,
-      #edf4f0 100%
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--paper);
+    /* 横向纹路，模拟档案纸张 */
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent 0 31px,
+      rgba(122, 92, 62, 0.045) 31px 32px
     );
     overflow: hidden;
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   ::-webkit-scrollbar {
-    width: 4px;
-    height: 4px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(0, 0, 0, 0.08);
-    border-radius: 99px;
+    background: var(--line);
+    border-radius: 0;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 0, 0, 0.16);
+    background: var(--ink3);
   }
 
+  /* 进度 / 音量滑块滑钮：档案棕 */
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #0891b2;
-    box-shadow: 0 0 6px rgba(8, 145, 178, 0.4);
+    width: 12px;
+    height: 12px;
+    border-radius: 0;
+    background: var(--ink);
+    border: 1.5px solid var(--ink);
     cursor: pointer;
     transition: transform 0.1s ease;
   }
   input[type="range"]::-webkit-slider-thumb:hover {
-    transform: scale(1.4);
+    background: var(--stamp);
+    border-color: var(--stamp);
+    transform: scale(1.2);
   }
 }
 
 @layer components {
-  .acrylic-sidebar {
-    background: rgba(248, 250, 252, 0.55);
-    backdrop-filter: blur(40px) saturate(190%);
-    -webkit-backdrop-filter: blur(40px) saturate(190%);
-    border-right: 1px solid rgba(0, 0, 0, 0.05);
+  /* 通用字体工具 */
+  .font-tw {
+    font-family: var(--tw);
+  }
+  .font-serif-sc {
+    font-family: var(--serif);
   }
 
   .no-scrollbar::-webkit-scrollbar {
@@ -71,179 +95,161 @@
     scrollbar-width: none;
   }
 
-  .acrylic-panel {
-    background: rgba(255, 255, 255, 0.4);
-    backdrop-filter: blur(30px) saturate(170%);
-    -webkit-backdrop-filter: blur(30px) saturate(170%);
-    border: 1px solid rgba(0, 0, 0, 0.04);
+  /* 应用外壳：牛皮纸 + 纹路 */
+  .app-shell {
+    background: var(--paper);
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent 0 31px,
+      rgba(122, 92, 62, 0.045) 31px 32px
+    );
   }
 
-  .acrylic-card {
-    background: rgba(255, 255, 255, 0.65);
-    border: 1px solid rgba(0, 0, 0, 0.04);
-    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
-    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  /* 文件夹卡片（主区头部档案夹） */
+  .folder-card {
+    border: 2px solid var(--ink);
+    background: var(--card);
+    box-shadow: 4px 4px 0 rgba(43, 39, 34, 0.12);
+    position: relative;
   }
 
-  .acrylic-card:hover {
-    background: rgba(255, 255, 255, 0.85);
-    border-color: rgba(0, 0, 0, 0.08);
-    box-shadow: 0 6px 24px rgba(15, 23, 42, 0.07);
+  /* 档案条目卡片 */
+  .archive-card {
+    border: 1.5px solid var(--line);
+    background: var(--card);
+    transition: 0.15s;
+  }
+  .archive-card:hover {
+    border-color: var(--ink);
+    box-shadow: 3px 3px 0 rgba(43, 39, 34, 0.15);
+  }
+  .archive-card.is-playing {
+    border: 2px solid var(--ink);
+    box-shadow: 4px 4px 0 var(--stamp);
   }
 
-  .album-breath {
-    animation: album-gentle-breath var(--album-breath-duration, 12s) ease-in-out infinite;
-    will-change: transform, box-shadow;
-    transition: box-shadow 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  /* 档案风按钮：硬阴影 + 按压位移 */
+  .stamp-btn {
+    border: 1.5px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: 2px 2px 0 rgba(43, 39, 34, 0.2);
+    transition: 0.1s;
+  }
+  .stamp-btn:hover {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 rgba(43, 39, 34, 0.2);
+  }
+  .stamp-btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: none;
   }
 
-  .ambient-aurora {
-    position: absolute;
-    width: 800px;
-    height: 800px;
-    border-radius: 50%;
-    filter: blur(140px);
-    opacity: 0.18;
-    pointer-events: none;
-    transition: background-color 2.5s cubic-bezier(0.16, 1, 0.3, 1), opacity 2.5s cubic-bezier(0.16, 1, 0.3, 1), filter 2.5s cubic-bezier(0.16, 1, 0.3, 1);
-    z-index: 0;
-    will-change: transform, opacity;
-  }
-
-  .ambient-aurora-1 {
-    animation: float-aurora-1 32s ease-in-out infinite alternate;
-  }
-
-  .ambient-aurora-2 {
-    animation: float-aurora-2 40s ease-in-out infinite alternate;
-  }
-
-  .ambient-aurora-3 {
-    animation: float-aurora-3 26s ease-in-out infinite alternate;
+  /* 文件标签（黑底纸字小标） */
+  .file-tab {
+    display: inline-block;
+    font-family: var(--tw);
+    font-size: 10px;
+    letter-spacing: 2px;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 5px 14px 4px;
   }
 
   /* 平滑切换页面的动画 */
   .animate-page-transition {
-    animation: page-enter 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation: page-enter 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
     will-change: transform, opacity, filter;
   }
 
-  .fluent-item {
+  /* 磁带机转盘 */
+  .reel {
+    width: 40px;
+    height: 40px;
+    border: 2px solid var(--ink);
+    border-radius: 50%;
     position: relative;
-    overflow: hidden;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    flex: none;
   }
-  .fluent-item::before {
+  .reel.spinning {
+    animation: reel-spin 4s linear infinite;
+  }
+  .reel::before {
     content: "";
     position: absolute;
-    inset: 0;
-    background: radial-gradient(
-      circle 80px at var(--fluent-x, 0px) var(--fluent-y, 0px),
-      rgba(0, 0, 0, 0.03),
-      transparent
-    );
-    opacity: 0;
-    transition: opacity 0.3s;
-    pointer-events: none;
+    inset: 11px;
+    border: 2px solid var(--ink);
+    border-radius: 50%;
   }
-  .fluent-item:hover::before {
-    opacity: 1;
-  }
-
-  .active-pill {
-    position: relative;
-  }
-  .active-pill::after {
+  .reel::after {
     content: "";
     position: absolute;
-    left: 0;
-    top: 25%;
-    height: 50%;
-    width: 3px;
-    background: #0891b2;
-    border-radius: 99px;
-    box-shadow: 0 0 8px rgba(8, 145, 178, 0.6);
+    left: 50%;
+    top: 2px;
+    width: 2px;
+    height: 7px;
+    background: var(--ink);
+    transform: translateX(-50%);
   }
 
-  .hires-badge {
-    background: linear-gradient(135deg, #fffbf0 0%, #fff8e1 100%);
-    border: 1px solid #d4af37;
-    box-shadow: 0 2px 10px rgba(212, 175, 55, 0.1);
+  /* 正在播放声波小动画 */
+  .bars {
+    display: inline-flex;
+    gap: 2px;
+    align-items: flex-end;
+    height: 11px;
+  }
+  .bars i {
+    width: 2.5px;
+    background: var(--stamp);
+    height: 3px;
+    animation: bars-bounce 0.7s infinite ease-in-out;
+  }
+  .bars i:nth-child(2) {
+    animation-delay: 0.22s;
+  }
+  .bars i:nth-child(3) {
+    animation-delay: 0.44s;
   }
 
-  .app-shell {
-    background: linear-gradient(
-      to bottom right,
-      #e9effd 0%,
-      #f1f3f9 50%,
-      #edf4f0 100%
-    );
+  /* 歌词打字机光标闪烁 */
+  .type-caret::after {
+    content: "▍";
+    color: var(--stamp);
+    animation: caret-blink 1s infinite;
+    margin-left: 1px;
   }
 }
 
-@keyframes float-aurora-1 {
-  0% {
-    transform: translate(0px, 0px) scale(1) rotate(0deg);
+@keyframes reel-spin {
+  to {
+    transform: rotate(360deg);
   }
-  33% {
-    transform: translate(60px, -45px) scale(1.1) rotate(60deg);
-  }
-  66% {
-    transform: translate(-30px, 60px) scale(0.9) rotate(120deg);
-  }
+}
+
+@keyframes bars-bounce {
+  0%,
   100% {
-    transform: translate(0px, 0px) scale(1) rotate(180deg);
-  }
-}
-
-@keyframes float-aurora-2 {
-  0% {
-    transform: translate(0px, 0px) scale(1) rotate(0deg);
+    height: 3px;
   }
   50% {
-    transform: translate(-80px, 40px) scale(1.15) rotate(-120deg);
-  }
-  100% {
-    transform: translate(0px, 0px) scale(1) rotate(-240deg);
+    height: 11px;
   }
 }
 
-@keyframes float-aurora-3 {
-  0% {
-    transform: translate(0px, 0px) scale(1) rotate(0deg);
-  }
-  40% {
-    transform: translate(50px, -50px) scale(0.85) rotate(45deg);
-  }
-  80% {
-    transform: translate(-40px, 30px) scale(1.05) rotate(90deg);
-  }
-  100% {
-    transform: translate(0px, 0px) scale(1) rotate(135deg);
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
   }
 }
 
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: translateY(12px) scale(0.995);
-    filter: blur(4px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
+    transform: translateY(0);
   }
 }
-
-@keyframes album-gentle-breath {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 12px 35px color-mix(in srgb, var(--album-glow-1, #06b6d4) 15%, transparent);
-  }
-  50% {
-    transform: scale(1.022);
-    box-shadow: 0 20px 48px color-mix(in srgb, var(--album-glow-2, #8b5cf6) 28%, transparent);
-  }
-}
-

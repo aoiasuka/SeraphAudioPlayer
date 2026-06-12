@@ -19,7 +19,7 @@ export const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
       max={max}
       step={step}
       className={cn(
-        "h-1 bg-black/10 rounded-lg appearance-none cursor-pointer accent-cyan-600",
+        "h-1.5 bg-line appearance-none cursor-pointer accent-ink",
         className
       )}
       {...props}

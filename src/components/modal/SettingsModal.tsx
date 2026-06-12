@@ -194,31 +194,32 @@ export function SettingsModal() {
     >
       <button
         onClick={toggleSettings}
-        className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"
+        className="absolute top-4 right-4 text-ink3 hover:text-stamp"
         aria-label="关闭"
       >
         <X className="w-4 h-4" />
       </button>
 
+      <span className="file-tab">FILE — SYSTEM / SETTINGS</span>
       <div className="space-y-2">
-        <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-          <Sliders className="w-4 h-4 text-cyan-600" />
+        <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
+          <Sliders className="w-4 h-4 text-brown" />
           音频输出设置
         </h3>
-        <p className="text-[11px] text-slate-500 leading-relaxed">
+        <p className="font-tw text-[11px] text-ink2 leading-relaxed">
           管理当前播放设备和输出偏好。
         </p>
       </div>
 
       <div className="space-y-4">
         <div className="space-y-1.5">
-          <label className="text-[9px] font-bold text-slate-400 uppercase">
+          <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
             Driver Interface
           </label>
           <select
             value={driverKind}
             onChange={(e) => setDriver(e.target.value as DriverKind)}
-            className="w-full bg-[#f1f5f9] border border-black/5 rounded-lg p-2 text-xs text-slate-700 focus:outline-none focus:border-cyan-600"
+            className="w-full bg-paper2 border-[1.5px] border-ink p-2 font-tw text-xs text-ink focus:outline-none focus:border-stamp"
           >
             {drivers.map((driver) => (
               <option
@@ -230,24 +231,24 @@ export function SettingsModal() {
               </option>
             ))}
           </select>
-          <p className="text-[10px] text-slate-400">
+          <p className="font-tw text-[10px] text-ink3">
             {currentDriver?.hint}
           </p>
         </div>
 
-        <div className="p-3 bg-white/60 rounded-lg border border-black/[0.04] space-y-2">
+        <div className="p-3 bg-paper2 border-[1.5px] border-ink space-y-2">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h4 className="text-xs font-semibold text-slate-800">
+              <h4 className="font-serif text-xs font-semibold text-ink">
                 当前输出设备
               </h4>
-              <p className="text-[10px] text-slate-500">
+              <p className="font-tw text-[10px] text-ink2">
                 {currentDevice?.name ?? currentDeviceId}
               </p>
             </div>
             <button
               onClick={loadDevices}
-              className="px-2 py-1 text-[10px] font-semibold rounded bg-cyan-600/10 text-cyan-700 hover:bg-cyan-600/15 transition-colors"
+              className="stamp-btn px-2 py-1 font-tw text-[10px] font-bold"
             >
               刷新
             </button>
@@ -255,7 +256,7 @@ export function SettingsModal() {
           <select
             value={currentDeviceId}
             onChange={(event) => selectDevice(event.target.value)}
-            className="w-full bg-[#f1f5f9] border border-black/5 rounded-lg p-2 text-xs text-slate-700 focus:outline-none focus:border-cyan-600"
+            className="w-full bg-card border-[1.5px] border-ink p-2 font-tw text-xs text-ink focus:outline-none focus:border-stamp"
           >
             {devices.map((device) => (
               <option key={device.id} value={device.id}>
@@ -268,15 +269,15 @@ export function SettingsModal() {
 
         <form
           onSubmit={saveCacheSettings}
-          className="p-3 bg-white/60 rounded-lg border border-black/[0.04] space-y-3"
+          className="p-3 bg-paper2 border-[1.5px] border-ink space-y-3"
         >
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h4 className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5 text-cyan-700" />
+              <h4 className="font-serif text-xs font-semibold text-ink flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5 text-brown" />
                 缓存管理
               </h4>
-              <p className="text-[10px] text-slate-500">
+              <p className="font-tw text-[10px] text-ink2">
                 {cacheStatus
                   ? `${cacheStatus.fileCount} 个文件 · ${formatMb(cacheStatus.usedMb)}`
                   : "正在读取缓存状态"}
@@ -286,7 +287,7 @@ export function SettingsModal() {
               type="button"
               onClick={() => void refreshCacheStatus()}
               disabled={cacheBusy}
-              className="inline-flex h-7 items-center gap-1.5 rounded bg-cyan-600/10 px-2 text-[10px] font-semibold text-cyan-700 transition-colors hover:bg-cyan-600/15 disabled:opacity-50"
+              className="stamp-btn inline-flex h-7 items-center gap-1.5 px-2 font-tw text-[10px] font-bold disabled:opacity-50"
             >
               <RotateCw className="h-3 w-3" />
               刷新
@@ -294,15 +295,15 @@ export function SettingsModal() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-[9px] font-bold text-slate-400 uppercase">
+            <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
               Cache Path
             </label>
-            <div className="grid grid-cols-[28px_minmax(0,1fr)] items-center gap-2 rounded-lg bg-[#f1f5f9] border border-black/5 px-1.5 py-1.5">
+            <div className="grid grid-cols-[28px_minmax(0,1fr)] items-center gap-2 bg-card border-[1.5px] border-ink px-1.5 py-1.5">
               <button
                 type="button"
                 onClick={chooseCacheDir}
                 disabled={cacheBusy}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex h-7 w-7 items-center justify-center text-ink2 transition-colors hover:bg-paper2 hover:text-brown disabled:cursor-not-allowed disabled:opacity-50"
                 title="选择缓存文件夹"
                 aria-label="选择缓存文件夹"
               >
@@ -311,7 +312,7 @@ export function SettingsModal() {
               <input
                 value={cacheDir}
                 onChange={(event) => setCacheDir(event.target.value)}
-                className="min-w-0 bg-transparent pr-2 text-xs text-slate-700 outline-none"
+                className="min-w-0 bg-transparent pr-2 font-tw text-xs text-ink outline-none"
                 placeholder="输入缓存目录路径"
               />
             </div>
@@ -319,45 +320,45 @@ export function SettingsModal() {
 
           <div className="grid gap-3 sm:grid-cols-[140px_minmax(0,1fr)]">
             <label className="space-y-1.5">
-              <span className="block text-[9px] font-bold text-slate-400 uppercase">
+              <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">
                 Max Size (MB)
               </span>
               <input
                 value={maxSizeMb}
                 onChange={(event) => setMaxSizeMb(event.target.value)}
                 inputMode="numeric"
-                className="w-full rounded-lg border border-black/5 bg-[#f1f5f9] p-2 text-xs text-slate-700 outline-none focus:border-cyan-600"
+                className="w-full border-[1.5px] border-ink bg-card p-2 font-tw text-xs text-ink outline-none focus:border-stamp"
               />
             </label>
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500">
+              <div className="flex items-center justify-between font-tw text-[10px] font-bold text-ink2">
                 <span>已用 {formatMb(cacheStatus?.usedMb ?? 0)}</span>
                 <span>{usagePercent.toFixed(1)}%</span>
               </div>
-              <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+              <div className="h-2.5 overflow-hidden border border-ink bg-card">
                 <div
-                  className="h-full rounded-full bg-cyan-600 transition-all"
+                  className="h-full bg-brown transition-all"
                   style={{ width: `${usagePercent}%` }}
                 />
               </div>
-              <label className="flex items-center gap-2 text-[10px] font-semibold text-slate-600">
+              <label className="flex items-center gap-2 font-tw text-[10px] font-bold text-ink2">
                 <input
                   type="checkbox"
                   checked={autoCleanup}
                   onChange={(event) => setAutoCleanup(event.target.checked)}
-                  className="h-3.5 w-3.5 accent-cyan-700"
+                  className="h-3.5 w-3.5 accent-ink"
                 />
                 接近上限时自动清理最旧的流媒体缓存
               </label>
             </div>
           </div>
 
-          <div className="flex flex-wrap justify-end gap-2 border-t border-black/5 pt-3">
+          <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">
             <button
               type="button"
               onClick={clearAppCache}
               disabled={cacheBusy || (cacheStatus?.fileCount ?? 0) === 0}
-              className="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-semibold text-rose-600 transition-colors hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-transparent"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 font-tw text-xs font-bold text-stamp transition-colors hover:bg-stamp-soft disabled:cursor-not-allowed disabled:text-ink3 disabled:hover:bg-transparent"
             >
               {cacheBusy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -369,34 +370,34 @@ export function SettingsModal() {
             <button
               type="submit"
               disabled={cacheBusy}
-              className="rounded bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-slate-900 disabled:bg-slate-300"
+              className="border-[1.5px] border-ink bg-ink px-3 py-1.5 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp disabled:bg-line disabled:border-line disabled:text-ink2"
             >
               保存缓存设置
             </button>
           </div>
         </form>
 
-        <div className="p-3 bg-cyan-50 rounded-lg border border-cyan-500/10 space-y-1.5">
-          <h4 className="text-xs font-semibold text-cyan-800 flex items-center gap-1.5">
+        <div className="p-3 bg-stamp-soft border-[1.5px] border-stamp space-y-1.5">
+          <h4 className="font-serif text-xs font-semibold text-stamp flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5" />
             当前输出能力
           </h4>
-          <p className="text-[10px] text-slate-500 leading-relaxed">
+          <p className="font-tw text-[10px] text-ink2 leading-relaxed">
             本地解码、播放进度事件、系统共享输出和 WASAPI 独占输出已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP、Native DSD、ASIO 与 bit-perfect 旁路尚未开放。
           </p>
         </div>
       </div>
 
-      <div className="flex justify-end gap-3 pt-3 border-t border-black/5">
+      <div className="flex justify-end gap-3 pt-3 border-t border-line">
         <button
           onClick={toggleSettings}
-          className="px-4 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+          className="px-4 py-1.5 font-tw text-xs font-bold text-ink2 hover:text-ink transition-colors"
         >
           取消
         </button>
         <button
           onClick={apply}
-          className="px-4 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded shadow-lg shadow-cyan-600/10 transition-all"
+          className="border-[1.5px] border-ink bg-ink px-4 py-1.5 font-tw text-xs font-bold text-paper hover:bg-stamp hover:border-stamp transition-all"
         >
           保存配置
         </button>

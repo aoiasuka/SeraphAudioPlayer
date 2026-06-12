@@ -5,12 +5,10 @@ import {
   ListMusic,
   Music,
   Radio,
-  Settings,
   Sliders,
   User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useFluentHover } from "@/hooks/useFluentHover";
 import { usePlayerStore } from "@/store/player";
 import type { LibraryView } from "@/types/track";
 
@@ -21,68 +19,108 @@ interface NavItem {
   onClickAction?: () => void;
 }
 
+interface NavGroup {
+  tab: string;
+  items: NavItem[];
+}
+
 export function Sidebar() {
   const activeView = usePlayerStore((s) => s.activeView);
   const setActiveView = usePlayerStore((s) => s.setActiveView);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
-  const onFluentMove = useFluentHover();
 
-  const items: NavItem[] = [
-    { key: "local", label: "本地音乐", icon: Music },
-    { key: "streaming", label: "流媒体", icon: Radio },
-    { key: "recent", label: "最近播放", icon: History },
-    { key: "liked", label: "我喜欢", icon: Heart },
-    { key: "playlists", label: "歌单", icon: ListMusic },
-    { key: "artists", label: "艺术家", icon: User },
-    { key: "albums", label: "专辑", icon: Disc3 },
-    { key: "settings", label: "设置", icon: Sliders, onClickAction: toggleSettings },
+  const groups: NavGroup[] = [
+    {
+      tab: "DRAWER A — 资料库",
+      items: [
+        { key: "local", label: "本地音乐", icon: Music },
+        { key: "streaming", label: "流媒体", icon: Radio },
+        { key: "recent", label: "最近播放", icon: History },
+        { key: "liked", label: "我喜欢", icon: Heart },
+      ],
+    },
+    {
+      tab: "DRAWER B — 浏览",
+      items: [
+        { key: "playlists", label: "歌单", icon: ListMusic },
+        { key: "artists", label: "艺术家", icon: User },
+        { key: "albums", label: "专辑", icon: Disc3 },
+      ],
+    },
+    {
+      tab: "DRAWER C — 系统",
+      items: [
+        {
+          key: "settings",
+          label: "设置",
+          icon: Sliders,
+          onClickAction: toggleSettings,
+        },
+      ],
+    },
   ];
 
   return (
-    <aside className="box-border w-[220px] min-w-[220px] max-w-[220px] flex-none flex flex-col justify-between p-4 acrylic-sidebar z-20 overflow-hidden">
-      <div className="space-y-6">
-        <nav className="space-y-1">
-          {items.map((item) => {
-            const Icon = item.icon;
-            const active = item.key !== "settings" && item.key === activeView;
-            return (
-              <a
-                key={item.key}
-                href="#"
-                onMouseMove={onFluentMove}
-                onClick={(e) => {
-                  e.preventDefault();
-                  if (item.onClickAction) item.onClickAction();
-                  else setActiveView(item.key as LibraryView);
-                }}
-                className={cn(
-                  "fluent-item grid h-9 grid-cols-[16px_minmax(0,1fr)] items-center gap-3 px-3 text-xs font-medium rounded-lg transition-all",
-                  active
-                    ? "active-pill text-cyan-700 bg-black/[0.02]"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-black/[0.02]"
-                )}
-              >
-                <Icon
-                  className={cn(
-                    "w-4 h-4 shrink-0",
-                    active ? "text-cyan-600" : "text-slate-500"
-                  )}
-                />
-                <span className="min-w-0 truncate">{item.label}</span>
-              </a>
-            );
-          })}
-        </nav>
+    <aside className="box-border w-[228px] min-w-[228px] max-w-[228px] flex-none flex flex-col border-r-2 border-ink bg-paper pt-6 pb-5 z-20 overflow-hidden">
+      <div className="px-6 pb-5 border-b-2 border-ink">
+        <h2 className="font-tw text-2xl font-bold tracking-tight text-ink">
+          SERAPH<span className="text-stamp">_</span>
+        </h2>
+        <p className="font-tw text-[10px] text-ink2 mt-0.5 tracking-widest">
+          AUDIO ARCHIVE SYSTEM v2.0
+        </p>
       </div>
 
-      <div className="pt-4 border-t border-black/[0.04] flex items-center justify-end">
-        <button
-          onClick={toggleSettings}
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-800 hover:bg-black/[0.03] transition-colors"
-          title="系统设置"
-        >
-          <Settings className="w-3 h-3" />
-        </button>
+      <nav className="flex flex-col px-3.5 mt-4 overflow-y-auto no-scrollbar flex-1">
+        {groups.map((group) => (
+          <div key={group.tab}>
+            <div className="font-tw text-[9px] tracking-[3px] text-ink3 px-3 pt-4 pb-1.5">
+              {group.tab}
+            </div>
+            {group.items.map((item) => {
+              const Icon = item.icon;
+              const active = item.key !== "settings" && item.key === activeView;
+              return (
+                <a
+                  key={item.key}
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (item.onClickAction) item.onClickAction();
+                    else setActiveView(item.key as LibraryView);
+                  }}
+                  className={cn(
+                    "group flex items-center gap-2.5 px-3 py-2 font-tw text-[13px] border-[1.5px] transition-all",
+                    active
+                      ? "text-ink bg-card border-ink font-bold shadow-[2.5px_2.5px_0_var(--ink)]"
+                      : "text-ink2 border-transparent hover:text-ink hover:bg-card"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "text-[11px] leading-none",
+                      active ? "text-stamp" : "text-ink3"
+                    )}
+                  >
+                    {active ? "■" : "□"}
+                  </span>
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
+                  <span className="min-w-0 truncate">{item.label}</span>
+                </a>
+              );
+            })}
+          </div>
+        ))}
+      </nav>
+
+      <div className="mt-auto mx-6 pt-4 border-t border-dashed border-line">
+        <div className="font-tw text-[11px] leading-[1.9] text-ink2">
+          OPERATOR
+          <br />
+          <b className="text-ink text-[13px]">羿昔落</b>
+          <br />
+          SERAPH ARCHIVE <span className="text-brown">● ONLINE</span>
+        </div>
       </div>
     </aside>
   );

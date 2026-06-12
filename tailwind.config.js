@@ -10,6 +10,17 @@ export default {
     },
     extend: {
       colors: {
+        // 档案 / 打字机风配色
+        paper: "#f5f1e8",
+        paper2: "#ece6d8",
+        card: "#fbf9f3",
+        ink: "#2b2722",
+        ink2: "#6e675c",
+        ink3: "#aaa193",
+        line: "#d9d2c2",
+        brown: "#7a5c3e",
+        stamp: "#b5482a",
+        "stamp-soft": "#f3e2dc",
         seraph: {
           gold: "#d4af37",
           "gold-light": "#fffbf0",
@@ -17,21 +28,10 @@ export default {
         },
       },
       fontFamily: {
-        sans: [
-          "Inter",
-          "Segoe UI",
-          "-apple-system",
-          "BlinkMacSystemFont",
-          "sans-serif",
-        ],
-        mono: [
-          "ui-monospace",
-          "SFMono-Regular",
-          "Menlo",
-          "Monaco",
-          "Consolas",
-          "monospace",
-        ],
+        sans: ["Noto Sans SC", "Segoe UI", "-apple-system", "sans-serif"],
+        serif: ["Noto Serif SC", "Songti SC", "serif"],
+        tw: ["Courier Prime", "Courier New", "ui-monospace", "monospace"],
+        mono: ["Courier Prime", "Consolas", "ui-monospace", "monospace"],
       },
       keyframes: {
         "gentle-breath": {

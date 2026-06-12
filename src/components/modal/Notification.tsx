@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2 } from "lucide-react";
+import { Stamp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePlayerStore } from "@/store/player";
 
@@ -29,14 +29,14 @@ export function Notification() {
   return (
     <div
       className={cn(
-        "fixed top-10 right-10 bg-white border border-cyan-500/20 text-slate-800 px-4 py-3 rounded-lg shadow-[0_8px_32px_rgba(15,23,42,0.08)] flex items-center gap-3 z-50 transition-all duration-500 ease-out",
+        "fixed top-14 right-10 bg-card border-2 border-ink text-ink px-4 py-3 shadow-[5px_5px_0_rgba(43,39,34,0.2)] flex items-center gap-3 z-50 transition-all duration-500 ease-out",
         visible
           ? "translate-x-0 opacity-100 pointer-events-auto"
           : "translate-x-[120%] opacity-0 pointer-events-none"
       )}
     >
-      <CheckCircle2 className="w-4 h-4 text-cyan-600" />
-      <span className="text-xs font-semibold">
+      <Stamp className="w-4 h-4 text-stamp" />
+      <span className="font-tw text-xs font-bold">
         {notification?.text ?? content}
       </span>
     </div>

@@ -6,14 +6,8 @@ import { useFileDropImport } from "@/hooks/useFileDropImport";
 import { useHydratePlayerStore } from "@/hooks/useHydratePlayerStore";
 import { usePlayback } from "@/hooks/usePlayback";
 import { useRevealWindow } from "@/hooks/useRevealWindow";
-import { runWhenIdle } from "@/lib/startup";
 import { usePlayerStore } from "@/store/player";
 
-const LazyAmbientAurora = lazy(() =>
-  import("@/components/effects/AmbientAurora").then((module) => ({
-    default: module.AmbientAurora,
-  }))
-);
 const LazyRightPanel = lazy(() =>
   import("@/components/layout/RightPanel").then((module) => ({
     default: module.RightPanel,
@@ -43,12 +37,7 @@ function App() {
   const hasTrack = usePlayerStore((s) => s.currentTrack() !== null);
   const settingsOpen = usePlayerStore((s) => s.settingsOpen);
   const hasNotification = usePlayerStore((s) => s.notification !== null);
-  const [effectsReady, setEffectsReady] = useState(false);
   const [notificationMounted, setNotificationMounted] = useState(false);
-
-  useEffect(() => {
-    return runWhenIdle(() => setEffectsReady(true), 900);
-  }, []);
 
   useEffect(() => {
     // M-16：出现过通知后保持组件挂载，让退场滑出动画能完整播放，
@@ -58,12 +47,7 @@ function App() {
 
   return (
     <div className="h-full w-full overflow-hidden flex flex-col app-shell">
-      <div className="relative w-full h-full min-h-0 min-w-0 overflow-hidden flex flex-col bg-[#f4f7fc] select-none">
-        {effectsReady && (
-          <Suspense fallback={null}>
-            <LazyAmbientAurora />
-          </Suspense>
-        )}
+      <div className="relative w-full h-full min-h-0 min-w-0 overflow-hidden flex flex-col app-shell select-none">
         <TitleBar />
 
         <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden z-10 relative">

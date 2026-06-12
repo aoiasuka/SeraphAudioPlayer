@@ -28,21 +28,26 @@ export function AudioInfoCard() {
 
   return (
     <div className="space-y-2">
-      <h3 className="text-[10px] font-bold text-slate-400 tracking-wider uppercase">
-        Audio Info 音频信息
-      </h3>
-      <div className="p-3 bg-white/60 border border-black/[0.04] rounded-lg space-y-2 text-[10px] font-mono text-slate-600">
-        {rows.map((r, i) => (
-          <div
-            key={r.label}
-            className={`flex justify-between py-0.5 ${
-              i < rows.length - 1 ? "border-b border-black/[0.02]" : ""
-            }`}
-          >
-            <span className="text-slate-400">{r.label}</span>
-            <span className="text-slate-700 font-semibold">{r.value}</span>
-          </div>
-        ))}
+      <div className="border-[1.5px] border-ink bg-card p-4 shadow-[3px_3px_0_rgba(43,39,34,0.12)]">
+        <h3 className="flex items-center justify-between font-tw text-[9px] tracking-[3px] text-ink3 mb-2.5">
+          <span>SPEC SHEET — 音频信息</span>
+          <i className="not-italic font-bold text-stamp">● REC</i>
+        </h3>
+        <div className="font-tw text-[12px] leading-[2] text-ink">
+          {rows.map((r) => {
+            const label = r.label.replace(":", "").toUpperCase();
+            const dots = ".".repeat(Math.max(2, 12 - label.length));
+            return (
+              <div key={r.label}>
+                <span className="text-ink3">
+                  {label}
+                  {dots}{" "}
+                </span>
+                <b className="font-bold">{r.value}</b>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ export function RightPanel() {
   if (!hasTrack) return null;
 
   return (
-    <aside className="w-[clamp(280px,25vw,360px)] shrink-0 min-h-0 bg-[#f8fafc]/80 border-l border-black/[0.04] flex flex-col p-[clamp(14px,1.6vw,18px)] overflow-hidden z-20 gap-[clamp(12px,2vh,18px)]">
+    <aside className="w-[clamp(300px,26vw,372px)] shrink-0 min-h-0 bg-paper2 border-l-2 border-ink flex flex-col p-[clamp(14px,1.6vw,20px)] overflow-hidden z-20 gap-[clamp(12px,2vh,18px)]">
       <UpNextCard />
       <LyricsPanel />
       <AudioInfoCard />

@@ -61,13 +61,13 @@ export function WaveformProgress() {
   return (
     <div className="w-full pt-3">
       <div
-        className="group grid h-12 w-full grid-cols-[52px_minmax(0,1fr)_52px] items-center gap-3 rounded-lg border border-cyan-700/10 bg-white/55 px-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_8px_22px_rgba(15,23,42,0.04)] transition-all hover:border-cyan-700/18 hover:bg-white/70"
+        className="group grid h-11 w-full grid-cols-[52px_minmax(0,1fr)_52px] items-center gap-3 border-[1.5px] border-ink bg-paper2 px-3 transition-all"
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={track.duration || 0}
         aria-valuenow={Math.min(displayTime, track.duration || 0)}
       >
-        <span className="rounded-md bg-white/70 px-2 py-1 text-center font-mono text-[10px] font-semibold tabular-nums text-slate-600 shadow-[0_1px_6px_rgba(15,23,42,0.04)]">
+        <span className="px-1 text-center font-tw text-[11px] font-bold tabular-nums text-ink2">
           {currentLabel}
         </span>
         <div
@@ -77,7 +77,7 @@ export function WaveformProgress() {
           onPointerUp={finishDrag}
           onPointerCancel={finishDrag}
           className={cn(
-            "relative flex h-8 min-w-0 touch-none items-center overflow-hidden rounded-md bg-gradient-to-r from-cyan-950/[0.035] via-white/35 to-cyan-950/[0.035]",
+            "relative flex h-8 min-w-0 touch-none items-center overflow-hidden bg-card",
             canSeek ? "cursor-pointer" : "cursor-default"
           )}
         >
@@ -86,7 +86,7 @@ export function WaveformProgress() {
             className="h-8 w-full opacity-100 transition-opacity group-hover:opacity-100"
           />
         </div>
-        <span className="rounded-md bg-white/70 px-2 py-1 text-center font-mono text-[10px] font-semibold tabular-nums text-slate-600 shadow-[0_1px_6px_rgba(15,23,42,0.04)]">
+        <span className="px-1 text-center font-tw text-[11px] font-bold tabular-nums text-ink2">
           {durationLabel}
         </span>
       </div>

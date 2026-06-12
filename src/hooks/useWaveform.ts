@@ -4,8 +4,9 @@ import type { Track } from "@/types/track";
 const BAR_COUNT = 96;
 const SIDE_PADDING = 0;
 const CSS_HEIGHT = 32;
-const CYAN = [8, 145, 178] as const;
-const SLATE = [71, 85, 105] as const;
+// 档案风配色：已播=档案棕 (--brown #7a5c3e)，未播=墨色淡 (--ink #2b2722)
+const CYAN = [122, 92, 62] as const;
+const SLATE = [43, 39, 34] as const;
 const CYAN_RGB = CYAN.join(", ");
 const SLATE_RGB = SLATE.join(", ");
 

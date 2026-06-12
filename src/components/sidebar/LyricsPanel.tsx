@@ -206,8 +206,8 @@ export function LyricsPanel() {
     <>
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <h3 className="text-[10px] font-bold text-slate-400 tracking-wider uppercase truncate shrink-0">
-            Lyrics 歌词区域
+          <h3 className="font-tw text-[10px] font-bold text-ink3 tracking-[3px] uppercase truncate shrink-0">
+            歌词稿
           </h3>
           <input
             ref={fileInputRef}
@@ -221,23 +221,23 @@ export function LyricsPanel() {
               type="button"
               onClick={handleOnlineLyricsClick}
               disabled={isFetchingOnline || isImporting}
-              className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-cyan-200/70 bg-cyan-50/70 px-2.5 text-[11px] font-semibold text-cyan-700 shadow-[0_3px_10px_rgba(8,145,178,0.08)] transition-all hover:border-cyan-300 hover:bg-white hover:text-cyan-800 disabled:cursor-wait disabled:opacity-70"
-              aria-label="在线歌词"
-              title="在线歌词"
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 border-[1.5px] border-ink bg-card px-2.5 font-tw text-[11px] font-bold text-ink transition-all hover:bg-paper2 disabled:cursor-wait disabled:opacity-70"
+              aria-label="在线匹配"
+              title="在线匹配"
             >
               {isFetchingOnline ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <CloudDownload className="h-3.5 w-3.5" />
               )}
-              <span>在线歌词</span>
+              <span>在线匹配</span>
             </button>
             <button
               type="button"
               onClick={handleImportClick}
               disabled={isImporting || isFetchingOnline}
-              className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-slate-200/80 bg-white/70 px-2.5 text-[11px] font-semibold text-slate-600 shadow-[0_3px_10px_rgba(15,23,42,0.05)] transition-all hover:border-cyan-200 hover:bg-white hover:text-cyan-700 disabled:cursor-wait disabled:opacity-70"
-              aria-label="导入歌词"
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 border-[1.5px] border-line bg-card px-2.5 font-tw text-[11px] font-bold text-ink2 transition-all hover:border-ink hover:text-ink disabled:cursor-wait disabled:opacity-70"
+              aria-label="导入"
               title="导入歌词"
             >
               {isImporting ? (
@@ -245,21 +245,27 @@ export function LyricsPanel() {
               ) : (
                 <Upload className="h-3.5 w-3.5" />
               )}
-              <span>导入歌词</span>
+              <span>导入</span>
             </button>
           </div>
         </div>
-        <div className="acrylic-card rounded-lg p-3 flex-1 min-h-0 overflow-hidden flex flex-col">
+        <div
+          className="relative flex-1 min-h-0 overflow-hidden flex flex-col border-[1.5px] border-line bg-card p-5"
+          style={{
+            backgroundImage:
+              "repeating-linear-gradient(0deg, transparent 0 27px, rgba(122,92,62,0.07) 27px 28px)",
+          }}
+        >
           <div
             ref={containerRef}
             className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1 text-left no-scrollbar"
           >
             {lyricGroups.length === 0 ? (
               <div className="flex h-full min-h-[180px] items-center justify-center text-center">
-                <p className="text-xs font-medium text-slate-400">暂无歌词</p>
+                <p className="font-tw text-xs font-medium text-ink3">暂无歌词稿</p>
               </div>
             ) : (
-              <div className="flex min-h-full flex-col gap-3.5">
+              <div className="flex min-h-full flex-col gap-2">
                 <div
                   aria-hidden="true"
                   style={{ height: `${centerPadding}px` }}
@@ -274,34 +280,28 @@ export function LyricsPanel() {
                       }}
                       onClick={() => seek(group.time)}
                       className={cn(
-                        "flex items-start gap-2 pl-1.5 pr-2 rounded border py-1.5 cursor-pointer transition-all duration-500 ease-out origin-left",
-                        active
-                          ? "bg-white border-black/[0.04] py-2.5 shadow-[0_4px_12px_rgba(0,0,0,0.03)] scale-[1.02] z-10 opacity-100"
-                          : "border-transparent hover:bg-black/[0.02] opacity-40 hover:opacity-80 scale-[0.98]"
+                        "flex items-start gap-2 px-1 cursor-pointer transition-all duration-300 ease-out origin-left",
+                        active ? "opacity-100" : "opacity-40 hover:opacity-70"
                       )}
                     >
-                      <div
-                        className={cn(
-                          "mt-0.5 rounded transition-all duration-500",
-                          active
-                            ? "w-[3px] h-5 bg-gradient-to-b from-cyan-500 to-blue-600 shadow-[0_0_8px_rgba(8,145,178,0.5)]"
-                            : "w-[2px] h-3 bg-transparent"
-                        )}
-                      />
-                      <div className="min-w-0 space-y-1">
+                      <div className="min-w-0 space-y-0.5">
                         {group.lines.map((line, lineIdx) => (
                           <p
                             key={`${track.id}-${idx}-${lineIdx}`}
                             className={cn(
-                              "break-words tracking-wide leading-relaxed transition-all duration-500 ease-out",
+                              "break-words font-serif leading-[28px] transition-all duration-300 ease-out",
                               active
                                 ? lineIdx === 0
-                                  ? "text-xs font-bold text-slate-800"
-                                  : "text-[11px] font-semibold text-slate-500"
-                                : "text-[11px] font-medium text-slate-500"
+                                  ? "text-[16.5px] font-semibold text-ink"
+                                  : "text-[13px] font-medium text-ink2"
+                                : "text-[14px] text-ink3"
                             )}
                           >
-                            {line.text}
+                            {active && lineIdx === 0 ? (
+                              <span className="type-caret">{line.text}</span>
+                            ) : (
+                              line.text
+                            )}
                           </p>
                         ))}
                       </div>
@@ -325,16 +325,16 @@ export function LyricsPanel() {
         }}
         className="max-w-4xl p-0 overflow-hidden rounded-lg"
       >
-        <div className="grid max-h-[78vh] min-h-[520px] grid-cols-[280px_minmax(0,1fr)] bg-white">
-          <aside className="min-h-0 border-r border-slate-200/70 bg-slate-50/80 p-4">
+        <div className="grid max-h-[78vh] min-h-[520px] grid-cols-[280px_minmax(0,1fr)] bg-card">
+          <aside className="min-h-0 border-r-2 border-ink bg-paper2 p-4">
             <div className="mb-3">
-              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-700">
+              <p className="font-tw text-[10px] font-bold uppercase tracking-[0.18em] text-stamp">
                 Online Lyrics
               </p>
-              <h2 className="mt-1 text-lg font-bold text-slate-800">
+              <h2 className="mt-1 font-serif text-lg font-bold text-ink">
                 {isFetchingOnline ? "正在搜索在线歌词" : "选择在线歌词"}
               </h2>
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+              <p className="mt-1 font-tw text-[11px] leading-relaxed text-ink2">
                 {isFetchingOnline
                   ? "正在搜索，请稍等。"
                   : onlineCandidates.length > 0
@@ -345,7 +345,7 @@ export function LyricsPanel() {
             <form onSubmit={handleManualLyricsSearch} className="mb-3">
               <label
                 htmlFor="online-lyrics-search"
-                className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400"
+                className="mb-1.5 block font-tw text-[10px] font-bold uppercase tracking-[0.14em] text-ink3"
               >
                 手动搜索
               </label>
@@ -356,12 +356,12 @@ export function LyricsPanel() {
                   onChange={(event) => setManualSearchQuery(event.target.value)}
                   disabled={isFetchingOnline}
                   placeholder="输入曲名或歌手"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100 disabled:cursor-wait disabled:bg-slate-100"
+                  className="h-8 min-w-0 flex-1 border-[1.5px] border-ink bg-card px-2.5 font-tw text-xs font-medium text-ink outline-none transition-colors placeholder:text-ink3 focus:border-stamp disabled:cursor-wait disabled:bg-paper2"
                 />
                 <button
                   type="submit"
                   disabled={isFetchingOnline}
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-cyan-200 bg-cyan-50 text-cyan-700 transition-colors hover:border-cyan-300 hover:bg-white disabled:cursor-wait disabled:opacity-60"
+                  className="stamp-btn inline-flex h-8 w-8 shrink-0 items-center justify-center disabled:cursor-wait disabled:opacity-60"
                   aria-label="搜索在线歌词"
                   title="搜索在线歌词"
                 >
@@ -375,17 +375,17 @@ export function LyricsPanel() {
             </form>
             <div className="min-h-0 max-h-[calc(78vh-190px)] space-y-2 overflow-y-auto pr-1">
               {isFetchingOnline ? (
-                <div className="flex h-56 flex-col items-center justify-center rounded-md border border-dashed border-cyan-200 bg-white/70 text-center">
-                  <Loader2 className="h-5 w-5 animate-spin text-cyan-700" />
-                  <p className="mt-3 text-xs font-semibold text-slate-700">
+                <div className="flex h-56 flex-col items-center justify-center border-[1.5px] border-dashed border-line bg-card text-center">
+                  <Loader2 className="h-5 w-5 animate-spin text-brown" />
+                  <p className="mt-3 font-tw text-xs font-semibold text-ink">
                     正在搜索，请稍等
                   </p>
-                  <p className="mt-1 text-[11px] text-slate-400">
+                  <p className="mt-1 font-tw text-[11px] text-ink3">
                     正在从 QQ 音乐、网易云音乐、酷狗音乐获取歌词
                   </p>
                 </div>
               ) : onlineCandidates.length === 0 ? (
-                <div className="flex h-56 items-center justify-center rounded-md border border-dashed border-slate-200 bg-white/70 px-4 text-center text-xs font-medium text-slate-400">
+                <div className="flex h-56 items-center justify-center border-[1.5px] border-dashed border-line bg-card px-4 text-center font-tw text-xs font-medium text-ink3">
                   未找到匹配歌词
                 </div>
               ) : (
@@ -398,27 +398,27 @@ export function LyricsPanel() {
                       type="button"
                       onClick={() => setSelectedCandidateId(candidate.id)}
                       className={cn(
-                        "w-full rounded-md border p-3 text-left transition-all",
+                        "w-full border-[1.5px] p-3 text-left transition-all",
                         active
-                          ? "border-cyan-300 bg-white shadow-[0_8px_24px_rgba(8,145,178,0.10)]"
-                          : "border-transparent bg-white/55 hover:border-slate-200 hover:bg-white"
+                          ? "border-ink bg-card shadow-[3px_3px_0_var(--stamp)]"
+                          : "border-line bg-card hover:border-ink"
                       )}
                     >
                       <span className="flex items-center justify-between gap-2">
-                        <span className="rounded border border-cyan-200 bg-cyan-50 px-1.5 py-0.5 text-[10px] font-bold text-cyan-700">
+                        <span className="border border-brown bg-paper2 px-1.5 py-0.5 font-tw text-[10px] font-bold text-brown">
                           {candidate.source}
                         </span>
-                        <span className="text-[10px] font-mono text-slate-400">
+                        <span className="font-tw text-[10px] text-ink3">
                           {duration || `${candidate.lyrics.length} 行`}
                         </span>
                       </span>
-                      <span className="mt-2 block truncate text-xs font-bold text-slate-800">
+                      <span className="mt-2 block truncate font-serif text-xs font-bold text-ink">
                         {candidate.title}
                       </span>
-                      <span className="mt-0.5 block truncate text-[11px] text-slate-500">
+                      <span className="mt-0.5 block truncate font-tw text-[11px] text-ink2">
                         {candidate.artist || "Unknown Artist"}
                       </span>
-                      <span className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-slate-400">
+                      <span className="mt-2 line-clamp-2 font-tw text-[11px] leading-relaxed text-ink3">
                         {lyricPreview(candidate.lyrics)}
                       </span>
                     </button>
@@ -429,17 +429,17 @@ export function LyricsPanel() {
           </aside>
 
           <section className="flex min-h-0 flex-col">
-            <header className="border-b border-slate-200/70 px-5 py-4">
+            <header className="border-b-2 border-ink px-5 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
+                  <p className="font-tw text-[10px] font-bold uppercase tracking-[0.16em] text-ink3">
                     {selectedCandidate?.source ?? "Preview"}
                   </p>
-                  <h3 className="mt-1 truncate text-base font-bold text-slate-800">
+                  <h3 className="mt-1 truncate font-serif text-base font-bold text-ink">
                     {selectedCandidate?.title ??
                       (isFetchingOnline ? "正在搜索歌词" : "未选择歌词")}
                   </h3>
-                  <p className="mt-1 truncate text-[11px] text-slate-500">
+                  <p className="mt-1 truncate font-tw text-[11px] text-ink2">
                     {selectedCandidate
                       ? `${selectedCandidate.artist || "Unknown Artist"}${
                           selectedCandidate.album
@@ -457,7 +457,7 @@ export function LyricsPanel() {
                   disabled={
                     isFetchingOnline || !selectedCandidate || isApplyingOnline
                   }
-                  className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md bg-cyan-700 px-3 text-xs font-bold text-white shadow-[0_8px_22px_rgba(8,145,178,0.20)] transition-colors hover:bg-cyan-800 disabled:cursor-wait disabled:bg-slate-300 disabled:shadow-none"
+                  className="inline-flex h-9 shrink-0 items-center gap-2 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp disabled:cursor-wait disabled:bg-line disabled:border-line disabled:text-ink2"
                 >
                   {isApplyingOnline ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -471,29 +471,29 @@ export function LyricsPanel() {
             <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
               {isFetchingOnline ? (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center text-center">
-                  <Loader2 className="h-6 w-6 animate-spin text-cyan-700" />
-                  <p className="mt-3 text-sm font-semibold text-slate-700">
+                  <Loader2 className="h-6 w-6 animate-spin text-brown" />
+                  <p className="mt-3 font-tw text-sm font-semibold text-ink">
                     正在搜索，请稍等
                   </p>
                 </div>
               ) : selectedCandidate ? (
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {selectedCandidate.lyrics.map((line, index) => (
                     <div
                       key={`${selectedCandidate.id}-${index}`}
-                      className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 rounded-md px-2 py-1.5 text-left hover:bg-slate-50"
+                      className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 px-2 py-1.5 text-left hover:bg-paper2"
                     >
-                      <span className="font-mono text-[11px] text-slate-400">
+                      <span className="font-tw text-[11px] text-ink3">
                         {formatCandidateDuration(line.time)}
                       </span>
-                      <span className="text-xs leading-relaxed text-slate-700">
+                      <span className="font-serif text-xs leading-relaxed text-ink">
                         {line.text}
                       </span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="flex h-full min-h-[260px] items-center justify-center text-xs font-medium text-slate-400">
+                <div className="flex h-full min-h-[260px] items-center justify-center font-tw text-xs font-medium text-ink3">
                   暂无可预览歌词
                 </div>
               )}
