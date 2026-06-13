@@ -453,12 +453,14 @@ async fn import_bilibili_audio_inner(
     options: &BilibiliImportOptions,
 ) -> Result<ImportedTrack, String> {
     let bvid = resolve_bvid(client, input).await?;
-    let resolved = resolve_audio(client, &bvid, options).await?;
+    // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
+    // 缺少 ffmpeg 时必须在选流阶段就避开它们，否则会导入一个永远无法播放的文件。
     let ffmpeg_path = options
         .remux_with_ffmpeg
         .unwrap_or(true)
         .then(|| find_ffmpeg(app))
         .flatten();
+    let resolved = resolve_audio(client, &bvid, options, ffmpeg_path.is_some()).await?;
     let cache_path = audio_cache_path(
         app,
         &resolved.video.bvid,
@@ -518,9 +520,11 @@ async fn resolve_audio(
     client: &Client,
     bvid: &str,
     options: &BilibiliImportOptions,
+    ffmpeg_available: bool,
 ) -> Result<ResolvedAudio, String> {
     let video = fetch_video_data(client, bvid).await?;
-    let stream = fetch_audio_stream(client, &video.bvid, video.cid, options).await?;
+    let stream =
+        fetch_audio_stream(client, &video.bvid, video.cid, options, ffmpeg_available).await?;
     Ok(ResolvedAudio { video, stream })
 }
 
@@ -544,6 +548,7 @@ async fn fetch_audio_stream(
     bvid: &str,
     cid: i64,
     options: &BilibiliImportOptions,
+    ffmpeg_available: bool,
 ) -> Result<AudioStream, String> {
     let response = client
         .get(PLAY_URL_API)
@@ -573,6 +578,7 @@ async fn fetch_audio_stream(
         dash,
         options.prefer_flac.unwrap_or(true),
         options.prefer_dolby_atmos.unwrap_or(true),
+        ffmpeg_available,
     )
 }
 
@@ -580,10 +586,13 @@ fn select_audio_stream(
     dash: DashData,
     prefer_flac: bool,
     prefer_dolby_atmos: bool,
+    ffmpeg_available: bool,
 ) -> Result<AudioStream, String> {
     let mut streams = Vec::new();
 
-    if prefer_dolby_atmos {
+    // 杜比 / 全景声（EAC3）流 Symphonia 无法原生解码，必须依赖 ffmpeg fallback。
+    // 没有 ffmpeg 时即便用户勾选了 prefer_dolby_atmos 也跳过，避免下载一个永远播不了的文件。
+    if prefer_dolby_atmos && ffmpeg_available {
         if let Some(dolby) = dash.dolby {
             let container_kind = dolby.kind;
             if let Some(audio) = dolby.audio {
@@ -614,7 +623,14 @@ fn select_audio_stream(
     streams
         .into_iter()
         .max_by_key(|stream| (stream.kind_rank(), stream.bandwidth.unwrap_or_default()))
-        .ok_or_else(|| "bilibili response has no usable audio stream".to_string())
+        .ok_or_else(|| {
+            if ffmpeg_available {
+                "bilibili response has no usable audio stream".to_string()
+            } else {
+                "未找到可直接播放的音频流（仅有杜比/全景声 EAC3 流，需要安装 ffmpeg 才能解码）"
+                    .to_string()
+            }
+        })
 }
 
 fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> AudioKind {
@@ -1725,7 +1741,86 @@ impl BilibiliSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bvid, extract_media_id};
+    use super::{extract_bvid, extract_media_id, select_audio_stream, AudioKind, DashData};
+    use serde_json::json;
+
+    fn dash_with_dolby_and_flac() -> DashData {
+        serde_json::from_value(json!({
+            "dolby": {
+                "type": 2,
+                "audio": [{
+                    "id": 30250,
+                    "baseUrl": "https://example.com/atmos.eac3",
+                    "backupUrl": [],
+                    "bandwidth": 1_025_000,
+                    "codecs": "ec-3"
+                }]
+            },
+            "flac": {
+                "audio": {
+                    "id": 30251,
+                    "baseUrl": "https://example.com/lossless.flac",
+                    "backupUrl": [],
+                    "bandwidth": 985_000,
+                    "codecs": "fLaC"
+                }
+            },
+            "audio": [{
+                "id": 30280,
+                "baseUrl": "https://example.com/normal.m4a",
+                "backupUrl": [],
+                "bandwidth": 320_000,
+                "codecs": "mp4a.40.2"
+            }]
+        }))
+        .expect("valid dash fixture")
+    }
+
+    #[test]
+    fn prefers_dolby_atmos_when_ffmpeg_available() {
+        let stream = select_audio_stream(dash_with_dolby_and_flac(), true, true, true)
+            .expect("a stream should be selected");
+        assert!(matches!(stream.kind, AudioKind::DolbyAtmos));
+    }
+
+    #[test]
+    fn skips_dolby_atmos_when_ffmpeg_missing() {
+        // 没有 ffmpeg 时 EAC3 流不可解码，必须回退到 Symphonia 能直接播放的 FLAC。
+        let stream = select_audio_stream(dash_with_dolby_and_flac(), true, true, false)
+            .expect("a playable stream should be selected");
+        assert!(
+            matches!(stream.kind, AudioKind::Flac),
+            "expected FLAC fallback, got {:?}",
+            stream.kind
+        );
+    }
+
+    #[test]
+    fn falls_back_to_normal_when_only_dolby_and_ffmpeg_missing() {
+        let dash: DashData = serde_json::from_value(json!({
+            "dolby": {
+                "type": 2,
+                "audio": [{
+                    "id": 30250,
+                    "baseUrl": "https://example.com/atmos.eac3",
+                    "backupUrl": [],
+                    "bandwidth": 1_025_000,
+                    "codecs": "ec-3"
+                }]
+            },
+            "audio": [{
+                "id": 30280,
+                "baseUrl": "https://example.com/normal.m4a",
+                "backupUrl": [],
+                "bandwidth": 320_000,
+                "codecs": "mp4a.40.2"
+            }]
+        }))
+        .expect("valid dash fixture");
+        let stream = select_audio_stream(dash, true, true, false)
+            .expect("a playable stream should be selected");
+        assert!(matches!(stream.kind, AudioKind::Normal));
+    }
 
     #[test]
     fn extracts_bvid_from_plain_text() {
