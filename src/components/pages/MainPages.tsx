@@ -29,7 +29,7 @@ import { VolumeControl } from "@/components/player/VolumeControl";
 import { WaveformProgress } from "@/components/player/WaveformProgress";
 import { cn } from "@/lib/utils";
 import { formatSeconds } from "@/lib/format";
-import { invoke } from "@/lib/tauri";
+import { invoke, listen } from "@/lib/tauri";
 import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
 import type { LibraryView, Track } from "@/types/track";
 
@@ -61,6 +61,14 @@ interface BilibiliLoginPollResult {
 interface BilibiliFfmpegStatus {
   available: boolean;
   path?: string | null;
+}
+
+interface FfmpegDownloadProgress {
+  stage: "download" | "extract" | "done" | "error";
+  downloaded: number;
+  total: number;
+  percent: number;
+  message?: string | null;
 }
 
 const TRACK_ROW_HEIGHT = 59;
@@ -367,6 +375,11 @@ function StreamingPage() {
   const [ffmpegStatus, setFfmpegStatus] = useState<BilibiliFfmpegStatus>({
     available: false,
   });
+  const [ffmpegDownload, setFfmpegDownload] = useState<{
+    active: boolean;
+    percent: number;
+    message?: string;
+  }>({ active: false, percent: 0 });
   const [loginQr, setLoginQr] = useState<BilibiliLoginQrCode | null>(null);
   const [loginQrDataUrl, setLoginQrDataUrl] = useState("");
   const [loginPollMessage, setLoginPollMessage] = useState("");
@@ -395,6 +408,51 @@ function StreamingPage() {
   useEffect(() => {
     void refreshBilibiliState();
   }, []);
+
+  // 订阅后端 ffmpeg 下载进度，实时更新按钮文案/百分比。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<FfmpegDownloadProgress>("seraph://ffmpeg-download", (progress) => {
+      if (progress.stage === "done") {
+        setFfmpegDownload({ active: false, percent: 100 });
+        return;
+      }
+      if (progress.stage === "error") {
+        setFfmpegDownload({ active: false, percent: 0 });
+        return;
+      }
+      setFfmpegDownload({
+        active: true,
+        percent: progress.percent >= 0 ? progress.percent : 0,
+        message: progress.message ?? undefined,
+      });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const handleDownloadFfmpeg = async () => {
+    if (ffmpegDownload.active) return;
+    setFfmpegDownload({ active: true, percent: 0, message: "准备下载…" });
+    showNotification("开始下载 FFmpeg，请保持网络畅通…");
+    try {
+      const status = await invoke<BilibiliFfmpegStatus>("download_ffmpeg");
+      setFfmpegStatus(status);
+      setFfmpegDownload({ active: false, percent: 100 });
+      showNotification(
+        status.available ? "FFmpeg 安装完成，现在可解码杜比/EAC3 了" : "FFmpeg 安装未完成"
+      );
+    } catch (err) {
+      setFfmpegDownload({ active: false, percent: 0 });
+      const reason = typeof err === "string" ? err : "下载失败";
+      showNotification(reason);
+      // eslint-disable-next-line no-console
+      console.warn("download_ffmpeg failed", err);
+    }
+  };
 
   useEffect(() => {
     let canceled = false;
@@ -642,6 +700,36 @@ function StreamingPage() {
               >
                 FFmpeg: {ffmpegStatus.available ? "可用" : "未找到"}
               </span>
+              {!ffmpegStatus.available && (
+                <button
+                  type="button"
+                  onClick={handleDownloadFfmpeg}
+                  disabled={ffmpegDownload.active}
+                  title="下载并安装 ffmpeg/ffprobe 以支持杜比全景声 / EAC3 解码"
+                  className={cn(
+                    "inline-flex h-9 items-center justify-center gap-1.5 border-[1.5px] px-2 font-tw text-[11px] font-bold transition-all",
+                    ffmpegDownload.active
+                      ? "border-line bg-card text-ink3 cursor-not-allowed"
+                      : "border-ink bg-ink text-paper hover:opacity-90"
+                  )}
+                >
+                  {ffmpegDownload.active ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>
+                        {ffmpegDownload.percent > 0
+                          ? `下载中 ${Math.round(ffmpegDownload.percent)}%`
+                          : ffmpegDownload.message ?? "下载中…"}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <DownloadCloud className="h-3.5 w-3.5" />
+                      <span>下载 FFmpeg</span>
+                    </>
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>

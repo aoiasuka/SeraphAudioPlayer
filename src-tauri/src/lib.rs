@@ -39,6 +39,7 @@ pub fn run() {
             ipc::library::get_track_info,
             ipc::library::import_tracks,
             ipc::bilibili::bilibili_ffmpeg_status,
+            ipc::bilibili::download_ffmpeg,
             ipc::bilibili::bilibili_login_qrcode,
             ipc::bilibili::bilibili_login_status,
             ipc::bilibili::bilibili_logout,

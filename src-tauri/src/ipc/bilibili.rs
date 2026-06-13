@@ -57,6 +57,20 @@ const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
 /// B 站视频页 HTML 抓取上限：BVID 一般在前若干 KB 出现，给 1 MB 防御性裁剪。
 const MAX_HTML_BYTES: u64 = 1 * 1024 * 1024;
 
+/// 前端监听的 ffmpeg 下载进度频道。
+pub const FFMPEG_DOWNLOAD_EVENT: &str = "seraph://ffmpeg-download";
+/// ffmpeg 压缩包下载上限（防御性裁剪，正常 essentials 包 ~40-80 MB）。
+const MAX_FFMPEG_DOWNLOAD_BYTES: u64 = 400 * 1024 * 1024;
+/// Windows x64 ffmpeg 静态构建候选下载地址，按顺序尝试直到某个成功。
+/// 同时含官方源与镜像，缓解国内 GitHub 直连不稳定的问题。
+#[cfg(windows)]
+const FFMPEG_DOWNLOAD_URLS: &[&str] = &[
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip",
+    "https://mirror.ghproxy.com/https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+];
+
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
     code: i32,
@@ -165,6 +179,19 @@ pub struct BilibiliLoginStatus {
 pub struct BilibiliFfmpegStatus {
     available: bool,
     path: Option<String>,
+}
+
+/// ffmpeg 下载/安装进度，通过 [`FFMPEG_DOWNLOAD_EVENT`] 推送给前端。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FfmpegDownloadProgress {
+    /// "download" | "extract" | "done" | "error"
+    stage: &'static str,
+    downloaded: u64,
+    total: u64,
+    /// 0.0 - 100.0；total 未知时为 -1。
+    percent: f64,
+    message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,6 +471,227 @@ pub fn bilibili_ffmpeg_status(app: AppHandle) -> Result<BilibiliFfmpegStatus, St
         available: path.is_some(),
         path: path.map(|value| value.to_string_lossy().to_string()),
     })
+}
+
+/// 一键下载并安装 ffmpeg / ffprobe 到 `app_data_dir/ffmpeg`，使 EAC3 /
+/// 杜比全景声等 Symphonia 无法解码的格式可以走 ffmpeg fallback 播放。
+/// 下载进度通过 [`FFMPEG_DOWNLOAD_EVENT`] 实时推送给前端。
+#[tauri::command]
+pub async fn download_ffmpeg(app: AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+    // 已经可用就直接返回，避免重复下载。
+    if let Some(path) = find_ffmpeg(&app) {
+        return Ok(BilibiliFfmpegStatus {
+            available: true,
+            path: Some(path.to_string_lossy().to_string()),
+        });
+    }
+
+    let result = download_ffmpeg_inner(&app).await;
+    match &result {
+        Ok(status) => emit_ffmpeg_progress(
+            &app,
+            FfmpegDownloadProgress {
+                stage: "done",
+                downloaded: 0,
+                total: 0,
+                percent: 100.0,
+                message: status.path.clone(),
+            },
+        ),
+        Err(reason) => emit_ffmpeg_progress(
+            &app,
+            FfmpegDownloadProgress {
+                stage: "error",
+                downloaded: 0,
+                total: 0,
+                percent: -1.0,
+                message: Some(reason.clone()),
+            },
+        ),
+    }
+    result
+}
+
+#[cfg(not(windows))]
+async fn download_ffmpeg_inner(_app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+    Err("自动下载暂仅支持 Windows，请手动安装 ffmpeg 并加入 PATH".into())
+}
+
+#[cfg(windows)]
+async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+    let ffmpeg_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("无法定位应用数据目录: {err}"))?
+        .join("ffmpeg");
+    fs::create_dir_all(&ffmpeg_dir)
+        .map_err(|err| format!("无法创建 ffmpeg 目录 {}: {err}", ffmpeg_dir.display()))?;
+
+    let client = ffmpeg_download_client()?;
+    let archive_path = ffmpeg_dir.join("ffmpeg-download.zip");
+
+    let mut last_error = String::from("没有可用的下载地址");
+    for (index, url) in FFMPEG_DOWNLOAD_URLS.iter().enumerate() {
+        emit_ffmpeg_progress(
+            app,
+            FfmpegDownloadProgress {
+                stage: "download",
+                downloaded: 0,
+                total: 0,
+                percent: 0.0,
+                message: Some(format!(
+                    "正在连接下载源 {}/{}…",
+                    index + 1,
+                    FFMPEG_DOWNLOAD_URLS.len()
+                )),
+            },
+        );
+
+        match download_to_file(&client, url, &archive_path, app).await {
+            Ok(()) => match extract_ffmpeg_tools(&archive_path, &ffmpeg_dir) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&archive_path);
+                    // find_ffmpeg 会重新搜索工具目录并刷新解码器缓存。
+                    if let Some(path) = find_ffmpeg(app) {
+                        return Ok(BilibiliFfmpegStatus {
+                            available: true,
+                            path: Some(path.to_string_lossy().to_string()),
+                        });
+                    }
+                    last_error = "下载完成但仍未能定位 ffmpeg 可执行文件".to_string();
+                }
+                Err(reason) => {
+                    let _ = fs::remove_file(&archive_path);
+                    last_error = format!("解压失败: {reason}");
+                }
+            },
+            Err(reason) => {
+                let _ = fs::remove_file(&archive_path);
+                last_error = reason;
+            }
+        }
+    }
+
+    Err(format!(
+        "ffmpeg 下载失败：{last_error}。可手动下载 ffmpeg.exe 与 ffprobe.exe 放入 {}",
+        ffmpeg_dir.display()
+    ))
+}
+
+fn emit_ffmpeg_progress(app: &AppHandle, progress: FfmpegDownloadProgress) {
+    use tauri::Emitter as _;
+    let _ = app.emit(FFMPEG_DOWNLOAD_EVENT, progress);
+}
+
+#[cfg(windows)]
+fn ffmpeg_download_client() -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .user_agent(USER_AGENT_VALUE)
+        .build()
+        .map_err(|err| format!("无法创建下载客户端: {err}"))
+}
+
+/// 流式下载到文件，边写边推送进度。
+#[cfg(windows)]
+async fn download_to_file(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| format!("请求失败: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("下载源返回错误: {err}"))?;
+
+    let total = response.content_length().unwrap_or(0);
+    let mut file =
+        fs::File::create(dest).map_err(|err| format!("无法写入临时文件: {err}"))?;
+    let mut downloaded: u64 = 0;
+    let mut last_emit: u64 = 0;
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("下载中断: {err}"))?
+    {
+        downloaded += chunk.len() as u64;
+        if downloaded > MAX_FFMPEG_DOWNLOAD_BYTES {
+            return Err("下载内容超出体积上限，已中止".into());
+        }
+        file.write_all(&chunk)
+            .map_err(|err| format!("写入失败: {err}"))?;
+
+        // 每累积 ~1 MB 推送一次进度，避免事件风暴。
+        if downloaded - last_emit >= 1024 * 1024 {
+            last_emit = downloaded;
+            let percent = if total > 0 {
+                (downloaded as f64 / total as f64) * 100.0
+            } else {
+                -1.0
+            };
+            emit_ffmpeg_progress(
+                app,
+                FfmpegDownloadProgress {
+                    stage: "download",
+                    downloaded,
+                    total,
+                    percent,
+                    message: None,
+                },
+            );
+        }
+    }
+
+    file.flush().map_err(|err| format!("刷新文件失败: {err}"))?;
+    Ok(())
+}
+
+/// 从 zip 包中提取 ffmpeg.exe 与 ffprobe.exe 到目标目录（忽略包内层级）。
+#[cfg(windows)]
+fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive_path).map_err(|err| format!("无法打开压缩包: {err}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
+
+    let wanted = ["ffmpeg.exe", "ffprobe.exe"];
+    let mut extracted: Vec<String> = Vec::new();
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("读取压缩条目失败: {err}"))?;
+        if !entry.is_file() {
+            continue;
+        }
+        let entry_name = entry.name().to_ascii_lowercase();
+        let file_name = entry_name.rsplit(['/', '\\']).next().unwrap_or(&entry_name);
+        let Some(target) = wanted.iter().find(|name| **name == file_name) else {
+            continue;
+        };
+        if extracted.iter().any(|done| done == *target) {
+            continue;
+        }
+
+        let out_path = dest_dir.join(target);
+        let mut out_file =
+            fs::File::create(&out_path).map_err(|err| format!("无法写入 {target}: {err}"))?;
+        std::io::copy(&mut entry, &mut out_file)
+            .map_err(|err| format!("解压 {target} 失败: {err}"))?;
+        extracted.push((*target).to_string());
+    }
+
+    if !extracted.iter().any(|name| name == "ffmpeg.exe") {
+        return Err("压缩包内未找到 ffmpeg.exe".into());
+    }
+    if !extracted.iter().any(|name| name == "ffprobe.exe") {
+        return Err("压缩包内未找到 ffprobe.exe".into());
+    }
+    Ok(())
 }
 
 async fn import_bilibili_audio_inner(
@@ -1820,6 +2068,45 @@ mod tests {
         let stream = select_audio_stream(dash, true, true, false)
             .expect("a playable stream should be selected");
         assert!(matches!(stream.kind, AudioKind::Normal));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extracts_ffmpeg_tools_from_nested_zip() {
+        use super::extract_ffmpeg_tools;
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        // 模拟 gyan/BtbN 包结构：可执行文件位于 ffmpeg-xxx/bin/ 子目录内。
+        let dir = std::env::temp_dir().join(format!("seraph-ffmpeg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("pkg.zip");
+
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, body) in [
+                ("ffmpeg-7.0-essentials_build/bin/ffmpeg.exe", b"FFMPEGBIN" as &[u8]),
+                ("ffmpeg-7.0-essentials_build/bin/ffprobe.exe", b"FFPROBEBIN"),
+                ("ffmpeg-7.0-essentials_build/bin/ffplay.exe", b"IGNORED"),
+                ("ffmpeg-7.0-essentials_build/README.txt", b"docs"),
+            ] {
+                writer.start_file(name, opts).unwrap();
+                writer.write_all(body).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        extract_ffmpeg_tools(&zip_path, &dir).expect("extraction should succeed");
+        assert!(dir.join("ffmpeg.exe").is_file());
+        assert!(dir.join("ffprobe.exe").is_file());
+        assert!(!dir.join("ffplay.exe").exists(), "only wanted tools extracted");
+        assert_eq!(std::fs::read(dir.join("ffmpeg.exe")).unwrap(), b"FFMPEGBIN");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
