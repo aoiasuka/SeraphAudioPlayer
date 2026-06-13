@@ -515,175 +515,202 @@ function StreamingPage() {
 
   return (
     <div className="relative flex min-h-0 flex-col gap-3">
-      <div className="grid gap-2.5 border-[1.5px] border-ink bg-card p-2.5">
-        <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span
-              className={cn(
-                "inline-flex h-9 min-w-0 items-center gap-2 border-[1.5px] px-3 font-tw text-xs font-bold",
-                loginStatus.loggedIn
-                  ? "border-brown text-brown bg-paper2"
-                  : "border-line text-ink2 bg-paper2"
-              )}
-            >
-              {loginStatus.face ? (
-                <img
-                  src={loginStatus.face}
-                  alt=""
-                  className="h-5 w-5 rounded-full object-cover"
-                />
-              ) : loginStatus.loggedIn ? (
-                <BadgeCheck className="h-4 w-4" />
-              ) : (
-                <QrCode className="h-4 w-4" />
-              )}
-              <span className="max-w-[180px] truncate">
-                {loginStatus.loggedIn
-                  ? loginStatus.username ?? "已登录"
-                  : "未登录"}
-              </span>
+      <div className="flex flex-col gap-4 border-[1.5px] border-ink bg-card p-4">
+        {/* Top Control Panels */}
+        <div className="grid gap-4 md:grid-cols-[1.2fr_1.8fr]">
+          {/* Account Profile Section */}
+          <div className="flex flex-col">
+            <span className="font-tw text-[10px] tracking-[2px] text-ink3 mb-2 block uppercase">
+              [ 01 // Account / 哔哩哔哩 ]
             </span>
-            <button
-              type="button"
-              onClick={startBilibiliLogin}
-              disabled={isLoginBusy}
-              className="stamp-btn inline-flex h-9 items-center gap-2 px-3 font-tw text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isLoginBusy ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "inline-flex h-9 flex-1 min-w-0 items-center gap-2 border-[1.5px] px-3 font-tw text-xs font-bold bg-paper2/40",
+                  loginStatus.loggedIn
+                    ? "border-brown text-brown"
+                    : "border-line text-ink2"
+                )}
+              >
+                {loginStatus.face ? (
+                  <img
+                    src={loginStatus.face}
+                    alt=""
+                    className="h-5 w-5 rounded-full object-cover border border-ink/10"
+                  />
+                ) : loginStatus.loggedIn ? (
+                  <BadgeCheck className="h-4 w-4 text-brown" />
+                ) : (
+                  <QrCode className="h-4 w-4 text-ink3" />
+                )}
+                <span className="truncate">
+                  {loginStatus.loggedIn
+                    ? loginStatus.username ?? "已登录"
+                    : "未登录"}
+                </span>
+              </span>
+
+              {loginStatus.loggedIn ? (
+                <button
+                  type="button"
+                  onClick={logoutBilibili}
+                  title="退出登录"
+                  className="stamp-btn inline-flex h-9 w-9 items-center justify-center font-tw text-xs font-bold"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
               ) : (
-                <LogIn className="h-4 w-4" />
+                <button
+                  type="button"
+                  onClick={startBilibiliLogin}
+                  disabled={isLoginBusy}
+                  className="stamp-btn inline-flex h-9 items-center gap-1.5 px-3 font-tw text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
+                >
+                  {isLoginBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <LogIn className="h-4 w-4" />
+                  )}
+                  <span>登录</span>
+                </button>
               )}
-              <span>扫码登录</span>
-            </button>
-            {loginStatus.loggedIn ? (
+
               <button
                 type="button"
-                onClick={logoutBilibili}
-                className="stamp-btn inline-flex h-9 items-center justify-center px-3 font-tw text-xs font-bold"
+                onClick={() => void refreshBilibiliState()}
+                title="刷新状态"
+                className="stamp-btn inline-flex h-9 w-9 items-center justify-center font-tw text-xs font-bold shrink-0"
               >
-                <LogOut className="h-4 w-4" />
+                <RefreshCw className="h-4 w-4" />
               </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => void refreshBilibiliState()}
-              className="stamp-btn inline-flex h-9 items-center justify-center px-3 font-tw text-xs font-bold"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </button>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setPreferDolbyAtmos((value) => !value)}
-              className={cn(
-                "inline-flex h-9 items-center gap-2 border-[1.5px] px-3 font-tw text-xs font-bold transition-colors",
-                preferDolbyAtmos
-                  ? "border-ink bg-ink text-paper"
-                  : "border-line bg-card text-ink2 hover:border-ink"
-              )}
-            >
-              <Headphones className="h-4 w-4" />
-              <span>Dolby Atmos</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setPreferFlac((value) => !value)}
-              className={cn(
-                "inline-flex h-9 items-center gap-2 border-[1.5px] px-3 font-tw text-xs font-bold transition-colors",
-                preferFlac
-                  ? "border-ink bg-ink text-paper"
-                  : "border-line bg-card text-ink2 hover:border-ink"
-              )}
-            >
-              <Sparkles className="h-4 w-4" />
-              <span>FLAC/Hi-Res</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setRemuxWithFfmpeg((value) => !value)}
-              className={cn(
-                "inline-flex h-9 items-center gap-2 border-[1.5px] px-3 font-tw text-xs font-bold transition-colors",
-                remuxWithFfmpeg
-                  ? "border-ink bg-ink text-paper"
-                  : "border-line bg-card text-ink2 hover:border-ink"
-              )}
-            >
-              <Settings2 className="h-4 w-4" />
-              <span>Remux</span>
-            </button>
-            <span
-              className={cn(
-                "inline-flex h-9 items-center border-[1.5px] px-3 font-tw text-[11px] font-bold",
-                ffmpegStatus.available
-                  ? "border-brown bg-paper2 text-brown"
-                  : "border-stamp bg-stamp-soft text-stamp"
-              )}
-              title={ffmpegStatus.path ?? undefined}
-            >
-              ffmpeg {ffmpegStatus.available ? "可用" : "未找到"}
+          {/* Preferences Section */}
+          <div className="flex flex-col">
+            <span className="font-tw text-[10px] tracking-[2px] text-ink3 mb-2 block uppercase">
+              [ 02 // Preferences / 下载设置 ]
             </span>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <button
+                type="button"
+                onClick={() => setPreferDolbyAtmos((value) => !value)}
+                className={cn(
+                  "inline-flex h-9 items-center justify-center gap-1.5 border-[1.5px] px-2 font-tw text-xs font-bold transition-all",
+                  preferDolbyAtmos
+                    ? "border-ink bg-ink text-paper"
+                    : "border-line bg-card text-ink2 hover:border-ink"
+                )}
+              >
+                <Headphones className="h-3.5 w-3.5" />
+                <span>杜比全景声</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreferFlac((value) => !value)}
+                className={cn(
+                  "inline-flex h-9 items-center justify-center gap-1.5 border-[1.5px] px-2 font-tw text-xs font-bold transition-all",
+                  preferFlac
+                    ? "border-ink bg-ink text-paper"
+                    : "border-line bg-card text-ink2 hover:border-ink"
+                )}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>FLAC/无损</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setRemuxWithFfmpeg((value) => !value)}
+                className={cn(
+                  "inline-flex h-9 items-center justify-center gap-1.5 border-[1.5px] px-2 font-tw text-xs font-bold transition-all",
+                  remuxWithFfmpeg
+                    ? "border-ink bg-ink text-paper"
+                    : "border-line bg-card text-ink2 hover:border-ink"
+                )}
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                <span>FFmpeg混流</span>
+              </button>
+              <span
+                className={cn(
+                  "inline-flex h-9 items-center justify-center border-[1.5px] px-2 font-tw text-[11px] font-bold text-center",
+                  ffmpegStatus.available
+                    ? "border-brown bg-paper2/40 text-brown"
+                    : "border-stamp bg-stamp-soft text-stamp"
+                )}
+                title={ffmpegStatus.path ?? undefined}
+              >
+                FFmpeg: {ffmpegStatus.available ? "可用" : "未找到"}
+              </span>
+            </div>
           </div>
         </div>
 
-        <div className="grid gap-2 xl:grid-cols-2">
-          <form
-            onSubmit={handleImportBilibili}
-            className="flex items-stretch border-[1.5px] border-ink bg-card"
-          >
-            <label className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-ink2">
-              <Link2 className="h-4 w-4 shrink-0 text-brown" />
-              <input
-                value={bilibiliInput}
-                onChange={(event) => setBilibiliInput(event.target.value)}
-                placeholder="链接 / BV号 — 自动识别归档…"
-                className="min-w-0 bg-transparent font-tw text-[13px] text-ink outline-none placeholder:text-ink3"
-                disabled={isImporting}
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={!bilibiliInput.trim() || isImporting}
-              className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-ink px-4 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp disabled:cursor-not-allowed disabled:bg-line disabled:text-ink2"
-            >
-              {isImporting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <DownloadCloud className="h-4 w-4" />
-              )}
-              <span>{isImporting ? "导入中" : "归档 →"}</span>
-            </button>
-          </form>
+        {/* Divider line */}
+        <div className="border-t border-dashed border-line my-0.5" />
 
-          <form
-            onSubmit={handleImportFavorites}
-            className="flex items-stretch border-[1.5px] border-ink bg-card"
-          >
-            <label className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-ink2">
-              <FolderHeart className="h-4 w-4 shrink-0 text-brown" />
-              <input
-                value={favoriteInput}
-                onChange={(event) => setFavoriteInput(event.target.value)}
-                placeholder="收藏夹链接、media_id 或 fid"
-                className="min-w-0 bg-transparent font-tw text-[13px] text-ink outline-none placeholder:text-ink3"
-                disabled={isBatchImporting}
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={!favoriteInput.trim() || isBatchImporting}
-              className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-card px-4 font-tw text-xs font-bold text-ink transition-colors hover:bg-paper2 disabled:cursor-not-allowed disabled:text-ink3"
+        {/* Ingestion Actions */}
+        <div className="flex flex-col">
+          <span className="font-tw text-[10px] tracking-[2px] text-ink3 mb-2 block uppercase">
+            [ 03 // Ingestion / 音频归档任务 ]
+          </span>
+          <div className="grid gap-3 md:grid-cols-2">
+            <form
+              onSubmit={handleImportBilibili}
+              className="flex items-stretch border-[1.5px] border-ink bg-card"
             >
-              {isBatchImporting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <FolderHeart className="h-4 w-4" />
-              )}
-              <span>{isBatchImporting ? "批量中" : "批量"}</span>
-            </button>
-          </form>
+              <label className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-ink2 cursor-text">
+                <Link2 className="h-4 w-4 shrink-0 text-brown" />
+                <input
+                  value={bilibiliInput}
+                  onChange={(event) => setBilibiliInput(event.target.value)}
+                  placeholder="链接 / BV号 — 自动识别归档…"
+                  className="min-w-0 bg-transparent font-tw text-[13px] text-ink outline-none placeholder:text-ink3"
+                  disabled={isImporting}
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={!bilibiliInput.trim() || isImporting}
+                className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-ink px-4 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp disabled:cursor-not-allowed disabled:bg-line disabled:text-ink2 shrink-0"
+              >
+                {isImporting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <DownloadCloud className="h-4 w-4" />
+                )}
+                <span>{isImporting ? "导入中" : "归档 →"}</span>
+              </button>
+            </form>
+
+            <form
+              onSubmit={handleImportFavorites}
+              className="flex items-stretch border-[1.5px] border-ink bg-card"
+            >
+              <label className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-ink2 cursor-text">
+                <FolderHeart className="h-4 w-4 shrink-0 text-brown" />
+                <input
+                  value={favoriteInput}
+                  onChange={(event) => setFavoriteInput(event.target.value)}
+                  placeholder="收藏夹链接、media_id 或 fid"
+                  className="min-w-0 bg-transparent font-tw text-[13px] text-ink outline-none placeholder:text-ink3"
+                  disabled={isBatchImporting}
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={!favoriteInput.trim() || isBatchImporting}
+                className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-card px-4 font-tw text-xs font-bold text-ink transition-colors hover:bg-paper2 disabled:cursor-not-allowed disabled:text-ink3 shrink-0"
+              >
+                {isBatchImporting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FolderHeart className="h-4 w-4" />
+                )}
+                <span>{isBatchImporting ? "批量中" : "批量"}</span>
+              </button>
+            </form>
+          </div>
         </div>
       </div>
 
