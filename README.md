@@ -1,98 +1,110 @@
-# Seraph Audio Player
+<div align="center">
 
-Premium local HiFi audio player — Rust + Tauri + React.
+# 🗃️ SERAPH AUDIO ARCHIVE
 
-参考 `初始化.md` 中确定的架构：放弃 Qt/C++，以 Rust 重写底层、Tauri 做系统壳、React 做 UI，WASAPI Exclusive + DSD 保留。
+**Premium Local HiFi Audio Player / 档案级本地高保真音频播放系统**
 
-> 当前音频路径已接入：本地文件会经 Rust 解码、重采样/声道适配后进入无锁 ring buffer，再由系统共享输出或 WASAPI Exclusive 渲染线程消费。DSD 目前使用 PCM Conversion；DoP、Native DSD、ASIO 和 bit-perfect 旁路尚未开放。
+[![Rust](https://img.shields.io/badge/Rust-Core%20Engine-black?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-System%20Shell-black?style=for-the-badge&logo=tauri)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-Archive%20UI-black?style=for-the-badge&logo=react)](https://react.dev/)
+[![WASAPI](https://img.shields.io/badge/Audio-WASAPI%20Exclusive-brown?style=for-the-badge)]()
 
-## 技术栈
+*“摒弃历史包袱，以现代工程重塑纯粹的听觉档案。”*
 
-| 层 | 选型 |
-|---|---|
-| 系统壳 | Tauri v2 |
-| 音频核心 | Rust workspace（多 crate） |
-| 解码 | Symphonia 主解码 + FFmpeg CLI fallback |
-| 重采样 | 窗口化 sinc 重采样（线性重采样保留为 fallback） |
-| 输出 | WASAPI Exclusive / 系统共享输出（ASIO 尚未开放） |
-| 前端 | React 18 + TypeScript + Vite |
-| 样式 | Tailwind CSS v3 + shadcn/ui |
-| 动画 | Framer Motion |
-| 图标 | Lucide |
-| 状态 | Zustand（UI 投影层） |
+</div>
 
-## 目录结构
+---
 
+## 📜 项目愿景
+
+Seraph Audio Archive 是一款面向发烧友（Audiophile）的本地高保真音乐播放器。
+它不仅在底层音频引擎上追求极致的 Bit-Perfect 与低延迟，更在 UI 设计上独树一帜，采用极具风格化的**“复古档案系统 (Archive System) / 打字机界面”**，旨在为用户提供一种沉浸式的音乐收藏与鉴赏体验。
+
+本项目脱胎于传统的 Qt/C++ 播放器架构，全面迁移至 **Rust + Tauri + React** 的现代化技术栈，确保在未来 3~5 年内具备卓越的可维护性与扩展性。
+
+## ✨ 核心特性
+
+### 🎧 发烧级音频引擎
+- **WASAPI Exclusive (独占模式)**：绕过 Windows 系统混音器，直接与音频硬件对话，确保零干扰输出。
+- **无锁环形缓冲区 (Lock-free Ringbuffer)**：基于高性能 `ringbuf` 实现音频解码与渲染线程的极低延迟数据交换。
+- **DSD 支持**：原生支持 DSD 格式解析与高精度 PCM 转换（未来规划支持 DoP 与 Native DSD）。
+- **多解码器无缝回退**：首选 `Symphonia` 纯 Rust 极速解码，无缝回退至 `FFmpeg` 以兼容极度生僻的格式与 CUE 轨道分轨。
+
+### 🗄️ 档案系统级交互
+- **纯粹的视觉美学**：采用牛皮纸底色、等宽打字机字体（Courier Prime）、斑驳的档案纹理与印章红点缀，杜绝花哨，回归音乐本质。
+- **动态终端体验**：独创的“打字机逐字敲击”歌词面板，伴随闪烁的光标，让每一句歌词如同正在被实时录入档案。
+- **丝滑过渡**：全面整合 Framer Motion 与 Tailwind CSS 动画，提供极致流畅的路由与交互反馈。
+
+---
+
+## 🏗️ 架构概览
+
+本项目采用典型的**“音频核心平台 + UI Shell”**的松耦合架构：
+
+```text
+Seraph Audio Archive
+├── 📦 crates/ (Rust 核心层)
+│   ├── seraph-core/        # 共享数据类型、领域模型与 EventBus
+│   ├── seraph-audio/       # WASAPI 独占输出引擎、设备状态机
+│   ├── seraph-dsp/         # 高精度重采样与 DSD 处理
+│   ├── seraph-decoder/     # Symphonia / FFmpeg 多级解码调度
+│   ├── seraph-playlist/    # 媒体库索引与播放列表管理
+│   └── seraph-visualizer/  # 音频频域/时域分析与共享内存桥接
+├── 🦀 src-tauri/ (系统壳层)
+│   └── src/main.rs         # Tauri IPC 桥接、窗口管理与系统托盘
+└── ⚛️ src/ (React 视图层)
+    └── components/         # 纯粹的 UI 投影层 (UI Projection Layer)
 ```
-crates/
-  seraph-core/        共享类型 / 事件总线 / 状态机
-  seraph-audio/       播放引擎 / 输出设备 / WASAPI 独占
-  seraph-dsp/         重采样 / DSD 转换 trait
-  seraph-decoder/     Symphonia / FFmpeg / DSD 解码
-  seraph-playlist/    歌单 / 库
-  seraph-visualizer/  FFT / shared ringbuffer
-src-tauri/            Tauri shell + IPC bridge
-src/                  React 前端
-```
 
-## 启动
+## 🛠️ 本地开发指南
 
-### 安装依赖
+### 前置依赖
+- Node.js (v18+)
+- Rust & Cargo (最新 Stable 版本)
+- Windows SDK (用于编译 WASAPI 依赖)
+
+### 1. 安装依赖
 
 ```bash
 npm install
 ```
 
-### 浏览器开发模式（不需要 Rust）
+### 2. 纯前端开发模式 (UI Mocking)
+无需编译庞大的 Rust 核心，极速开发 UI 组件。所有的 IPC 调用将自动使用 Fallback 数据。
 
 ```bash
 npm run dev
 ```
 
-打开 http://localhost:1420 即可看到 UI。所有 IPC 调用走 fallback（仅 console.log），用于纯前端迭代。
-
-### Tauri 桌面模式
+### 3. 全量桌面开发模式 (Tauri)
+整合真实音频引擎运行。首次运行会触发 `cargo build`，可能需要几分钟。
 
 ```bash
 npm run tauri:dev
 ```
 
-首次运行会触发 `cargo build`，需要等几分钟。
-
-### 类型检查
+### 4. 生产环境构建
 
 ```bash
-npm run typecheck
+npm run tauri:build
 ```
 
-### Rust 编译
+---
 
-```bash
-cargo build
-```
+## 🗺️ 未来路线图 (Roadmap)
 
-## 验证清单
+我们正以稳健的步伐推进 Seraph 架构的演进：
 
-- [ ] `cargo build` 通过
-- [ ] `npm run typecheck` 通过
-- [ ] `npm run dev` 浏览器看到完整 UI
-- [ ] `npm run tauri:dev` 桌面窗口正常打开
-- [ ] 视觉对照 `synapse_hifi_music_player (1).html` 一致
+- [x] **Phase 1**: 完成基础设施重构 (React + Tauri + Rust 骨架)
+- [x] **Phase 2**: WASAPI 独占输出与 SPSC 音频管线连通
+- [x] **Phase 3**: 实现“档案系统”风格 UI 核心视觉（如打字机歌词组件）
+- [ ] **Phase 4**: 完善 Bit-perfect PCM 路径（音量旁路、格式硬锁定）
+- [ ] **Phase 5**: 设备插拔 (Device Lost) 恢复状态机
+- [ ] **Phase 6**: 无缝播放 (Gapless Playback) 及 Sample-accurate Transition
+- [ ] **Phase 7**: DSD 原生透传 (Native DSD) 与 DoP 支持
 
-## 下一步路线
+---
 
-1. 完善 bit-perfect PCM 路径：音量旁路、格式锁定、避免不必要的 f32/重采样转换
-2. DSD 分模式实现：PCM Conversion / DoP / Native DSD
-3. Gapless 与 Device Lost 恢复
-4. 将 WASAPI backend trait 与当前渲染 worker 收口
-5. ASIO 输出路径
-6. 更完整的真实音频格式回归测试
+## 📜 协议
 
-## 参考文件
-
-- `初始化.md` —— 架构迁移方案讨论
-- `synapse_hifi_music_player (1).html` —— UI 设计稿
-
-## 最近更新
-
-- **UI 优化**：为歌词面板（LyricsPanel）的当前播放行加入了匹配“档案系统”风格的**打字机逐字敲击效果**，并配有闪烁光标，提升了界面的动态生命力与复古氛围。
+基于 [MIT License](LICENSE) 开源。欢迎各类 Issue 与 Pull Request 共同完善这座听觉档案库！
