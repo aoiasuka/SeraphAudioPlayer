@@ -36,6 +36,31 @@ function lyricPreview(lyrics: LyricLine[]) {
     .join(" / ");
 }
 
+function TypewriterText({ text }: { text: string }) {
+  const [displayedLength, setDisplayedLength] = useState(0);
+
+  useEffect(() => {
+    setDisplayedLength(0);
+    if (!text) return;
+    
+    const speed = Math.max(30, Math.min(80, 800 / text.length));
+    
+    const interval = setInterval(() => {
+      setDisplayedLength((prev) => {
+        if (prev >= text.length) {
+          clearInterval(interval);
+          return text.length;
+        }
+        return prev + 1;
+      });
+    }, speed);
+
+    return () => clearInterval(interval);
+  }, [text]);
+
+  return <span className="type-caret">{text.slice(0, displayedLength)}</span>;
+}
+
 function groupLyricsByTime(lyrics: LyricLine[]) {
   const groups: LyricGroup[] = [];
 
@@ -298,7 +323,7 @@ export function LyricsPanel() {
                             )}
                           >
                             {active && lineIdx === 0 ? (
-                              <span className="type-caret">{line.text}</span>
+                              <TypewriterText text={line.text} />
                             ) : (
                               line.text
                             )}
