@@ -93,6 +93,7 @@ interface PlayerStore {
   toggleLike: (trackId: string) => void;
   createUserPlaylist: (name: string) => void;
   deleteUserPlaylist: (playlistId: string) => void;
+  deleteTrack: (trackId: string) => Promise<void>;
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (paths: string[]) => Promise<void>;
   importBilibiliAudio: (
@@ -980,6 +981,66 @@ export const usePlayerStore = create<PlayerStore>()(
       userPlaylists: state.userPlaylists.filter((item) => item.id !== playlistId),
     }));
     get().showNotification(`已删除歌单：${playlist.name}`);
+  },
+
+  deleteTrack: async (trackId) => {
+    const track = get().playlist.find((item) => item.id === trackId);
+    if (!track) return;
+
+    try {
+      await invoke<boolean>("delete_track", {
+        track: {
+          id: track.id,
+          path: track.path,
+          sourceUrl: track.sourceUrl ?? null,
+          sourceId: track.sourceId ?? null,
+        },
+      });
+
+      const deletingCurrentTrack = get().currentTrack()?.id === trackId;
+      if (deletingCurrentTrack) {
+        sendCommand("stop");
+      }
+      nextIndexCache = null;
+
+      set((state) => {
+        const removedIndex = state.playlist.findIndex(
+          (item) => item.id === trackId
+        );
+        if (removedIndex < 0) return {};
+
+        const playlist = state.playlist.filter((item) => item.id !== trackId);
+        const liked = { ...state.liked };
+        delete liked[trackId];
+        const currentTrackIndex =
+          playlist.length === 0
+            ? 0
+            : removedIndex < state.currentTrackIndex
+              ? state.currentTrackIndex - 1
+              : removedIndex === state.currentTrackIndex
+                ? Math.min(removedIndex, playlist.length - 1)
+                : Math.min(state.currentTrackIndex, playlist.length - 1);
+
+        return {
+          playlist,
+          currentTrackIndex,
+          currentTime: deletingCurrentTrack ? 0 : state.currentTime,
+          isPlaying: deletingCurrentTrack ? false : state.isPlaying,
+          recentTrackIds: state.recentTrackIds.filter((id) => id !== trackId),
+          liked,
+          userPlaylists: state.userPlaylists.map((playlist) => ({
+            ...playlist,
+            trackIds: playlist.trackIds.filter((id) => id !== trackId),
+          })),
+        };
+      });
+
+      get().showNotification(`已从曲库移除：${track.title}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: delete_track", err);
+      get().showNotification("删除曲库记录失败");
+    }
   },
 
   loadBackendLibrary: async () => {

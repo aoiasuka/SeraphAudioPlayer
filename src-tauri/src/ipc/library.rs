@@ -70,6 +70,17 @@ pub struct ImportedTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTrackRequest {
+    pub id: String,
+    pub path: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LyricLine {
     pub time: f64,
     pub text: String,
@@ -124,6 +135,23 @@ pub fn get_track_info(app: AppHandle, track_id: String) -> Result<Option<Importe
     Ok(read_cached_tracks(&app)?
         .into_iter()
         .find(|track| track.id == track_id))
+}
+
+#[tauri::command]
+pub fn delete_track(app: AppHandle, track: DeleteTrackRequest) -> Result<bool, String> {
+    let track_id = track.id.trim();
+    let target_key = delete_track_request_key(&track);
+    if track_id.is_empty() && target_key.is_none() {
+        return Err("missing track identity".into());
+    }
+
+    let tracks = read_cached_tracks(&app)?;
+    let (updated, removed) = remove_cached_track(tracks, track_id, target_key.as_deref());
+    if removed {
+        write_cached_tracks(&app, &updated)?;
+    }
+
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -859,6 +887,25 @@ fn merge_cached_tracks(
     dedupe_cached_tracks(cached)
 }
 
+fn remove_cached_track(
+    tracks: Vec<ImportedTrack>,
+    track_id: &str,
+    target_key: Option<&str>,
+) -> (Vec<ImportedTrack>, bool) {
+    let before = tracks.len();
+    let updated = tracks
+        .into_iter()
+        .filter(|track| {
+            let id_matches = !track_id.is_empty() && track.id == track_id;
+            let key_matches = target_key.is_some_and(|key| import_track_key(track) == key);
+            !(id_matches || key_matches)
+        })
+        .collect::<Vec<_>>();
+
+    let removed = updated.len() != before;
+    (updated, removed)
+}
+
 fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {
     let mut output: Vec<ImportedTrack> = Vec::new();
     let mut index_by_key: HashMap<String, usize> = HashMap::new();
@@ -931,6 +978,33 @@ fn imported_tracks_from_cache(
                 .unwrap_or_else(|| track.clone())
         })
         .collect()
+}
+
+fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<String> {
+    if let Some(source_id) = track
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(format!("source-id:{}", source_id.to_ascii_lowercase()));
+    }
+
+    if let Some(source_url) = track
+        .source_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(format!("source-url:{}", source_url.to_ascii_lowercase()));
+    }
+
+    let path = track.path.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(import_dedupe_key(Path::new(path)))
+    }
 }
 
 fn apply_track_lyrics(
@@ -2438,6 +2512,38 @@ mod tests {
         assert_eq!(merged[0].lyrics.len(), 1);
         assert!((merged[0].lyrics[0].time - 1.5).abs() < 0.001);
         assert_eq!(merged[0].lyrics[0].text, "cached line");
+    }
+
+    #[test]
+    fn removes_cached_track_by_id() {
+        let tracks = vec![
+            test_imported_track("a", "C:/Music/a.flac", "A"),
+            test_imported_track("b", "C:/Music/b.flac", "B"),
+        ];
+
+        let (updated, removed) = remove_cached_track(tracks, "a", None);
+
+        assert!(removed);
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, "b");
+    }
+
+    #[test]
+    fn removes_cached_track_by_streaming_source_key() {
+        let mut track = test_imported_track("old-id", "C:/Cache/BV1xx-1.flac", "Stream");
+        track.source_id = Some("BV1xx".into());
+        let request = DeleteTrackRequest {
+            id: "new-id".into(),
+            path: "C:/Cache/BV1xx-1.flac".into(),
+            source_url: None,
+            source_id: Some("bv1XX".into()),
+        };
+        let key = delete_track_request_key(&request);
+
+        let (updated, removed) = remove_cached_track(vec![track], &request.id, key.as_deref());
+
+        assert!(removed);
+        assert!(updated.is_empty());
     }
 
     #[test]

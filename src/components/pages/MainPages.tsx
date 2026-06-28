@@ -183,13 +183,23 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
   const liked = usePlayerStore((s) => s.liked);
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const toggleLike = usePlayerStore((s) => s.toggleLike);
+  const deleteTrack = usePlayerStore((s) => s.deleteTrack);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
+  const [trackToDeleteId, setTrackToDeleteId] = useState<string | null>(null);
+  const [isDeletingTrack, setIsDeletingTrack] = useState(false);
   const trackIndexById = useMemo(() => {
     const indexById = new Map<string, number>();
     playlist.forEach((track, index) => indexById.set(track.id, index));
     return indexById;
   }, [playlist]);
+  const trackToDelete = useMemo(
+    () =>
+      tracks.find((track) => track.id === trackToDeleteId) ??
+      playlist.find((track) => track.id === trackToDeleteId) ??
+      null,
+    [playlist, trackToDeleteId, tracks]
+  );
   const visibleRows = useMemo(() => {
     const start = Math.max(
       0,
@@ -211,6 +221,20 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
     const element = event.currentTarget;
     setScrollTop(element.scrollTop);
     setViewportHeight(element.clientHeight);
+  };
+  const closeDeleteDialog = () => {
+    if (!isDeletingTrack) setTrackToDeleteId(null);
+  };
+  const handleDeleteTrack = async () => {
+    if (!trackToDelete || isDeletingTrack) return;
+
+    setIsDeletingTrack(true);
+    try {
+      await deleteTrack(trackToDelete.id);
+      setTrackToDeleteId(null);
+    } finally {
+      setIsDeletingTrack(false);
+    }
   };
 
   if (tracks.length === 0) {
@@ -245,7 +269,7 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
             <div
               key={track.id}
               className={cn(
-                "archive-card relative grid h-[49px] grid-cols-[58px_minmax(0,1fr)_118px_64px_40px] items-center gap-3 px-4 mb-2.5",
+                "archive-card group relative grid h-[49px] grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px] items-center gap-3 px-4 mb-2.5",
                 active && "is-playing"
               )}
             >
@@ -325,11 +349,62 @@ function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
               >
                 <Heart className="w-3.5 h-3.5" fill={favorite ? "currentColor" : "none"} />
               </button>
+              <button
+                type="button"
+                onClick={() => setTrackToDeleteId(track.id)}
+                className="flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-stamp focus:opacity-100 focus:text-stamp group-hover:opacity-100"
+                aria-label={`删除曲库记录 ${track.title}`}
+                title="删除曲库记录"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
             </div>
           );
         })}
         </div>
       </div>
+      <Dialog
+        open={Boolean(trackToDelete)}
+        onClose={closeDeleteDialog}
+        className="max-w-sm"
+      >
+        <div className="space-y-4">
+          <div>
+            <p className="font-tw text-[10px] font-bold uppercase tracking-[0.18em] text-stamp">
+              Delete Track
+            </p>
+            <h2 className="mt-1 font-serif text-lg font-bold text-ink">
+              删除曲库记录
+            </h2>
+            <p className="mt-2 font-tw text-xs leading-relaxed text-ink2">
+              确定从曲库中移除「{trackToDelete?.title}」吗？这只会删除软件内记录，不会删除磁盘上的音频文件。
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={closeDeleteDialog}
+              disabled={isDeletingTrack}
+              className="stamp-btn h-9 px-3 font-tw text-xs font-bold disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteTrack}
+              disabled={isDeletingTrack}
+              className="inline-flex h-9 items-center gap-2 border-[1.5px] border-stamp bg-stamp px-3 font-tw text-xs font-bold text-paper transition-colors hover:brightness-110 disabled:cursor-wait disabled:opacity-70"
+            >
+              {isDeletingTrack ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+              <span>{isDeletingTrack ? "删除中" : "删除记录"}</span>
+            </button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

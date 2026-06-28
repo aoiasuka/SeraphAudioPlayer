@@ -37,6 +37,7 @@ pub fn run() {
             ipc::cache::update_cache_settings,
             ipc::library::get_playlist,
             ipc::library::get_track_info,
+            ipc::library::delete_track,
             ipc::library::import_tracks,
             ipc::bilibili::bilibili_ffmpeg_status,
             ipc::bilibili::download_ffmpeg,
