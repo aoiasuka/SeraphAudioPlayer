@@ -99,7 +99,7 @@ npm run tauri:build
 - [x] **Phase 2**: WASAPI 独占输出与 SPSC 音频管线连通
 - [x] **Phase 3**: 实现“档案系统”风格 UI 核心视觉（如打字机歌词组件）
 - [ ] **Phase 4**: 完善 Bit-perfect PCM 路径（音量旁路、格式硬锁定）
-- [ ] **Phase 5**: 设备插拔 (Device Lost) 恢复状态机
+- [x] **Phase 5**: 设备持久化标识与插拔容错处理 (Device ID Resolution & Fallback)
 - [ ] **Phase 6**: 无缝播放 (Gapless Playback) 及 Sample-accurate Transition
 - [ ] **Phase 7**: DSD 原生透传 (Native DSD) 与 DoP 支持
 
