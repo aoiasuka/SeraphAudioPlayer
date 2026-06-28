@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seraph Audio - Lyrics Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400;1,700&family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        paper: '#f5f1e8',
+                        paper2: '#e6e2d6',
+                        ink: '#1c1b18',
+                        ink2: '#4a4843',
+                        ink3: '#7a766c',
+                        stamp: '#c93b3b',
+                        brown: '#8b6b4a',
+                        line: '#d1cdc1'
+                    },
+                    fontFamily: {
+                        tw: ['"Courier Prime"', 'monospace'],
+                        serif: ['"Noto Serif SC"', 'serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #1c1b18; /* Dark ink background for terminal */
+            color: #f5f1e8; /* Paper color text */
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.08'/%3E%3C/svg%3E");
+        }
+        .folder-card {
+            background-color: #1c1b18;
+            border: 1.5px solid #4a4843;
+            position: relative;
+        }
+        .terminal-text {
+            text-shadow: 0 0 4px rgba(245, 241, 232, 0.4);
+        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        .cursor-blink { animation: blink 1s step-end infinite; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1c1b18; border-left: 1.5px solid #4a4843; }
+        ::-webkit-scrollbar-thumb { background: #4a4843; }
+    </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col font-tw">
+
+    <!-- Top Navigation -->
+    <nav class="h-12 border-b-[1.5px] border-ink2 bg-ink flex items-center justify-between px-6 shrink-0 text-paper">
+        <button class="hover:text-stamp transition-colors flex items-center gap-2 text-sm font-bold">
+            <i class="fa-solid fa-arrow-left"></i> RETURN_TO_ARCHIVE
+        </button>
+        <div class="text-xs font-bold text-ink3 flex items-center gap-4">
+            <span>TERMINAL_MODE: ACTIVE</span>
+        </div>
+    </nav>
+
+    <main class="flex-1 flex overflow-hidden p-8 gap-12 max-w-7xl mx-auto w-full">
+        
+        <!-- Left: Album Art & Info -->
+        <div class="w-[400px] flex flex-col gap-6 shrink-0 justify-center">
+            <div class="folder-card p-2 relative">
+                <div class="absolute -top-4 -left-4 w-12 h-12 border-t-2 border-l-2 border-stamp"></div>
+                <div class="absolute -bottom-4 -right-4 w-12 h-12 border-b-2 border-r-2 border-stamp"></div>
+                <img src="https://placehold.co/800x800/111/ddd?text=ALBUM" alt="Cover" class="w-full aspect-square object-cover grayscale contrast-125 border-[1.5px] border-ink2">
+                <div class="absolute bottom-4 right-4 bg-stamp text-paper text-xs font-bold px-2 py-1 rotate-[-5deg]">
+                    HI-RES AUDIO
+                </div>
+            </div>
+            <div class="space-y-2 mt-4 text-center">
+                <h1 class="font-serif text-3xl font-black text-paper terminal-text">Two Thousand and Seventeen</h1>
+                <h2 class="text-lg font-bold text-ink3">Four Tet — New Energy</h2>
+                <div class="text-xs text-ink2 mt-4">
+                    [ FORMAT: FLAC ] [ BITDEPTH: 24bit ] [ SR: 96kHz ]
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Lyrics Terminal -->
+        <div class="flex-1 flex flex-col border-[1.5px] border-ink2 p-8 relative overflow-hidden bg-[#151412]">
+            <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPgo8cmVjdCB3aWR0aD0iNCIgaGVpZ2h0PSI0IiBmaWxsPSJ0cmFuc3BhcmVudCIvPgo8cmVjdCB3aWR0aD0iNCIgaGVpZ2h0PSIxIiBmaWxsPSJyZ2JhKDI0NSwgMjQxLCAyMzIsIDAuMDMpIi8+Cjwvc3ZnPg==')] pointer-events-none"></div>
+
+            <div class="text-[10px] tracking-widest text-ink3 mb-8 border-b-[1.5px] border-ink2 pb-2 uppercase flex justify-between">
+                <span>[ TRANSCRIPT_LOG // LYRICS ]</span>
+                <span class="text-stamp animate-pulse">● LIVE_DECODING</span>
+            </div>
+
+            <div class="flex-1 overflow-y-auto space-y-6 text-lg font-bold terminal-text pr-4 mask-image: linear-gradient(to bottom, transparent, black 10%, black 90%, transparent)">
+                
+                <div class="text-ink3 opacity-50 flex gap-4">
+                    <span class="text-xs mt-1 w-12 text-right">00:45</span>
+                    <p>A delicate sound, floating on the breeze</p>
+                </div>
+                
+                <div class="text-ink3 opacity-70 flex gap-4">
+                    <span class="text-xs mt-1 w-12 text-right">00:52</span>
+                    <p>A cascade of bells, playing sweet melodies</p>
+                </div>
+                
+                <!-- Active Line -->
+                <div class="text-paper flex gap-4 text-2xl scale-[1.02] transform origin-left transition-all">
+                    <span class="text-xs mt-2 w-12 text-right text-stamp">01:05</span>
+                    <p>
+                        The rhythm builds, taking you on a flight<span class="inline-block w-3 h-6 bg-stamp ml-1 cursor-blink align-middle"></span>
+                    </p>
+                </div>
+                
+                <div class="text-ink2 flex gap-4">
+                    <span class="text-xs mt-1 w-12 text-right">01:18</span>
+                    <p>Through a digital dreamscape of neon light</p>
+                </div>
+
+                <div class="text-ink2 flex gap-4">
+                    <span class="text-xs mt-1 w-12 text-right">01:30</span>
+                    <p>Hear the sub-bass pulse...</p>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+</body>
+</html>

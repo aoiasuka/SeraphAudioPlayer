@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
@@ -27,7 +29,7 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
-  envPrefix: ["VITE_", "TAURI_ENV_*"],
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
     target: "esnext",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
