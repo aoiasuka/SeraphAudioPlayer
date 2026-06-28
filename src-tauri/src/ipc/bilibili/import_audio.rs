@@ -1,0 +1,642 @@
+async fn import_bilibili_audio_inner(
+    app: &AppHandle,
+    client: &Client,
+    input: &str,
+    options: &BilibiliImportOptions,
+) -> Result<ImportedTrack, String> {
+    let bvid = resolve_bvid(client, input).await?;
+    // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
+    // 缺少 ffmpeg 时必须在选流阶段就避开它们，否则会导入一个永远无法播放的文件。
+    let ffmpeg_path = options
+        .remux_with_ffmpeg
+        .unwrap_or(true)
+        .then(|| find_ffmpeg(app))
+        .flatten();
+    let resolved = resolve_audio(client, &bvid, options, ffmpeg_path.is_some()).await?;
+    let cache_path = audio_cache_path(
+        app,
+        &resolved.video.bvid,
+        resolved.video.cid,
+        resolved.stream.output_extension(ffmpeg_path.is_some()),
+    )?;
+
+    ensure_audio_file(
+        client,
+        &resolved.stream.audio_urls(),
+        &cache_path,
+        ffmpeg_path.as_deref(),
+    )
+    .await?;
+    let _ = enforce_cache_limit_preserving(app, &cache_path);
+
+    let track = track_from_resolved_audio(&resolved, &cache_path, ffmpeg_path.is_some())?;
+    let imported = merge_tracks_into_cache(app, &[track])?;
+    imported
+        .into_iter()
+        .next()
+        .ok_or_else(|| "failed to import bilibili audio".to_string())
+}
+
+async fn resolve_bvid(client: &Client, input: &str) -> Result<String, String> {
+    if let Some(bvid) = extract_bvid(input) {
+        return Ok(bvid);
+    }
+
+    let trimmed = input.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("没有找到有效的 B 站 BV 号或视频链接".into());
+    }
+
+    let response = client
+        .get(trimmed)
+        .send()
+        .await
+        .map_err(|err| format!("无法打开 B 站链接: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("B 站链接不可访问: {err}"))?;
+
+    let final_url = response.url().to_string();
+    if let Some(bvid) = extract_bvid(&final_url) {
+        return Ok(bvid);
+    }
+
+    // 限制 HTML 抓取大小：避免恶意服务器/重定向到大文件导致内存爆炸。
+    let body = read_bytes_capped(response, MAX_HTML_BYTES)
+        .await
+        .map_err(|err| format!("无法读取 B 站页面内容: {err}"))?;
+    let body_str = String::from_utf8_lossy(&body);
+    extract_bvid(&body_str).ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
+}
+
+async fn resolve_audio(
+    client: &Client,
+    bvid: &str,
+    options: &BilibiliImportOptions,
+    ffmpeg_available: bool,
+) -> Result<ResolvedAudio, String> {
+    let video = fetch_video_data(client, bvid).await?;
+    let stream =
+        fetch_audio_stream(client, &video.bvid, video.cid, options, ffmpeg_available).await?;
+    Ok(ResolvedAudio { video, stream })
+}
+
+async fn fetch_video_data(client: &Client, bvid: &str) -> Result<VideoData, String> {
+    let response = client
+        .get(VIEW_API)
+        .query(&[("bvid", bvid)])
+        .send()
+        .await
+        .map_err(|err| format!("failed to fetch bilibili video info: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("bilibili video info request failed: {err}"))?;
+
+    let api =
+        parse_json_response::<ApiResponse<VideoData>>(response, "bilibili video info").await?;
+    api.into_data("bilibili video info")
+}
+
+async fn fetch_audio_stream(
+    client: &Client,
+    bvid: &str,
+    cid: i64,
+    options: &BilibiliImportOptions,
+    ffmpeg_available: bool,
+) -> Result<AudioStream, String> {
+    let response = client
+        .get(PLAY_URL_API)
+        .query(&[
+            ("fnval", PLAY_URL_FNVAL),
+            ("fnver", "0"),
+            ("fourk", "1"),
+            ("high_quality", "1"),
+            ("platform", "pc"),
+            ("bvid", bvid),
+            ("cid", &cid.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|err| format!("failed to fetch bilibili play url: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("bilibili play url request failed: {err}"))?;
+
+    let api =
+        parse_json_response::<ApiResponse<PlayUrlData>>(response, "bilibili play url").await?;
+    let play_url = api.into_data("bilibili play url")?;
+    let dash = play_url
+        .dash
+        .ok_or_else(|| "bilibili response has no dash audio streams".to_string())?;
+
+    select_audio_stream(
+        dash,
+        options.prefer_flac.unwrap_or(true),
+        options.prefer_dolby_atmos.unwrap_or(true),
+        ffmpeg_available,
+    )
+}
+
+fn select_audio_stream(
+    dash: DashData,
+    prefer_flac: bool,
+    prefer_dolby_atmos: bool,
+    ffmpeg_available: bool,
+) -> Result<AudioStream, String> {
+    let mut streams = Vec::new();
+
+    // 杜比 / 全景声（EAC3）流 Symphonia 无法原生解码，必须依赖 ffmpeg fallback。
+    // 没有 ffmpeg 时即便用户勾选了 prefer_dolby_atmos 也跳过，避免下载一个永远播不了的文件。
+    if prefer_dolby_atmos && ffmpeg_available {
+        if let Some(dolby) = dash.dolby {
+            let container_kind = dolby.kind;
+            if let Some(audio) = dolby.audio {
+                streams.extend(audio.into_iter().filter_map(|value| {
+                    let kind = dolby_audio_kind(&value, container_kind);
+                    audio_stream_from_value(value, kind)
+                }));
+            }
+        }
+    }
+
+    if prefer_flac {
+        if let Some(audio) = dash.flac.and_then(|flac| flac.audio) {
+            if let Some(stream) = audio_stream_from_value(audio, AudioKind::Flac) {
+                streams.push(stream);
+            }
+        }
+    }
+
+    if let Some(audio) = dash.audio {
+        streams.extend(
+            audio
+                .into_iter()
+                .filter_map(|value| audio_stream_from_value(value, AudioKind::Normal)),
+        );
+    }
+
+    streams
+        .into_iter()
+        .max_by_key(|stream| (stream.kind_rank(), stream.bandwidth.unwrap_or_default()))
+        .ok_or_else(|| {
+            if ffmpeg_available {
+                "bilibili response has no usable audio stream".to_string()
+            } else {
+                "未找到可直接播放的音频流（仅有杜比/全景声 EAC3 流，需要安装 ffmpeg 才能解码）"
+                    .to_string()
+            }
+        })
+}
+
+fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> AudioKind {
+    if is_dolby_atmos_stream(value, container_kind) {
+        AudioKind::DolbyAtmos
+    } else {
+        AudioKind::Dolby
+    }
+}
+
+fn is_dolby_atmos_stream(value: &Value, container_kind: Option<u32>) -> bool {
+    if container_kind.is_some_and(|kind| kind > 0) {
+        return true;
+    }
+
+    let quality = value
+        .get("id")
+        .or_else(|| value.get("quality"))
+        .or_else(|| value.get("audio_quality"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if matches!(quality, 30250 | 30255) {
+        return true;
+    }
+
+    let mut haystack = String::new();
+    for key in [
+        "codecs",
+        "desc",
+        "description",
+        "display_desc",
+        "displayDesc",
+        "quality_desc",
+        "qualityDesc",
+    ] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            haystack.push_str(text);
+            haystack.push(' ');
+        }
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    haystack.contains("atmos")
+        || haystack.contains("dolby")
+        || haystack.contains("eac3")
+        || haystack.contains("ec-3")
+        || haystack.contains("ac-4")
+        || haystack.contains("杜比")
+        || haystack.contains("全景声")
+}
+
+fn audio_stream_from_value(value: Value, kind: AudioKind) -> Option<AudioStream> {
+    let base_url = value
+        .get("baseUrl")
+        .or_else(|| value.get("base_url"))
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
+    if base_url.is_empty() {
+        return None;
+    }
+
+    let mut backup_urls = Vec::new();
+    for key in ["backupUrl", "backup_url"] {
+        if let Some(urls) = value.get(key).and_then(Value::as_array) {
+            for url in urls.iter().filter_map(Value::as_str) {
+                let url = url.trim();
+                if !url.is_empty() && !backup_urls.iter().any(|item| item == url) {
+                    backup_urls.push(url.to_string());
+                }
+            }
+        }
+    }
+
+    let bandwidth = value
+        .get("bandwidth")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let codecs = value
+        .get("codecs")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    Some(AudioStream {
+        base_url,
+        backup_urls,
+        bandwidth,
+        codecs,
+        kind,
+    })
+}
+
+async fn fetch_favorite_bvids(
+    client: &Client,
+    media_id: &str,
+    max_items: usize,
+) -> Result<Vec<FavMedia>, String> {
+    let mut all = Vec::new();
+    let mut page = 1usize;
+
+    while all.len() < max_items {
+        let response = client
+            .get(FAV_RESOURCE_LIST_API)
+            .query(&[
+                ("media_id", media_id),
+                ("pn", &page.to_string()),
+                ("ps", &FAV_PAGE_SIZE.to_string()),
+                ("platform", "web"),
+            ])
+            .send()
+            .await
+            .map_err(|err| format!("failed to fetch bilibili favorite list: {err}"))?
+            .error_for_status()
+            .map_err(|err| format!("bilibili favorite list request failed: {err}"))?;
+        let api =
+            parse_json_response::<ApiResponse<FavListData>>(response, "bilibili favorite list")
+                .await?;
+        let data = api.into_data("bilibili favorite list")?;
+        let medias = data.medias.unwrap_or_default();
+        let count_before = all.len();
+        for media in medias {
+            if media
+                .bvid
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                all.push(media);
+                if all.len() >= max_items {
+                    break;
+                }
+            }
+        }
+
+        if !data.has_more || all.len() == count_before {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(all)
+}
+
+async fn parse_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<T, String> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| format!("failed to read {label} response body: {err}"))?;
+    serde_json::from_slice(&bytes).map_err(|err| {
+        let preview = String::from_utf8_lossy(&bytes);
+        let preview = preview.chars().take(240).collect::<String>();
+        format!("failed to parse {label} json: {err}; body preview: {preview}")
+    })
+}
+
+async fn ensure_audio_file(
+    client: &Client,
+    audio_urls: &[String],
+    path: &Path,
+    ffmpeg_path: Option<&Path>,
+) -> Result<(), String> {
+    // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
+    // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
+    let sentinel = ok_sentinel_path(path);
+    if path.is_file()
+        && sentinel.is_file()
+        && fs::metadata(path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    // 清理可能残留的不完整文件 + 旧 sentinel
+    let _ = fs::remove_file(&sentinel);
+    if path.is_file() {
+        let _ = fs::remove_file(path);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create bilibili cache dir: {err}"))?;
+    }
+
+    let mut last_error = None;
+    for audio_url in audio_urls {
+        let temp_path = temp_download_path(path);
+        match download_audio_to_file(client, audio_url, &temp_path).await {
+            Ok(()) => {
+                finalize_audio_file(&temp_path, path, ffmpeg_path)?;
+                // 写一个零字节 sentinel 标记缓存完整可用；
+                // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
+                let _ = fs::write(&sentinel, b"");
+                return Ok(());
+            }
+            Err(err) => {
+                let _ = fs::remove_file(&temp_path);
+                last_error = Some(err);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "bilibili response has no audio download url".into()))
+}
+
+fn ok_sentinel_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bilibili-audio");
+    path.with_file_name(format!(".{file_name}.ok"))
+}
+
+async fn download_audio_to_file(
+    client: &Client,
+    audio_url: &str,
+    temp_path: &Path,
+) -> Result<(), String> {
+    if audio_url.trim().is_empty() {
+        return Err("empty bilibili audio url".into());
+    }
+
+    let mut response = client
+        .get(audio_url)
+        .send()
+        .await
+        .map_err(|err| format!("failed to download bilibili audio: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("bilibili audio download failed: {err}"))?;
+
+    // 提前检查 Content-Length；超出上限直接拒绝，避免下载到一半才发现。
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_AUDIO_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bilibili audio too large: declared {} bytes (limit {})",
+                content_length, MAX_AUDIO_DOWNLOAD_BYTES
+            ));
+        }
+    }
+
+    // L-13：流式写入临时文件，避免把整段 FLAC（数百 MB）整块驻留内存再二次复制。
+    let mut file = fs::File::create(temp_path)
+        .map_err(|err| format!("failed to create bilibili temp file: {err}"))?;
+    let mut written: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("network read error: {err}"))?
+    {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > MAX_AUDIO_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bilibili audio exceeded {MAX_AUDIO_DOWNLOAD_BYTES} bytes; aborted"
+            ));
+        }
+        file.write_all(&chunk)
+            .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
+    }
+
+    if written == 0 {
+        return Err("downloaded bilibili audio is empty".into());
+    }
+    file.flush()
+        .map_err(|err| format!("failed to flush bilibili temp file: {err}"))?;
+    Ok(())
+}
+
+/// 增量读取响应体，超出上限即截断并报错；
+/// 避免恶意服务器或异常重定向把进程内存撑爆。
+async fn read_bytes_capped(
+    mut response: reqwest::Response,
+    cap: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("network read error: {err}"))?
+    {
+        if (buf.len() as u64).saturating_add(chunk.len() as u64) > cap {
+            return Err(format!("response body exceeded {cap} bytes; aborted"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<String>, String> {
+    let url = normalize_url(url);
+    if url.trim().is_empty() || url.starts_with("data:") {
+        return Ok((!url.trim().is_empty()).then_some(url));
+    }
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| format!("failed to download bilibili avatar: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("bilibili avatar download failed: {err}"))?;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(avatar_mime_type)
+        .unwrap_or("image/jpeg")
+        .to_string();
+    // L-12：增量读取并在超限时立即中止，避免重定向到大文件时白白吃内存。
+    let bytes = match read_bytes_capped(response, MAX_AVATAR_BYTES as u64).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "data:{};base64,{}",
+        content_type,
+        BASE64.encode(bytes)
+    )))
+}
+
+fn avatar_mime_type(value: &str) -> Option<&'static str> {
+    let value = value.split(';').next()?.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        "image/gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn finalize_audio_file(
+    temp_path: &Path,
+    path: &Path,
+    ffmpeg_path: Option<&Path>,
+) -> Result<(), String> {
+    // temp_path 已由 download_audio_to_file 流式写好；这里只做 remux 或就地改名。
+    if let Some(ffmpeg_path) = ffmpeg_path {
+        match remux_audio(ffmpeg_path, temp_path, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(temp_path);
+                return Ok(());
+            }
+            Err(_) => {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fs::rename(temp_path, path)
+        .map_err(|err| format!("failed to finalize bilibili audio file: {err}"))?;
+    Ok(())
+}
+
+fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
+    let mut command = Command::new(ffmpeg_path);
+    hide_console_window(&mut command);
+    let result = command
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(input)
+        .arg("-vn")
+        .arg("-c:a")
+        .arg("copy")
+        .arg(output)
+        .output()
+        .map_err(|err| format!("failed to start ffmpeg: {err}"))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("ffmpeg remux failed: {stderr}"));
+    }
+
+    if !output.is_file()
+        || fs::metadata(output)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
+    {
+        return Err("ffmpeg did not create a usable output file".into());
+    }
+
+    Ok(())
+}
+
+fn track_from_resolved_audio(
+    resolved: &ResolvedAudio,
+    path: &Path,
+    remuxed: bool,
+) -> Result<ImportedTrack, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("failed to read cached audio metadata: {err}"))?;
+    let mut hasher = DefaultHasher::new();
+    format!("{}:{}", resolved.video.bvid, resolved.video.cid).hash(&mut hasher);
+    let hash = hasher.finish();
+    let bitrate = resolved.stream.bandwidth.map(|value| value / 1000);
+    let (glow1, glow2) = color_pair(hash);
+    let format = resolved.stream.format_label().to_string();
+
+    Ok(ImportedTrack {
+        id: format!(
+            "bilibili-{}-{}",
+            resolved.video.bvid.to_ascii_lowercase(),
+            resolved.video.cid
+        ),
+        title: resolved.video.title.clone(),
+        artist: resolved.video.owner.name.clone(),
+        album: "Bilibili".into(),
+        album_year: None,
+        cover: resolved.video.pic.clone().unwrap_or_default(),
+        format: format.clone(),
+        bitdepth: format_bilibili_quality(&format, bitrate, &resolved.stream.kind, remuxed),
+        sample_rate: "Unknown".into(),
+        bitrate: format_bitrate(bitrate),
+        channels: "Stereo".into(),
+        size: format_file_size(metadata.len()),
+        path: path.to_string_lossy().to_string(),
+        source_url: Some(format!(
+            "https://www.bilibili.com/video/{}",
+            resolved.video.bvid
+        )),
+        source_id: Some(resolved.video.bvid.clone()),
+        cache_missing: false,
+        duration: resolved.video.duration,
+        glow_color: glow1.clone(),
+        glow1,
+        glow2,
+        lyrics: Vec::new(),
+    })
+}
+
+fn audio_cache_path(
+    app: &AppHandle,
+    bvid: &str,
+    cid: i64,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    Ok(cache_dir(app)?.join(format!(
+        "{}-{cid}.{}",
+        sanitize_file_component(bvid),
+        extension.trim_start_matches('.')
+    )))
+}
+
+fn temp_download_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bilibili-audio");
+    path.with_file_name(format!("{file_name}.download"))
+}
