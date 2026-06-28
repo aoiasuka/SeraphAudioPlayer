@@ -226,16 +226,16 @@ fn spawn_wasapi_submit_worker(
     let (ready_tx, ready_rx) = mpsc::channel();
     let shared_for_worker = shared.clone();
     let worker = thread::spawn(move || {
-        run_wasapi_submit_worker(
+        run_wasapi_submit_worker(WasapiSubmitWorkerConfig {
             device_id,
             sample_rate,
             bit_depth,
             channels,
             format,
-            shared_for_worker,
+            shared: shared_for_worker,
             rx,
             ready_tx,
-        )
+        })
     });
 
     match ready_rx.recv_timeout(Duration::from_secs(8)) {
@@ -271,7 +271,7 @@ fn spawn_wasapi_submit_worker(
 }
 
 #[cfg(windows)]
-fn run_wasapi_submit_worker(
+struct WasapiSubmitWorkerConfig {
     device_id: String,
     sample_rate: SampleRate,
     bit_depth: BitDepth,
@@ -280,8 +280,22 @@ fn run_wasapi_submit_worker(
     shared: Arc<WasapiShared>,
     rx: Receiver<Vec<f32>>,
     ready_tx: Sender<std::result::Result<(), String>>,
-) -> Result<()> {
+}
+
+#[cfg(windows)]
+fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
     use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
+
+    let WasapiSubmitWorkerConfig {
+        device_id,
+        sample_rate,
+        bit_depth,
+        channels,
+        format,
+        shared,
+        rx,
+        ready_tx,
+    } = config;
 
     let init_result: Result<(wasapi::AudioClient, wasapi::AudioRenderClient, Duration)> = (|| {
         wasapi::initialize_mta()

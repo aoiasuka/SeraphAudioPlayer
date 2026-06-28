@@ -189,8 +189,7 @@ fn spectrum_bins_from_fft(fft_output: &[Complex32], bin_count: usize, fft_size: 
         let hi = hi.max(lo + 1).min(nyquist + 1);
 
         let mut max_mag = 0.0_f32;
-        for k in lo..hi {
-            let c = fft_output[k];
+        for c in fft_output.iter().take(hi).skip(lo) {
             let mag = (c.re * c.re + c.im * c.im).sqrt();
             if mag > max_mag {
                 max_mag = mag;

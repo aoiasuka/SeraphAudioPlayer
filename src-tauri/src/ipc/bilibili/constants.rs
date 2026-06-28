@@ -14,7 +14,7 @@ const MAX_AVATAR_BYTES: usize = 512 * 1024;
 /// 单次音频下载上限。普通 m4a < 50 MB，FLAC 流可达数百 MB，给到 1.5 GB 已远超合理上限。
 const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
 /// B 站视频页 HTML 抓取上限：BVID 一般在前若干 KB 出现，给 1 MB 防御性裁剪。
-const MAX_HTML_BYTES: u64 = 1 * 1024 * 1024;
+const MAX_HTML_BYTES: u64 = 1024 * 1024;
 
 /// 前端监听的 ffmpeg 下载进度频道。
 pub const FFMPEG_DOWNLOAD_EVENT: &str = "seraph://ffmpeg-download";

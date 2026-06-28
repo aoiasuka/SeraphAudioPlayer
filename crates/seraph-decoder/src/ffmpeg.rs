@@ -242,7 +242,7 @@ impl Decoder for FfmpegDecoder {
                 .map(|info| self.frames_read as f64 / f64::from(info.sample_rate.0.max(1)))
                 .unwrap_or(0.0);
         let delta = target - current;
-        if self.stdout.is_some() && delta >= 0.0 && delta < 2.0 {
+        if self.stdout.is_some() && (0.0..2.0).contains(&delta) {
             if let Some(info) = self.info.as_ref() {
                 let channels = usize::from(info.channels.0).max(1);
                 let frames_to_skip = (delta * f64::from(info.sample_rate.0.max(1))).round() as u64;
