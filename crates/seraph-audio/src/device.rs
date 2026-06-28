@@ -404,10 +404,8 @@ fn legacy_index_device_id(index: usize, name: &str) -> String {
 fn legacy_index_device_id_slug(device_id: &str) -> Option<&str> {
     let rest = device_id.strip_prefix("cpal:")?;
     let (index, slug) = rest.split_once(':')?;
-    (!index.is_empty()
-        && index.chars().all(|ch| ch.is_ascii_digit())
-        && !slug.is_empty())
-    .then_some(slug)
+    (!index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()) && !slug.is_empty())
+        .then_some(slug)
 }
 
 fn sanitize_device_id(name: &str) -> String {

@@ -1546,8 +1546,9 @@ mod tests {
     use super::*;
 
     fn adapt(input: &[f32], in_rate: u32, in_ch: usize, out_rate: u32, out_ch: usize) -> Vec<f32> {
-        let mut resampler = StatefulSincResampler::new(in_rate.max(1), out_rate.max(1), out_ch.max(1))
-            .expect("resampler");
+        let mut resampler =
+            StatefulSincResampler::new(in_rate.max(1), out_rate.max(1), out_ch.max(1))
+                .expect("resampler");
         let mut remap = Vec::new();
         let mut out = Vec::new();
         adapt_samples_into(input, in_ch, out_ch, &mut resampler, &mut remap, &mut out)

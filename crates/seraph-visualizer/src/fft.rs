@@ -167,11 +167,7 @@ fn hann_window(index: usize, len: usize) -> f32 {
 }
 
 /// 把 FFT 输出按 log 频率聚合到 `bin_count` 个频段，便于 UI 直接绘制。
-fn spectrum_bins_from_fft(
-    fft_output: &[Complex32],
-    bin_count: usize,
-    fft_size: usize,
-) -> Vec<f32> {
+fn spectrum_bins_from_fft(fft_output: &[Complex32], bin_count: usize, fft_size: usize) -> Vec<f32> {
     let nyquist = fft_size / 2;
     if nyquist == 0 || bin_count == 0 {
         return vec![0.0; bin_count];

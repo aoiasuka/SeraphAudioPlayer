@@ -251,9 +251,7 @@ impl StatefulSincResampler {
                         continue;
                     }
                     let weight = self.cutoff * sinc(self.cutoff * distance) * window;
-                    let sample = self.history
-                        [(source as usize * self.channels) + channel]
-                        as f64;
+                    let sample = self.history[(source as usize * self.channels) + channel] as f64;
                     weighted_sum += sample * weight;
                     weight_sum += weight;
                 }
