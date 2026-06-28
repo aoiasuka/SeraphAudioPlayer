@@ -41,6 +41,7 @@ export interface OutputDevice {
   id: string;
   name: string;
   isDefault: boolean;
+  legacyIds?: string[];
 }
 
 export interface UserPlaylist {

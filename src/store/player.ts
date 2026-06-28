@@ -22,6 +22,8 @@ interface BackendDevice {
   name: string;
   is_default?: boolean;
   isDefault?: boolean;
+  legacyIds?: string[];
+  legacy_ids?: string[];
 }
 
 export interface BilibiliImportOptions {
@@ -252,11 +254,17 @@ async function applyOutputConfiguration() {
   const { currentDeviceId, devices, driverKind, volume, isMuted } =
     usePlayerStore.getState();
   await sendCommandAsync("set_output_driver", { driver: driverKind });
-  if (
-    devices !== mockDevices &&
-    devices.some((device) => device.id === currentDeviceId)
-  ) {
-    await sendCommandAsync("select_output_device", { deviceId: currentDeviceId });
+  const selectedDevice =
+    devices !== mockDevices
+      ? findDeviceByCurrentId(devices, currentDeviceId)
+      : undefined;
+  if (selectedDevice) {
+    if (selectedDevice.id !== currentDeviceId) {
+      usePlayerStore.setState({ currentDeviceId: selectedDevice.id });
+    }
+    await sendCommandAsync("select_output_device", {
+      deviceId: selectedDevice.id,
+    });
   }
   // M-4：每次播放前同步音量，避免重启后引擎停在默认 0.7 而 UI 显示其它值，
   // 造成「UI 显示 20% 实际 70%」的突然大音量。
@@ -286,7 +294,30 @@ function normalizeDevice(device: BackendDevice): OutputDevice {
     id: device.id,
     name: device.name,
     isDefault: device.isDefault ?? device.is_default ?? false,
+    legacyIds: device.legacyIds ?? device.legacy_ids ?? [],
   };
+}
+
+function findDeviceByCurrentId(devices: OutputDevice[], currentDeviceId: string) {
+  const exact = devices.find(
+    (device) =>
+      device.id === currentDeviceId ||
+      device.legacyIds?.includes(currentDeviceId)
+  );
+  if (exact) return exact;
+
+  const legacySlug = legacyIndexDeviceSlug(currentDeviceId);
+  if (!legacySlug) return undefined;
+
+  const slugMatches = devices.filter((device) =>
+    device.legacyIds?.some((id) => legacyIndexDeviceSlug(id) === legacySlug)
+  );
+  return slugMatches.length === 1 ? slugMatches[0] : undefined;
+}
+
+function legacyIndexDeviceSlug(deviceId: string) {
+  const match = deviceId.match(/^cpal:\d+:(.+)$/);
+  return match?.[1] || null;
 }
 
 function normalizePath(path: string) {
@@ -1295,8 +1326,9 @@ export const usePlayerStore = create<PlayerStore>()(
         if (!Array.isArray(devices) || devices.length === 0) return;
         const normalized = devices.map(normalizeDevice);
         const currentDeviceId = get().currentDeviceId;
+        const currentDevice = findDeviceByCurrentId(normalized, currentDeviceId);
         const selectedDeviceId =
-          normalized.find((device) => device.id === currentDeviceId)?.id ??
+          currentDevice?.id ??
           normalized.find((device) => device.isDefault)?.id ??
           normalized[0].id;
         set({

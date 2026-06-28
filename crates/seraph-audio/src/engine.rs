@@ -1,6 +1,6 @@
 use crate::{
     backend::{BackendError, Result},
-    device::{device_name_and_occurrence, output_device_by_id},
+    device::{output_device_by_id, resolve_output_device_id},
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -261,9 +261,6 @@ impl PlaybackEngine {
         }
 
         let device = self.output_device()?;
-        let device_name = device
-            .name()
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
         let (sample_format, config) = select_output_config(&device, &info, self.driver)?;
         let output_rate = config.sample_rate.0;
         let output_channels = usize::from(config.channels).max(1);
@@ -280,19 +277,13 @@ impl PlaybackEngine {
 
         let (stream, render_worker) = match self.driver {
             OutputDriver::WasapiExclusive => {
-                // L-17：把所选 device_id 解析成「同名设备序号」，供 WASAPI 按序号精确匹配；
-                // 选了设备但解析失败退回 0（按名首个），未选设备(None)则用默认设备。
-                let device_occurrence = match self.selected_device_id.as_deref() {
-                    Some(id) => Some(
-                        device_name_and_occurrence(id)
-                            .map(|(_, occurrence)| occurrence)
-                            .unwrap_or(0),
-                    ),
-                    None => None,
-                };
+                let endpoint_id = self
+                    .selected_device_id
+                    .as_deref()
+                    .map(resolve_output_device_id)
+                    .transpose()?;
                 let worker = spawn_wasapi_exclusive_render_worker(
-                    device_occurrence,
-                    device_name,
+                    endpoint_id,
                     config.clone(),
                     sample_format,
                     shared.clone(),
@@ -435,6 +426,7 @@ impl PlaybackEngine {
     }
 
     pub fn set_output_device(&mut self, device_id: String) -> Result<()> {
+        let device_id = resolve_output_device_id(&device_id)?;
         output_device_by_id(&device_id)?;
         if self.selected_device_id.as_deref() == Some(device_id.as_str()) {
             return Ok(());
@@ -741,8 +733,7 @@ fn output_format_priority(format: SampleFormat) -> u8 {
 
 #[cfg(windows)]
 fn spawn_wasapi_exclusive_render_worker(
-    device_occurrence: Option<usize>,
-    device_name: String,
+    endpoint_id: Option<String>,
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
@@ -753,8 +744,7 @@ fn spawn_wasapi_exclusive_render_worker(
     let shared_for_worker = shared.clone();
     let worker = thread::spawn(move || {
         run_wasapi_exclusive_render_worker(
-            device_occurrence,
-            device_name,
+            endpoint_id,
             config,
             sample_format,
             shared_for_worker,
@@ -786,8 +776,7 @@ fn spawn_wasapi_exclusive_render_worker(
 
 #[cfg(not(windows))]
 fn spawn_wasapi_exclusive_render_worker(
-    _device_occurrence: Option<usize>,
-    _device_name: String,
+    _endpoint_id: Option<String>,
     _config: StreamConfig,
     _sample_format: SampleFormat,
     _shared: Arc<PlaybackShared>,
@@ -800,31 +789,8 @@ fn spawn_wasapi_exclusive_render_worker(
 }
 
 #[cfg(windows)]
-fn find_render_device_by_occurrence(
-    collection: &wasapi::DeviceCollection,
-    name: &str,
-    occurrence: usize,
-) -> Option<wasapi::Device> {
-    let count = collection.get_nbr_devices().ok()?;
-    let mut seen = 0usize;
-    for index in 0..count {
-        let Ok(device) = collection.get_device_at_index(index) else {
-            continue;
-        };
-        if device.get_friendlyname().ok().as_deref() == Some(name) {
-            if seen == occurrence {
-                return Some(device);
-            }
-            seen += 1;
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
 fn run_wasapi_exclusive_render_worker(
-    device_occurrence: Option<usize>,
-    device_name: String,
+    endpoint_id: Option<String>,
     config: StreamConfig,
     sample_format: SampleFormat,
     shared: Arc<PlaybackShared>,
@@ -852,19 +818,10 @@ fn run_wasapi_exclusive_render_worker(
 
         let enumerator = wasapi::DeviceEnumerator::new()
             .map_err(|err| BackendError::Internal(err.to_string()))?;
-        let device = match device_occurrence {
-            Some(occurrence) => {
-                let collection = enumerator
-                    .get_device_collection(&Direction::Render)
-                    .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-                // L-17：同名设备按 0-based 序号取第 N 个；找不到回退按名首个，不弱于旧行为。
-                match find_render_device_by_occurrence(&collection, &device_name, occurrence) {
-                    Some(device) => device,
-                    None => collection
-                        .get_device_with_name(&device_name)
-                        .map_err(|err| BackendError::DeviceLost(err.to_string()))?,
-                }
-            }
+        let device = match endpoint_id.as_deref() {
+            Some(id) => enumerator
+                .get_device(id)
+                .map_err(|_| BackendError::DeviceNotFound)?,
             None => enumerator
                 .get_default_device(&Direction::Render)
                 .map_err(|err| BackendError::DeviceLost(err.to_string()))?,

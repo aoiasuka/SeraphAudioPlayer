@@ -5,7 +5,7 @@
 //! and want to submit it directly to a WASAPI exclusive stream.
 
 use crate::backend::{AudioBackend, BackendError, Result};
-use crate::device::{device_name_and_occurrence, AudioDevice, ShareMode};
+use crate::device::{resolve_output_device_id, AudioDevice, ShareMode};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::collections::VecDeque;
 use std::sync::{
@@ -96,12 +96,9 @@ impl AudioBackend for WasapiExclusive {
             .saturating_mul(BUFFER_SECONDS)
             .max(4);
         let (tx, rx) = mpsc::sync_channel(queue_chunks);
-        let occurrence = device_name_and_occurrence(&device.id)
-            .map(|(_, occurrence)| occurrence)
-            .unwrap_or(0);
+        let device_id = resolve_output_device_id(&device.id)?;
         let worker = spawn_wasapi_submit_worker(
-            device.name.clone(),
-            occurrence,
+            device_id.clone(),
             sample_rate,
             bit_depth,
             channels,
@@ -110,7 +107,9 @@ impl AudioBackend for WasapiExclusive {
             rx,
         )?;
 
-        self.current_device = Some(device.clone());
+        let mut current_device = device.clone();
+        current_device.id = device_id;
+        self.current_device = Some(current_device);
         self.current_format = Some((sample_rate, bit_depth, channels));
         self.stream = Some(WasapiStream {
             shared,
@@ -216,8 +215,7 @@ impl WasapiSampleFormat {
 
 #[cfg(windows)]
 fn spawn_wasapi_submit_worker(
-    device_name: String,
-    device_occurrence: usize,
+    device_id: String,
     sample_rate: SampleRate,
     bit_depth: BitDepth,
     channels: Channels,
@@ -229,8 +227,7 @@ fn spawn_wasapi_submit_worker(
     let shared_for_worker = shared.clone();
     let worker = thread::spawn(move || {
         run_wasapi_submit_worker(
-            device_name,
-            device_occurrence,
+            device_id,
             sample_rate,
             bit_depth,
             channels,
@@ -260,8 +257,7 @@ fn spawn_wasapi_submit_worker(
 
 #[cfg(not(windows))]
 fn spawn_wasapi_submit_worker(
-    _device_name: String,
-    _device_occurrence: usize,
+    _device_id: String,
     _sample_rate: SampleRate,
     _bit_depth: BitDepth,
     _channels: Channels,
@@ -276,8 +272,7 @@ fn spawn_wasapi_submit_worker(
 
 #[cfg(windows)]
 fn run_wasapi_submit_worker(
-    device_name: String,
-    device_occurrence: usize,
+    device_id: String,
     sample_rate: SampleRate,
     bit_depth: BitDepth,
     channels: Channels,
@@ -295,12 +290,9 @@ fn run_wasapi_submit_worker(
 
         let enumerator = wasapi::DeviceEnumerator::new()
             .map_err(|err| BackendError::Internal(err.to_string()))?;
-        let collection = enumerator
-            .get_device_collection(&Direction::Render)
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let device = find_render_device_by_occurrence(&collection, &device_name, device_occurrence)
-            .or_else(|| collection.get_device_with_name(&device_name).ok())
-            .ok_or(BackendError::DeviceNotFound)?;
+        let device = enumerator
+            .get_device(&device_id)
+            .map_err(|_| BackendError::DeviceNotFound)?;
 
         let mut audio_client = device
             .get_iaudioclient()
@@ -377,28 +369,6 @@ fn run_wasapi_submit_worker(
 
     let _ = audio_client.stop_stream();
     Ok(())
-}
-
-#[cfg(windows)]
-fn find_render_device_by_occurrence(
-    collection: &wasapi::DeviceCollection,
-    name: &str,
-    occurrence: usize,
-) -> Option<wasapi::Device> {
-    let count = collection.get_nbr_devices().ok()?;
-    let mut seen = 0usize;
-    for index in 0..count {
-        let Ok(device) = collection.get_device_at_index(index) else {
-            continue;
-        };
-        if device.get_friendlyname().ok().as_deref() == Some(name) {
-            if seen == occurrence {
-                return Some(device);
-            }
-            seen += 1;
-        }
-    }
-    None
 }
 
 #[cfg(windows)]

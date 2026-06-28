@@ -36,6 +36,8 @@ pub struct OutputDeviceInfo {
     pub id: String,
     pub name: String,
     pub is_default: bool,
+    #[serde(rename = "legacyIds")]
+    pub legacy_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +135,7 @@ pub fn list_devices() -> Result<Vec<OutputDeviceInfo>, String> {
             id: device.id,
             name: device.name,
             is_default: device.is_default,
+            legacy_ids: device.legacy_ids,
         })
         .collect())
 }
