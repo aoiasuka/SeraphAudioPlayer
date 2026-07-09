@@ -133,8 +133,8 @@ target/release/bundle/msi/
 示例：
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.3.4
+git push origin v0.3.4
 ```
 
 ## 许可证
