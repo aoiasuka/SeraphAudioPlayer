@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -11,6 +11,7 @@ use super::library::mark_tracks_cache_missing_by_paths;
 
 const SETTINGS_FILE: &str = "cache-settings.json";
 const DEFAULT_CACHE_DIR_NAME: &str = "bilibili-cache";
+const PROGRAM_DATA_DIR_NAME: &str = "Seraph Audio Player";
 const CACHE_MARKER_FILE: &str = ".seraph-cache";
 const DEFAULT_MAX_SIZE_MB: u64 = 5 * 1024;
 const CLEANUP_THRESHOLD_PERCENT: u64 = 90;
@@ -287,11 +288,46 @@ fn default_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
 }
 
 fn default_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app_data_cache_dir(app)?;
+    let candidates = [
+        install_dir_cache_dir(),
+        program_data_cache_dir(),
+        Some(app_data_dir.clone()),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if ensure_cache_dir_safe(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(app_data_dir)
+}
+
+fn app_data_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
     Ok(dir.join(DEFAULT_CACHE_DIR_NAME))
+}
+
+fn install_dir_cache_dir() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    Some(exe.parent()?.join(DEFAULT_CACHE_DIR_NAME))
+}
+
+fn program_data_cache_dir() -> Option<PathBuf> {
+    let program_data = env::var_os("ProgramData")?;
+    if program_data.is_empty() {
+        return None;
+    }
+
+    Some(
+        PathBuf::from(program_data)
+            .join(PROGRAM_DATA_DIR_NAME)
+            .join(DEFAULT_CACHE_DIR_NAME),
+    )
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
