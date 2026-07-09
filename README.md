@@ -1,110 +1,129 @@
-<div align="center">
+# Seraph Audio Player
 
-# 🗃️ SERAPH AUDIO ARCHIVE
+Premium local HiFi audio player built with Rust, Tauri, and React.
 
-**Premium Local HiFi Audio Player / 档案级本地高保真音频播放系统**
+Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器，目标是在 Windows 上提供低延迟、可控、稳定的本地音频播放体验。底层播放、设备与切歌状态由 Rust 后端负责，React 前端只作为 UI 投影层。
 
-[![Rust](https://img.shields.io/badge/Rust-Core%20Engine-black?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-System%20Shell-black?style=for-the-badge&logo=tauri)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-Archive%20UI-black?style=for-the-badge&logo=react)](https://react.dev/)
-[![WASAPI](https://img.shields.io/badge/Audio-WASAPI%20Exclusive-brown?style=for-the-badge)]()
+## 核心特性
 
-*“摒弃历史包袱，以现代工程重塑纯粹的听觉档案。”*
+- **Rust 音频后端**：播放状态、切歌、结束续播、上一首/下一首由 Rust 统一管理，减少前后端状态分叉。
+- **WASAPI Exclusive**：支持 Windows WASAPI 独占输出，绕过系统混音路径。
+- **多格式解码**：基于 Symphonia / FFmpeg 的多级解码路径，支持常见本地音频与部分流媒体缓存文件。
+- **DSD/高采样率处理**：包含 DSD PCM 转换与重采样处理模块。
+- **Bilibili 音频导入与缓存**：支持导入 Bilibili 音频并管理本地缓存。
+- **缓存保护机制**：缓存目录写入 `.seraph-cache` 标记，清理时只处理受管理的缓存文件，降低误删风险。
+- **中英文 Windows 安装包**：Tauri 打包配置会生成英文/中文 MSI，并为 NSIS EXE 安装器启用语言选择。
 
-</div>
-
----
-
-## 📜 项目愿景
-
-Seraph Audio Archive 是一款面向发烧友（Audiophile）的本地高保真音乐播放器。
-它不仅在底层音频引擎上追求极致的 Bit-Perfect 与低延迟，更在 UI 设计上独树一帜，采用极具风格化的**“复古档案系统 (Archive System) / 打字机界面”**，旨在为用户提供一种沉浸式的音乐收藏与鉴赏体验。
-
-本项目脱胎于传统的 Qt/C++ 播放器架构，全面迁移至 **Rust + Tauri + React** 的现代化技术栈，确保在未来 3~5 年内具备卓越的可维护性与扩展性。
-
-## ✨ 核心特性
-
-### 🎧 发烧级音频引擎
-- **WASAPI Exclusive (独占模式)**：绕过 Windows 系统混音器，直接与音频硬件对话，确保零干扰输出。
-- **无锁环形缓冲区 (Lock-free Ringbuffer)**：基于高性能 `ringbuf` 实现音频解码与渲染线程的极低延迟数据交换。
-- **DSD 支持**：原生支持 DSD 格式解析与高精度 PCM 转换（未来规划支持 DoP 与 Native DSD）。
-- **多解码器无缝回退**：首选 `Symphonia` 纯 Rust 极速解码，无缝回退至 `FFmpeg` 以兼容极度生僻的格式与 CUE 轨道分轨。
-
-### 🗄️ 档案系统级交互
-- **纯粹的视觉美学**：采用牛皮纸底色、等宽打字机字体（Courier Prime）、斑驳的档案纹理与印章红点缀，杜绝花哨，回归音乐本质。
-- **动态终端体验**：独创的“打字机逐字敲击”歌词面板，伴随闪烁的光标，让每一句歌词如同正在被实时录入档案。
-- **丝滑过渡**：全面整合 Framer Motion 与 Tailwind CSS 动画，提供极致流畅的路由与交互反馈。
-
----
-
-## 🏗️ 架构概览
-
-本项目采用典型的**“音频核心平台 + UI Shell”**的松耦合架构：
+## 架构概览
 
 ```text
-Seraph Audio Archive
-├── 📦 crates/ (Rust 核心层)
-│   ├── seraph-core/        # 共享数据类型、领域模型与 EventBus
-│   ├── seraph-audio/       # WASAPI 独占输出引擎、设备状态机
-│   ├── seraph-dsp/         # 高精度重采样与 DSD 处理
-│   ├── seraph-decoder/     # Symphonia / FFmpeg 多级解码调度
-│   ├── seraph-playlist/    # 媒体库索引与播放列表管理
-│   └── seraph-visualizer/  # 音频频域/时域分析与共享内存桥接
-├── 🦀 src-tauri/ (系统壳层)
-│   └── src/main.rs         # Tauri IPC 桥接、窗口管理与系统托盘
-└── ⚛️ src/ (React 视图层)
-    └── components/         # 纯粹的 UI 投影层 (UI Projection Layer)
+Seraph Audio Player
+├─ crates/
+│  ├─ seraph-core/        # 共享事件、状态与领域类型
+│  ├─ seraph-audio/       # 播放控制器、WASAPI/CPAL 输出、播放会话
+│  ├─ seraph-decoder/     # Symphonia / FFmpeg / DSD 解码
+│  ├─ seraph-dsp/         # 重采样与 DSD DSP
+│  ├─ seraph-playlist/    # 播放列表与曲库模型
+│  └─ seraph-visualizer/  # 频谱/可视化基础模块
+├─ src-tauri/
+│  └─ src/ipc/            # Tauri IPC、缓存、曲库、播放命令
+└─ src/
+   ├─ components/         # React UI
+   ├─ hooks/              # 播放事件、拖放导入、波形等 hook
+   └─ store/              # 前端 UI 状态与后端命令封装
 ```
 
-## 🛠️ 本地开发指南
+## 播放状态机
 
-### 前置依赖
-- Node.js (v18+)
-- Rust & Cargo (最新 Stable 版本)
-- Windows SDK (用于编译 WASAPI 依赖)
+当前播放队列、随机/循环模式、播放结束后的续播、`next_track` / `prev_track` 都由 Rust 后端处理。
 
-### 1. 安装依赖
+前端负责：
+
+- 同步当前队列快照到后端；
+- 发送播放、暂停、上一首、下一首等命令；
+- 监听后端 `TrackChanged`、`PlaybackStarted`、`PlaybackStopped`、`Progress` 等事件并更新 UI。
+
+这样可以避免播放结束时前端自己推算下一首，导致 UI 状态和真实音频后端分叉。
+
+## 缓存默认路径
+
+缓存设置保存在应用数据目录的 `cache-settings.json`。已有设置文件的用户不会被自动迁移。
+
+新用户首次启动时，默认缓存目录按以下优先级选择：
+
+1. `<应用 exe 所在目录>/bilibili-cache`
+2. `C:\ProgramData\Seraph Audio Player\bilibili-cache`
+3. Tauri AppData 目录下的 `bilibili-cache`
+
+每个候选路径都会尝试创建目录并写入 `.seraph-cache` 标记；如果不可写或不安全，会自动尝试下一个路径。
+
+## 本地开发
+
+### 环境要求
+
+- Node.js 22+
+- Rust stable
+- Windows SDK / MSVC 工具链
+- Tauri CLI 依赖由项目脚本调用
+
+### 安装依赖
 
 ```bash
 npm install
 ```
 
-### 2. 纯前端开发模式 (UI Mocking)
-无需编译庞大的 Rust 核心，极速开发 UI 组件。所有的 IPC 调用将自动使用 Fallback 数据。
+### 前端开发模式
 
 ```bash
 npm run dev
 ```
 
-### 3. 全量桌面开发模式 (Tauri)
-整合真实音频引擎运行。首次运行会触发 `cargo build`，可能需要几分钟。
+### Tauri 桌面开发模式
 
 ```bash
 npm run tauri:dev
 ```
 
-### 4. 生产环境构建
+### 类型检查与测试
 
 ```bash
-npm run tauri:build
+npm run typecheck
+npm test
+cargo check
 ```
 
----
+## 构建安装包
 
-## 🗺️ 未来路线图 (Roadmap)
+生成 Windows EXE 安装器和 MSI：
 
-我们正以稳健的步伐推进 Seraph 架构的演进：
+```bash
+npm run tauri -- build --bundles nsis,msi
+```
 
-- [x] **Phase 1**: 完成基础设施重构 (React + Tauri + Rust 骨架)
-- [x] **Phase 2**: WASAPI 独占输出与 SPSC 音频管线连通
-- [x] **Phase 3**: 实现“档案系统”风格 UI 核心视觉（如打字机歌词组件）
-- [ ] **Phase 4**: 完善 Bit-perfect PCM 路径（音量旁路、格式硬锁定）
-- [x] **Phase 5**: 设备持久化标识与插拔容错处理 (Device ID Resolution & Fallback)
-- [ ] **Phase 6**: 无缝播放 (Gapless Playback) 及 Sample-accurate Transition
-- [ ] **Phase 7**: DSD 原生透传 (Native DSD) 与 DoP 支持
+产物默认位于：
 
----
+```text
+target/release/bundle/nsis/
+target/release/bundle/msi/
+```
 
-## 📜 协议
+当前 Tauri 配置会生成：
 
-基于 [MIT License](LICENSE) 开源。欢迎各类 Issue 与 Pull Request 共同完善这座听觉档案库！
+- NSIS EXE 安装器；
+- `en-US` MSI；
+- `zh-CN` MSI。
+
+## GitHub Release
+
+仓库包含 `.github/workflows/release.yml`。推送 `v*` tag 时会触发 Windows release 构建，并发布安装包到 GitHub Release。
+
+示例：
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+## 许可证
+
+MIT License
