@@ -126,6 +126,14 @@ target/release/bundle/msi/
 - `en-US` MSI；
 - `zh-CN` MSI。
 
+## 版本记录
+
+### v0.3.5
+
+- 修复歌曲列表序号在不同页面中仍显示全局固定编号的问题。
+- 当前页面、筛选结果和虚拟滚动列表会按视图内顺序重新显示 `REC.001`、`REC.002` 等编号。
+- 播放逻辑仍使用全局播放队列索引，不影响点击播放、收藏和删除操作。
+
 ## GitHub Release
 
 仓库包含 `.github/workflows/release.yml`。推送 `v*` tag 时会触发 Windows release 构建，并发布安装包到 GitHub Release。
@@ -133,8 +141,8 @@ target/release/bundle/msi/
 示例：
 
 ```bash
-git tag v0.3.4
-git push origin v0.3.4
+git tag v0.3.5
+git push origin v0.3.5
 ```
 
 ## 许可证

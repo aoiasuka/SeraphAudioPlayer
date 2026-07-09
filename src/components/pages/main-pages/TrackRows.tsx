@@ -53,6 +53,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
 
     return {
       tracks: tracks.slice(start, end),
+      start,
       paddingTop: start * TRACK_ROW_HEIGHT,
       paddingBottom: (tracks.length - end) * TRACK_ROW_HEIGHT,
     };
@@ -96,11 +97,12 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
         onScroll={handleScroll}
       >
         <div style={{ paddingTop: visibleRows.paddingTop, paddingBottom: visibleRows.paddingBottom }}>
-        {visibleRows.tracks.map((track) => {
+        {visibleRows.tracks.map((track, visibleIndex) => {
           const index = trackIndexById.get(track.id) ?? -1;
           const active = currentTrack?.id === track.id;
           const favorite = !!liked[track.id];
-          const recNo = (index >= 0 ? index + 1 : 0)
+          const displayIndex = visibleRows.start + visibleIndex + 1;
+          const recNo = displayIndex
             .toString()
             .padStart(3, "0");
           const playing = active && isPlaying;
