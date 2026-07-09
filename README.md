@@ -12,6 +12,9 @@ Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器
 - **DSD/高采样率处理**：包含 DSD PCM 转换与重采样处理模块。
 - **Bilibili 音频导入与缓存**：支持导入 Bilibili 音频并管理本地缓存。
 - **缓存保护机制**：缓存目录写入 `.seraph-cache` 标记，清理时只处理受管理的缓存文件，降低误删风险。
+- **状态一致性保护**：播放命令会等待 Rust 音频线程返回真实执行结果，再同步给前端 UI。
+- **持久化迁移**：前端播放偏好使用版本化持久化状态，旧字段会在启动时自动迁移到当前结构。
+- **收窄 Tauri 权限**：桌面壳只开启窗口控制、事件监听、拖放和打开文件对话框所需权限。
 - **中英文 Windows 安装包**：Tauri 打包配置会生成英文/中文 MSI，并为 NSIS EXE 安装器启用语言选择。
 
 ## 架构概览
@@ -89,12 +92,22 @@ npm run tauri:dev
 ```bash
 npm run typecheck
 npm test
-cargo check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+npm audit --audit-level=low
 ```
+
+这些检查也会在 GitHub Release 工作流中作为发布门禁执行。
 
 ## 构建安装包
 
-生成 Windows EXE 安装器和 MSI：
+只生成 Windows EXE 安装器：
+
+```bash
+npm run tauri -- build --bundles nsis
+```
+
+同时生成 Windows EXE 安装器和 MSI：
 
 ```bash
 npm run tauri -- build --bundles nsis,msi

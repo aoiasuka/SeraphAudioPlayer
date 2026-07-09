@@ -34,6 +34,21 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=low
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v0
         env:

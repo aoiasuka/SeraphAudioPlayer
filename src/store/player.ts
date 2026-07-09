@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { mockDevices, mockPlaylist } from "@/data/mock-playlist";
+import { mockDevices } from "@/data/mock-playlist";
 import { createBilibiliActions } from "./player/bilibiliActions";
 import { createLibraryActions } from "./player/libraryActions";
 import { createLyricsActions } from "./player/lyricsActions";
@@ -9,13 +9,90 @@ import { createPlaybackActions } from "./player/playbackActions";
 import { createPlayerPersistStorage } from "./player/persistStorage";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
 import { createUiActions } from "./player/uiActions";
+import type { DriverKind, LibraryView } from "@/types/track";
 
 export type {
   BilibiliBatchImportResult,
   BilibiliImportFailure,
   BilibiliImportOptions,
+  PersistedPlayerState,
   PlayerStore,
 } from "./player/types";
+
+const PERSIST_VERSION = 1;
+const validDrivers = new Set<DriverKind>(["wasapi", "direct", "asio"]);
+const validViews = new Set<LibraryView>([
+  "local",
+  "streaming",
+  "recent",
+  "liked",
+  "playlists",
+  "artists",
+  "albums",
+]);
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function booleanRecord(value: unknown) {
+  const record = asRecord(value);
+  return Object.fromEntries(
+    Object.entries(record).filter((entry): entry is [string, boolean] => (
+      typeof entry[1] === "boolean"
+    ))
+  );
+}
+
+function finiteNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clampVolume(value: unknown, fallback: number) {
+  return Math.max(0, Math.min(1, finiteNumber(value, fallback)));
+}
+
+function migrateDriver(value: unknown): DriverKind {
+  if (value === "usb") return "wasapi";
+  if (value === "asio") return "direct";
+  return typeof value === "string" && validDrivers.has(value as DriverKind)
+    ? value as DriverKind
+    : "wasapi";
+}
+
+function migrateView(value: unknown): LibraryView {
+  return typeof value === "string" && validViews.has(value as LibraryView)
+    ? value as LibraryView
+    : "local";
+}
+
+export function migratePersistedPlayerState(persistedState: unknown) {
+  const state = asRecord(persistedState);
+  const volume = clampVolume(state.volume, 0.7);
+  return {
+    currentTrackIndex: Math.max(0, Math.trunc(finiteNumber(state.currentTrackIndex, 0))),
+    recentTrackIds: stringArray(state.recentTrackIds).slice(0, 12),
+    volume,
+    isMuted: typeof state.isMuted === "boolean" ? state.isMuted : volume === 0,
+    previousVolume: clampVolume(state.previousVolume, 0.7),
+    shuffleMode: state.shuffleMode === true,
+    loopMode: state.loopMode === true,
+    liked: booleanRecord(state.liked),
+    userPlaylists: Array.isArray(state.userPlaylists) ? state.userPlaylists : [],
+    currentDeviceId:
+      typeof state.currentDeviceId === "string" && state.currentDeviceId.trim()
+        ? state.currentDeviceId
+        : "wasapi:hd-dac1",
+    driverKind: migrateDriver(state.driverKind),
+    activeView: migrateView(state.activeView),
+  };
+}
 
 export const usePlayerStore = create<PlayerStore>()(
   persist(
@@ -24,7 +101,7 @@ export const usePlayerStore = create<PlayerStore>()(
       const storeGet = get as PlayerStoreGet;
 
       return {
-        playlist: mockPlaylist,
+        playlist: [],
         currentTrackIndex: 0,
         recentTrackIds: [],
         isPlaying: false,
@@ -56,8 +133,10 @@ export const usePlayerStore = create<PlayerStore>()(
     },
     {
       name: "seraph-player-state",
+      version: PERSIST_VERSION,
       storage: createPlayerPersistStorage(),
       skipHydration: true,
+      migrate: migratePersistedPlayerState,
       partialize: (state) => ({
         currentTrackIndex: state.currentTrackIndex,
         recentTrackIds: state.recentTrackIds,

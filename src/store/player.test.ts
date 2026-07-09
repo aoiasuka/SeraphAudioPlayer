@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { usePlayerStore } from "@/store/player";
+import { migratePersistedPlayerState, usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
 function testTrack(overrides: Partial<Track>): Track {
@@ -48,6 +48,36 @@ describe("player store output driver", () => {
     usePlayerStore.getState().setDriver("wasapi");
 
     expect(usePlayerStore.getState().driverKind).toBe("wasapi");
+  });
+});
+
+describe("player store startup and persistence", () => {
+  it("starts with an empty production playlist", () => {
+    expect(usePlayerStore.getState().playlist).toEqual([]);
+  });
+
+  it("migrates old persisted state into bounded current values", () => {
+    const migrated = migratePersistedPlayerState({
+      currentTrackIndex: -4.8,
+      recentTrackIds: ["a", 1, "b"],
+      volume: 2,
+      previousVolume: Number.NaN,
+      liked: { a: true, b: "yes" },
+      userPlaylists: "bad",
+      currentDeviceId: "",
+      driverKind: "usb",
+      activeView: "missing",
+    });
+
+    expect(migrated.currentTrackIndex).toBe(0);
+    expect(migrated.recentTrackIds).toEqual(["a", "b"]);
+    expect(migrated.volume).toBe(1);
+    expect(migrated.previousVolume).toBe(0.7);
+    expect(migrated.liked).toEqual({ a: true });
+    expect(migrated.userPlaylists).toEqual([]);
+    expect(migrated.currentDeviceId).toBe("wasapi:hd-dac1");
+    expect(migrated.driverKind).toBe("wasapi");
+    expect(migrated.activeView).toBe("local");
   });
 });
 

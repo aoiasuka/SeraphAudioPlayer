@@ -30,7 +30,12 @@ const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
 
 #[derive(Clone)]
 pub struct PlaybackController {
-    tx: Sender<PlaybackCommand>,
+    tx: Sender<PlaybackRequest>,
+}
+
+struct PlaybackRequest {
+    command: PlaybackCommand,
+    reply: Sender<Result<()>>,
 }
 
 enum PlaybackCommand {
@@ -50,11 +55,11 @@ enum PlaybackCommand {
 
 impl PlaybackController {
     pub fn new(event_bus: EventBus) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<PlaybackRequest>();
         thread::spawn(move || {
             let mut engine = PlaybackEngine::new(event_bus.clone());
-            while let Ok(command) = rx.recv() {
-                let result = match command {
+            while let Ok(request) = rx.recv() {
+                let result = match request.command {
                     PlaybackCommand::PlayFile {
                         path,
                         track_id,
@@ -71,12 +76,14 @@ impl PlaybackController {
                     PlaybackCommand::SetVolume(volume) => engine.set_volume(volume),
                 };
 
-                if let Err(err) = result {
+                if let Err(err) = &result {
                     event_bus.publish(PlayerEvent::Error {
                         message: err.to_string(),
                     });
                     event_bus.publish(PlayerEvent::PlaybackStopped);
                 }
+
+                let _ = request.reply.send(result);
             }
         });
 
@@ -120,9 +127,12 @@ impl PlaybackController {
     }
 
     fn send(&self, command: PlaybackCommand) -> Result<()> {
+        let (reply, rx) = mpsc::channel();
         self.tx
-            .send(command)
-            .map_err(|_| BackendError::Internal("audio thread is not available".into()))
+            .send(PlaybackRequest { command, reply })
+            .map_err(|_| BackendError::Internal("audio thread is not available".into()))?;
+        rx.recv()
+            .map_err(|_| BackendError::Internal("audio thread did not return a result".into()))?
     }
 }
 
@@ -1573,5 +1583,18 @@ mod tests {
         let output = adapt(&[0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1);
         assert!(output.iter().all(|sample| sample.is_finite()));
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
+    #[test]
+    fn playback_controller_returns_audio_thread_errors() {
+        let controller = PlaybackController::new(EventBus::new());
+        let missing = std::env::temp_dir().join("seraph-audio-missing-fixture.flac");
+        let _ = std::fs::remove_file(&missing);
+
+        let err = controller
+            .play_file(missing, "missing-track".into(), 0.0)
+            .expect_err("missing file should fail in the audio thread");
+
+        assert!(err.to_string().contains("unsupported format"));
     }
 }

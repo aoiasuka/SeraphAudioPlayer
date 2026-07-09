@@ -263,7 +263,12 @@ fn load_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
         settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
     }
     settings.max_size_mb = settings.max_size_mb.clamp(128, 1024 * 1024);
-    ensure_cache_dir(Path::new(&settings.cache_dir))?;
+    let configured_dir = PathBuf::from(&settings.cache_dir);
+    if ensure_cache_dir_safe(&configured_dir).is_err() {
+        settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
+        save_cache_settings(app, &settings)?;
+    }
+    ensure_cache_dir_safe(Path::new(&settings.cache_dir))?;
     Ok(settings)
 }
 
