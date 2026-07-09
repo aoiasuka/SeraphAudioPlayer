@@ -43,6 +43,15 @@
     "copyright": "© Seraph Audio",
     "category": "Music",
     "shortDescription": "Premium local HiFi audio player",
-    "longDescription": "Seraph Audio Player — premium local HiFi audio player with WASAPI Exclusive mode, local decoding, and DSD PCM conversion support."
+    "longDescription": "Seraph Audio Player — premium local HiFi audio player with WASAPI Exclusive mode, local decoding, and DSD PCM conversion support.",
+    "windows": {
+      "wix": {
+        "language": ["en-US", "zh-CN"]
+      },
+      "nsis": {
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": true
+      }
+    }
   }
 }

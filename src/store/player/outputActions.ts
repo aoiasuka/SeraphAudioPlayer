@@ -3,6 +3,7 @@ import { invoke } from "@/lib/tauri";
 import type { OutputDevice, Track } from "@/types/track";
 import { sendCommand, sendCommandAsync } from "./commands";
 import { playbackErrorMessage } from "./playbackActions";
+import { syncPlaybackQueue } from "./queueSync";
 import type { BackendDevice, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
 async function applyOutputConfiguration(get: PlayerStoreGet, set: PlayerStoreSet) {
@@ -32,6 +33,7 @@ export async function sendPlayCommand(
   set: PlayerStoreSet,
   startSeconds = 0
 ) {
+  await syncPlaybackQueue(get);
   await applyOutputConfiguration(get, set);
   await sendCommandAsync("play", {
     path: track.path,

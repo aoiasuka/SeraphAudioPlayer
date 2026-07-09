@@ -24,6 +24,8 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             ipc::playback::play,
+            ipc::playback::sync_playback_queue,
+            ipc::playback::set_playback_modes,
             ipc::playback::pause,
             ipc::playback::stop,
             ipc::playback::seek,

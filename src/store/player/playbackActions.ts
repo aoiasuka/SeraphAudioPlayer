@@ -1,6 +1,7 @@
-import { sendCommand } from "./commands";
+import { sendCommand, sendCommandAsync } from "./commands";
 import { ensurePlayableTrack, bilibiliImportErrorMessage } from "./bilibiliActions";
 import { sendPlayCommand } from "./outputActions";
+import { syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 import type { Track } from "@/types/track";
 
@@ -11,18 +12,13 @@ interface VolumeDebounceState {
 
 const volumeDebounce: VolumeDebounceState = { timer: null, pending: null };
 
-function withRecentTrack(ids: string[], trackId: string) {
+export function withRecentTrack(ids: string[], trackId: string) {
   return [trackId, ...ids.filter((id) => id !== trackId)].slice(0, 12);
 }
 
 function nextSequentialTrackIndex(playlist: Track[], currentTrackIndex: number) {
   if (playlist.length === 0) return -1;
   return (currentTrackIndex + 1) % playlist.length;
-}
-
-function prevSequentialTrackIndex(playlist: Track[], currentTrackIndex: number) {
-  if (playlist.length === 0) return -1;
-  return (currentTrackIndex - 1 + playlist.length) % playlist.length;
 }
 
 function nextShuffleTrackIndex(
@@ -40,8 +36,6 @@ function nextShuffleTrackIndex(
     (index) => !recentTrackIds.includes(playlist[index].id)
   );
   const pool = freshCandidates.length > 0 ? freshCandidates : candidates;
-  // 用 Math.random 替代 hashString —— 旧实现是确定性的，同样的输入永远选同一首，
-  // 用户感受到的是「随机播放」退化为「固定顺序」。
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -56,28 +50,6 @@ function nextTrackIndex(
     : nextSequentialTrackIndex(playlist, currentTrackIndex);
 }
 
-function prevTrackIndex(
-  playlist: Track[],
-  currentTrackIndex: number,
-  shuffleMode: boolean,
-  recentTrackIds: string[]
-) {
-  if (!shuffleMode) return prevSequentialTrackIndex(playlist, currentTrackIndex);
-
-  const previousRecentId = recentTrackIds.find(
-    (trackId) => trackId !== playlist[currentTrackIndex]?.id
-  );
-  const previousRecentIndex = playlist.findIndex(
-    (track) => track.id === previousRecentId
-  );
-  return previousRecentIndex >= 0
-    ? previousRecentIndex
-    : prevSequentialTrackIndex(playlist, currentTrackIndex);
-}
-
-// M-5：缓存「下一首」索引。随机模式下只在曲目/模式/历史变化时重抽一次，
-// 避免 nextTrackPreview 在 selector 里每次渲染都 Math.random —— 旧实现会让
-// UpNext 卡片高频闪变，且 nextTrack 独立再抽一次导致预览与实际切歌不一致。
 let nextIndexCache: { key: string; index: number } | null = null;
 
 function nextIndexCacheKey(
@@ -168,6 +140,16 @@ function queueVolumeCommand(volume: number) {
   }, 80);
 }
 
+function reportPlaybackCommandError(
+  get: PlayerStoreGet,
+  context: string,
+  err: unknown
+) {
+  // eslint-disable-next-line no-console
+  console.warn(context, err);
+  get().showNotification(playbackErrorMessage(err));
+}
+
 export function createPlaybackActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
@@ -216,10 +198,8 @@ export function createPlaybackActions(
             get().showNotification(`正在播放: ${playableTrack.title}`);
           })
           .catch((err) => {
-            // eslint-disable-next-line no-console
-            console.warn("Failed to start playback", err);
+            reportPlaybackCommandError(get, "Failed to start playback", err);
             set({ isPlaying: false });
-            get().showNotification(playbackErrorMessage(err));
           });
       })
       .catch((err) => {
@@ -230,32 +210,23 @@ export function createPlaybackActions(
   },
 
   nextTrack: () => {
-    const { currentTrackIndex, playlist, recentTrackIds, shuffleMode } = get();
-    if (playlist.length === 0) return;
-    // M-5：与 nextTrackPreview 共用缓存的索引，保证「预览的那首 == 实际切到的那首」。
-    const next = resolveNextIndex(
-      playlist,
-      currentTrackIndex,
-      shuffleMode,
-      recentTrackIds
-    );
-    if (next < 0) return;
-    get().loadTrack(next);
-    get().showNotification(`已切换到: ${playlist[next].title}`);
+    if (get().playlist.length === 0) return;
+    resetNextIndexCache();
+    void syncPlaybackQueue(get)
+      .then(() => sendCommandAsync("next_track"))
+      .catch((err) =>
+        reportPlaybackCommandError(get, "Failed to advance to next track", err)
+      );
   },
 
   prevTrack: () => {
-    const { currentTrackIndex, playlist, recentTrackIds, shuffleMode } = get();
-    if (playlist.length === 0) return;
-    const prev = prevTrackIndex(
-      playlist,
-      currentTrackIndex,
-      shuffleMode,
-      recentTrackIds
-    );
-    if (prev < 0) return;
-    get().loadTrack(prev);
-    get().showNotification(`已切换到: ${playlist[prev].title}`);
+    if (get().playlist.length === 0) return;
+    resetNextIndexCache();
+    void syncPlaybackQueue(get)
+      .then(() => sendCommandAsync("prev_track"))
+      .catch((err) =>
+        reportPlaybackCommandError(get, "Failed to return to previous track", err)
+      );
   },
 
   loadTrack: (index) => {
@@ -267,6 +238,7 @@ export function createPlaybackActions(
       currentTime: 0,
       recentTrackIds: withRecentTrack(get().recentTrackIds, track.id),
     });
+    resetNextIndexCache();
     if (wasPlaying) {
       void ensurePlayableTrack(
         track,
@@ -281,10 +253,8 @@ export function createPlaybackActions(
       )
         .then((playableTrack) => {
           void sendPlayCommand(playableTrack, get, set, 0).catch((err) => {
-            // eslint-disable-next-line no-console
-            console.warn("Failed to start playback", err);
+            reportPlaybackCommandError(get, "Failed to start playback", err);
             set({ isPlaying: false });
-            get().showNotification(playbackErrorMessage(err));
           });
         })
         .catch((err) => {
@@ -292,6 +262,11 @@ export function createPlaybackActions(
           console.warn("Failed to prepare streaming track", err);
           get().showNotification(bilibiliImportErrorMessage(err));
         });
+    } else {
+      void syncPlaybackQueue(get).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("Failed to sync selected track", err);
+      });
     }
   },
 
@@ -344,12 +319,21 @@ export function createPlaybackActions(
   toggleShuffle: () => {
     const next = !get().shuffleMode;
     set({ shuffleMode: next });
+    resetNextIndexCache();
+    void syncPlaybackModes(get).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("Failed to sync shuffle mode", err);
+    });
     get().showNotification(next ? "随机播放已启用" : "顺序播放已启用");
   },
 
   toggleLoop: () => {
     const next = !get().loopMode;
     set({ loopMode: next });
+    void syncPlaybackModes(get).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("Failed to sync loop mode", err);
+    });
     get().showNotification(next ? "单曲循环已开启" : "单曲循环已关闭");
   },
 
@@ -360,4 +344,3 @@ export function createPlaybackActions(
   },
   };
 }
-

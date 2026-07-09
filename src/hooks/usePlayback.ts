@@ -2,6 +2,8 @@ import { useCallback, useEffect } from "react";
 import { isTauriRuntime } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import { usePlayerEvents } from "@/hooks/usePlayerEvents";
+import { resetNextIndexCache, withRecentTrack } from "@/store/player/playbackActions";
+import { syncPlaybackQueue } from "@/store/player/queueSync";
 
 /**
  * 每秒推进播放进度（mock 时间轴）。
@@ -10,6 +12,11 @@ import { usePlayerEvents } from "@/hooks/usePlayerEvents";
 export function usePlayback() {
   const tick = usePlayerStore((s) => s.tick);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const playlist = usePlayerStore((s) => s.playlist);
+  const currentTrackIndex = usePlayerStore((s) => s.currentTrackIndex);
+  const recentTrackIds = usePlayerStore((s) => s.recentTrackIds);
+  const shuffleMode = usePlayerStore((s) => s.shuffleMode);
+  const loopMode = usePlayerStore((s) => s.loopMode);
   const handleBackendEvent = useCallback((event: { type: string; [key: string]: unknown }) => {
     if (event.type === "progress") {
       const seconds = typeof event.seconds === "number" ? event.seconds : 0;
@@ -41,32 +48,30 @@ export function usePlayback() {
       return;
     }
 
-    if (event.type === "playback_paused" || event.type === "playback_stopped") {
-      usePlayerStore.setState({ isPlaying: false });
+    if (event.type === "track_changed") {
+      const trackId =
+        typeof event.track_id === "string"
+          ? event.track_id
+          : typeof event.trackId === "string"
+            ? event.trackId
+            : undefined;
+      if (!trackId) return;
+
+      usePlayerStore.setState((state) => {
+        const index = state.playlist.findIndex((track) => track.id === trackId);
+        if (index < 0) return {};
+        resetNextIndexCache();
+        return {
+          currentTrackIndex: index,
+          currentTime: 0,
+          recentTrackIds: withRecentTrack(state.recentTrackIds, trackId),
+        };
+      });
       return;
     }
 
-    if (event.type === "playback_ended") {
-      const state = usePlayerStore.getState();
-      const current = state.currentTrack();
-      const endedTrackId =
-        typeof event.track_id === "string" ? event.track_id : current?.id;
-      if (current && endedTrackId && current.id !== endedTrackId) return;
-
-      if (state.loopMode) {
-        state.loadTrack(state.currentTrackIndex);
-        return;
-      }
-
-      if (state.playlist.length > 1) {
-        state.nextTrack();
-        return;
-      }
-
-      usePlayerStore.setState({
-        isPlaying: false,
-        currentTime: current?.duration ?? 0,
-      });
+    if (event.type === "playback_paused" || event.type === "playback_stopped") {
+      usePlayerStore.setState({ isPlaying: false });
       return;
     }
 
@@ -87,4 +92,12 @@ export function usePlayback() {
     const id = window.setInterval(() => tick(), 1000);
     return () => window.clearInterval(id);
   }, [isPlaying, tick]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void syncPlaybackQueue(usePlayerStore.getState).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("Failed to sync playback queue", err);
+    });
+  }, [playlist, currentTrackIndex, recentTrackIds, shuffleMode, loopMode]);
 }
