@@ -128,6 +128,14 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.3.6
+
+- 完成全代码库深度审查（约 1.8 万行），审查报告见 `docs/audit/`，共修复 60+ 项问题。
+- 音频引擎：新增每样本增益斜坡，消除暂停/恢复、seek、音量调整时的爆音与 zipper noise；seek 越界钳制；解码线程 panic 兜底；WASAPI 初始化超时不再阻塞引擎线程；5.1/7.1 → 立体声按 ITU 系数下混；16bit 输出加入 TPDF dither 并统一四舍五入量化。
+- 解码/DSP：修复 DSF 末尾 padding 导致的曲目结尾爆音；DC blocker 截止频率按实际 PCM 采样率计算；DSD 容器头严格校验（防损坏文件导致崩溃或死循环）；DSD 回放 +6 dB 增益补偿；启用 Symphonia gapless；seek 精确到样本级；修正 DoP 打包字节序。
+- Tauri 后端：修复 B 站登录 Cookie 可能泄漏到任意链接的安全问题（host 白名单）；曲库缓存改为原子写入并对损坏文件备份拒写；下载改用专用超时策略客户端；`.eac3` 纳入缓存配额管理；曲库读写加锁防并发丢更新；移除 ffmpeg 第三方下载镜像。
+- 前端：启动后恢复上次播放曲目；快速切歌请求代际守卫；歌词应用锁定目标曲目；修复两处事件监听器泄漏；进度条拖动后抑制旧进度回跳；虚拟列表随窗口尺寸自适应。
+
 ### v0.3.5
 
 - 修复歌曲列表序号在不同页面中仍显示全局固定编号的问题。
@@ -141,8 +149,8 @@ target/release/bundle/msi/
 示例：
 
 ```bash
-git tag v0.3.5
-git push origin v0.3.5
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
 ## 许可证
