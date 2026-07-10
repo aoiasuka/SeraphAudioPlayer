@@ -11,7 +11,6 @@
     "core:window:allow-start-dragging",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "core:webview:allow-get-all-webviews",
     "dialog:allow-open"
   ]
 }

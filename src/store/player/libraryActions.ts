@@ -229,7 +229,9 @@ export function createLibraryActions(
       if (!Array.isArray(cached) || cached.length === 0) return;
 
       set((state) => {
-        const prevId = state.playlist[state.currentTrackIndex]?.id;
+        // 发现1：playlist 尚未加载（启动水合）时用持久化的曲目 id 恢复上次播放位置
+        const prevId =
+          state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId;
         const merged = dedupeTracksWithLiked(
           mergeTracksByPath(state.playlist, cached),
           state.liked
@@ -242,6 +244,8 @@ export function createLibraryActions(
         return {
           ...merged,
           currentTrackIndex: remapped >= 0 ? remapped : 0,
+          persistedCurrentTrackId:
+            (remapped >= 0 ? prevId : merged.playlist[0]?.id) ?? null,
         };
       });
     } catch (err) {
@@ -281,7 +285,8 @@ export function createLibraryActions(
 
           remaining.delete(key);
           updatedCount += 1;
-          return updatedTrack;
+          // 发现8：与其他导入路径一致，保留已有歌词 / sourceUrl 等前端合并语义
+          return mergeIncomingTrack(track, updatedTrack);
         });
         const newTracks = Array.from(remaining.values());
         addedCount = newTracks.length;
@@ -332,13 +337,26 @@ export function createLibraryActions(
 
   normalizeLibrary: () => {
     set((state) => {
+      // 发现1：启动水合时 playlist 为空，保持持久化的索引 / 曲目 id 不动，
+      // 等 loadBackendLibrary 按 id 重映射。
+      if (state.playlist.length === 0) return {};
+
+      // 发现9：与 loadBackendLibrary (M-8) 一致，去重后按曲目 id 重映射索引，
+      // 避免去重移除靠前的重复项后 currentTrackIndex 指向别的歌。
+      const prevId = state.playlist[state.currentTrackIndex]?.id;
       const deduped = dedupeTracksWithLiked(state.playlist, state.liked);
+      const remapped = prevId
+        ? deduped.playlist.findIndex((track) => track.id === prevId)
+        : -1;
       return {
         ...deduped,
-        currentTrackIndex: Math.min(
-          state.currentTrackIndex,
-          Math.max(deduped.playlist.length - 1, 0)
-        ),
+        currentTrackIndex:
+          remapped >= 0
+            ? remapped
+            : Math.min(
+                state.currentTrackIndex,
+                Math.max(deduped.playlist.length - 1, 0)
+              ),
       };
     });
   },

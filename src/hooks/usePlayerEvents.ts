@@ -18,9 +18,16 @@ export function usePlayerEvents(
     let cancelled = false;
     (async () => {
       if (!isTauriRuntime()) return;
-      unlisten = await listen<PlayerEventPayload>(FRONTEND_EVENT, (payload) => {
+      const fn = await listen<PlayerEventPayload>(FRONTEND_EVENT, (payload) => {
         if (!cancelled) handler(payload);
       });
+      // cleanup 已在 listen resolve 之前执行（StrictMode 双挂载必然触发一次）：
+      // 立即注销，避免 Tauri 侧监听器泄漏。
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
     })();
     return () => {
       cancelled = true;

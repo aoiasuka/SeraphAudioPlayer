@@ -156,12 +156,18 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
                 .flatten(),
             None => None,
         };
-        let mut next_session = session;
-        next_session.username = data.uname.clone();
-        next_session.mid = data.mid;
-        next_session.face = face.clone();
-        next_session.saved_at = now_secs();
-        save_session(&app, &next_session)?;
+        // P2-8：仅当资料实际变化时才重写 Credential Manager + session 文件，
+        // 避免前端周期性查询登录状态时的无谓 CredWriteW / icacls 开销。
+        let changed = session.username != data.uname || session.mid != data.mid
+            || session.face != face;
+        if changed {
+            let mut next_session = session;
+            next_session.username = data.uname.clone();
+            next_session.mid = data.mid;
+            next_session.face = face.clone();
+            next_session.saved_at = now_secs();
+            save_session(&app, &next_session)?;
+        }
         return Ok(BilibiliLoginStatus {
             logged_in: true,
             username: data.uname,

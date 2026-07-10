@@ -21,11 +21,11 @@ pub const FFMPEG_DOWNLOAD_EVENT: &str = "seraph://ffmpeg-download";
 /// ffmpeg 压缩包下载上限（防御性裁剪，正常 essentials 包 ~40-80 MB）。
 const MAX_FFMPEG_DOWNLOAD_BYTES: u64 = 400 * 1024 * 1024;
 /// Windows x64 ffmpeg 静态构建候选下载地址，按顺序尝试直到某个成功。
-/// 同时含官方源与镜像，缓解国内 GitHub 直连不稳定的问题。
+/// P1-4：只保留官方/第一方来源，第三方代理镜像可任意替换 zip 内容，
+/// 属于供应链任意代码执行风险，已移除。
 #[cfg(windows)]
 const FFMPEG_DOWNLOAD_URLS: &[&str] = &[
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip",
-    "https://mirror.ghproxy.com/https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip",
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
 ];

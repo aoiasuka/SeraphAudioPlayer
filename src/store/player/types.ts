@@ -40,6 +40,7 @@ export interface BilibiliBatchImportResult {
 
 export interface PersistedPlayerState {
   currentTrackIndex: number;
+  persistedCurrentTrackId: string | null;
   recentTrackIds: string[];
   volume: number;
   isMuted: boolean;
@@ -56,6 +57,7 @@ export interface PersistedPlayerState {
 export interface PlayerStore {
   playlist: Track[];
   currentTrackIndex: number;
+  persistedCurrentTrackId: string | null;
   recentTrackIds: string[];
   isPlaying: boolean;
   currentTime: number;

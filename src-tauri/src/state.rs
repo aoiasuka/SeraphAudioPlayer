@@ -270,9 +270,23 @@ fn pseudo_random_index(len: usize) -> usize {
     if len <= 1 {
         return 0;
     }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as usize)
-        .unwrap_or(0);
-    nanos % len
+    // P3-8：简单 xorshift 状态机替代"纳秒取模"——快速连点"下一首"时
+    // 纳秒接近会反复选中相同索引。首次用时间纳秒做种子，之后每次推进状态。
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SHUFFLE_STATE: AtomicU64 = AtomicU64::new(0);
+
+    let mut state = SHUFFLE_STATE.load(Ordering::Relaxed);
+    if state == 0 {
+        state = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            | 1;
+    }
+    // xorshift64
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    SHUFFLE_STATE.store(state, Ordering::Relaxed);
+    (state % len as u64) as usize
 }

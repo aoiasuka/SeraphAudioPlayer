@@ -97,8 +97,10 @@ export function StreamingPage() {
 
   // 订阅后端 ffmpeg 下载进度，实时更新按钮文案/百分比。
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     void listen<FfmpegDownloadProgress>("seraph://ffmpeg-download", (progress) => {
+      if (cancelled) return;
       if (progress.stage === "done") {
         setFfmpegDownload({ active: false, percent: 100 });
         return;
@@ -113,9 +115,15 @@ export function StreamingPage() {
         message: progress.message ?? undefined,
       });
     }).then((fn) => {
+      // cleanup 已先于 listen resolve 执行时立即注销，避免监听器泄漏
+      if (cancelled) {
+        fn();
+        return;
+      }
       unlisten = fn;
     });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);

@@ -51,6 +51,8 @@ pub struct CacheCleanupResult {
     pub removed_bytes: u64,
     pub used_bytes: u64,
     pub removed_paths: Vec<String>,
+    /// P2-2：删除失败的文件不再中止整体流程，错误在这里汇总返回。
+    pub errors: Vec<String>,
 }
 
 #[tauri::command]
@@ -99,16 +101,19 @@ pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
     let entries = collect_cache_files(&cache_dir)?;
     let mut removed_paths = Vec::new();
     let mut removed_bytes = 0;
+    let mut errors = Vec::new();
 
+    // P2-2：单个文件删除失败（如正被播放、句柄独占）跳过继续，
+    // 最后统一标记 cache_missing 并把错误汇总在结果里。
     for entry in entries {
-        fs::remove_file(&entry.path).map_err(|err| {
-            format!(
-                "failed to remove cache file {}: {err}",
-                entry.path.display()
-            )
-        })?;
-        removed_bytes += entry.size;
-        removed_paths.push(entry.path);
+        match fs::remove_file(&entry.path) {
+            Ok(()) => {
+                remove_ok_sentinel(&entry.path);
+                removed_bytes += entry.size;
+                removed_paths.push(entry.path);
+            }
+            Err(err) => errors.push(format!("{}: {err}", entry.path.display())),
+        }
     }
 
     mark_tracks_cache_missing_by_paths(&app, &removed_paths)?;
@@ -121,6 +126,7 @@ pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
             .into_iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect(),
+        errors,
     })
 }
 
@@ -159,6 +165,7 @@ fn enforce_cache_limit_inner(
             removed_bytes: 0,
             used_bytes: cache_size(&cache_dir)?,
             removed_paths: Vec::new(),
+            errors: Vec::new(),
         });
     }
 
@@ -174,6 +181,7 @@ fn enforce_cache_limit_inner(
             removed_bytes: 0,
             used_bytes,
             removed_paths: Vec::new(),
+            errors: Vec::new(),
         });
     }
 
@@ -181,6 +189,7 @@ fn enforce_cache_limit_inner(
     let preserve_key = preserve_path.map(normalized_path_key);
     let mut removed_paths = Vec::new();
     let mut removed_bytes = 0;
+    let mut errors = Vec::new();
 
     for entry in entries {
         if used_bytes <= target_bytes {
@@ -193,15 +202,16 @@ fn enforce_cache_limit_inner(
             continue;
         }
 
-        fs::remove_file(&entry.path).map_err(|err| {
-            format!(
-                "failed to remove cache file {}: {err}",
-                entry.path.display()
-            )
-        })?;
-        used_bytes = used_bytes.saturating_sub(entry.size);
-        removed_bytes += entry.size;
-        removed_paths.push(entry.path);
+        // P2-2：删除失败跳过继续，不让一个被占用的文件卡死整个清理。
+        match fs::remove_file(&entry.path) {
+            Ok(()) => {
+                remove_ok_sentinel(&entry.path);
+                used_bytes = used_bytes.saturating_sub(entry.size);
+                removed_bytes += entry.size;
+                removed_paths.push(entry.path);
+            }
+            Err(err) => errors.push(format!("{}: {err}", entry.path.display())),
+        }
     }
 
     mark_tracks_cache_missing_by_paths(app, &removed_paths)?;
@@ -213,7 +223,16 @@ fn enforce_cache_limit_inner(
             .into_iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect(),
+        errors,
     })
+}
+
+/// P1-2：删除缓存音频时同步清掉对应的 `.{name}.ok` sentinel，
+/// 避免零字节 sentinel 永久残留。
+fn remove_ok_sentinel(path: &Path) {
+    if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
+        let _ = fs::remove_file(path.with_file_name(format!(".{file_name}.ok")));
+    }
 }
 
 fn normalized_path_key(path: &Path) -> String {
@@ -257,8 +276,23 @@ fn load_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
 
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read cache settings {}: {err}", path.display()))?;
-    let mut settings: CacheSettings = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse cache settings {}: {err}", path.display()))?;
+    // P2-5：设置文件损坏时备份坏文件并回退默认值重建，
+    // 不再让所有缓存相关功能因一个损坏的 JSON 永久瘫痪。
+    let mut settings: CacheSettings = match serde_json::from_slice(&bytes) {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::warn!(
+                "cache settings {} corrupt, rebuilding defaults: {err}",
+                path.display()
+            );
+            let backup = PathBuf::from(format!("{}.corrupt", path.display()));
+            let _ = fs::copy(&path, &backup);
+            let settings = default_cache_settings(app)?;
+            ensure_cache_dir(Path::new(&settings.cache_dir))?;
+            save_cache_settings(app, &settings)?;
+            return Ok(settings);
+        }
+    };
     if settings.cache_dir.trim().is_empty() {
         settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
     }
@@ -280,8 +314,18 @@ fn save_cache_settings(app: &AppHandle, settings: &CacheSettings) -> Result<(), 
     }
     let bytes = serde_json::to_vec_pretty(settings)
         .map_err(|err| format!("failed to serialize cache settings: {err}"))?;
-    fs::write(&path, bytes)
-        .map_err(|err| format!("failed to write cache settings {}: {err}", path.display()))
+    // P2-5：temp+rename 原子写，避免写一半崩溃留下截断 JSON。
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    fs::write(&tmp, bytes).map_err(|err| {
+        format!(
+            "failed to write cache settings temp {}: {err}",
+            tmp.display()
+        )
+    })?;
+    fs::rename(&tmp, &path).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        format!("failed to replace cache settings {}: {err}", path.display())
+    })
 }
 
 fn default_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
@@ -423,14 +467,21 @@ fn cache_size(path: &Path) -> Result<u64, String> {
         .sum())
 }
 
+/// P2-3：缓存扫描递归深度上限，与曲库导入端 L-14 方案对齐。
+const MAX_CACHE_SCAN_DEPTH: usize = 64;
+
 fn collect_cache_files(path: &Path) -> Result<Vec<CacheFile>, String> {
     let mut files = Vec::new();
-    collect_cache_files_inner(path, &mut files)?;
+    collect_cache_files_inner(path, &mut files, 0)?;
     Ok(files)
 }
 
-fn collect_cache_files_inner(path: &Path, files: &mut Vec<CacheFile>) -> Result<(), String> {
-    if !path.is_dir() {
+fn collect_cache_files_inner(
+    path: &Path,
+    files: &mut Vec<CacheFile>,
+    depth: usize,
+) -> Result<(), String> {
+    if !path.is_dir() || depth >= MAX_CACHE_SCAN_DEPTH {
         return Ok(());
     }
 
@@ -438,9 +489,15 @@ fn collect_cache_files_inner(path: &Path, files: &mut Vec<CacheFile>) -> Result<
         .map_err(|err| format!("failed to read cache dir {}: {err}", path.display()))?
     {
         let entry = entry.map_err(|err| err.to_string())?;
+        // P2-3：跳过 symlink / Windows junction，防止链接环无限递归，
+        // 以及链接指向缓存目录之外时把用户真实音乐文件计入/删除。
+        let file_type = entry.file_type().map_err(|err| err.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
-            collect_cache_files_inner(&path, files)?;
+        if file_type.is_dir() {
+            collect_cache_files_inner(&path, files, depth + 1)?;
             continue;
         }
         if !is_managed_cache_file(&path) {
@@ -465,7 +522,8 @@ fn is_managed_cache_file(path: &Path) -> bool {
         .map(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "m4a" | "flac" | "opus" | "aac" | "mp3" | "download" | "tmp"
+                // P1-2：加入 "eac3"，杜比流缓存必须参与配额统计与清理。
+                "m4a" | "flac" | "opus" | "aac" | "mp3" | "eac3" | "download" | "tmp"
             )
         })
         .unwrap_or(false)

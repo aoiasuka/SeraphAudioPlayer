@@ -18,7 +18,9 @@ pub fn delete_track(app: AppHandle, track: DeleteTrackRequest) -> Result<bool, S
         return Err("missing track identity".into());
     }
 
-    let tracks = read_cached_tracks(&app)?;
+    // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
+    let _guard = LIBRARY_LOCK.lock();
+    let tracks = read_cached_tracks_for_update(&app)?;
     let (updated, removed) = remove_cached_track(tracks, track_id, target_key.as_deref());
     if removed {
         write_cached_tracks(&app, &updated)?;
@@ -49,6 +51,8 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<Imp
         let mut tracks = Vec::new();
         let mut seen_files = HashSet::new();
         let mut visited_dirs = HashSet::new();
+        // P3-11：子目录读失败只累积警告，不中止整批导入。
+        let mut warnings = Vec::new();
 
         for path in paths {
             collect_audio_files(
@@ -57,11 +61,18 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<Imp
                 &mut seen_files,
                 &mut visited_dirs,
                 0,
+                &mut warnings,
             )?;
         }
 
+        for warning in &warnings {
+            tracing::warn!("import_tracks: {warning}");
+        }
+
         if !tracks.is_empty() {
-            let cached = read_cached_tracks(&app).unwrap_or_default();
+            // P1-3 + P0-2：持锁读改写；缓存损坏时报错并备份，不再当空库覆盖。
+            let _guard = LIBRARY_LOCK.lock();
+            let cached = read_cached_tracks_for_update(&app)?;
             let merged = merge_cached_tracks(cached, &tracks);
             write_cached_tracks(&app, &merged)?;
             return Ok(imported_tracks_from_cache(&merged, &tracks));
@@ -104,7 +115,9 @@ pub fn save_track_lyrics(
         return Err("lyrics file has no usable text".into());
     }
 
-    let mut tracks = read_cached_tracks(&app)?;
+    // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
+    let _guard = LIBRARY_LOCK.lock();
+    let mut tracks = read_cached_tracks_for_update(&app)?;
     apply_track_lyrics(
         &mut tracks,
         &track_id,
@@ -151,7 +164,9 @@ pub fn apply_online_lyrics(
         return Err("lyrics file has no usable text".into());
     }
 
-    let mut tracks = read_cached_tracks(&app)?;
+    // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
+    let _guard = LIBRARY_LOCK.lock();
+    let mut tracks = read_cached_tracks_for_update(&app)?;
     apply_track_lyrics(
         &mut tracks,
         &track_id,

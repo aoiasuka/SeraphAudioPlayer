@@ -348,4 +348,43 @@ mod tests {
         assert_eq!(lyrics[1].time, 4.0);
         assert_eq!(lyrics[1].text, "第二行");
     }
+
+    #[test]
+    fn atomic_write_replaces_existing_file_and_leaves_no_temp() {
+        let path = temp_audio_path("seraph-atomic-write", "json");
+        fs::write(&path, b"old-content").unwrap();
+
+        write_json_atomic(&path, b"[]").expect("atomic write should succeed");
+
+        assert_eq!(fs::read(&path).unwrap(), b"[]");
+        assert!(
+            !PathBuf::from(format!("{}.tmp", path.display())).exists(),
+            "临时文件必须被 rename 消耗掉"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_library_cache_is_reported_and_backed_up_not_emptied() {
+        let path = temp_audio_path("seraph-corrupt-cache", "json");
+        fs::write(&path, b"{ this is not valid json").unwrap();
+
+        // P0-2：解析失败必须报错，绝不能当成空库。
+        let result = read_tracks_from_file(&path);
+        assert!(result.is_err(), "损坏缓存必须返回 Err 而不是空列表");
+
+        let backup = backup_corrupt_file(&path);
+        assert!(backup.is_file(), "坏文件应被备份为 .corrupt");
+        assert_eq!(fs::read(&backup).unwrap(), b"{ this is not valid json");
+        assert!(path.is_file(), "原始坏文件保留现场，不被移动");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn missing_library_cache_reads_as_empty() {
+        let path = temp_audio_path("seraph-missing-cache", "json");
+        assert_eq!(read_tracks_from_file(&path).unwrap().len(), 0);
+    }
 }

@@ -3,6 +3,7 @@ import { ensurePlayableTrack, bilibiliImportErrorMessage } from "./bilibiliActio
 import { sendPlayCommand } from "./outputActions";
 import { syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
+import { isTauriRuntime } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 
 interface VolumeDebounceState {
@@ -11,6 +12,21 @@ interface VolumeDebounceState {
 }
 
 const volumeDebounce: VolumeDebounceState = { timer: null, pending: null };
+
+// 发现2：播放代际计数。每次新的播放/暂停意图递增；
+// 慢速异步续体（如 B 站重缓存）完成时若代际已过期则丢弃，避免旧曲目顶掉新选中的曲目。
+let playEpoch = 0;
+
+export function bumpPlayEpoch() {
+  return ++playEpoch;
+}
+
+export function currentPlayEpoch() {
+  return playEpoch;
+}
+
+// 发现7：seek 后 400ms 内忽略明显偏离目标位置的旧 Progress 事件，避免进度条回跳闪烁。
+export const seekGuard = { until: 0, target: 0 };
 
 export function withRecentTrack(ids: string[], trackId: string) {
   return [trackId, ...ids.filter((id) => id !== trackId)].slice(0, 12);
@@ -175,11 +191,13 @@ export function createPlaybackActions(
     }
 
     if (isPlaying) {
+      bumpPlayEpoch();
       sendCommand("pause");
       set({ isPlaying: false });
       return;
     }
 
+    const epoch = bumpPlayEpoch();
     void ensurePlayableTrack(
       track,
       (updatedTrack) => {
@@ -192,14 +210,21 @@ export function createPlaybackActions(
       get().showNotification
     )
       .then((playableTrack) => {
+        // 发现2：期间用户已有更新的播放意图，丢弃过期续体
+        if (epoch !== currentPlayEpoch()) return;
+        if (get().currentTrack()?.id !== playableTrack.id) return;
         void sendPlayCommand(playableTrack, get, set, get().currentTime)
           .then(() => {
-            set({ isPlaying: true });
+            if (epoch !== currentPlayEpoch()) return;
+            if (get().currentTrack()?.id !== playableTrack.id) return;
+            // 发现15：Tauri 下 isPlaying 由 playback_started 事件驱动，
+            // 不在此乐观置位，避免短暂覆盖用户刚按下的暂停；stub 模式无事件，保留置位。
+            if (!isTauriRuntime()) set({ isPlaying: true });
             get().showNotification(`正在播放: ${playableTrack.title}`);
           })
           .catch((err) => {
             reportPlaybackCommandError(get, "Failed to start playback", err);
-            set({ isPlaying: false });
+            if (epoch === currentPlayEpoch()) set({ isPlaying: false });
           });
       })
       .catch((err) => {
@@ -232,6 +257,8 @@ export function createPlaybackActions(
   loadTrack: (index) => {
     const track = get().playlist[index];
     if (!track) return;
+    // 发现2：任何新的选曲都会使先前挂起的播放续体过期
+    const epoch = bumpPlayEpoch();
     const wasPlaying = get().isPlaying;
     set({
       currentTrackIndex: index,
@@ -252,9 +279,12 @@ export function createPlaybackActions(
         get().showNotification
       )
         .then((playableTrack) => {
+          // 发现2：期间用户已切到别的曲目，丢弃过期续体
+          if (epoch !== currentPlayEpoch()) return;
+          if (get().currentTrack()?.id !== playableTrack.id) return;
           void sendPlayCommand(playableTrack, get, set, 0).catch((err) => {
             reportPlaybackCommandError(get, "Failed to start playback", err);
-            set({ isPlaying: false });
+            if (epoch === currentPlayEpoch()) set({ isPlaying: false });
           });
         })
         .catch((err) => {
@@ -275,6 +305,9 @@ export function createPlaybackActions(
     if (!track) return;
     const seconds = Math.max(0, Math.min(sec, track.duration));
     if (get().currentTime === seconds) return;
+    // 发现7：记录抑制窗口，忽略随后在途的旧位置 Progress 事件
+    seekGuard.until = Date.now() + 400;
+    seekGuard.target = seconds;
     sendCommand("seek", { seconds });
     set({ currentTime: seconds });
   },

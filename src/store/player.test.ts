@@ -1,6 +1,23 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { invoke } from "@/lib/tauri";
 import { migratePersistedPlayerState, usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
+
+vi.mock("@/lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tauri")>();
+  return {
+    ...actual,
+    invoke: vi.fn(async () => undefined) as unknown as typeof actual.invoke,
+  };
+});
+
+const invokeMock = invoke as unknown as Mock;
+
+async function flushAsyncQueue() {
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 function testTrack(overrides: Partial<Track>): Track {
   return {
@@ -70,6 +87,7 @@ describe("player store startup and persistence", () => {
     });
 
     expect(migrated.currentTrackIndex).toBe(0);
+    expect(migrated.persistedCurrentTrackId).toBe(null);
     expect(migrated.recentTrackIds).toEqual(["a", "b"]);
     expect(migrated.volume).toBe(1);
     expect(migrated.previousVolume).toBe(0.7);
@@ -142,5 +160,144 @@ describe("player store track deletion", () => {
     expect(state.currentTrack()?.id).toBe("track-c");
     expect(state.isPlaying).toBe(true);
     expect(state.currentTime).toBe(25);
+  });
+});
+
+describe("player store library normalization (发现1/9)", () => {
+  beforeEach(() => {
+    invokeMock.mockImplementation(async () => undefined);
+  });
+
+  it("keeps the persisted index untouched when the playlist is still empty", () => {
+    usePlayerStore.setState({
+      playlist: [],
+      currentTrackIndex: 5,
+      persistedCurrentTrackId: "track-b",
+      liked: {},
+    });
+
+    usePlayerStore.getState().normalizeLibrary();
+
+    const state = usePlayerStore.getState();
+    expect(state.currentTrackIndex).toBe(5);
+    expect(state.persistedCurrentTrackId).toBe("track-b");
+  });
+
+  it("remaps currentTrackIndex by id after dedupe removes an earlier duplicate", () => {
+    usePlayerStore.setState({
+      playlist: [
+        testTrack({ id: "track-a", title: "Alpha", path: "C:/Music/a.flac" }),
+        testTrack({ id: "track-a-dup", title: "Alpha Copy", path: "C:/Music/a.flac" }),
+        testTrack({ id: "track-b", title: "Beta", path: "C:/Music/b.flac" }),
+      ],
+      currentTrackIndex: 2,
+      liked: {},
+    });
+
+    usePlayerStore.getState().normalizeLibrary();
+
+    const state = usePlayerStore.getState();
+    expect(state.playlist).toHaveLength(2);
+    expect(state.currentTrackIndex).toBe(1);
+    expect(state.currentTrack()?.id).toBe("track-b");
+  });
+
+  it("restores the last played track by persisted id when hydrating an empty playlist", async () => {
+    const backendTracks = [
+      testTrack({ id: "track-a", title: "Alpha", path: "C:/Music/a.flac" }),
+      testTrack({ id: "track-b", title: "Beta", path: "C:/Music/b.flac" }),
+      testTrack({ id: "track-c", title: "Gamma", path: "C:/Music/c.flac" }),
+    ];
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "get_playlist" ? backendTracks : undefined
+    );
+    usePlayerStore.setState({
+      playlist: [],
+      currentTrackIndex: 0,
+      persistedCurrentTrackId: "track-b",
+      liked: {},
+      recentTrackIds: [],
+    });
+
+    await usePlayerStore.getState().loadBackendLibrary();
+
+    const state = usePlayerStore.getState();
+    expect(state.playlist).toHaveLength(3);
+    expect(state.currentTrackIndex).toBe(1);
+    expect(state.currentTrack()?.id).toBe("track-b");
+    expect(state.persistedCurrentTrackId).toBe("track-b");
+  });
+
+  it("falls back to the first track when the persisted id no longer exists", async () => {
+    const backendTracks = [
+      testTrack({ id: "track-a", title: "Alpha", path: "C:/Music/a.flac" }),
+      testTrack({ id: "track-b", title: "Beta", path: "C:/Music/b.flac" }),
+    ];
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "get_playlist" ? backendTracks : undefined
+    );
+    usePlayerStore.setState({
+      playlist: [],
+      currentTrackIndex: 0,
+      persistedCurrentTrackId: "track-gone",
+      liked: {},
+      recentTrackIds: [],
+    });
+
+    await usePlayerStore.getState().loadBackendLibrary();
+
+    const state = usePlayerStore.getState();
+    expect(state.currentTrackIndex).toBe(0);
+    expect(state.currentTrack()?.id).toBe("track-a");
+    expect(state.persistedCurrentTrackId).toBe("track-a");
+  });
+});
+
+describe("player store playback epoch (发现2)", () => {
+  beforeEach(() => {
+    invokeMock.mockImplementation(async () => undefined);
+    usePlayerStore.setState({
+      playlist: [
+        testTrack({ id: "track-a", title: "Track A", path: "C:/Music/a.flac" }),
+        testTrack({ id: "track-b", title: "Track B", path: "C:/Music/b.flac" }),
+      ],
+      currentTrackIndex: 0,
+      recentTrackIds: [],
+      isPlaying: false,
+      currentTime: 0,
+      notification: null,
+    });
+  });
+
+  it("starts playback when no newer intent arrives (stub mode)", async () => {
+    usePlayerStore.getState().togglePlayback();
+    await flushAsyncQueue();
+
+    const state = usePlayerStore.getState();
+    expect(state.isPlaying).toBe(true);
+    expect(state.notification?.text).toContain("正在播放: Track A");
+  });
+
+  it("drops the stale play continuation when a newer track is selected", async () => {
+    usePlayerStore.getState().togglePlayback(); // 异步开始播放 track-a
+    usePlayerStore.getState().loadTrack(1); // 立即切到 track-b，使上面的续体过期
+    await flushAsyncQueue();
+
+    const state = usePlayerStore.getState();
+    expect(state.currentTrack()?.id).toBe("track-b");
+    expect(state.isPlaying).toBe(false);
+    expect(state.notification?.text ?? "").not.toContain("正在播放: Track A");
+  });
+
+  it("drops the stale resume continuation when the user pauses again", async () => {
+    usePlayerStore.getState().togglePlayback(); // 异步开始播放
+    // 用户随即又按了一次暂停（此时 UI 仍是未播放态，模拟为直接置为播放后暂停）
+    usePlayerStore.setState({ isPlaying: true });
+    usePlayerStore.getState().togglePlayback(); // 暂停，代际递增
+    await flushAsyncQueue();
+
+    const state = usePlayerStore.getState();
+    expect(state.isPlaying).toBe(false);
+    expect(state.notification?.text ?? "").not.toContain("正在播放");
   });
 });

@@ -86,6 +86,10 @@ pub fn stop(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
     debug!("ipc::seek -> {seconds}s");
+    // P2-7：IPC 层最后防线，拒绝 NaN / Infinity / 负值直达音频引擎。
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("无效的跳转位置: {seconds}"));
+    }
     state.audio.seek(seconds).map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -107,6 +111,11 @@ pub fn prev_track(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
     debug!("ipc::set_volume -> {volume}");
+    // P2-7：NaN/Infinity 直接拒绝，范围收敛到 0..=1，防止异常增益爆音。
+    if !volume.is_finite() {
+        return Err(format!("无效的音量值: {volume}"));
+    }
+    let volume = volume.clamp(0.0, 1.0);
     state
         .audio
         .set_volume(volume)

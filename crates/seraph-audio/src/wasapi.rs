@@ -6,7 +6,10 @@
 
 use crate::backend::{AudioBackend, BackendError, Result};
 use crate::device::{resolve_output_device_id, AudioDevice, ShareMode};
+#[cfg(windows)]
+use crate::engine::{quantize_i16_tpdf, quantize_i24, quantize_i32, TpdfDither};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
+#[cfg(windows)]
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -18,6 +21,9 @@ use std::time::Duration;
 
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
 const BUFFER_SECONDS: usize = 2;
+/// F-1（同型）：暂停/恢复增益斜坡时长。
+#[cfg(windows)]
+const GAIN_RAMP_SECONDS: f32 = 0.005;
 
 pub struct WasapiExclusive {
     current_device: Option<AudioDevice>,
@@ -246,8 +252,10 @@ fn spawn_wasapi_submit_worker(
             Err(BackendError::ExclusiveModeUnavailable(message))
         }
         Err(_) => {
+            // F-4（同型）：初始化超时不 join——worker 可能卡死在驱动调用内部，
+            // stopped 已置位，worker 返回后会自行退出；泄漏 detached 线程好过调用方永久阻塞。
             shared.stopped.store(true, Ordering::Release);
-            let _ = worker.join();
+            drop(worker);
             Err(BackendError::ExclusiveModeUnavailable(
                 "WASAPI exclusive stream init timed out".into(),
             ))
@@ -365,6 +373,13 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
     };
 
     let mut pending = VecDeque::new();
+    // F-1（同型）：暂停/恢复的增益斜坡状态（worker 本地，无锁）。
+    let mut gain = 0.0_f32;
+    let gain_step = 1.0 / (GAIN_RAMP_SECONDS * sample_rate.0.max(1) as f32);
+    let mut dither = TpdfDither::default();
+    // F-13（同型）：scratch buffer 复用。
+    let mut samples_scratch: Vec<f32> = Vec::new();
+    let mut bytes_scratch: Vec<u8> = Vec::new();
     while !shared.stopped.load(Ordering::Acquire) {
         let frames = audio_client
             .get_available_space_in_frames()
@@ -373,9 +388,19 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
             while let Ok(chunk) = rx.try_recv() {
                 pending.extend(chunk);
             }
-            let bytes = render_submit_buffer(frames as usize, format, &shared, &mut pending);
+            render_submit_buffer(
+                frames as usize,
+                format,
+                &shared,
+                &mut pending,
+                &mut gain,
+                gain_step,
+                &mut dither,
+                &mut samples_scratch,
+                &mut bytes_scratch,
+            );
             render_client
-                .write_to_device(frames as usize, &bytes, None)
+                .write_to_device(frames as usize, &bytes_scratch, None)
                 .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
         }
         thread::sleep(sleep_period);
@@ -386,46 +411,55 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn render_submit_buffer(
     frames: usize,
     format: WasapiSampleFormat,
     shared: &WasapiShared,
     pending: &mut VecDeque<f32>,
-) -> Vec<u8> {
+    gain: &mut f32,
+    gain_step: f32,
+    dither: &mut TpdfDither,
+    samples: &mut Vec<f32>,
+    bytes: &mut Vec<u8>,
+) {
     let sample_count = frames * shared.channels.max(1);
-    let mut samples = Vec::with_capacity(sample_count);
+    let paused = shared.paused.load(Ordering::Acquire);
+    let target = if paused { 0.0 } else { 1.0 };
+    samples.clear();
+    samples.reserve(sample_count);
     for _ in 0..sample_count {
-        let value = if shared.paused.load(Ordering::Acquire) {
+        // F-1（同型）：先 ramp 后静音——暂停后继续以递减增益消费 pending，
+        // ramp 到 0 才输出纯静音；恢复时从 0 ramp-in，消除硬切爆音。
+        *gain += (target - *gain).clamp(-gain_step, gain_step);
+        let value = if paused && *gain <= 0.0 {
             0.0
         } else {
-            pending.pop_front().unwrap_or(0.0)
+            pending.pop_front().unwrap_or(0.0) * *gain
         };
         samples.push(value.clamp(-1.0, 1.0));
     }
 
+    bytes.clear();
     match format {
         WasapiSampleFormat::I16 => {
-            let mut bytes = Vec::with_capacity(sample_count * 2);
-            for sample in samples {
-                bytes.extend_from_slice(&((sample * i16::MAX as f32) as i16).to_le_bytes());
+            bytes.reserve(sample_count * 2);
+            for &sample in samples.iter() {
+                // F-14（同型）：×32768 + round + clamp，叠加 TPDF dither。
+                bytes.extend_from_slice(&quantize_i16_tpdf(sample, dither).to_le_bytes());
             }
-            bytes
         }
         WasapiSampleFormat::I24In32 => {
-            let mut bytes = Vec::with_capacity(sample_count * 4);
-            for sample in samples {
-                let value = (sample * 8_388_607.0) as i32;
-                bytes.extend_from_slice(&(value << 8).to_le_bytes());
+            bytes.reserve(sample_count * 4);
+            for &sample in samples.iter() {
+                bytes.extend_from_slice(&(quantize_i24(sample) << 8).to_le_bytes());
             }
-            bytes
         }
         WasapiSampleFormat::I32 => {
-            let mut bytes = Vec::with_capacity(sample_count * 4);
-            for sample in samples {
-                let value = (f64::from(sample) * i32::MAX as f64) as i32;
-                bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.reserve(sample_count * 4);
+            for &sample in samples.iter() {
+                bytes.extend_from_slice(&quantize_i32(sample).to_le_bytes());
             }
-            bytes
         }
     }
 }

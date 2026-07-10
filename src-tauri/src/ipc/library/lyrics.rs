@@ -257,8 +257,12 @@ fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
 }
 
 fn extract_qrc_lyric_content(text: &str) -> Option<String> {
-    let pattern =
-        Regex::new(r#"(?s)<Lyric_1\s+[^>]*LyricContent="(?P<content>.*?)"[^>]*/?>"#).ok()?;
+    // P3-3：正则只编译一次，批量解析歌词候选时避免每次重新编译。
+    static QRC_CONTENT_PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let pattern = QRC_CONTENT_PATTERN.get_or_init(|| {
+        Regex::new(r#"(?s)<Lyric_1\s+[^>]*LyricContent="(?P<content>.*?)"[^>]*/?>"#)
+            .expect("valid qrc content regex")
+    });
     pattern
         .captures(text)
         .and_then(|captures| captures.name("content"))

@@ -199,20 +199,22 @@ fn spectrum_bins_from_fft(fft_output: &[Complex32], bin_count: usize, fft_size: 
         bins.push((max_mag / (fft_size as f32 * 0.5)).clamp(0.0, 1.0));
     }
 
-    normalize_bins(bins)
+    map_bins_to_db(bins)
 }
 
-fn normalize_bins(mut bins: Vec<f32>) -> Vec<f32> {
-    let max = bins
-        .iter()
-        .copied()
-        .fold(0.0_f32, |acc, value| acc.max(value));
-    if max <= f32::EPSILON {
-        return bins;
-    }
+/// F-14：dB 映射代替逐帧最大值归一。
+/// 逐帧归一会抹掉绝对电平（安静段与响段柱高相同）且随最大 bin 抖动闪烁。
+/// 把幅度按 20·log10 映射，[-72, 0] dB 线性映射到 [0, 1]。
+const SPECTRUM_DB_FLOOR: f32 = -72.0;
 
+fn map_bins_to_db(mut bins: Vec<f32>) -> Vec<f32> {
     for bin in &mut bins {
-        *bin = (*bin / max).clamp(0.0, 1.0);
+        let db = if *bin > 0.0 {
+            20.0 * bin.log10()
+        } else {
+            SPECTRUM_DB_FLOOR
+        };
+        *bin = ((db - SPECTRUM_DB_FLOOR) / -SPECTRUM_DB_FLOOR).clamp(0.0, 1.0);
     }
     bins
 }
@@ -244,6 +246,21 @@ mod tests {
         assert!(frame.bins.iter().any(|value| *value > 0.5));
         assert!(frame.peak_left > 0.9);
         assert!(frame.peak_right > 0.9);
+    }
+
+    #[test]
+    fn db_mapping_preserves_absolute_level() {
+        // F-14：0 dBFS → 1.0；-36 dB → 0.5；地板以下 → 0；绝对电平差异必须保留
+        let mapped = map_bins_to_db(vec![1.0, 10.0_f32.powf(-36.0 / 20.0), 1.0e-6, 0.0]);
+        assert!((mapped[0] - 1.0).abs() < 1.0e-4);
+        assert!((mapped[1] - 0.5).abs() < 1.0e-4);
+        assert_eq!(mapped[2], 0.0); // -120 dB 低于 -72 dB 地板
+        assert_eq!(mapped[3], 0.0);
+
+        // 响 10 倍的信号柱高必须更高（旧逐帧归一会把两者都拉到 1.0）
+        let loud = map_bins_to_db(vec![0.5]);
+        let quiet = map_bins_to_db(vec![0.05]);
+        assert!(loud[0] > quiet[0]);
     }
 
     #[test]

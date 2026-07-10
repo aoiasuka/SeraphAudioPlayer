@@ -17,27 +17,56 @@ async fn import_bilibili_audio_inner(
         app,
         &resolved.video.bvid,
         resolved.video.cid,
-        resolved.stream.output_extension(ffmpeg_path.is_some()),
+        resolved.stream.output_extension(),
     )?;
 
-    ensure_audio_file(
-        client,
+    // P1-1：下载走专用 client（无总超时，仅连接/读空闲超时），
+    // 避免大文件在 30 秒总超时下必然失败。
+    let download_client = bilibili_download_client_for_app(app)?;
+    // P2-4：EAC3 等必须 remux 的流，remux 失败时不允许 fallback 落盘。
+    let must_remux = matches!(
+        resolved.stream.kind,
+        AudioKind::Dolby | AudioKind::DolbyAtmos
+    );
+    let final_path = ensure_audio_file(
+        &download_client,
         &resolved.stream.audio_urls(),
         &cache_path,
         ffmpeg_path.as_deref(),
+        must_remux,
     )
     .await?;
-    let _ = enforce_cache_limit_preserving(app, &cache_path);
+    let _ = enforce_cache_limit_preserving(app, &final_path);
 
-    let track = track_from_resolved_audio(&resolved, &cache_path, ffmpeg_path.is_some())?;
-    let imported = merge_tracks_into_cache(app, &[track])?;
+    let track = track_from_resolved_audio(&resolved, &final_path, ffmpeg_path.is_some())?;
+    // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
+    // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
+    let app_for_merge = app.clone();
+    let imported = tauri::async_runtime::spawn_blocking(move || {
+        merge_tracks_into_cache(&app_for_merge, &[track])
+    })
+    .await
+    .map_err(|err| format!("曲库合并任务异常终止: {err}"))??;
     imported
         .into_iter()
         .next()
         .ok_or_else(|| "failed to import bilibili audio".to_string())
 }
 
-async fn resolve_bvid(client: &Client, input: &str) -> Result<String, String> {
+/// P0-1：仅允许 B 站官方域名，防止把请求（尤其是登录 Cookie）发往任意用户输入的 URL。
+fn is_bilibili_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("b23.tv")
+            || host.eq_ignore_ascii_case("acg.tv")
+            || host.eq_ignore_ascii_case("bilibili.com")
+            || host
+                .to_ascii_lowercase()
+                .strip_suffix(".bilibili.com")
+                .is_some_and(|prefix| !prefix.is_empty())
+    })
+}
+
+async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
     if let Some(bvid) = extract_bvid(input) {
         return Ok(bvid);
     }
@@ -47,8 +76,16 @@ async fn resolve_bvid(client: &Client, input: &str) -> Result<String, String> {
         return Err("没有找到有效的 B 站 BV 号或视频链接".into());
     }
 
-    let response = client
-        .get(trimmed)
+    let url = reqwest::Url::parse(trimmed).map_err(|_| "无效的 B 站链接".to_string())?;
+    if !is_bilibili_host(&url) {
+        return Err("仅支持 B 站链接（b23.tv / acg.tv / bilibili.com）".into());
+    }
+
+    // P0-1：解析短链/网页一律使用无 Cookie 的裸 client，
+    // 避免 SESSDATA 等登录凭据随 default_headers 发往非预期主机。
+    let bare_client = bilibili_client_with_cookie(None)?;
+    let response = bare_client
+        .get(url)
         .send()
         .await
         .map_err(|err| format!("无法打开 B 站链接: {err}"))?
@@ -339,12 +376,38 @@ async fn parse_json_response<T: DeserializeOwned>(
     })
 }
 
+/// P2-1：进程内进行中下载任务表，拒绝对同一目标文件的并发下载，
+/// 防止交错写入产出损坏缓存又被 sentinel 标记为有效。
+static DOWNLOADS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<PathBuf>> =
+    parking_lot::Mutex::new(BTreeSet::new());
+
+struct DownloadSlot(PathBuf);
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        DOWNLOADS_IN_FLIGHT.lock().remove(&self.0);
+    }
+}
+
+fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
+    let key = path.to_path_buf();
+    let mut in_flight = DOWNLOADS_IN_FLIGHT.lock();
+    if !in_flight.insert(key.clone()) {
+        return Err(format!(
+            "该音频正在下载中，请稍候再试: {}",
+            path.display()
+        ));
+    }
+    Ok(DownloadSlot(key))
+}
+
 async fn ensure_audio_file(
     client: &Client,
     audio_urls: &[String],
     path: &Path,
     ffmpeg_path: Option<&Path>,
-) -> Result<(), String> {
+    must_remux: bool,
+) -> Result<PathBuf, String> {
     // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
     // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
     let sentinel = ok_sentinel_path(path);
@@ -354,8 +417,10 @@ async fn ensure_audio_file(
             .map(|meta| meta.len() > 0)
             .unwrap_or(false)
     {
-        return Ok(());
+        return Ok(path.to_path_buf());
     }
+
+    let _slot = acquire_download_slot(path)?;
 
     // 清理可能残留的不完整文件 + 旧 sentinel
     let _ = fs::remove_file(&sentinel);
@@ -372,13 +437,18 @@ async fn ensure_audio_file(
     for audio_url in audio_urls {
         let temp_path = temp_download_path(path);
         match download_audio_to_file(client, audio_url, &temp_path).await {
-            Ok(()) => {
-                finalize_audio_file(&temp_path, path, ffmpeg_path)?;
-                // 写一个零字节 sentinel 标记缓存完整可用；
-                // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
-                let _ = fs::write(&sentinel, b"");
-                return Ok(());
-            }
+            Ok(()) => match finalize_audio_file(&temp_path, path, ffmpeg_path, must_remux) {
+                Ok(final_path) => {
+                    // 写一个零字节 sentinel 标记缓存完整可用；
+                    // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
+                    let _ = fs::write(ok_sentinel_path(&final_path), b"");
+                    return Ok(final_path);
+                }
+                Err(err) => {
+                    let _ = fs::remove_file(&temp_path);
+                    last_error = Some(err);
+                }
+            },
             Err(err) => {
                 let _ = fs::remove_file(&temp_path);
                 last_error = Some(err);
@@ -471,10 +541,20 @@ async fn read_bytes_capped(
     Ok(buf)
 }
 
+/// P2-8：头像 data URL 按源 URL 内存缓存，避免前端周期性查询登录状态时
+/// 每次都重新下载头像并 base64 编码。
+static AVATAR_DATA_URL_CACHE: parking_lot::Mutex<BTreeMap<String, String>> =
+    parking_lot::Mutex::new(BTreeMap::new());
+const MAX_AVATAR_CACHE_ENTRIES: usize = 8;
+
 async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<String>, String> {
     let url = normalize_url(url);
     if url.trim().is_empty() || url.starts_with("data:") {
         return Ok((!url.trim().is_empty()).then_some(url));
+    }
+
+    if let Some(cached) = AVATAR_DATA_URL_CACHE.lock().get(&url).cloned() {
+        return Ok(Some(cached));
     }
 
     let response = client
@@ -500,11 +580,15 @@ async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<St
         return Ok(None);
     }
 
-    Ok(Some(format!(
-        "data:{};base64,{}",
-        content_type,
-        BASE64.encode(bytes)
-    )))
+    let data_url = format!("data:{};base64,{}", content_type, BASE64.encode(bytes));
+    {
+        let mut cache = AVATAR_DATA_URL_CACHE.lock();
+        if cache.len() >= MAX_AVATAR_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(url, data_url.clone());
+    }
+    Ok(Some(data_url))
 }
 
 fn avatar_mime_type(value: &str) -> Option<&'static str> {
@@ -522,23 +606,36 @@ fn finalize_audio_file(
     temp_path: &Path,
     path: &Path,
     ffmpeg_path: Option<&Path>,
-) -> Result<(), String> {
+    must_remux: bool,
+) -> Result<PathBuf, String> {
     // temp_path 已由 download_audio_to_file 流式写好；这里只做 remux 或就地改名。
     if let Some(ffmpeg_path) = ffmpeg_path {
         match remux_audio(ffmpeg_path, temp_path, path) {
             Ok(()) => {
                 let _ = fs::remove_file(temp_path);
-                return Ok(());
+                return Ok(path.to_path_buf());
             }
-            Err(_) => {
+            Err(err) => {
                 let _ = fs::remove_file(path);
+                // P2-4：EAC3 等必须 remux 的流不允许把原始 fMP4 字节冠以
+                // .eac3 落盘——Symphonia 无法解码，会永久缓存一个不可播文件。
+                if must_remux {
+                    return Err(format!("音频流必须经 ffmpeg 重封装，但重封装失败: {err}"));
+                }
             }
         }
     }
 
-    fs::rename(temp_path, path)
+    // P2-4：remux 失败（或无 ffmpeg）时按实际容器（fMP4）落 .m4a 扩展名，
+    // 而不是沿用 .flac 等可能与内容不符的扩展名。
+    let fallback_path = if ffmpeg_path.is_some() {
+        path.with_extension("m4a")
+    } else {
+        path.to_path_buf()
+    };
+    fs::rename(temp_path, &fallback_path)
         .map_err(|err| format!("failed to finalize bilibili audio file: {err}"))?;
-    Ok(())
+    Ok(fallback_path)
 }
 
 fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
@@ -633,10 +730,18 @@ fn audio_cache_path(
     )))
 }
 
+/// P2-1：临时文件名带进程内计数器 + 时间纳秒的唯一后缀，
+/// 保证并发下载即便命中同一目标也不会互相截断/交错写。
 fn temp_download_path(path: &Path) -> PathBuf {
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("bilibili-audio");
-    path.with_file_name(format!("{file_name}.download"))
+    let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}.{nanos}-{counter}.download"))
 }

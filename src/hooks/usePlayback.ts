@@ -2,7 +2,7 @@ import { useCallback, useEffect } from "react";
 import { isTauriRuntime } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import { usePlayerEvents } from "@/hooks/usePlayerEvents";
-import { resetNextIndexCache, withRecentTrack } from "@/store/player/playbackActions";
+import { resetNextIndexCache, seekGuard, withRecentTrack } from "@/store/player/playbackActions";
 import { syncPlaybackQueue } from "@/store/player/queueSync";
 
 /**
@@ -20,6 +20,10 @@ export function usePlayback() {
   const handleBackendEvent = useCallback((event: { type: string; [key: string]: unknown }) => {
     if (event.type === "progress") {
       const seconds = typeof event.seconds === "number" ? event.seconds : 0;
+      // 发现7：seek 后的抑制窗口内，忽略仍携带旧位置的在途 Progress 事件，避免进度条回跳
+      if (Date.now() < seekGuard.until && Math.abs(seconds - seekGuard.target) > 1.5) {
+        return;
+      }
       usePlayerStore.setState((state) => {
         const track = state.playlist[state.currentTrackIndex];
         const eventTrackId =

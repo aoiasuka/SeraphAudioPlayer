@@ -15,6 +15,22 @@ fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client, String> {
         .map_err(|err| format!("failed to create http client: {err}"))
 }
 
+/// P1-1：音频下载专用 client。不设总超时（`Client::timeout` 是连接到 body
+/// 读完的整体上限，大文件必然超时），只用连接超时 + 两次读之间的空闲超时。
+fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
+    let cookie = load_session(app)?.and_then(|session| session.cookie_header());
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+        .default_headers(bilibili_headers(cookie.as_deref())?)
+        .build()
+        .map_err(|err| format!("failed to create download http client: {err}"))
+}
+
 fn bilibili_headers(cookie: Option<&str>) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, header_value(USER_AGENT_VALUE)?);
@@ -237,14 +253,14 @@ fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        // 用户名可能含空格/中文/特殊字符；icacls 的 /grant 接受 "User:F" 形式，
-        // 用引号包裹更稳妥。若 USERNAME 未设置则退到 SID S-1-5-32-545（Users），
-        // 至少保留可访问性，不让权限设置直接失败。
+        // P2-6：std::process::Command 传参不经 shell，无需引号；手动加引号
+        // 会被转义为字面 `"user"` 导致账户解析失败。若 USERNAME 未设置则退到
+        // SID S-1-5-32-545（Users），至少保留可访问性，不让权限设置直接失败。
         let user = std::env::var("USERNAME")
             .ok()
             .filter(|name| !name.trim().is_empty());
         let grant_arg = match &user {
-            Some(name) => format!("\"{name}\":F"),
+            Some(name) => format!("{name}:F"),
             None => "*S-1-5-32-545:F".to_string(),
         };
         let status = {
@@ -303,10 +319,6 @@ fn merge_set_cookie_headers(
         let mut expire_at: Option<u64> = None;
         for attr in parts {
             let attr = attr.trim();
-            if let Some(rest) = attr.strip_prefix(|c: char| c.eq_ignore_ascii_case(&'M')) {
-                // 简化：用 to_ascii_lowercase 再判前缀更可靠
-                let _ = rest;
-            }
             let lower = attr.to_ascii_lowercase();
             if let Some(rest) = lower.strip_prefix("max-age=") {
                 if let Ok(seconds) = rest.trim().parse::<i64>() {
@@ -366,11 +378,14 @@ fn parse_http_date_to_unix(text: &str) -> Option<u64> {
     let h: u32 = t.next()?.parse().ok()?;
     let m: u32 = t.next()?.parse().ok()?;
     let s: u32 = t.next()?.parse().ok()?;
-    let month: u32 = match month_str {
-        "Jan" => 1, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
-        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
-        _ => return None,
-    };
+    // P1-5：月份匹配必须大小写不敏感——上游把整段属性 to_ascii_lowercase 后
+    // 才传进来，大小写敏感匹配 "Nov" 会恒失败。
+    let month = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    .iter()
+    .position(|name| month_str.eq_ignore_ascii_case(name))? as u32
+        + 1;
     // 计算自 1970-01-01 起的天数（Howard Hinnant 算法）
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);

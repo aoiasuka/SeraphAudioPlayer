@@ -93,9 +93,14 @@ export function LyricsPanel() {
   const applyOnlineLyricsForCurrentTrack = usePlayerStore(
     (s) => s.applyOnlineLyricsForCurrentTrack
   );
+  const showNotification = usePlayerStore((s) => s.showNotification);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const lineRefs = useRef<Array<HTMLDivElement | null>>([]);
+  // 发现3：打开弹窗/文件选择器那一刻锁定的曲目 id，应用前校验曲目未被切换
+  const pinnedTrackIdRef = useRef<string | null>(null);
+  // 发现16：用户手动滚动后 3 秒内暂停歌词自动跟随
+  const lastUserScrollAtRef = useRef(0);
   const [isImporting, setIsImporting] = useState(false);
   const [isFetchingOnline, setIsFetchingOnline] = useState(false);
   const [isApplyingOnline, setIsApplyingOnline] = useState(false);
@@ -153,6 +158,8 @@ export function LyricsPanel() {
     if (!container || !active) return;
     // L-10: 节流到 200ms，避免连续切换 group 时 smooth-scroll 互相打断
     const handle = window.setTimeout(() => {
+      // 发现16：用户刚手动滚动过，暂停自动跟随
+      if (Date.now() - lastUserScrollAtRef.current < 3000) return;
       const top =
         active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
       container.scrollTo({
@@ -167,8 +174,25 @@ export function LyricsPanel() {
     lineRefs.current = [];
   }, [trackId]);
 
+  // 发现16：监听用户手动滚动（wheel / pointerdown），记录时间戳
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const markUserScroll = () => {
+      lastUserScrollAtRef.current = Date.now();
+    };
+    container.addEventListener("wheel", markUserScroll, { passive: true });
+    container.addEventListener("pointerdown", markUserScroll);
+    return () => {
+      container.removeEventListener("wheel", markUserScroll);
+      container.removeEventListener("pointerdown", markUserScroll);
+    };
+  }, [trackId]);
+
   const handleImportClick = () => {
     if (isImporting) return;
+    pinnedTrackIdRef.current = track?.id ?? null;
     fileInputRef.current?.click();
   };
 
@@ -189,6 +213,7 @@ export function LyricsPanel() {
   };
 
   const handleOnlineLyricsClick = async () => {
+    pinnedTrackIdRef.current = track?.id ?? null;
     setManualSearchQuery(track?.title ?? "");
     await runOnlineLyricsSearch();
   };
@@ -200,6 +225,14 @@ export function LyricsPanel() {
 
   const handleApplyOnlineLyrics = async () => {
     if (!selectedCandidate || isApplyingOnline) return;
+
+    // 发现3：弹窗打开期间曲目被切换（如自动切歌）时，拒绝把歌词写进错误的曲目
+    const pinnedTrackId = pinnedTrackIdRef.current;
+    if (pinnedTrackId && track?.id !== pinnedTrackId) {
+      showNotification("曲目已切换，歌词未应用");
+      setOnlineDialogOpen(false);
+      return;
+    }
 
     setIsApplyingOnline(true);
     try {
@@ -216,6 +249,13 @@ export function LyricsPanel() {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file || isImporting) return;
+
+    // 发现3：文件选择器打开期间曲目被切换时，拒绝把歌词写进错误的曲目
+    const pinnedTrackId = pinnedTrackIdRef.current;
+    if (pinnedTrackId && track?.id !== pinnedTrackId) {
+      showNotification("曲目已切换，歌词未应用");
+      return;
+    }
 
     setIsImporting(true);
     try {

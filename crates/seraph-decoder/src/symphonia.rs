@@ -34,6 +34,9 @@ pub struct SymphoniaDecoder {
     buffer_spec: Option<SignalSpec>,
     buffer_frames: u64,
     consecutive_decode_errors: u32,
+    // F-7：seek 返回的 required_ts。coarse seek 落点在目标之前，
+    // next_packet 需要把 required_ts 之前的帧丢掉才是样本精确 seek。
+    trim_before_ts: Option<u64>,
 }
 
 impl SymphoniaDecoder {
@@ -49,6 +52,7 @@ impl SymphoniaDecoder {
             buffer_spec: None,
             buffer_frames: 0,
             consecutive_decode_errors: 0,
+            trim_before_ts: None,
         }
     }
 }
@@ -75,13 +79,13 @@ impl Decoder for SymphoniaDecoder {
         }
 
         let media = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+        // F-6：启用 gapless，剪掉 MP3/AAC 编码器 delay/padding 引入的首尾静音。
+        let format_options = FormatOptions {
+            enable_gapless: true,
+            ..Default::default()
+        };
         let probed = get_probe()
-            .format(
-                &hint,
-                media,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )
+            .format(&hint, media, &format_options, &MetadataOptions::default())
             .map_err(map_symphonia_error)?;
         let format = probed.format;
 
@@ -111,6 +115,7 @@ impl Decoder for SymphoniaDecoder {
         self.decoder = Some(decoder);
         self.time_base = codec_params.time_base;
         self.sample_rate = sample_rate;
+        self.trim_before_ts = None;
 
         Ok(())
     }
@@ -151,8 +156,6 @@ impl Decoder for SymphoniaDecoder {
                 continue;
             }
 
-            let timestamp_seconds =
-                timestamp_seconds(self.time_base, packet.ts(), self.sample_rate);
             let decoded = match self
                 .decoder
                 .as_mut()
@@ -204,8 +207,24 @@ impl Decoder for SymphoniaDecoder {
                 .expect("sample buffer must exist after rebuild");
             buffer.copy_interleaved_ref(decoded);
 
+            let mut samples = buffer.samples().to_vec();
+            let mut effective_ts = packet.ts();
+            // F-7：coarse seek 落点在 required_ts 之前，丢掉之前的帧实现样本精确 seek。
+            if let Some(required_ts) = self.trim_before_ts {
+                let channels = spec.channels.count().max(1);
+                if trim_samples_before(&mut samples, packet.ts(), required_ts, channels) {
+                    continue; // 整包都在目标之前
+                }
+                // 走到这里说明 required_ts 落在包内（或包起点之后），
+                // 剩余样本的第一帧对应 max(packet.ts, required_ts)
+                effective_ts = effective_ts.max(required_ts);
+                self.trim_before_ts = None;
+            }
+            let timestamp_seconds =
+                timestamp_seconds(self.time_base, effective_ts, self.sample_rate);
+
             return Ok(Some(Packet {
-                samples: buffer.samples().to_vec(),
+                samples,
                 timestamp_seconds,
             }));
         }
@@ -225,7 +244,7 @@ impl Decoder for SymphoniaDecoder {
             .track_id
             .ok_or_else(|| DecoderError::Internal("decoder is not open".into()))?;
 
-        format
+        let seeked = format
             .seek(
                 SeekMode::Coarse,
                 SeekTo::TimeStamp {
@@ -234,6 +253,8 @@ impl Decoder for SymphoniaDecoder {
                 },
             )
             .map_err(map_symphonia_error)?;
+        // F-7：保存 required_ts，next_packet 中丢弃其之前的帧（样本精确 seek）
+        self.trim_before_ts = Some(seeked.required_ts);
         if let Some(decoder) = self.decoder.as_mut() {
             decoder.reset();
         }
@@ -244,6 +265,27 @@ impl Decoder for SymphoniaDecoder {
         self.consecutive_decode_errors = 0;
         Ok(())
     }
+}
+
+/// F-7 的纯逻辑部分：把 `required_ts` 之前的帧从 `samples` 前缀剪掉。
+/// 返回 true 表示整包都在目标之前（应丢弃并继续读下一包）。
+fn trim_samples_before(
+    samples: &mut Vec<f32>,
+    packet_ts: u64,
+    required_ts: u64,
+    channels: usize,
+) -> bool {
+    let channels = channels.max(1);
+    let frames = (samples.len() / channels) as u64;
+    if packet_ts.saturating_add(frames) <= required_ts {
+        samples.clear();
+        return true;
+    }
+    if required_ts > packet_ts {
+        let skip = ((required_ts - packet_ts) as usize).saturating_mul(channels);
+        samples.drain(..skip.min(samples.len()));
+    }
+    false
 }
 
 fn stream_info_from_codec(params: &symphonia::core::codecs::CodecParameters) -> StreamInfo {
@@ -319,6 +361,53 @@ mod tests {
             .expect("first packet");
         assert!(!packet.samples.is_empty());
         assert!(packet.timestamp_seconds >= 0.0);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn trim_drops_whole_packet_before_required_ts() {
+        // 包覆盖帧 [100, 104)，目标 104 → 整包丢弃
+        let mut samples = vec![0.0_f32; 8]; // 4 帧 × 2 声道
+        assert!(trim_samples_before(&mut samples, 100, 104, 2));
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn trim_cuts_prefix_of_straddling_packet() {
+        // 包覆盖帧 [100, 104)，目标 102 → 剪掉前 2 帧
+        let mut samples: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        assert!(!trim_samples_before(&mut samples, 100, 102, 2));
+        assert_eq!(samples, vec![4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn trim_noop_when_packet_starts_at_or_after_required_ts() {
+        let mut samples: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        assert!(!trim_samples_before(&mut samples, 102, 100, 2));
+        assert_eq!(samples.len(), 8);
+    }
+
+    #[test]
+    fn seek_trims_to_sample_accurate_position() {
+        // WAV 每包 ts 已知；seek 到非包边界位置后，首包时间戳应精确等于目标
+        let path = temp_audio_path("seraph-decoder-seektrim", "wav");
+        write_test_wav(&path);
+
+        let mut decoder = SymphoniaDecoder::new();
+        decoder.open(&path).expect("open wav");
+        let target = 10.0 / 44_100.0; // 第 10 帧
+        decoder.seek(target).expect("seek");
+        let packet = decoder
+            .next_packet()
+            .expect("packet result")
+            .expect("packet after seek");
+        assert!(
+            (packet.timestamp_seconds - target).abs() < 0.5 / 44_100.0,
+            "seek 后时间戳不精确: {} vs {}",
+            packet.timestamp_seconds,
+            target
+        );
 
         let _ = fs::remove_file(path);
     }

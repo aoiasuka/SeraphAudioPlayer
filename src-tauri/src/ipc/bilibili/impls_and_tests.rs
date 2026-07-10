@@ -35,13 +35,12 @@ impl AudioStream {
         }
     }
 
-    fn output_extension(&self, remuxed: bool) -> &'static str {
+    fn output_extension(&self) -> &'static str {
         // 即使未 remux 也按真实编码落扩展名，避免 FLAC stream 被命名为 .m4a
         // 导致后续元数据探测失败 (M-2)。
         match self.format_label() {
             "FLAC" => "flac",
             "OPUS" => "opus",
-            "EAC3" if remuxed => "eac3",
             "EAC3" => "eac3",
             _ => "m4a",
         }
@@ -78,7 +77,10 @@ impl BilibiliSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bvid, extract_media_id, select_audio_stream, AudioKind, DashData};
+    use super::{
+        extract_bvid, extract_media_id, is_bilibili_host, parse_http_date_to_unix,
+        select_audio_stream, temp_download_path, AudioKind, DashData,
+    };
     use serde_json::json;
 
     fn dash_with_dolby_and_flac() -> DashData {
@@ -226,5 +228,65 @@ mod tests {
             Some("987654")
         );
         assert_eq!(extract_media_id("123").as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn bilibili_host_whitelist_accepts_official_hosts() {
+        for url in [
+            "https://b23.tv/abc123",
+            "https://acg.tv/av170001",
+            "https://bilibili.com/video/BV1xx411c7mD",
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://m.bilibili.com/video/BV1xx411c7mD",
+            "https://WWW.BILIBILI.COM/video/BV1xx411c7mD",
+        ] {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            assert!(is_bilibili_host(&parsed), "should accept {url}");
+        }
+    }
+
+    #[test]
+    fn bilibili_host_whitelist_rejects_lookalike_hosts() {
+        for url in [
+            "https://evil.example/BV-share",
+            "https://bilibili.com.evil.example/video",
+            "https://fakebilibili.com/video",
+            "https://notb23.tv/xyz",
+            "https://bilibili.com@evil.example/",
+            "https://xbilibili.com/",
+        ] {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            assert!(!is_bilibili_host(&parsed), "should reject {url}");
+        }
+    }
+
+    #[test]
+    fn parses_expires_date_case_insensitively() {
+        // 上游会把整段属性 to_ascii_lowercase，月份必须大小写不敏感匹配。
+        let expected = parse_http_date_to_unix("Sun, 06 Nov 1994 08:49:37 GMT");
+        assert_eq!(expected, Some(784_111_777));
+        assert_eq!(
+            parse_http_date_to_unix("sun, 06 nov 1994 08:49:37 gmt"),
+            expected
+        );
+        assert_eq!(
+            parse_http_date_to_unix("SUN, 06 NOV 1994 08:49:37 GMT"),
+            expected
+        );
+        assert_eq!(parse_http_date_to_unix("sun, 06 xxx 1994 08:49:37 gmt"), None);
+    }
+
+    #[test]
+    fn temp_download_paths_are_unique() {
+        let target = std::path::Path::new("C:/cache/BV1xx411c7mD-123.flac");
+        let first = temp_download_path(target);
+        let second = temp_download_path(target);
+        assert_ne!(first, second, "并发下载的临时文件路径必须唯一");
+        for path in [&first, &second] {
+            assert_eq!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("download")
+            );
+        }
     }
 }

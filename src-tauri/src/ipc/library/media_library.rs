@@ -1,11 +1,18 @@
 const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
 
+/// P1-3：曲库缓存"读全量 → 内存合并 → 覆盖写"序列的模块级互斥锁。
+/// 所有读改写路径（导入、删除、歌词写入、缓存缺失标记）必须持有它，
+/// 防止并发命令互相覆盖丢更新。parking_lot Mutex 只在同步块内持有，
+/// async 路径需先进 spawn_blocking 再调用。
+static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn collect_audio_files(
     path: PathBuf,
     tracks: &mut Vec<ImportedTrack>,
     seen_files: &mut HashSet<String>,
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
+    warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     if path.is_dir() {
         // L-14：symlink / Windows junction 可能指向祖先目录导致无限递归栈溢出。
@@ -18,12 +25,31 @@ fn collect_audio_files(
             return Ok(());
         }
 
-        let entries = fs::read_dir(&path)
-            .map_err(|err| format!("failed to read directory {}: {err}", path.display()))?;
+        // P3-11：单个子目录读失败（如无权限）只记警告并跳过，不中止整批导入。
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(err) => {
+                warnings.push(format!("无法读取目录 {}: {err}", path.display()));
+                return Ok(());
+            }
+        };
 
         for entry in entries {
-            let entry = entry.map_err(|err| err.to_string())?;
-            collect_audio_files(entry.path(), tracks, seen_files, visited_dirs, depth + 1)?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warnings.push(format!("读取目录项失败 {}: {err}", path.display()));
+                    continue;
+                }
+            };
+            collect_audio_files(
+                entry.path(),
+                tracks,
+                seen_files,
+                visited_dirs,
+                depth + 1,
+                warnings,
+            )?;
         }
         return Ok(());
     }
@@ -40,15 +66,42 @@ fn collect_audio_files(
 
 fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
     let path = library_cache_path(app)?;
+    read_tracks_from_file(&path).map(|tracks| tracks.into_iter().map(enrich_cached_track).collect())
+}
+
+fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
 
-    let bytes = fs::read(&path)
+    let bytes = fs::read(path)
         .map_err(|err| format!("failed to read library cache {}: {err}", path.display()))?;
-    let tracks: Vec<ImportedTrack> = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))?;
-    Ok(tracks.into_iter().map(enrich_cached_track).collect())
+    serde_json::from_slice(&bytes)
+        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))
+}
+
+/// P0-2：读改写路径专用读取。文件存在但读取/解析失败时，把坏文件备份为
+/// `.corrupt` 并显式报错——绝不能把损坏缓存当空库，否则随后的覆盖写会把
+/// 用户整个曲库（含手动匹配的歌词）静默清空。
+fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
+    let path = library_cache_path(app)?;
+    match read_tracks_from_file(&path) {
+        Ok(tracks) => Ok(tracks.into_iter().map(enrich_cached_track).collect()),
+        Err(err) => {
+            let backup = backup_corrupt_file(&path);
+            Err(format!(
+                "曲库缓存损坏，已中止写入以免覆盖数据（坏文件已备份到 {}）: {err}",
+                backup.display()
+            ))
+        }
+    }
+}
+
+/// 把损坏的 JSON 文件备份为 `<原名>.corrupt`（复制而非移动，保留现场）。
+fn backup_corrupt_file(path: &Path) -> PathBuf {
+    let backup = PathBuf::from(format!("{}.corrupt", path.display()));
+    let _ = fs::copy(path, &backup);
+    backup
 }
 
 fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
@@ -63,8 +116,19 @@ fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), 
     }
     let bytes = serde_json::to_vec_pretty(tracks)
         .map_err(|err| format!("failed to serialize library cache: {err}"))?;
-    fs::write(&path, bytes)
-        .map_err(|err| format!("failed to write library cache {}: {err}", path.display()))
+    // P0-2：temp+rename 原子写，避免写一半崩溃/断电截断 JSON 丢曲库。
+    write_json_atomic(&path, &bytes)
+}
+
+/// 原子写 JSON：先写同目录临时文件再 rename（Windows 同卷 rename 原子）。
+fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    fs::write(&tmp, bytes)
+        .map_err(|err| format!("failed to write temp file {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        format!("failed to replace {}: {err}", path.display())
+    })
 }
 
 pub(super) fn merge_tracks_into_cache(
@@ -75,7 +139,8 @@ pub(super) fn merge_tracks_into_cache(
         return Ok(Vec::new());
     }
 
-    let cached = read_cached_tracks(app).unwrap_or_default();
+    let _guard = LIBRARY_LOCK.lock();
+    let cached = read_cached_tracks_for_update(app)?;
     let merged = merge_cached_tracks(cached, tracks);
     write_cached_tracks(app, &merged)?;
     Ok(imported_tracks_from_cache(&merged, tracks))
@@ -93,7 +158,8 @@ pub(super) fn mark_tracks_cache_missing_by_paths(
         .iter()
         .map(|path| import_dedupe_key(path))
         .collect::<HashSet<_>>();
-    let tracks = read_cached_tracks(app).unwrap_or_default();
+    let _guard = LIBRARY_LOCK.lock();
+    let tracks = read_cached_tracks_for_update(app)?;
     let updated = tracks
         .into_iter()
         .map(|mut track| {

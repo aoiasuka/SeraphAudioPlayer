@@ -1,15 +1,28 @@
 import { Check, Monitor } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/store/player";
 
 export function DeviceMenu() {
   const deviceMenuOpen = usePlayerStore((s) => s.deviceMenuOpen);
   const toggleDeviceMenu = usePlayerStore((s) => s.toggleDeviceMenu);
+  const closeDeviceMenu = usePlayerStore((s) => s.closeDeviceMenu);
   const currentDeviceId = usePlayerStore((s) => s.currentDeviceId);
   const devices = usePlayerStore((s) => s.devices);
   const selectDevice = usePlayerStore((s) => s.selectDevice);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // 发现10：点击菜单外部时关闭设备菜单
+  useEffect(() => {
+    if (!deviceMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) closeDeviceMenu();
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [deviceMenuOpen, closeDeviceMenu]);
 
   return (
-    <div className="relative">
+    <div className="relative" ref={rootRef}>
       <button
         onClick={toggleDeviceMenu}
         className="text-ink2 hover:text-ink transition-colors"

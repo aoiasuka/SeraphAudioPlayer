@@ -16,7 +16,6 @@ interface NavItem {
   key: LibraryView | "settings";
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  onClickAction?: () => void;
 }
 
 interface NavGroup {
@@ -24,41 +23,35 @@ interface NavGroup {
   items: NavItem[];
 }
 
+// 发现18：groups 是纯静态数据，移到模块级避免每次渲染重建
+const NAV_GROUPS: NavGroup[] = [
+  {
+    tab: "DRAWER A — 资料库",
+    items: [
+      { key: "local", label: "本地音乐", icon: Music },
+      { key: "streaming", label: "流媒体", icon: Radio },
+      { key: "recent", label: "最近播放", icon: History },
+      { key: "liked", label: "我喜欢", icon: Heart },
+    ],
+  },
+  {
+    tab: "DRAWER B — 浏览",
+    items: [
+      { key: "playlists", label: "歌单", icon: ListMusic },
+      { key: "artists", label: "艺术家", icon: User },
+      { key: "albums", label: "专辑", icon: Disc3 },
+    ],
+  },
+  {
+    tab: "DRAWER C — 系统",
+    items: [{ key: "settings", label: "设置", icon: Sliders }],
+  },
+];
+
 export function Sidebar() {
   const activeView = usePlayerStore((s) => s.activeView);
   const setActiveView = usePlayerStore((s) => s.setActiveView);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
-
-  const groups: NavGroup[] = [
-    {
-      tab: "DRAWER A — 资料库",
-      items: [
-        { key: "local", label: "本地音乐", icon: Music },
-        { key: "streaming", label: "流媒体", icon: Radio },
-        { key: "recent", label: "最近播放", icon: History },
-        { key: "liked", label: "我喜欢", icon: Heart },
-      ],
-    },
-    {
-      tab: "DRAWER B — 浏览",
-      items: [
-        { key: "playlists", label: "歌单", icon: ListMusic },
-        { key: "artists", label: "艺术家", icon: User },
-        { key: "albums", label: "专辑", icon: Disc3 },
-      ],
-    },
-    {
-      tab: "DRAWER C — 系统",
-      items: [
-        {
-          key: "settings",
-          label: "设置",
-          icon: Sliders,
-          onClickAction: toggleSettings,
-        },
-      ],
-    },
-  ];
 
   return (
     <aside className="box-border w-[228px] min-w-[228px] max-w-[228px] flex-none flex flex-col border-r-2 border-ink bg-paper pt-6 pb-5 z-20 overflow-hidden">
@@ -72,7 +65,7 @@ export function Sidebar() {
       </div>
 
       <nav className="flex flex-col px-3.5 mt-4 overflow-y-auto no-scrollbar flex-1">
-        {groups.map((group) => (
+        {NAV_GROUPS.map((group) => (
           <div key={group.tab}>
             <div className="font-tw text-[9px] tracking-[3px] text-ink3 px-3 pt-4 pb-1.5">
               {group.tab}
@@ -81,16 +74,15 @@ export function Sidebar() {
               const Icon = item.icon;
               const active = item.key !== "settings" && item.key === activeView;
               return (
-                <a
+                <button
                   key={item.key}
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    if (item.onClickAction) item.onClickAction();
-                    else setActiveView(item.key as LibraryView);
+                  type="button"
+                  onClick={() => {
+                    if (item.key === "settings") toggleSettings();
+                    else setActiveView(item.key);
                   }}
                   className={cn(
-                    "group flex items-center gap-2.5 px-3 py-2 font-tw text-[13px] border-[1.5px] transition-all",
+                    "group flex w-full items-center gap-2.5 px-3 py-2 font-tw text-[13px] text-left border-[1.5px] transition-all",
                     active
                       ? "text-ink bg-card border-ink font-bold shadow-[2.5px_2.5px_0_var(--ink)]"
                       : "text-ink2 border-transparent hover:text-ink hover:bg-card"
@@ -106,7 +98,7 @@ export function Sidebar() {
                   </span>
                   <Icon className="w-3.5 h-3.5 shrink-0" />
                   <span className="min-w-0 truncate">{item.label}</span>
-                </a>
+                </button>
               );
             })}
           </div>

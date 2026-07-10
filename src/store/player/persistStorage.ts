@@ -7,6 +7,7 @@ function isSamePersistedState(
 ) {
   return (
     previous.currentTrackIndex === next.currentTrackIndex &&
+    previous.persistedCurrentTrackId === next.persistedCurrentTrackId &&
     previous.recentTrackIds === next.recentTrackIds &&
     previous.volume === next.volume &&
     previous.isMuted === next.isMuted &&
@@ -30,6 +31,45 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
 
   const storage = () =>
     typeof window === "undefined" ? null : window.localStorage;
+
+  const writeNow = (name: string, serialized: string) => {
+    const localStorage = storage();
+    if (localStorage) {
+      try {
+        localStorage.setItem(name, serialized);
+      } catch (err) {
+        // QuotaExceededError / SecurityError 等：回退到内存存储，避免崩溃
+        // eslint-disable-next-line no-console
+        console.warn(
+          "localStorage.setItem failed, falling back to memory storage",
+          err
+        );
+        memoryStorage.set(name, serialized);
+      }
+    } else {
+      memoryStorage.set(name, serialized);
+    }
+  };
+
+  // 发现14：300ms trailing debounce，避免拖动音量滑块等高频 set 触发同步落盘 IO
+  let pendingWrite: { name: string; serialized: string } | null = null;
+  let writeTimer: number | null = null;
+
+  const flushPendingWrite = () => {
+    if (writeTimer !== null) {
+      window.clearTimeout(writeTimer);
+      writeTimer = null;
+    }
+    if (!pendingWrite) return;
+    const { name, serialized } = pendingWrite;
+    pendingWrite = null;
+    writeNow(name, serialized);
+  };
+
+  if (typeof window !== "undefined") {
+    // 页面卸载前把挂起的状态落盘
+    window.addEventListener("pagehide", flushPendingWrite);
+  }
 
   return {
     getItem: (name) => {
@@ -66,24 +106,20 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
 
       lastValue = value;
       const serialized = JSON.stringify(value);
-      const localStorage = storage();
-      if (localStorage) {
-        try {
-          localStorage.setItem(name, serialized);
-        } catch (err) {
-          // QuotaExceededError / SecurityError 等：回退到内存存储，避免崩溃
-          // eslint-disable-next-line no-console
-          console.warn(
-            "localStorage.setItem failed, falling back to memory storage",
-            err
-          );
-          memoryStorage.set(name, serialized);
-        }
-      } else {
-        memoryStorage.set(name, serialized);
+      pendingWrite = { name, serialized };
+      if (typeof window === "undefined") {
+        flushPendingWrite();
+        return;
       }
+      if (writeTimer !== null) window.clearTimeout(writeTimer);
+      writeTimer = window.setTimeout(flushPendingWrite, 300);
     },
     removeItem: (name) => {
+      if (writeTimer !== null) {
+        window.clearTimeout(writeTimer);
+        writeTimer = null;
+      }
+      pendingWrite = null;
       lastValue = null;
       storage()?.removeItem(name);
       memoryStorage.delete(name);

@@ -1,5 +1,5 @@
 import { Loader2, Heart, Trash2 } from "lucide-react";
-import { useMemo, useState, type UIEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -26,6 +26,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const deleteTrack = usePlayerStore((s) => s.deleteTrack);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const [trackToDeleteId, setTrackToDeleteId] = useState<string | null>(null);
   const [isDeletingTrack, setIsDeletingTrack] = useState(false);
   const trackIndexById = useMemo(() => {
@@ -61,8 +62,19 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     setScrollTop(element.scrollTop);
-    setViewportHeight(element.clientHeight);
   };
+  const hasTracks = tracks.length > 0;
+  // 发现6：用 ResizeObserver 测量容器实际高度，修复首屏高窗口/resize 时底部曲目空白
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    const updateViewport = () => setViewportHeight(element.clientHeight);
+    updateViewport();
+    const resizeObserver = new ResizeObserver(updateViewport);
+    resizeObserver.observe(element);
+    return () => resizeObserver.disconnect();
+  }, [hasTracks]);
   const closeDeleteDialog = () => {
     if (!isDeletingTrack) setTrackToDeleteId(null);
   };
@@ -93,6 +105,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
         <span>{tracks.length} RECORDS</span>
       </div>
       <div
+        ref={scrollRef}
         className="min-h-0 flex-1 overflow-y-auto pr-1"
         onScroll={handleScroll}
       >

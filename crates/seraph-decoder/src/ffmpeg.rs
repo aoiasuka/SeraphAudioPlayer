@@ -37,7 +37,12 @@ pub struct FfmpegDecoder {
     stderr_thread: Option<thread::JoinHandle<()>>,
     frames_read: u64,
     base_seconds: f64,
+    /// F-10：正常 EOF 后置位，仅 seek/重启进程可清。
+    /// 否则轮询式调用方在 EOF 后再调 next_packet 会自动重启进程重播尾段。
+    finished: bool,
     sample_scratch: Vec<f32>,
+    /// F-16：每包字节缓冲复用，避免热路径每包 vec! 分配。
+    byte_scratch: Vec<u8>,
 }
 
 impl FfmpegDecoder {
@@ -51,7 +56,9 @@ impl FfmpegDecoder {
             stderr_thread: None,
             frames_read: 0,
             base_seconds: 0.0,
+            finished: false,
             sample_scratch: Vec::new(),
+            byte_scratch: Vec::new(),
         }
     }
 
@@ -73,7 +80,7 @@ impl FfmpegDecoder {
         }
         command
             .arg("-i")
-            .arg(path)
+            .arg(ffmpeg_input_arg(path))
             .arg("-map")
             .arg("0:a:0")
             .arg("-vn")
@@ -103,6 +110,7 @@ impl FfmpegDecoder {
         self.stderr_thread = stderr_thread;
         self.frames_read = 0;
         self.base_seconds = start_seconds.max(0.0);
+        self.finished = false;
         Ok(())
     }
 
@@ -162,7 +170,9 @@ impl Decoder for FfmpegDecoder {
         let info = probe_with_ffprobe(path)?;
         self.path = Some(path.to_path_buf());
         self.info = Some(info);
-        self.start_process(0.0)?;
+        // F-11：不再在 open 时 start_process(0.0)——next_packet 已有懒启动，
+        // 扫库 probe 场景不必为每个文件白 spawn 一个全量解码进程再立刻 kill。
+        self.finished = false;
         Ok(())
     }
 
@@ -171,6 +181,9 @@ impl Decoder for FfmpegDecoder {
     }
 
     fn next_packet(&mut self) -> Result<Option<Packet>, DecoderError> {
+        if self.finished {
+            return Ok(None);
+        }
         if self.stdout.is_none() {
             self.start_process(self.base_seconds)?;
         }
@@ -182,26 +195,33 @@ impl Decoder for FfmpegDecoder {
         let channels = usize::from(info.channels.0).max(1);
         let frame_bytes = channels * std::mem::size_of::<f32>();
         let bytes_per_packet = PACKET_FRAMES * frame_bytes;
-        let mut bytes = vec![0_u8; bytes_per_packet];
+        let timestamp_seconds =
+            self.base_seconds + self.frames_read as f64 / f64::from(info.sample_rate.0.max(1));
+        self.byte_scratch.clear();
+        self.byte_scratch.resize(bytes_per_packet, 0);
         let mut filled = 0;
 
-        while filled < bytes.len() {
-            let read = self
+        {
+            let stdout = self
                 .stdout
                 .as_mut()
-                .ok_or_else(|| DecoderError::Internal("ffmpeg stdout is unavailable".into()))?
-                .read(&mut bytes[filled..])
-                .map_err(DecoderError::Io)?;
-            if read == 0 {
-                break;
+                .ok_or_else(|| DecoderError::Internal("ffmpeg stdout is unavailable".into()))?;
+            while filled < self.byte_scratch.len() {
+                let read = stdout
+                    .read(&mut self.byte_scratch[filled..])
+                    .map_err(DecoderError::Io)?;
+                if read == 0 {
+                    break;
+                }
+                filled += read;
             }
-            filled += read;
         }
 
         if filled == 0 {
             // EOF：检查进程退出码区分"正常播完"与"中途崩溃"
             let crash_reason = self.detect_crash();
             self.stop_process();
+            self.finished = true;
             if let Some(reason) = crash_reason {
                 return Err(DecoderError::Internal(format!("ffmpeg aborted: {reason}")));
             }
@@ -212,17 +232,21 @@ impl Decoder for FfmpegDecoder {
         // 否则末包字节数不是声道整数倍 → 后续帧串扰。
         let aligned = filled - (filled % frame_bytes);
         if aligned == 0 {
+            // F-10：写出半帧后 EOF 同样要走崩溃检测，否则 ffmpeg
+            // 半帧崩溃会被当成正常播完。
+            let crash_reason = self.detect_crash();
             self.stop_process();
+            self.finished = true;
+            if let Some(reason) = crash_reason {
+                return Err(DecoderError::Internal(format!("ffmpeg aborted: {reason}")));
+            }
             return Ok(None);
         }
-        bytes.truncate(aligned);
 
-        let timestamp_seconds =
-            self.base_seconds + self.frames_read as f64 / f64::from(info.sample_rate.0.max(1));
         let sample_count = aligned / std::mem::size_of::<f32>();
         self.sample_scratch.clear();
         self.sample_scratch.reserve(sample_count);
-        bytes_to_f32_into(&bytes, &mut self.sample_scratch);
+        bytes_to_f32_into(&self.byte_scratch[..aligned], &mut self.sample_scratch);
         self.frames_read += (sample_count / channels) as u64;
 
         Ok(Some(Packet {
@@ -232,6 +256,8 @@ impl Decoder for FfmpegDecoder {
     }
 
     fn seek(&mut self, seconds: f64) -> Result<(), DecoderError> {
+        // F-10：seek 是唯一清除 finished 标志的途径
+        self.finished = false;
         // L-3: 近距向前 seek（<2s）跳过重启 ffmpeg 进程，改为读丢中间样本。
         // 频繁拖动进度条时启动新进程要 ~50–100ms，体验明显卡顿。
         let target = seconds.max(0.0);
@@ -278,6 +304,19 @@ impl Decoder for FfmpegDecoder {
     }
 }
 
+/// F-11：以 `-` 开头的文件名会被 ffmpeg/ffprobe 当成选项解析，
+/// 统一加 `file:` 协议前缀消除歧义。
+fn ffmpeg_input_arg(path: &Path) -> std::ffi::OsString {
+    use std::ffi::OsString;
+    if path.to_string_lossy().starts_with('-') {
+        let mut arg = OsString::from("file:");
+        arg.push(path.as_os_str());
+        arg
+    } else {
+        path.as_os_str().to_os_string()
+    }
+}
+
 fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
     let mut command = Command::new(ffprobe_command_path());
     hide_console_window(&mut command);
@@ -292,7 +331,7 @@ fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
         .arg("format=duration")
         .arg("-of")
         .arg("default=noprint_wrappers=1")
-        .arg(path)
+        .arg(ffmpeg_input_arg(path))
         .output()
         .map_err(map_tool_spawn_error)?;
 
@@ -534,6 +573,14 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dash_prefixed_path_gets_file_protocol_prefix() {
+        let arg = ffmpeg_input_arg(Path::new("-weird.mp3"));
+        assert_eq!(arg.to_string_lossy(), "file:-weird.mp3");
+        let arg = ffmpeg_input_arg(Path::new("C:/music/track.mp3"));
+        assert_eq!(arg.to_string_lossy(), "C:/music/track.mp3");
+    }
 
     #[test]
     fn parses_ffprobe_stream_info() {

@@ -278,6 +278,17 @@ impl StatefulSincResampler {
 
         Ok(())
     }
+
+    /// F-13：曲尾 flush——喂 2×radius 帧零样本，把仍卡在 sinc 窗口里的
+    /// 尾部真实样本冲出来。不调用则每曲结尾永远丢约 radius 帧。
+    /// 同采样率直通模式下无内部状态，为 no-op。
+    pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), ResamplerError> {
+        if self.input_rate == self.output_rate {
+            return Ok(());
+        }
+        let zeros = vec![0.0_f32; self.radius * 2 * self.channels];
+        self.process(&zeros, out)
+    }
 }
 
 pub fn resample_interleaved_sinc_with_radius(
@@ -424,6 +435,25 @@ mod tests {
             .process(&[0.0, 0.1, 0.2, 0.3], &mut output)
             .unwrap();
         assert_eq!(output, vec![0.0, 0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn flush_emits_buffered_tail_samples() {
+        // 不 flush 时尾部约 radius 帧永远留在 history 里
+        let mut resampler = StatefulSincResampler::with_radius(8, 4, 1, 4).unwrap();
+        let input: Vec<f32> = (0..64).map(|i| (i as f32 * 0.2).sin()).collect();
+        let mut out = Vec::new();
+        resampler.process(&input, &mut out).unwrap();
+        let before_flush = out.len();
+        resampler.flush(&mut out).unwrap();
+        assert!(out.len() > before_flush, "flush 应冲出卡在窗口里的尾部样本");
+        assert!(out.iter().all(|s| s.is_finite()));
+
+        // 同采样率直通模式下 flush 不产生任何输出
+        let mut passthrough = StatefulSincResampler::new(48_000, 48_000, 2).unwrap();
+        let mut out2 = Vec::new();
+        passthrough.flush(&mut out2).unwrap();
+        assert!(out2.is_empty());
     }
 
     #[test]

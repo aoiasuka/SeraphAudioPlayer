@@ -19,7 +19,8 @@ export type {
   PlayerStore,
 } from "./player/types";
 
-const PERSIST_VERSION = 1;
+// v2: 新增 persistedCurrentTrackId，用曲目 id（而非索引）恢复上次播放位置
+const PERSIST_VERSION = 2;
 const validDrivers = new Set<DriverKind>(["wasapi", "direct", "asio"]);
 const validViews = new Set<LibraryView>([
   "local",
@@ -77,6 +78,10 @@ export function migratePersistedPlayerState(persistedState: unknown) {
   const volume = clampVolume(state.volume, 0.7);
   return {
     currentTrackIndex: Math.max(0, Math.trunc(finiteNumber(state.currentTrackIndex, 0))),
+    persistedCurrentTrackId:
+      typeof state.persistedCurrentTrackId === "string" && state.persistedCurrentTrackId
+        ? state.persistedCurrentTrackId
+        : null,
     recentTrackIds: stringArray(state.recentTrackIds).slice(0, 12),
     volume,
     isMuted: typeof state.isMuted === "boolean" ? state.isMuted : volume === 0,
@@ -103,6 +108,7 @@ export const usePlayerStore = create<PlayerStore>()(
       return {
         playlist: [],
         currentTrackIndex: 0,
+        persistedCurrentTrackId: null,
         recentTrackIds: [],
         isPlaying: false,
         currentTime: 0,
@@ -139,6 +145,9 @@ export const usePlayerStore = create<PlayerStore>()(
       migrate: migratePersistedPlayerState,
       partialize: (state) => ({
         currentTrackIndex: state.currentTrackIndex,
+        // 发现1：持久化当前曲目 id；playlist 未加载（为空）时回退到已持久化的 id
+        persistedCurrentTrackId:
+          state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId,
         recentTrackIds: state.recentTrackIds,
         volume: state.volume,
         isMuted: state.isMuted,

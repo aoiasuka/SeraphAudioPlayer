@@ -66,11 +66,15 @@ pub fn open_decoder(path: &Path) -> Result<Box<dyn Decoder>, DecoderError> {
 /// 把主解码器错误 + ffmpeg fallback 错误合并成一条 message，
 /// 避免静默吞掉真正的失败原因（典型场景：fallback 报"ffmpeg not found"
 /// 但日志里只看到 Symphonia 的 "unknown format"）。
+/// F-17：FileNotFound 原样透传，让上层能区分"文件被移动"与"格式不支持"。
 fn merge_open_errors(
     primary_name: &str,
     primary: DecoderError,
     fallback: DecoderError,
 ) -> DecoderError {
+    if matches!(primary, DecoderError::FileNotFound) {
+        return DecoderError::FileNotFound;
+    }
     DecoderError::UnsupportedFormat(format!(
         "{primary_name}: {primary}; ffmpeg fallback: {fallback}"
     ))
@@ -124,6 +128,17 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn missing_file_reports_file_not_found() {
+        // F-17：文件不存在时不得被合并成 UnsupportedFormat
+        let path = temp_audio_path("seraph-decoder-missing", "flac");
+        let err = match open_decoder(&path) {
+            Err(err) => err,
+            Ok(_) => panic!("opening a missing file must fail"),
+        };
+        assert!(matches!(err, DecoderError::FileNotFound), "{err}");
+    }
 
     #[test]
     fn probes_dsd_by_magic_even_with_unknown_extension() {
