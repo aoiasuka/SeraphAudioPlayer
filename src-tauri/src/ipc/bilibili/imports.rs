@@ -35,6 +35,6 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use super::{
-    cache::{cache_dir, enforce_cache_limit_preserving},
+    cache::{cache_dir, enforce_cache_limit_preserving_many, unique_temp_path},
     library::{merge_tracks_into_cache, ImportedTrack},
 };

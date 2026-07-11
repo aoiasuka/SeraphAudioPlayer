@@ -4,16 +4,16 @@ import { mergeIncomingTrack, mergeTracksByPathWithStats } from "./libraryActions
 import { streamingSourceInput, trackMergeKey } from "./trackIdentity";
 import type { BilibiliBatchImportResult, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
-export async function ensurePlayableTrack(
+// 审2-R3：同一曲目在途的重缓存请求去重——并发触发（如快速重复点击）复用同一 Promise，
+// 避免对同一曲目发起第二次下载。
+const ensureInFlight = new Map<string, Promise<Track>>();
+
+async function recachePlayableTrack(
   track: Track,
+  sourceInput: string,
   replaceTrack: (track: Track) => void,
   notify: (text: string) => void
 ) {
-  const sourceInput = streamingSourceInput(track);
-  if (!track.cacheMissing || !sourceInput) {
-    return track;
-  }
-
   notify(`正在重新缓存: ${track.title}`);
   const imported = await invoke<Track>("import_bilibili_audio_with_options", {
     input: sourceInput,
@@ -28,6 +28,29 @@ export async function ensurePlayableTrack(
   replaceTrack(merged);
   notify(`已重新缓存: ${merged.title}`);
   return merged;
+}
+
+export async function ensurePlayableTrack(
+  track: Track,
+  replaceTrack: (track: Track) => void,
+  notify: (text: string) => void
+) {
+  const sourceInput = streamingSourceInput(track);
+  if (!track.cacheMissing || !sourceInput) {
+    return track;
+  }
+
+  // 审2-R3：已有同曲目请求在途时直接返回既有 Promise
+  const inFlight = ensureInFlight.get(track.id);
+  if (inFlight) return inFlight;
+
+  const request = recachePlayableTrack(track, sourceInput, replaceTrack, notify);
+  ensureInFlight.set(track.id, request);
+  try {
+    return await request;
+  } finally {
+    ensureInFlight.delete(track.id);
+  }
 }
 
 export function bilibiliImportErrorMessage(err: unknown) {
@@ -60,10 +83,11 @@ export function createBilibiliActions(
 ): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites"> {
   return {
   importBilibiliAudio: async (input, options) => {
+    // 审2-R10：返回是否导入成功，调用方（StreamingPage）据此决定是否清空输入框（L-7）
     const cleanInput = input.trim();
     if (!cleanInput) {
       get().showNotification("请输入 B 站视频链接或 BV 号");
-      return;
+      return false;
     }
 
     try {
@@ -74,7 +98,7 @@ export function createBilibiliActions(
 
       if (!imported?.path) {
         get().showNotification("没有解析到可用的 B 站音频");
-        return;
+        return false;
       }
 
       let added = false;
@@ -114,10 +138,12 @@ export function createBilibiliActions(
             ? `已更新 B 站音频: ${imported.title}`
             : "B 站音频已在曲库中"
       );
+      return true;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: import_bilibili_audio", err);
       get().showNotification(bilibiliImportErrorMessage(err));
+      return false;
     }
   },
 

@@ -68,8 +68,22 @@ fn load_session(app: &AppHandle) -> Result<Option<BilibiliSession>, String> {
 
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read bilibili session {}: {err}", path.display()))?;
-    let mut session: BilibiliSession = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse bilibili session {}: {err}", path.display()))?;
+    // 审2-S1c：session 文件存在但解析失败时不再直接 Err（那会让所有 B 站功能
+    // 永久瘫痪且无法自愈）——备份坏文件为 .corrupt 留现场，然后按“无 session
+    // 文件”处理返回未登录状态；下次登录成功会重建文件。仅解析失败分支的行为
+    // 变化，解析成功后的 Credential Manager cookie 迁移逻辑保持不变。
+    let mut session: BilibiliSession = match serde_json::from_slice(&bytes) {
+        Ok(session) => session,
+        Err(err) => {
+            tracing::warn!(
+                "bilibili session {} corrupt, treating as logged out: {err}",
+                path.display()
+            );
+            let backup = PathBuf::from(format!("{}.corrupt", path.display()));
+            let _ = fs::copy(&path, &backup);
+            return Ok(None);
+        }
+    };
     if let Some(cookies) = load_secure_bilibili_cookies()? {
         session.cookies = cookies;
         session.has_secure_cookies = true;
@@ -88,11 +102,19 @@ fn save_session(app: &AppHandle, session: &BilibiliSession) -> Result<(), String
     write_session_file(app, session, false)
 }
 
+/// 审2-S1a：session 文件写路径互斥锁。bilibili_poll_login 与
+/// bilibili_login_status 可能并发触发写（save_session / load_session 的
+/// 旧文件迁移路径都汇聚到 write_session_file），持锁串行化整个
+/// “序列化 → 临时文件 → rename → 收权限”序列。
+static SESSION_FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn write_session_file(
     app: &AppHandle,
     session: &BilibiliSession,
     include_cookies: bool,
 ) -> Result<(), String> {
+    // 审2-S1a：所有写路径都经过这里，锁在此处覆盖即可（调用方不持锁，无重入）。
+    let _guard = SESSION_FILE_LOCK.lock();
     let path = session_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -109,8 +131,19 @@ fn write_session_file(
     };
     let bytes = serde_json::to_vec(&disk_session)
         .map_err(|err| format!("failed to serialize bilibili session: {err}"))?;
-    fs::write(&path, bytes)
-        .map_err(|err| format!("failed to write bilibili session {}: {err}", path.display()))?;
+    // 审2-S1b：唯一临时名 + rename 原子写（参考 media_library.rs 的
+    // write_json_atomic 模式，但临时名唯一化，防并发写交错截断）。
+    let tmp = unique_temp_path(&path);
+    fs::write(&tmp, bytes).map_err(|err| {
+        format!(
+            "failed to write bilibili session temp {}: {err}",
+            tmp.display()
+        )
+    })?;
+    fs::rename(&tmp, &path).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        format!("failed to write bilibili session {}: {err}", path.display())
+    })?;
     restrict_session_file_permissions(&path)?;
     Ok(())
 }

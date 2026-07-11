@@ -3,6 +3,10 @@ async fn import_bilibili_audio_inner(
     client: &Client,
     input: &str,
     options: &BilibiliImportOptions,
+    // 审2-S3：单曲导入传 true；收藏夹批量循环传 false——批量时逐首清理只
+    // preserve 当前一首，缓存超限会把同批先导入的文件删掉，改由批量调用方在
+    // 整批结束后统一清理一次并 preserve 全部成功导入的文件。
+    enforce_cache_limit: bool,
 ) -> Result<ImportedTrack, String> {
     let bvid = resolve_bvid(client, input).await?;
     // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
@@ -36,7 +40,22 @@ async fn import_bilibili_audio_inner(
         must_remux,
     )
     .await?;
-    let _ = enforce_cache_limit_preserving(app, &final_path);
+    if enforce_cache_limit {
+        // 审2-S2：enforce_cache_limit 是同步磁盘遍历 + 删除，不能在 async
+        // runtime 线程上直调；挪进 spawn_blocking，失败只 warn 不中断导入
+        // （保持原 `let _ =` 的容错语义）。
+        let app_for_cache = app.clone();
+        let preserve = vec![final_path.clone()];
+        match tauri::async_runtime::spawn_blocking(move || {
+            enforce_cache_limit_preserving_many(&app_for_cache, &preserve)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => tracing::warn!("bilibili 导入后缓存清理失败: {err}"),
+            Err(err) => tracing::warn!("bilibili 导入后缓存清理任务异常终止: {err}"),
+        }
+    }
 
     let track = track_from_resolved_audio(&resolved, &final_path, ffmpeg_path.is_some())?;
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
@@ -393,10 +412,7 @@ fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
     let key = path.to_path_buf();
     let mut in_flight = DOWNLOADS_IN_FLIGHT.lock();
     if !in_flight.insert(key.clone()) {
-        return Err(format!(
-            "该音频正在下载中，请稍候再试: {}",
-            path.display()
-        ));
+        return Err(format!("该音频正在下载中，请稍候再试: {}", path.display()));
     }
     Ok(DownloadSlot(key))
 }
@@ -411,13 +427,15 @@ async fn ensure_audio_file(
     // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
     // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
     let sentinel = ok_sentinel_path(path);
-    if path.is_file()
-        && sentinel.is_file()
-        && fs::metadata(path)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or(false)
-    {
+    if cached_audio_file_is_valid(path) {
         return Ok(path.to_path_buf());
+    }
+
+    // 审2-S8：上次 remux 失败 fallback 落的 `.m4a` 也参与缓存命中检查，
+    // 否则同 BV 重复导入时只查原扩展名路径，会绕过 fallback 缓存重新下载。
+    let remux_fallback_path = path.with_extension("m4a");
+    if remux_fallback_path != path && cached_audio_file_is_valid(&remux_fallback_path) {
+        return Ok(remux_fallback_path);
     }
 
     let _slot = acquire_download_slot(path)?;
@@ -465,6 +483,16 @@ fn ok_sentinel_path(path: &Path) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("bilibili-audio");
     path.with_file_name(format!(".{file_name}.ok"))
+}
+
+/// 审2-S8：缓存有效性判定收敛到一处——文件存在且非空、且对应 ok sentinel
+/// 存在，供原扩展名路径与 remux fallback `.m4a` 路径共用。
+fn cached_audio_file_is_valid(path: &Path) -> bool {
+    path.is_file()
+        && ok_sentinel_path(path).is_file()
+        && fs::metadata(path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false)
 }
 
 async fn download_audio_to_file(

@@ -21,7 +21,8 @@ interface LyricGroup {
 const SAME_TIMESTAMP_EPSILON = 0.01;
 
 function formatCandidateDuration(duration?: number | null) {
-  if (!duration || duration <= 0) return "";
+  // 审2-R12：与 formatSeconds 同修——Infinity 会绕过 <=0 判断产生 "Infinity:NaN"
+  if (!duration || !Number.isFinite(duration) || duration <= 0) return "";
   const minutes = Math.floor(duration / 60);
   const seconds = Math.floor(duration % 60)
     .toString()
@@ -197,7 +198,7 @@ export function LyricsPanel() {
   };
 
   const runOnlineLyricsSearch = async (query?: string) => {
-    if (isFetchingOnline) return;
+    if (isFetchingOnline) return null;
 
     setOnlineCandidates([]);
     setSelectedCandidateId("");
@@ -207,6 +208,7 @@ export function LyricsPanel() {
       const candidates = await fetchOnlineLyricsForCurrentTrack(query);
       setOnlineCandidates(candidates);
       setSelectedCandidateId(candidates[0]?.id ?? "");
+      return candidates;
     } finally {
       setIsFetchingOnline(false);
     }
@@ -220,7 +222,14 @@ export function LyricsPanel() {
 
   const handleManualLyricsSearch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await runOnlineLyricsSearch(manualSearchQuery);
+    // 审2-R9：手动搜索是对“发起搜索时的当前曲目”的新意图。弹窗打开期间自动切歌后，
+    // pinned 若仍停留在旧曲目，应用歌词会被发现3的校验误拒；搜索成功后把 pinned
+    // 更新为搜索发起时快照的曲目 id。
+    const searchTrackId = track?.id ?? null;
+    const candidates = await runOnlineLyricsSearch(manualSearchQuery);
+    if (candidates && searchTrackId) {
+      pinnedTrackIdRef.current = searchTrackId;
+    }
   };
 
   const handleApplyOnlineLyrics = async () => {
@@ -266,6 +275,10 @@ export function LyricsPanel() {
   };
 
   if (!track) return null;
+
+  // 审2-R7：与 WaveformProgress 的 canSeek 一致——duration 未知(<=0)时点击歌词行不触发 seek，
+  // 否则 seek 会被钳制成 0 导致进度直接回开头。
+  const canSeek = track.duration > 0;
 
   return (
     <>
@@ -343,9 +356,12 @@ export function LyricsPanel() {
                       ref={(el) => {
                         lineRefs.current[idx] = el;
                       }}
-                      onClick={() => seek(group.time)}
+                      onClick={() => {
+                        if (canSeek) seek(group.time);
+                      }}
                       className={cn(
-                        "flex items-start gap-2 px-1 cursor-pointer transition-all duration-300 ease-out origin-left",
+                        "flex items-start gap-2 px-1 transition-all duration-300 ease-out origin-left",
+                        canSeek ? "cursor-pointer" : "cursor-default",
                         active ? "opacity-100" : "opacity-40 hover:opacity-70"
                       )}
                     >

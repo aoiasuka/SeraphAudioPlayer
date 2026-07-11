@@ -172,12 +172,20 @@ fn parse_krc_text(text: &str) -> Vec<LyricLine> {
         let Some((start_ms, _, body)) = split_provider_timed_line(line) else {
             continue;
         };
-        if let Some(text) = clean_lyric_text(&tagged_line_text(body, '<', '>', 3)) {
-            original.push(ProviderLyricLine { start_ms, text });
-        }
+        // 审2-S6：清洗失败（如纯间奏/空白行）的行以空文本占位保留在 original
+        // 中，保证译文按行号对齐时索引空间不塌缩；占位行在输出前被过滤。
+        let text = clean_lyric_text(&tagged_line_text(body, '<', '>', 3)).unwrap_or_default();
+        original.push(ProviderLyricLine { start_ms, text });
     }
 
-    let mut lyrics = provider_lines_to_lyrics(original.clone());
+    // 审2-S6：主歌词输出前过滤空占位行；译文对齐（下方）用完整 original。
+    let mut lyrics = provider_lines_to_lyrics(
+        original
+            .iter()
+            .filter(|line| !line.text.is_empty())
+            .cloned()
+            .collect(),
+    );
     if let Some(language_tag) = language_tag {
         lyrics.extend(parse_krc_translation_lines(&language_tag, &original));
         lyrics.sort_by(|a, b| {

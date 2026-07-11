@@ -428,6 +428,13 @@ fn parse_dsf(file: &mut File) -> Result<ParsedDsd, DecoderError> {
         ));
     }
 
+    // 审2：data chunk 声明长度与文件真实大小交叉校验——截断/损坏文件的
+    // chunk size 可能虚大，时长与进度会按虚值严重失真（流式读取本身安全）。
+    let file_len = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
+    let data_len = data_len.min(file_len.saturating_sub(data_start));
+    let decodable_samples = (data_len / channels.max(1) as u64).saturating_mul(8);
+    let sample_count = sample_count.min(decodable_samples.max(1));
+
     // F-1：有效音频字节数（每声道），不含末块的 block 对齐零填充；
     // 与 data chunk 实际容量取 min，防 sample_count 虚大。
     let audio_bytes_per_channel = sample_count
@@ -516,6 +523,10 @@ fn parse_dff(file: &mut File) -> Result<ParsedDsd, DecoderError> {
         ));
     }
     validate_dsd_header(channels, dsd_sample_rate, None)?;
+
+    // 审2：DSD chunk 声明长度与文件真实大小交叉校验（同 DSF 端说明）。
+    let file_len = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
+    let data_len = data_len.min(file_len.saturating_sub(data_start));
 
     let sample_count = (data_len / channels as u64) * 8;
     Ok(ParsedDsd {

@@ -7,6 +7,7 @@ import { createLyricsActions } from "./player/lyricsActions";
 import { createOutputActions } from "./player/outputActions";
 import { createPlaybackActions } from "./player/playbackActions";
 import { createPlayerPersistStorage } from "./player/persistStorage";
+import { createStreamingActions } from "./player/streamingActions";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
 import { createUiActions } from "./player/uiActions";
 import type { DriverKind, LibraryView } from "@/types/track";
@@ -126,6 +127,12 @@ export const usePlayerStore = create<PlayerStore>()(
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
+        // 审2-R5：流媒体页提升到 store 的状态（非持久化，不进 partialize）
+        bilibiliLoginStatus: { loggedIn: false },
+        bilibiliFfmpegStatus: { available: false },
+        ffmpegDownload: { stage: "idle", percent: 0 },
+        loginQr: null,
+        isLoginBusy: false,
 
         currentTrack: () => storeGet().playlist[storeGet().currentTrackIndex] ?? null,
 
@@ -135,6 +142,7 @@ export const usePlayerStore = create<PlayerStore>()(
         ...createBilibiliActions(storeSet, storeGet),
         ...createLyricsActions(storeSet, storeGet),
         ...createOutputActions(storeSet, storeGet),
+        ...createStreamingActions(storeSet, storeGet),
       };
     },
     {

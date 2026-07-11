@@ -725,7 +725,11 @@ fn write_test_dsf(path: &Path) {
     let dsd_rate = 2_822_400_u32;
     let sample_count = dsd_rate as u64;
     let block_size_per_channel = 8_u32;
-    let data_len = channels as u64 * block_size_per_channel as u64;
+    // 审2：数据体必须与 sample_count 自洽（每声道 sample_count/8 字节）——
+    // 解码器现在会把声明时长与文件真实大小交叉校验，虚大的 sample_count
+    // 不再被信任（此前夹具只写 16 字节数据却声称 1 秒时长）。
+    let bytes_per_channel = sample_count / 8;
+    let data_len = channels as u64 * bytes_per_channel;
     let file_size = 28_u64 + 52 + 12 + data_len;
 
     let mut file = fs::File::create(path).expect("create dsf");
@@ -749,8 +753,9 @@ fn write_test_dsf(path: &Path) {
 
     file.write_all(b"data").unwrap();
     file.write_all(&(12_u64 + data_len).to_le_bytes()).unwrap();
-    file.write_all(&[0xff; 8]).unwrap();
-    file.write_all(&[0x00; 8]).unwrap();
+    // 0x69 = 01101001，DSD 静音位型
+    let body = vec![0x69_u8; data_len as usize];
+    file.write_all(&body).unwrap();
 }
 
 #[cfg(test)]

@@ -1,6 +1,13 @@
 import type { PersistStorage } from "zustand/middleware";
 import type { PersistedPlayerState } from "./types";
 
+// 审2-R1：水合门闩。store 使用 skipHydration，rehydrate 被 runWhenIdle 最长推迟 1.8s；
+// 空窗期内 zustand persist 对任何 set 都会无条件 setItem，此时内存里还是默认状态，
+// 落盘会把用户已持久化的收藏/歌单整个覆盖掉。ready 之前丢弃所有写入。
+// getItem 只会在 rehydrate 时被调用，因此在 getItem 里自动置位（直接调 rehydrate 的
+// 测试等场景也能解锁）；useHydratePlayerStore 里在 rehydrate 前还会显式置位兜底。
+export const hydrationGate = { ready: false };
+
 function isSamePersistedState(
   previous: PersistedPlayerState,
   next: PersistedPlayerState
@@ -73,6 +80,9 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
 
   return {
     getItem: (name) => {
+      // 审2-R1：getItem 只在 rehydrate 时被调用，读到即代表水合开始，自动打开写门闩
+      // （必须先于返回，version 迁移完成后的回写才能通过）。
+      hydrationGate.ready = true;
       const value = storage()?.getItem(name) ?? memoryStorage.get(name) ?? null;
       if (value === null) {
         lastValue = null;
@@ -96,6 +106,8 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
       }
     },
     setItem: (name, value) => {
+      // 审2-R1：未水合前的任何写入都只能是默认状态，落盘会覆盖用户数据，直接丢弃。
+      if (!hydrationGate.ready) return;
       if (
         lastValue &&
         lastValue.version === value.version &&

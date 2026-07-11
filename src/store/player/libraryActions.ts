@@ -56,8 +56,11 @@ function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) 
     .map((key) => byKey.get(key))
     .filter((track): track is Track => !!track);
 
-  const nextLiked: Record<string, boolean> = {};
+  // 审2-R11：在原 liked 基础上做 id 迁移/合并，而不是只保留在场曲目——
+  // 曲库分批加载/合并时不在当前 playlist 的收藏（如后端尚未返回的流媒体曲目）不再被丢弃。
+  const nextLiked: Record<string, boolean> = { ...liked };
   for (const track of playlist) {
+    // 重复曲目合并后，存活条目按 mergeKey 继承 liked（保持既有语义）
     if (liked[track.id] || likedByKey.has(trackMergeKey(track))) {
       nextLiked[track.id] = true;
     }

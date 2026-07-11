@@ -1,3 +1,34 @@
+/// 审2-S5：ffmpeg 下载进行中标记。download_ffmpeg 命令可被前端重复触发，
+/// 并发下载会互相覆盖/截断落盘文件，这里全局串行化为同时最多一个任务。
+static FFMPEG_DOWNLOAD_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 审2-S5：下载占位 guard——Drop 时复位标记，确保任何返回路径
+/// （成功 / 失败 / panic 展开）都能释放，不会把标记卡死在 true。
+struct FfmpegDownloadSlot;
+
+impl Drop for FfmpegDownloadSlot {
+    fn drop(&mut self) {
+        FFMPEG_DOWNLOAD_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 审2-S5：compare_exchange(false→true) 抢占下载权，已有任务在跑则直接报错。
+fn acquire_ffmpeg_download_slot() -> Result<FfmpegDownloadSlot, String> {
+    if FFMPEG_DOWNLOAD_IN_FLIGHT
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err("FFmpeg 正在下载中".into());
+    }
+    Ok(FfmpegDownloadSlot)
+}
+
 #[cfg(not(windows))]
 async fn download_ffmpeg_inner(_app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
     Err("自动下载暂仅支持 Windows，请手动安装 ffmpeg 并加入 PATH".into())
@@ -79,8 +110,28 @@ fn ffmpeg_download_client() -> Result<Client, String> {
 }
 
 /// 流式下载到文件，边写边推送进度。
+/// 审2-S5：先写唯一临时名，完整落盘后 rename 到目标，失败路径清掉临时文件；
+/// 防止下载中断 / 并发写残留半截 zip 被后续解压流程误用。
 #[cfg(windows)]
 async fn download_to_file(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let temp_path = unique_temp_path(dest);
+    if let Err(err) = download_to_temp_file(client, url, &temp_path, app).await {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    fs::rename(&temp_path, dest).map_err(|err| {
+        let _ = fs::remove_file(&temp_path);
+        format!("无法落盘下载文件 {}: {err}", dest.display())
+    })
+}
+
+#[cfg(windows)]
+async fn download_to_temp_file(
     client: &Client,
     url: &str,
     dest: &Path,
@@ -95,8 +146,7 @@ async fn download_to_file(
         .map_err(|err| format!("下载源返回错误: {err}"))?;
 
     let total = response.content_length().unwrap_or(0);
-    let mut file =
-        fs::File::create(dest).map_err(|err| format!("无法写入临时文件: {err}"))?;
+    let mut file = fs::File::create(dest).map_err(|err| format!("无法写入临时文件: {err}"))?;
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
 
@@ -141,8 +191,7 @@ async fn download_to_file(
 #[cfg(windows)]
 fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
     let file = fs::File::open(archive_path).map_err(|err| format!("无法打开压缩包: {err}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
 
     let wanted = ["ffmpeg.exe", "ffprobe.exe"];
     let mut extracted: Vec<String> = Vec::new();

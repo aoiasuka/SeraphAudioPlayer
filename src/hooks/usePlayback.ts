@@ -19,6 +19,10 @@ export function usePlayback() {
   const loopMode = usePlayerStore((s) => s.loopMode);
   const handleBackendEvent = useCallback((event: { type: string; [key: string]: unknown }) => {
     if (event.type === "progress") {
+      // 审2-R12：NaN/Infinity 的进度事件直接丢弃，避免污染 currentTime 后 UI 显示 "NaN:NaN"
+      if (typeof event.seconds === "number" && !Number.isFinite(event.seconds)) {
+        return;
+      }
       const seconds = typeof event.seconds === "number" ? event.seconds : 0;
       // 发现7：seek 后的抑制窗口内，忽略仍携带旧位置的在途 Progress 事件，避免进度条回跳
       if (Date.now() < seekGuard.until && Math.abs(seconds - seekGuard.target) > 1.5) {
@@ -53,6 +57,9 @@ export function usePlayback() {
     }
 
     if (event.type === "track_changed") {
+      // 审2-R6：后端切歌后，上一次 seek 的抑制窗口随之失效，
+      // 否则会误吞新曲目开头（与旧 seek 目标差距大）的 Progress 事件。
+      seekGuard.until = 0;
       const trackId =
         typeof event.track_id === "string"
           ? event.track_id

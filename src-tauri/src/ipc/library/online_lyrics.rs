@@ -375,7 +375,11 @@ fn dedupe_online_lyrics_candidates(
         // 同首歌不同来源即使翻译字段不同也能识别为同一份。
         let mut hasher = DefaultHasher::new();
         candidate.lyrics.len().hash(&mut hasher);
-        let total_chars: usize = candidate.lyrics.iter().map(|l| l.text.chars().count()).sum();
+        let total_chars: usize = candidate
+            .lyrics
+            .iter()
+            .map(|l| l.text.chars().count())
+            .sum();
         total_chars.hash(&mut hasher);
         for line in candidate.lyrics.iter().take(3) {
             normalize_text(&line.text).hash(&mut hasher);
@@ -439,8 +443,13 @@ fn provider_duration_ms(item: &Value) -> Option<u64> {
         if let Some(value) = item.get(key).and_then(Value::as_u64) {
             return Some(if value < 10_000 { value * 1000 } else { value });
         }
-        if let Some(value) = item.get(key).and_then(Value::as_str) {
-            let parsed = value.parse::<u64>().ok()?;
+        // 审2-S7：字符串值解析失败时继续尝试下一个候选键；
+        // 原先的 `?` 会让单个坏键（如 "N/A"）直接放弃全部剩余候选。
+        if let Some(parsed) = item
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+        {
             return Some(if parsed < 10_000 {
                 parsed * 1000
             } else {

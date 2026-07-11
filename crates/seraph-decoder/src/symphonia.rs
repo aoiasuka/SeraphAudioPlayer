@@ -212,7 +212,12 @@ impl Decoder for SymphoniaDecoder {
             // F-7：coarse seek 落点在 required_ts 之前，丢掉之前的帧实现样本精确 seek。
             if let Some(required_ts) = self.trim_before_ts {
                 let channels = spec.channels.count().max(1);
-                if trim_samples_before(&mut samples, packet.ts(), required_ts, channels) {
+                // 审2-3：packet.ts()/required_ts 的单位是 time_base tick，
+                // 不一定等于采样帧（MP4/MKV 的 time_base ≠ 1/sample_rate）——
+                // 切样本前必须显式换算到帧域，否则 seek 落点与裁剪量双错。
+                let packet_frame = ts_to_frames(self.time_base, packet.ts(), self.sample_rate);
+                let required_frame = ts_to_frames(self.time_base, required_ts, self.sample_rate);
+                if trim_samples_before(&mut samples, packet_frame, required_frame, channels) {
                     continue; // 整包都在目标之前
                 }
                 // 走到这里说明 required_ts 落在包内（或包起点之后），
@@ -267,25 +272,33 @@ impl Decoder for SymphoniaDecoder {
     }
 }
 
-/// F-7 的纯逻辑部分：把 `required_ts` 之前的帧从 `samples` 前缀剪掉。
+/// F-7 的纯逻辑部分：把 `required_frame` 之前的帧从 `samples` 前缀剪掉。
+/// 审2-3：参数单位是**采样帧**（调用方负责把 time_base tick 换算为帧）。
 /// 返回 true 表示整包都在目标之前（应丢弃并继续读下一包）。
 fn trim_samples_before(
     samples: &mut Vec<f32>,
-    packet_ts: u64,
-    required_ts: u64,
+    packet_frame: u64,
+    required_frame: u64,
     channels: usize,
 ) -> bool {
     let channels = channels.max(1);
     let frames = (samples.len() / channels) as u64;
-    if packet_ts.saturating_add(frames) <= required_ts {
+    if packet_frame.saturating_add(frames) <= required_frame {
         samples.clear();
         return true;
     }
-    if required_ts > packet_ts {
-        let skip = ((required_ts - packet_ts) as usize).saturating_mul(channels);
+    if required_frame > packet_frame {
+        let skip = ((required_frame - packet_frame) as usize).saturating_mul(channels);
         samples.drain(..skip.min(samples.len()));
     }
     false
+}
+
+/// 审2-3：把 time_base tick 时间戳换算为采样帧数。
+/// time_base 为 1/sample_rate 的容器（FLAC/WAV/MP3）换算结果与原值一致；
+/// MP4/MKV 等以其它 timescale 计时的容器由此获得正确的帧偏移。
+fn ts_to_frames(time_base: Option<TimeBase>, ts: u64, sample_rate: u32) -> u64 {
+    (timestamp_seconds(time_base, ts, sample_rate) * f64::from(sample_rate.max(1))).round() as u64
 }
 
 fn stream_info_from_codec(params: &symphonia::core::codecs::CodecParameters) -> StreamInfo {
@@ -386,6 +399,19 @@ mod tests {
         let mut samples: Vec<f32> = (0..8).map(|i| i as f32).collect();
         assert!(!trim_samples_before(&mut samples, 102, 100, 2));
         assert_eq!(samples.len(), 8);
+    }
+
+    #[test]
+    fn ts_to_frames_converts_non_sample_rate_time_base() {
+        // 审2-3：MKV/MP4 等容器的 time_base ≠ 1/sample_rate。
+        // tick=毫秒（1/1000）、48kHz：500ms 必须换算为 24000 帧，而不是 500 帧。
+        let millis = TimeBase::new(1, 1_000);
+        assert_eq!(ts_to_frames(Some(millis), 500, 48_000), 24_000);
+        // time_base = 1/sample_rate 的容器（FLAC/WAV/MP3）：换算恒等，行为不回归。
+        let native = TimeBase::new(1, 44_100);
+        assert_eq!(ts_to_frames(Some(native), 12_345, 44_100), 12_345);
+        // 无 time_base：按 ts 即帧处理。
+        assert_eq!(ts_to_frames(None, 777, 44_100), 777);
     }
 
     #[test]

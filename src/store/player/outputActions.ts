@@ -1,8 +1,9 @@
 import { mockDevices } from "@/data/mock-playlist";
-import { invoke } from "@/lib/tauri";
+import { invoke, isTauriRuntime } from "@/lib/tauri";
 import type { OutputDevice, Track } from "@/types/track";
 import { sendCommand, sendCommandAsync } from "./commands";
 import { playbackErrorMessage } from "./playbackActions";
+import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackQueue } from "./queueSync";
 import type { BackendDevice, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -31,10 +32,14 @@ export async function sendPlayCommand(
   track: Track,
   get: PlayerStoreGet,
   set: PlayerStoreSet,
-  startSeconds = 0
+  startSeconds = 0,
+  isStillCurrent?: () => boolean
 ) {
   await syncPlaybackQueue(get);
   await applyOutputConfiguration(get, set);
+  // 审2-R2：上面两个 await 期间用户可能已切歌/暂停（代际递增），
+  // 发送 "play" 前复查播放意图是否仍然有效，过期则丢弃，避免旧续体顶掉新状态。
+  if (isStillCurrent && !isStillCurrent()) return;
   await sendCommandAsync("play", {
     path: track.path,
     trackId: track.id,
@@ -132,8 +137,16 @@ export function createOutputActions(
     if (wasPlaying) {
       const track = get().currentTrack();
       if (track) {
-        void sendPlayCommand(track, get, set, 0)
-          .then(() => set({ isPlaying: true }))
+        // 审2-R2：为续播链申请新代际；期间用户切歌/暂停则放弃续播。
+        const epoch = bumpPlayEpoch();
+        const isStillCurrent = () =>
+          epoch === currentPlayEpoch() && get().currentTrack()?.id === track.id;
+        void sendPlayCommand(track, get, set, 0, isStillCurrent)
+          .then(() => {
+            // 审2-R2：Tauri 下 isPlaying 改由 playback_started 事件驱动（与发现15一致），
+            // 删除乐观置位，避免后端实际起播失败时 UI 卡在播放态；stub 模式无事件，保留置位。
+            if (!isTauriRuntime() && isStillCurrent()) set({ isPlaying: true });
+          })
           .catch((err) => {
             // eslint-disable-next-line no-console
             console.warn("Failed to resume after driver switch", err);

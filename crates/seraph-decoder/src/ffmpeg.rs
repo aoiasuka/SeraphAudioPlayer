@@ -9,6 +9,7 @@ use std::{
     process::{Child, ChildStderr, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
+    time::{Duration, Instant},
 };
 
 const PACKET_FRAMES: usize = 2048;
@@ -140,11 +141,30 @@ impl FfmpegDecoder {
         }
     }
 
-    /// EOF 时调用：若子进程已退出且 exit_code != 0，把 stderr 尾部当成失败原因返回。
+    /// EOF 时调用：若子进程非正常退出，把 stderr 尾部当成失败原因返回。
     /// 正常播完返回 None。
+    /// 审2-7：ffmpeg 关闭 stdout 与进程真正退出之间存在时间窗，单次 try_wait
+    /// 在窗口内返回 None 会把中途崩溃误判成正常播完。改为轮询等待退出码，
+    /// 上限 500ms：正常 EOF 后 ffmpeg 毫秒级退出，超时视为仍在运行（维持
+    /// 原"无崩溃"语义，由随后的 stop_process kill 兜底），不会挂住解码线程。
     fn detect_crash(&mut self) -> Option<String> {
+        const EXIT_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
+        const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
         let child = self.child.as_mut()?;
-        let status = child.try_wait().ok().flatten()?;
+        let deadline = Instant::now() + EXIT_WAIT_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    thread::sleep(EXIT_POLL_INTERVAL);
+                }
+                Err(_) => return None,
+            }
+        };
         if status.success() {
             return None;
         }

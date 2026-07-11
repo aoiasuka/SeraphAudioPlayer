@@ -38,6 +38,57 @@ export interface BilibiliBatchImportResult {
   failed: BilibiliImportFailure[];
 }
 
+// 审2-R5：以下流媒体页状态从 StreamingPage 组件提升到 store（非持久化，不进 partialize），
+// MainPages 用 key={activeView} 强制卸载页面，组件局部状态切页即丢：
+// ffmpeg 下载进度会被重复触发、B 站扫码登录轮询会静默中断。
+export interface BilibiliLoginStatus {
+  loggedIn: boolean;
+  username?: string | null;
+  mid?: number | null;
+  face?: string | null;
+}
+
+export interface BilibiliLoginQrCode {
+  url: string;
+  qrcodeKey: string;
+}
+
+export interface BilibiliLoginPollResult {
+  code: number;
+  message: string;
+  loggedIn: boolean;
+  profile?: BilibiliLoginStatus | null;
+}
+
+export interface BilibiliFfmpegStatus {
+  available: boolean;
+  path?: string | null;
+}
+
+// 后端 "seraph://ffmpeg-download" 事件载荷
+export interface FfmpegDownloadProgress {
+  stage: "download" | "extract" | "done" | "error";
+  downloaded: number;
+  total: number;
+  percent: number;
+  message?: string | null;
+}
+
+// store 内的下载状态机
+export interface FfmpegDownloadState {
+  stage: "idle" | "downloading" | "done" | "error";
+  percent: number;
+  message?: string;
+}
+
+// B 站扫码登录二维码状态；轮询 interval 本身是不可序列化对象，存 streamingActions 模块级变量
+export interface BilibiliLoginQrState {
+  qrcodeKey: string;
+  url: string;
+  dataUrl: string;
+  message: string;
+}
+
 export interface PersistedPlayerState {
   currentTrackIndex: number;
   persistedCurrentTrackId: string | null;
@@ -75,6 +126,12 @@ export interface PlayerStore {
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
+  // 审2-R5：流媒体页提升到 store 的状态（非持久化）
+  bilibiliLoginStatus: BilibiliLoginStatus;
+  bilibiliFfmpegStatus: BilibiliFfmpegStatus;
+  ffmpegDownload: FfmpegDownloadState;
+  loginQr: BilibiliLoginQrState | null;
+  isLoginBusy: boolean;
   currentTrack: () => Track | null;
   nextTrackPreview: () => Track | null;
   togglePlayback: () => void;
@@ -97,11 +154,17 @@ export interface PlayerStore {
   importBilibiliAudio: (
     input: string,
     options?: BilibiliImportOptions
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   importBilibiliFavorites: (
     input: string,
     options?: BilibiliImportOptions
   ) => Promise<BilibiliBatchImportResult | null>;
+  // 审2-R5：流媒体页 actions（生命周期归 store 管，组件卸载不清理）
+  refreshBilibiliState: () => Promise<void>;
+  startFfmpegDownload: () => Promise<void>;
+  startLoginPolling: () => Promise<void>;
+  stopLoginPolling: () => void;
+  logoutBilibili: () => Promise<void>;
   markTracksCacheMissingByPaths: (paths: string[]) => void;
   normalizeLibrary: () => void;
   importLyricsForCurrentTrack: (file: File) => Promise<void>;

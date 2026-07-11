@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::fs;
 
     #[test]
@@ -327,6 +328,48 @@ mod tests {
         assert!((lyrics[2].time - 3.0).abs() < 0.001);
         assert_eq!(lyrics[2].text, "world");
         assert_eq!(lyrics[3].text, "planet");
+    }
+
+    #[test]
+    fn krc_translation_stays_aligned_when_original_line_is_cleaned_away() {
+        // 审2-S6：第二行原文清洗后为空（纯 word 标记无文本），主歌词不展示它，
+        // 但后续行的译文必须仍按原始行号对齐到各自时间点，不整体前移错位。
+        let language = BASE64_STANDARD.encode(
+            r#"{"content":[{"type":1,"lyricContent":[["greeting"],["interlude"],["planet"]]}]}"#,
+        );
+        let text = format!(
+            "[language:{language}]\n[1000,2000]<0,500,0>he<500,500,0>llo\n[2000,500]<0,500,0>\n[3000,1000]<0,1000,0>world"
+        );
+
+        let lyrics = parse_lyrics_bytes(text.as_bytes());
+
+        assert_eq!(lyrics.len(), 5);
+        assert!((lyrics[0].time - 1.0).abs() < 0.001);
+        assert_eq!(lyrics[0].text, "hello");
+        assert_eq!(lyrics[1].text, "greeting");
+        // 空原文行本身被过滤，但它的译文仍锚定在原始行的时间点。
+        assert!((lyrics[2].time - 2.0).abs() < 0.001);
+        assert_eq!(lyrics[2].text, "interlude");
+        assert!((lyrics[3].time - 3.0).abs() < 0.001);
+        assert_eq!(lyrics[3].text, "world");
+        assert!((lyrics[4].time - 3.0).abs() < 0.001);
+        assert_eq!(lyrics[4].text, "planet");
+    }
+
+    #[test]
+    fn provider_duration_skips_unparsable_string_keys() {
+        // 审2-S7：单个候选键是无法解析的字符串（如 "N/A"）时，
+        // 应继续尝试后续候选键，而不是放弃全部候选。
+        assert_eq!(
+            provider_duration_ms(&json!({"duration": "N/A", "interval": 200})),
+            Some(200_000)
+        );
+        assert_eq!(provider_duration_ms(&json!({"duration": "N/A"})), None);
+        assert_eq!(
+            provider_duration_ms(&json!({"interval": "185"})),
+            Some(185_000)
+        );
+        assert_eq!(provider_duration_ms(&json!({"dt": 240_000})), Some(240_000));
     }
 
     #[test]

@@ -1,10 +1,14 @@
 import { sendCommand, sendCommandAsync } from "./commands";
 import { ensurePlayableTrack, bilibiliImportErrorMessage } from "./bilibiliActions";
 import { sendPlayCommand } from "./outputActions";
+import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 import { isTauriRuntime } from "@/lib/tauri";
 import type { Track } from "@/types/track";
+
+// 审2-R2：代际计数迁至 ./playEpoch（避免与 outputActions 循环导入），此处重新导出保持既有导入兼容
+export { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 
 interface VolumeDebounceState {
   timer: number | null;
@@ -12,18 +16,6 @@ interface VolumeDebounceState {
 }
 
 const volumeDebounce: VolumeDebounceState = { timer: null, pending: null };
-
-// 发现2：播放代际计数。每次新的播放/暂停意图递增；
-// 慢速异步续体（如 B 站重缓存）完成时若代际已过期则丢弃，避免旧曲目顶掉新选中的曲目。
-let playEpoch = 0;
-
-export function bumpPlayEpoch() {
-  return ++playEpoch;
-}
-
-export function currentPlayEpoch() {
-  return playEpoch;
-}
 
 // 发现7：seek 后 400ms 内忽略明显偏离目标位置的旧 Progress 事件，避免进度条回跳闪烁。
 export const seekGuard = { until: 0, target: 0 };
@@ -213,7 +205,12 @@ export function createPlaybackActions(
         // 发现2：期间用户已有更新的播放意图，丢弃过期续体
         if (epoch !== currentPlayEpoch()) return;
         if (get().currentTrack()?.id !== playableTrack.id) return;
-        void sendPlayCommand(playableTrack, get, set, get().currentTime)
+        // 审2-R2：把复查回调下沉进 sendPlayCommand，其内部两个 await 之后、
+        // 真正发 "play" 之前再核对一次代际与当前曲目。
+        void sendPlayCommand(playableTrack, get, set, get().currentTime, () =>
+          epoch === currentPlayEpoch() &&
+          get().currentTrack()?.id === playableTrack.id
+        )
           .then(() => {
             if (epoch !== currentPlayEpoch()) return;
             if (get().currentTrack()?.id !== playableTrack.id) return;
@@ -236,6 +233,8 @@ export function createPlaybackActions(
 
   nextTrack: () => {
     if (get().playlist.length === 0) return;
+    // 审2-R6：切歌使上一次 seek 的抑制窗口失效，避免误吞新曲目开头的 Progress 事件
+    seekGuard.until = 0;
     resetNextIndexCache();
     void syncPlaybackQueue(get)
       .then(() => sendCommandAsync("next_track"))
@@ -246,6 +245,8 @@ export function createPlaybackActions(
 
   prevTrack: () => {
     if (get().playlist.length === 0) return;
+    // 审2-R6：切歌使上一次 seek 的抑制窗口失效
+    seekGuard.until = 0;
     resetNextIndexCache();
     void syncPlaybackQueue(get)
       .then(() => sendCommandAsync("prev_track"))
@@ -257,6 +258,8 @@ export function createPlaybackActions(
   loadTrack: (index) => {
     const track = get().playlist[index];
     if (!track) return;
+    // 审2-R6：切歌使上一次 seek 的抑制窗口失效
+    seekGuard.until = 0;
     // 发现2：任何新的选曲都会使先前挂起的播放续体过期
     const epoch = bumpPlayEpoch();
     const wasPlaying = get().isPlaying;
@@ -282,7 +285,11 @@ export function createPlaybackActions(
           // 发现2：期间用户已切到别的曲目，丢弃过期续体
           if (epoch !== currentPlayEpoch()) return;
           if (get().currentTrack()?.id !== playableTrack.id) return;
-          void sendPlayCommand(playableTrack, get, set, 0).catch((err) => {
+          // 审2-R2：复查回调下沉进 sendPlayCommand，内部 await 之后再核对一次
+          void sendPlayCommand(playableTrack, get, set, 0, () =>
+            epoch === currentPlayEpoch() &&
+            get().currentTrack()?.id === playableTrack.id
+          ).catch((err) => {
             reportPlaybackCommandError(get, "Failed to start playback", err);
             if (epoch === currentPlayEpoch()) set({ isPlaying: false });
           });
@@ -291,6 +298,14 @@ export function createPlaybackActions(
           // eslint-disable-next-line no-console
           console.warn("Failed to prepare streaming track", err);
           get().showNotification(bilibiliImportErrorMessage(err));
+          // 审2-R4：重缓存失败时复位播放态，避免 UI 停留在“播放中”而实际无声；
+          // 仅当播放意图仍指向本曲目时才复位，不影响用户随后切走的新播放。
+          if (
+            epoch === currentPlayEpoch() &&
+            get().currentTrack()?.id === track.id
+          ) {
+            set({ isPlaying: false });
+          }
         });
     } else {
       void syncPlaybackQueue(get).catch((err) => {
@@ -331,7 +346,12 @@ export function createPlaybackActions(
     if (get().volume === volume) return;
 
     queueVolumeCommand(volume);
-    set({ volume, isMuted: volume === 0 });
+    // 审2-R8：滑到 0 时同步记录滑动前的音量，toggleMute 恢复时才不会回到过期的 previousVolume
+    set((state) => {
+      const next: Partial<PlayerStore> = { volume, isMuted: volume === 0 };
+      if (volume === 0 && state.volume > 0) next.previousVolume = state.volume;
+      return next;
+    });
   },
 
   toggleMute: () => {

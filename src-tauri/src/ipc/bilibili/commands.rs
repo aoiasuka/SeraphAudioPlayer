@@ -10,7 +10,7 @@ pub async fn import_bilibili_audio_with_options(
     options: Option<BilibiliImportOptions>,
 ) -> Result<ImportedTrack, String> {
     let client = bilibili_client_for_app(&app)?;
-    import_bilibili_audio_inner(&app, &client, &input, &options.unwrap_or_default()).await
+    import_bilibili_audio_inner(&app, &client, &input, &options.unwrap_or_default(), true).await
 }
 
 #[tauri::command]
@@ -31,15 +31,37 @@ pub async fn import_bilibili_favorites(
 
     let mut tracks = Vec::new();
     let mut failed = Vec::new();
+    // 审2-S3：收集本批全部成功导入的音频路径（ImportedTrack.path 即 ensure_audio_file
+    // 返回的最终落盘路径，含 remux fallback），批量结束后统一清理时整体 preserve。
+    let mut imported_paths = Vec::new();
     for item in bvids {
         let bvid = item.bvid.clone().unwrap_or_default();
         let display_name = item.title.clone().unwrap_or_else(|| bvid.clone());
-        match import_bilibili_audio_inner(&app, &client, &bvid, &options).await {
-            Ok(track) => tracks.push(track),
+        match import_bilibili_audio_inner(&app, &client, &bvid, &options, false).await {
+            Ok(track) => {
+                imported_paths.push(PathBuf::from(&track.path));
+                tracks.push(track);
+            }
             Err(reason) => failed.push(BilibiliImportFailure {
                 input: display_name,
                 reason,
             }),
+        }
+    }
+
+    // 审2-S3：整批只在结束后清理一次缓存并 preserve 本批全部成功导入的文件，
+    // 替代逐首清理只 preserve 当前一首（超限时会把同批先导入的文件删掉）。
+    // 同步磁盘遍历放 spawn_blocking，失败只 warn 不影响导入结果（对齐 S2 语义）。
+    if !imported_paths.is_empty() {
+        let app_for_cache = app.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            enforce_cache_limit_preserving_many(&app_for_cache, &imported_paths)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => tracing::warn!("收藏夹批量导入后缓存清理失败: {err}"),
+            Err(err) => tracing::warn!("收藏夹批量导入后缓存清理任务异常终止: {err}"),
         }
     }
 
@@ -158,8 +180,8 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
         };
         // P2-8：仅当资料实际变化时才重写 Credential Manager + session 文件，
         // 避免前端周期性查询登录状态时的无谓 CredWriteW / icacls 开销。
-        let changed = session.username != data.uname || session.mid != data.mid
-            || session.face != face;
+        let changed =
+            session.username != data.uname || session.mid != data.mid || session.face != face;
         if changed {
             let mut next_session = session;
             next_session.username = data.uname.clone();
@@ -217,6 +239,9 @@ pub async fn download_ffmpeg(app: AppHandle) -> Result<BilibiliFfmpegStatus, Str
         });
     }
 
+    // 审2-S5：并发保护——同一时刻只允许一个下载任务在跑，重复触发直接报错；
+    // guard 存活到本函数返回，任何路径（成功/失败）都经 Drop 复位标记。
+    let _download_slot = acquire_ffmpeg_download_slot()?;
     let result = download_ffmpeg_inner(&app).await;
     match &result {
         Ok(status) => emit_ffmpeg_progress(

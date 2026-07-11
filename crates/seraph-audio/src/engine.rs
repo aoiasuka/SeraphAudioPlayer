@@ -35,6 +35,10 @@ const RESUME_SEEK_THRESHOLD_SECONDS: f64 = 1.0;
 const SEEK_END_MARGIN_SECONDS: f64 = 0.1;
 /// F-15：EOF 后向重采样器喂入的零填充帧数（≥ sinc radius=16，冲出尾部残留）。
 const RESAMPLER_FLUSH_FRAMES: usize = 32;
+/// 审2-5：stop/切歌前留给渲染端执行 ramp-out 的宽限（5ms 斜坡 + 共享模式 ~10ms 回调周期 + 余量）。
+const STOP_RAMP_GRACE: Duration = Duration::from_millis(30);
+/// 审2-5：独占模式退出前等待设备缓冲排空的上限（缓冲总深约 185ms，超时兜底防挂）。
+const EXCLUSIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Clone)]
 pub struct PlaybackController {
@@ -173,8 +177,17 @@ struct PlaybackSession {
     _stream: Option<Stream>,
 }
 
+/// 审2-4：seek 请求携带发起时的播放位置。decoder.seek 失败时，
+/// 解码线程用 prev_frames 把 frame_position 回滚到 seek 前的位置，
+/// 避免进度停在从未到达的目标点、与实际声音持续错位。
+#[derive(Debug, Clone, Copy)]
+struct SeekRequest {
+    seconds: f64,
+    prev_frames: u64,
+}
+
 struct PlaybackShared {
-    seek_request: Mutex<Option<f64>>,
+    seek_request: Mutex<Option<SeekRequest>>,
     paused: AtomicBool,
     stopped: AtomicBool,
     frame_position: AtomicU64,
@@ -263,19 +276,31 @@ impl PlaybackEngine {
             // F-16：None = 续播，不动位置；Some(s) = 指定位置（含 0.0 从头播）。
             // F-2：请求位置与内部精确位置足够接近时跳过 seek，
             // 避免暂停→恢复因前端 250ms 粒度快照回跳并丢弃整个 3 秒缓冲。
+            // 审2-12：Some(0.0) 是「从头播」的显式意图（前端点击曲目恒传 0），
+            // 不参与就近豁免——否则开播 1 秒内重复点播同曲会被静默忽略。
             let mut pending_seek = None;
             if let Some(seconds) = start_seconds {
                 let session = self.session.as_ref().expect("can_resume implies session");
                 let seconds = clamp_seek_seconds(seconds, session.duration_seconds);
                 let current = session.shared.progress_seconds();
-                if (seconds - current).abs() >= RESUME_SEEK_THRESHOLD_SECONDS {
+                if seconds == 0.0 || (seconds - current).abs() >= RESUME_SEEK_THRESHOLD_SECONDS {
                     pending_seek = Some(seconds);
                 }
             }
             if let Some(seconds) = pending_seek {
                 self.seek(seconds)?;
             }
-            return self.resume();
+            self.resume()?;
+            // 审2-9：can_resume 判定与 worker 自然收尾之间存在竞态窗口——
+            // resume 后复查 stopped，若 worker 恰好已收尾（Ended 已发），
+            // 落回下方完整重建路径，避免「UI 显示播放中但无声且不再有事件」的假死。
+            let still_active = self
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.shared.stopped.load(Ordering::Acquire));
+            if still_active {
+                return Ok(());
+            }
         }
 
         // 先停旧 session，再 open 解码器：
@@ -284,12 +309,24 @@ impl PlaybackEngine {
         // 避免同一失败被双重上报。
         self.stop_session();
 
-        let decoder =
-            open_decoder(&path).map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
-        let info = decoder
-            .info()
-            .cloned()
-            .ok_or_else(|| BackendError::Internal("decoder opened without stream info".into()))?;
+        // 审2-2：open/probe 处理的是最不可信的文件头，解码栈对畸形文件可能 panic
+        // （与 F-5 保护解码 worker 同理）。此处运行在引擎命令线程上——不兜底的话
+        // 线程 unwind 死亡后所有播放命令永久失效（"audio thread is not available"），
+        // 只能重启应用。
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let decoder = open_decoder(&path)
+                .map_err(|err| BackendError::UnsupportedFormat(err.to_string()))?;
+            let info = decoder.info().cloned().ok_or_else(|| {
+                BackendError::Internal("decoder opened without stream info".into())
+            })?;
+            Ok::<_, BackendError>((decoder, info))
+        }))
+        .unwrap_or_else(|_| {
+            Err(BackendError::UnsupportedFormat(
+                "decoder panicked while probing file".into(),
+            ))
+        });
+        let (decoder, info) = opened?;
         let duration_seconds = info.duration_seconds;
         // F-3：起播位置钳制到 [0, duration-0.1]，避免 seek 到曲尾之后导致解码失败/瞬间跳曲。
         let start_seconds = clamp_seek_seconds(start_seconds.unwrap_or(0.0), duration_seconds);
@@ -435,12 +472,21 @@ impl PlaybackEngine {
 
         // F-3：钳制到 [0, duration-0.1]，避免 seek 到曲尾之后触发 decoder 失败或瞬间跳曲。
         let seconds = clamp_seek_seconds(seconds, session.duration_seconds);
+        // 审2-4：先快照 seek 前位置，decoder.seek 失败时解码线程据此回滚进度。
+        let prev_frames = session.shared.frame_position.load(Ordering::Relaxed);
         session.shared.frame_position.store(
             seconds_to_frames(seconds, session.shared.output_rate),
             Ordering::Relaxed,
         );
+        // 审2-8：写序必须是「先写 seek_request，再递增 generation」。
+        // 解码线程按「先读 generation，再检查 seek_request」的相反顺序访问：
+        // 任一交错下，旧位置样本要么被打上旧代（渲染端丢弃），要么让出写入——
+        // 消除「旧位置样本被打上新代写入、seek 后闪回旧位置音频」的窗口。
+        *session.shared.seek_request.lock() = Some(SeekRequest {
+            seconds,
+            prev_frames,
+        });
         session.shared.next_buffer_generation();
-        *session.shared.seek_request.lock() = Some(seconds);
         self.event_bus.publish(PlayerEvent::Progress {
             track_id: session.track_id.clone(),
             seconds,
@@ -499,6 +545,17 @@ impl PlaybackEngine {
         let Some(mut session) = self.session.take() else {
             return;
         };
+
+        // 审2-5：stop/切歌先走一次 ramp-out 再置 stopped——
+        // 正在出声时直接销毁流会在任意波形相位硬切，产生可闻爆音。
+        // 置 paused 触发渲染端现有的 5ms 增益斜坡，留出约一个回调周期让其执行；
+        // 已暂停/已停止的 session 无声可 ramp，直接跳过等待。
+        let audible = !session.shared.paused.load(Ordering::Acquire)
+            && !session.shared.stopped.load(Ordering::Acquire);
+        if audible {
+            session.shared.paused.store(true, Ordering::Release);
+            thread::sleep(STOP_RAMP_GRACE);
+        }
 
         session.shared.stopped.store(true, Ordering::Release);
         if let Some(worker) = session.decode_worker.take() {
@@ -955,7 +1012,7 @@ fn run_wasapi_exclusive_render_worker(
         Ok((audio_client, render_client, buffer_frames, sleep_period))
     })();
 
-    let (audio_client, render_client, _buffer_frames, sleep_period) = match init_result {
+    let (audio_client, render_client, buffer_frames, sleep_period) = match init_result {
         Ok(parts) => {
             // 启动成功才通知主线程：避免 H-2 描述的「先 Started 后 Error」乱序
             let _ = ready_tx.send(Ok(()));
@@ -1001,6 +1058,19 @@ fn run_wasapi_exclusive_render_worker(
             }
         }
         thread::sleep(sleep_period);
+    }
+
+    // 审2-5：stopped 后不立即 stop_stream——设备缓冲里还积压着最多一整个缓冲深度
+    // （~185ms）的已写入音频，其中包含 stop_session 触发的 ramp-out + 静音尾巴。
+    // 立即停止会把「当前播放位置」的满幅波形任意相位截断（爆音）。
+    // 等缓冲排空（available == total）或超时后再停，保证截断点落在静音区。
+    let drain_deadline = Instant::now() + EXCLUSIVE_DRAIN_TIMEOUT;
+    while Instant::now() < drain_deadline {
+        match audio_client.get_available_space_in_frames() {
+            Ok(available) if available >= buffer_frames => break,
+            Ok(_) => thread::sleep(Duration::from_millis(5)),
+            Err(_) => break,
+        }
     }
 
     let _ = audio_client.stop_stream();
@@ -1091,8 +1161,10 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
             return;
         }
 
-        if !shared.stopped.load(Ordering::Acquire) {
-            shared.stopped.store(true, Ordering::Release);
+        // 审2-7：swap 而非 load-then-store——与 stop_session/report_render_failure
+        // 并发时保证「宣告结束」全局只发生一次，避免用户刚按停止/切歌，
+        // 这里又补发 PlaybackEnded 触发自动切下一曲，覆盖用户意图。
+        if !shared.stopped.swap(true, Ordering::AcqRel) {
             event_bus.publish(PlayerEvent::Progress {
                 track_id: track_id.clone(),
                 seconds: info.duration_seconds,
@@ -1143,12 +1215,28 @@ fn run_decode_worker(
                 return Ok(());
             }
 
-            if let Some(seconds) = shared.seek_request.lock().take() {
-                match decoder.seek(seconds) {
+            if let Some(request) = shared.seek_request.lock().take() {
+                match decoder.seek(request.seconds) {
                     // seek 后 resampler 内部 history 已属过去时间段，必须 reset
                     Ok(()) => resampler.reset(),
                     // F-3：seek 失败降级为忽略该次 seek + warning，而非终止整曲。
-                    Err(err) => warn!("seek to {seconds:.3}s failed, ignoring: {err}"),
+                    // 审2-4：engine.seek() 已前置更新 frame_position / generation，
+                    // 失败时把进度回滚到 seek 前的位置并告知前端，
+                    // 避免进度条停在从未到达的目标点、与实际声音持续错位到曲终。
+                    // （generation 已递增导致最多 3 秒缓冲被丢，属不可逆的既成事实，
+                    // 解码从原位置继续，声音前跳的量级即被丢的缓冲量。）
+                    Err(err) => {
+                        warn!(
+                            "seek to {:.3}s failed, restoring position: {err}",
+                            request.seconds
+                        );
+                        shared
+                            .frame_position
+                            .store(request.prev_frames, Ordering::Relaxed);
+                        event_bus.publish(PlayerEvent::Error {
+                            message: format!("当前音频流不支持跳转: {err}"),
+                        });
+                    }
                 }
             }
 
@@ -1265,6 +1353,12 @@ fn push_samples(
 ) {
     let mut offset = 0;
     while offset < samples.len() && !shared.stopped.load(Ordering::Acquire) {
+        // 审2-8：读序必须是「先读 generation，再检查 seek_request」，
+        // 与 engine.seek() 的「先写 request，再增 generation」互为镜像：
+        // 若本轮读到的是 seek 后的新代，检查时必能看到未消费的请求并让出；
+        // 若检查时请求为空，则读到的代一定早于任何未见的 seek——旧位置样本
+        // 只会被打上旧代标记，由渲染端的代际过滤丢弃。
+        let generation = shared.buffer_generation();
         // H-1：检测到 seek 请求立即让出本包，但**不消费**请求——
         // 交由主解码循环统一执行 decoder.seek + resampler.reset。
         // frame_position 已在 engine.seek() 中更新，这里无需重设。
@@ -1272,7 +1366,6 @@ fn push_samples(
             return;
         }
 
-        let generation = shared.buffer_generation();
         let count = producer.slots().min(samples.len() - offset);
         // F-13：write_chunk_uninit 批量提交，替代逐样本 push（每次一组原子操作）。
         let written = match producer.write_chunk_uninit(count) {
@@ -1593,6 +1686,9 @@ fn render_output_u64(
 /// 实时音频回调核心：无锁、无分配、无 IO。
 /// F-1：每样本增益斜坡——暂停/停止先 ramp 到 0 再静音（期间继续消费样本），
 /// 恢复/起播/seek 后从 0 ramp-in，音量变化按步长逼近，消除硬切爆音与 zipper noise。
+/// 审2-1：消费严格按帧（output_channels 个样本）对齐——ramp-out 停止消费、
+/// 缓冲濒空等任何中断都只发生在帧边界。此前逐样本中断会让 ring 停在半帧位置，
+/// 暂停→恢复后左右声道持续互换。
 fn render_output<T>(
     data: &mut [T],
     shared: &PlaybackShared,
@@ -1611,6 +1707,7 @@ fn render_output<T>(
 
     let target = if silenced { 0.0 } else { shared.volume() };
     let step = gain_ramp_step(shared.output_rate);
+    let channels = shared.output_channels.max(1);
 
     let current_generation = shared.buffer_generation();
     if current_generation != state.observed_generation {
@@ -1622,40 +1719,55 @@ fn render_output<T>(
     }
 
     let mut consumed = 0_usize;
-    for sample in data.iter_mut() {
-        state.gain = ramp_gain(state.gain, target, step);
+    for frame in data.chunks_mut(channels) {
+        // 帧边界判定 ramp-out 完成：帧内即使 gain 中途到 0 也消费完整帧，
+        // 多消费的 ≤channels-1 个静音级样本对听感无影响，但保住了帧对齐。
         if silenced && state.gain <= 0.0 {
-            // ramp-out 完成，剩余样本输出静音且不再消费。
-            write_sample(sample, 0.0);
+            for sample in frame.iter_mut() {
+                write_sample(sample, 0.0);
+            }
             continue;
         }
-        let mut has_sample = false;
-        let value = loop {
-            match consumer.pop() {
-                Ok(queued) => {
-                    // F-11：接受「等于或新于」observed 的代（wrapping 比较）并同步 observed，
-                    // 避免回调期间 seek 落地后误丢新代样本。
-                    if generation_is_current(queued.generation, state.observed_generation) {
-                        if queued.generation != state.observed_generation {
-                            state.observed_generation = queued.generation;
-                            // 代际切换 = 波形不连续，新段从 0 ramp-in。
-                            state.gain = 0.0;
-                        }
-                        has_sample = true;
-                        break queued.value;
-                    }
-                    continue; // 旧代样本，丢弃
-                }
-                Err(_) => break 0.0,
+        // 不足一整帧的可用样本：整帧输出静音且完全不消费（保持帧对齐）。
+        // 旧代样本残留只可能位于 ring 头部且已被上面的批量清扫移除，
+        // 因此 slots() 即有效样本数的可靠下界。
+        if consumer.slots() < channels {
+            for sample in frame.iter_mut() {
+                state.gain = ramp_gain(state.gain, target, step);
+                write_sample(sample, 0.0);
             }
-        };
-        if has_sample {
-            consumed += 1;
+            continue;
         }
-        write_sample(sample, value * state.gain);
+        for sample in frame.iter_mut() {
+            state.gain = ramp_gain(state.gain, target, step);
+            let value = loop {
+                match consumer.pop() {
+                    Ok(queued) => {
+                        // F-11：接受「等于或新于」observed 的代（wrapping 比较）并同步 observed，
+                        // 避免回调期间 seek 落地后误丢新代样本。
+                        if generation_is_current(queued.generation, state.observed_generation) {
+                            if queued.generation != state.observed_generation {
+                                state.observed_generation = queued.generation;
+                                // 代际切换 = 波形不连续，新段从 0 ramp-in。
+                                // 每代样本流自身整帧对齐（push_samples 按整包写入），
+                                // 因此切代只会发生在帧首，不破坏帧对齐。
+                                state.gain = 0.0;
+                            }
+                            break queued.value;
+                        }
+                        continue; // 旧代样本，丢弃（理论上已被批量清扫，防御保留）
+                    }
+                    // slots() 已保证本帧样本充足，此分支仅在极端竞态下可达；
+                    // 输出静音但仍计入消费口径之外，帧对齐由外层 slots 检查兜底。
+                    Err(_) => break 0.0,
+                }
+            };
+            write_sample(sample, value * state.gain);
+        }
+        consumed += channels;
     }
 
-    let frames = consumed / shared.output_channels.max(1);
+    let frames = consumed / channels;
     if frames > 0 {
         shared
             .frame_position
@@ -1720,17 +1832,33 @@ fn adapt_samples_into(
 }
 
 /// F-17：多声道→立体声下混系数（ITU-R BS.775 风格）。
-/// 假定标准 WAVE 声道序：FL FR FC LFE BL BR [SL SR]。
+/// 审2-6：按输入声道数选择 WAVE 默认布局，不再统一假定 5.1——
+/// 此前 4.0 quad 的 BR（index 3）被当 LFE 整声道丢弃、5.0 的 BL 丢失。
 /// 返回 (left_coef, right_coef)。LFE 不参与下混。
-fn stereo_downmix_coefficient(channel: usize) -> (f32, f32) {
+fn stereo_downmix_coefficient(input_channels: usize, channel: usize) -> (f32, f32) {
     const C: f32 = std::f32::consts::FRAC_1_SQRT_2; // 0.7071
-    match channel {
-        0 => (1.0, 0.0),               // FL
-        1 => (0.0, 1.0),               // FR
-        2 => (C, C),                   // FC（人声）
-        3 => (0.0, 0.0),               // LFE
-        ch if ch % 2 == 0 => (C, 0.0), // BL/SL
-        _ => (0.0, C),                 // BR/SR
+    const HALF: f32 = 0.5;
+    match (input_channels, channel) {
+        // 3.0: FL FR FC
+        (3, 2) => (C, C),
+        // 4.0 quad: FL FR BL BR（无中置、无 LFE）
+        (4, 2) => (C, 0.0),
+        (4, 3) => (0.0, C),
+        // 5.0: FL FR FC BL BR（无 LFE）
+        (5, 2) => (C, C),
+        (5, 3) => (C, 0.0),
+        (5, 4) => (0.0, C),
+        // 6.1: FL FR FC LFE BC SL SR——BC（后中置）均分两边
+        (7, 4) => (HALF, HALF),
+        (7, 5) => (C, 0.0),
+        (7, 6) => (0.0, C),
+        // 通用（含 5.1/7.1 的标准 WAVE 布局）：FL FR FC LFE 后接成对环绕
+        (_, 0) => (1.0, 0.0),               // FL
+        (_, 1) => (0.0, 1.0),               // FR
+        (_, 2) => (C, C),                   // FC（人声）
+        (_, 3) => (0.0, 0.0),               // LFE
+        (_, ch) if ch % 2 == 0 => (C, 0.0), // BL/SL
+        _ => (0.0, C),                      // BR/SR
     }
 }
 
@@ -1742,7 +1870,7 @@ fn downmix_frame_to_stereo(frame: &[f32]) -> (f32, f32) {
     let mut left_sum = 0.0_f32;
     let mut right_sum = 0.0_f32;
     for (channel, &sample) in frame.iter().enumerate() {
-        let (cl, cr) = stereo_downmix_coefficient(channel);
+        let (cl, cr) = stereo_downmix_coefficient(frame.len(), channel);
         left += cl * sample;
         right += cr * sample;
         left_sum += cl;
@@ -1872,6 +2000,32 @@ mod tests {
         assert!((l - (1.0 + C + C) * norm).abs() < 1e-6);
         // 右声道只应收到 FC 的 0.7071（FR/BR 为 0；LFE 不参与）
         assert!((r - C * norm).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_quad_keeps_all_four_channels() {
+        // 审2-6：4.0 quad = FL FR BL BR，此前 BR（index 3）被当 LFE 丢弃。
+        let frame = [0.0, 0.0, 0.0, 1.0];
+        let (l, r) = downmix_frame_to_stereo(&frame);
+        assert!(l.abs() < 1e-6, "BR 不应进入左声道");
+        assert!(r > 0.2, "BR 必须保留在右声道，而不是被当 LFE 丢弃");
+        // 对称验证 BL
+        let frame = [0.0, 0.0, 1.0, 0.0];
+        let (l, r) = downmix_frame_to_stereo(&frame);
+        assert!(l > 0.2 && r.abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_5_0_keeps_back_pair() {
+        // 审2-6：5.0 = FL FR FC BL BR，此前 BL（index 3）被当 LFE 丢弃。
+        let frame = [0.0, 0.0, 0.0, 1.0, 0.0];
+        let (l, r) = downmix_frame_to_stereo(&frame);
+        assert!(l > 0.2, "5.0 的 BL 必须保留在左声道");
+        assert!(r.abs() < 1e-6);
+        let frame = [0.0, 0.0, 0.0, 0.0, 1.0];
+        let (l, r) = downmix_frame_to_stereo(&frame);
+        assert!(r > 0.2, "5.0 的 BR 必须保留在右声道");
+        assert!(l.abs() < 1e-6);
     }
 
     #[test]

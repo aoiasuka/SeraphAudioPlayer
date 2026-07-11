@@ -1,7 +1,9 @@
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -140,19 +142,22 @@ pub(super) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub(super) fn enforce_cache_limit(app: &AppHandle) -> Result<CacheCleanupResult, String> {
-    enforce_cache_limit_inner(app, None)
+    enforce_cache_limit_inner(app, &[])
 }
 
-pub(super) fn enforce_cache_limit_preserving(
+/// 审2-S3：多路径 preserve 版本——收藏夹批量导入整批结束后统一清理一次，
+/// preserve 本批全部成功导入的文件，避免逐首清理把同批先导入的文件删掉。
+/// 单曲导入也走这里（传单元素切片）。
+pub(super) fn enforce_cache_limit_preserving_many(
     app: &AppHandle,
-    preserve_path: &Path,
+    preserve: &[PathBuf],
 ) -> Result<CacheCleanupResult, String> {
-    enforce_cache_limit_inner(app, Some(preserve_path))
+    enforce_cache_limit_inner(app, preserve)
 }
 
 fn enforce_cache_limit_inner(
     app: &AppHandle,
-    preserve_path: Option<&Path>,
+    preserve_paths: &[PathBuf],
 ) -> Result<CacheCleanupResult, String> {
     let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
@@ -186,7 +191,11 @@ fn enforce_cache_limit_inner(
     }
 
     entries.sort_by_key(|entry| entry.modified);
-    let preserve_key = preserve_path.map(normalized_path_key);
+    // 审2-S3：preserve 集合归一化后做整体比对，支持一次保住整批导入的文件。
+    let preserve_keys = preserve_paths
+        .iter()
+        .map(|path| normalized_path_key(path))
+        .collect::<HashSet<_>>();
     let mut removed_paths = Vec::new();
     let mut removed_bytes = 0;
     let mut errors = Vec::new();
@@ -195,10 +204,7 @@ fn enforce_cache_limit_inner(
         if used_bytes <= target_bytes {
             break;
         }
-        if preserve_key
-            .as_deref()
-            .is_some_and(|key| key == normalized_path_key(&entry.path))
-        {
+        if preserve_keys.contains(&normalized_path_key(&entry.path)) {
             continue;
         }
 
@@ -315,7 +321,8 @@ fn save_cache_settings(app: &AppHandle, settings: &CacheSettings) -> Result<(), 
     let bytes = serde_json::to_vec_pretty(settings)
         .map_err(|err| format!("failed to serialize cache settings: {err}"))?;
     // P2-5：temp+rename 原子写，避免写一半崩溃留下截断 JSON。
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    // 审2-S4：固定 `{path}.tmp` 改为唯一临时名，防止并发保存交错写坏彼此的临时文件。
+    let tmp = unique_temp_path(&path);
     fs::write(&tmp, bytes).map_err(|err| {
         format!(
             "failed to write cache settings temp {}: {err}",
@@ -326,6 +333,23 @@ fn save_cache_settings(app: &AppHandle, settings: &CacheSettings) -> Result<(), 
         let _ = fs::remove_file(&tmp);
         format!("failed to replace cache settings {}: {err}", path.display())
     })
+}
+
+/// 审2-S4：生成唯一临时文件名（时间纳秒 + 进程内计数器），供 temp+rename
+/// 原子写使用；并发写同一目标时各自持有独立临时文件，互不交错/截断。
+/// 与 bilibili 下载临时名（temp_download_path）的唯一化模式一致。
+pub(super) fn unique_temp_path(path: &Path) -> PathBuf {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("seraph-temp");
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}.{nanos}-{counter}.tmp"))
 }
 
 fn default_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {

@@ -6,6 +6,7 @@ import { useFileDropImport } from "@/hooks/useFileDropImport";
 import { useHydratePlayerStore } from "@/hooks/useHydratePlayerStore";
 import { usePlayback } from "@/hooks/usePlayback";
 import { useRevealWindow } from "@/hooks/useRevealWindow";
+import { useStreamingEvents } from "@/hooks/useStreamingEvents";
 import { usePlayerStore } from "@/store/player";
 
 const LazyRightPanel = lazy(() =>
@@ -33,6 +34,8 @@ function App() {
   useRevealWindow();
   useHydratePlayerStore();
   usePlayback();
+  // 审2-R5：ffmpeg 下载进度监听挂在 App 级，切页不丢事件
+  useStreamingEvents();
   const isDraggingFiles = useFileDropImport();
   const hasTrack = usePlayerStore((s) => s.currentTrack() !== null);
   const settingsOpen = usePlayerStore((s) => s.settingsOpen);

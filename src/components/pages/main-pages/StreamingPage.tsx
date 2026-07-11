@@ -1,43 +1,9 @@
 import { BadgeCheck, DownloadCloud, FolderHeart, Headphones, Link2, Loader2, LogIn, LogOut, QrCode, RefreshCw, Settings2, Sparkles } from "lucide-react";
-import * as QRCode from "qrcode";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cn } from "@/lib/utils";
-import { invoke, listen } from "@/lib/tauri";
 import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
 import { TrackRows } from "./TrackRows";
 import { isStreamingTrack } from "./trackFilters";
-
-interface BilibiliLoginStatus {
-  loggedIn: boolean;
-  username?: string | null;
-  mid?: number | null;
-  face?: string | null;
-}
-
-interface BilibiliLoginQrCode {
-  url: string;
-  qrcodeKey: string;
-}
-
-interface BilibiliLoginPollResult {
-  code: number;
-  message: string;
-  loggedIn: boolean;
-  profile?: BilibiliLoginStatus | null;
-}
-
-interface BilibiliFfmpegStatus {
-  available: boolean;
-  path?: string | null;
-}
-
-interface FfmpegDownloadProgress {
-  stage: "download" | "extract" | "done" | "error";
-  downloaded: number;
-  total: number;
-  percent: number;
-  message?: string | null;
-}
 
 export function StreamingPage() {
   const playlist = usePlayerStore((s) => s.playlist);
@@ -47,7 +13,18 @@ export function StreamingPage() {
   );
   const importBilibiliAudio = usePlayerStore((s) => s.importBilibiliAudio);
   const importBilibiliFavorites = usePlayerStore((s) => s.importBilibiliFavorites);
-  const showNotification = usePlayerStore((s) => s.showNotification);
+  // 审2-R5：登录/FFmpeg 状态、下载进度与扫码轮询全部提升到 store（streamingActions），
+  // MainPages 的 key={activeView} 切页卸载不再丢下载进度、不再中断登录轮询。
+  const loginStatus = usePlayerStore((s) => s.bilibiliLoginStatus);
+  const ffmpegStatus = usePlayerStore((s) => s.bilibiliFfmpegStatus);
+  const ffmpegDownload = usePlayerStore((s) => s.ffmpegDownload);
+  const loginQr = usePlayerStore((s) => s.loginQr);
+  const isLoginBusy = usePlayerStore((s) => s.isLoginBusy);
+  const refreshBilibiliState = usePlayerStore((s) => s.refreshBilibiliState);
+  const startFfmpegDownload = usePlayerStore((s) => s.startFfmpegDownload);
+  const startLoginPolling = usePlayerStore((s) => s.startLoginPolling);
+  const stopLoginPolling = usePlayerStore((s) => s.stopLoginPolling);
+  const logoutBilibili = usePlayerStore((s) => s.logoutBilibili);
   const [bilibiliInput, setBilibiliInput] = useState("");
   const [favoriteInput, setFavoriteInput] = useState("");
   const [isImporting, setIsImporting] = useState(false);
@@ -55,21 +32,8 @@ export function StreamingPage() {
   const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(true);
   const [preferFlac, setPreferFlac] = useState(true);
   const [remuxWithFfmpeg, setRemuxWithFfmpeg] = useState(true);
-  const [loginStatus, setLoginStatus] = useState<BilibiliLoginStatus>({
-    loggedIn: false,
-  });
-  const [ffmpegStatus, setFfmpegStatus] = useState<BilibiliFfmpegStatus>({
-    available: false,
-  });
-  const [ffmpegDownload, setFfmpegDownload] = useState<{
-    active: boolean;
-    percent: number;
-    message?: string;
-  }>({ active: false, percent: 0 });
-  const [loginQr, setLoginQr] = useState<BilibiliLoginQrCode | null>(null);
-  const [loginQrDataUrl, setLoginQrDataUrl] = useState("");
-  const [loginPollMessage, setLoginPollMessage] = useState("");
-  const [isLoginBusy, setIsLoginBusy] = useState(false);
+
+  const isFfmpegDownloading = ffmpegDownload.stage === "downloading";
 
   const importOptions: BilibiliImportOptions = {
     preferFlac,
@@ -77,163 +41,9 @@ export function StreamingPage() {
     remuxWithFfmpeg,
   };
 
-  const refreshBilibiliState = async () => {
-    try {
-      const [status, ffmpeg] = await Promise.all([
-        invoke<BilibiliLoginStatus>("bilibili_login_status"),
-        invoke<BilibiliFfmpegStatus>("bilibili_ffmpeg_status"),
-      ]);
-      setLoginStatus(status);
-      setFfmpegStatus(ffmpeg);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("Tauri command failed: bilibili status", err);
-    }
-  };
-
   useEffect(() => {
     void refreshBilibiliState();
-  }, []);
-
-  // 订阅后端 ffmpeg 下载进度，实时更新按钮文案/百分比。
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void listen<FfmpegDownloadProgress>("seraph://ffmpeg-download", (progress) => {
-      if (cancelled) return;
-      if (progress.stage === "done") {
-        setFfmpegDownload({ active: false, percent: 100 });
-        return;
-      }
-      if (progress.stage === "error") {
-        setFfmpegDownload({ active: false, percent: 0 });
-        return;
-      }
-      setFfmpegDownload({
-        active: true,
-        percent: progress.percent >= 0 ? progress.percent : 0,
-        message: progress.message ?? undefined,
-      });
-    }).then((fn) => {
-      // cleanup 已先于 listen resolve 执行时立即注销，避免监听器泄漏
-      if (cancelled) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  const handleDownloadFfmpeg = async () => {
-    if (ffmpegDownload.active) return;
-    setFfmpegDownload({ active: true, percent: 0, message: "准备下载…" });
-    showNotification("开始下载 FFmpeg，请保持网络畅通…");
-    try {
-      const status = await invoke<BilibiliFfmpegStatus>("download_ffmpeg");
-      setFfmpegStatus(status);
-      setFfmpegDownload({ active: false, percent: 100 });
-      showNotification(
-        status.available ? "FFmpeg 安装完成，现在可解码杜比/EAC3 了" : "FFmpeg 安装未完成"
-      );
-    } catch (err) {
-      setFfmpegDownload({ active: false, percent: 0 });
-      const reason = typeof err === "string" ? err : "下载失败";
-      showNotification(reason);
-      // eslint-disable-next-line no-console
-      console.warn("download_ffmpeg failed", err);
-    }
-  };
-
-  useEffect(() => {
-    let canceled = false;
-    if (!loginQr?.url) {
-      setLoginQrDataUrl("");
-      return;
-    }
-
-    void QRCode.toDataURL(loginQr.url, {
-      width: 184,
-      margin: 1,
-      color: { dark: "#0f172a", light: "#ffffff" },
-    }).then((dataUrl) => {
-      if (!canceled) setLoginQrDataUrl(dataUrl);
-    });
-
-    return () => {
-      canceled = true;
-    };
-  }, [loginQr]);
-
-  useEffect(() => {
-    if (!loginQr?.qrcodeKey) return;
-
-    let stopped = false;
-    // L-9: 拉长到 3.5s 降低 B 站风控风险；登录成功 / 二维码过期会立即停止
-    const timer = window.setInterval(() => {
-      void invoke<BilibiliLoginPollResult>("bilibili_poll_login", {
-        qrcodeKey: loginQr.qrcodeKey,
-      })
-        .then((result) => {
-          if (stopped) return;
-          setLoginPollMessage(result.message);
-          if (result.loggedIn || result.code === 0) {
-            setLoginStatus(
-              result.profile ?? {
-                loggedIn: true,
-              }
-            );
-            setLoginQr(null);
-            showNotification("B 站登录成功");
-          } else if (result.code === 86038) {
-            setLoginQr(null);
-            showNotification("B 站二维码已过期");
-          }
-        })
-        .catch((err) => {
-          if (stopped) return;
-          // eslint-disable-next-line no-console
-          console.warn("Tauri command failed: bilibili_poll_login", err);
-          setLoginPollMessage("登录轮询失败");
-        });
-    }, 3500);
-
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [loginQr, showNotification]);
-
-  const startBilibiliLogin = async () => {
-    if (isLoginBusy) return;
-    setIsLoginBusy(true);
-    try {
-      const qrcode = await invoke<BilibiliLoginQrCode>("bilibili_login_qrcode");
-      setLoginQr(qrcode);
-      setLoginPollMessage("等待扫码");
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("Tauri command failed: bilibili_login_qrcode", err);
-      showNotification("无法生成 B 站登录二维码");
-    } finally {
-      setIsLoginBusy(false);
-    }
-  };
-
-  const logoutBilibili = async () => {
-    try {
-      await invoke("bilibili_logout");
-      setLoginStatus({ loggedIn: false });
-      showNotification("已退出 B 站登录");
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("Tauri command failed: bilibili_logout", err);
-      showNotification("退出 B 站登录失败");
-    }
-  };
+  }, [refreshBilibiliState]);
 
   const handleImportBilibili = async (event: FormEvent) => {
     event.preventDefault();
@@ -242,8 +52,9 @@ export function StreamingPage() {
 
     setIsImporting(true);
     try {
-      await importBilibiliAudio(input, importOptions);
-      setBilibiliInput("");
+      // 审2-R10（L-7）：导入失败保留输入框内容便于修正重试，与收藏夹分支行为对齐
+      const imported = await importBilibiliAudio(input, importOptions);
+      if (imported) setBilibiliInput("");
     } finally {
       setIsImporting(false);
     }
@@ -305,7 +116,7 @@ export function StreamingPage() {
               {loginStatus.loggedIn ? (
                 <button
                   type="button"
-                  onClick={logoutBilibili}
+                  onClick={() => void logoutBilibili()}
                   title="退出登录"
                   className="stamp-btn inline-flex h-9 w-9 items-center justify-center font-tw text-xs font-bold"
                 >
@@ -314,7 +125,7 @@ export function StreamingPage() {
               ) : (
                 <button
                   type="button"
-                  onClick={startBilibiliLogin}
+                  onClick={() => void startLoginPolling()}
                   disabled={isLoginBusy}
                   className="stamp-btn inline-flex h-9 items-center gap-1.5 px-3 font-tw text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
                 >
@@ -397,17 +208,17 @@ export function StreamingPage() {
               {!ffmpegStatus.available && (
                 <button
                   type="button"
-                  onClick={handleDownloadFfmpeg}
-                  disabled={ffmpegDownload.active}
+                  onClick={() => void startFfmpegDownload()}
+                  disabled={isFfmpegDownloading}
                   title="下载并安装 ffmpeg/ffprobe 以支持杜比全景声 / EAC3 解码"
                   className={cn(
                     "inline-flex h-9 items-center justify-center gap-1.5 border-[1.5px] px-2 font-tw text-[11px] font-bold transition-all",
-                    ffmpegDownload.active
+                    isFfmpegDownloading
                       ? "border-line bg-card text-ink3 cursor-not-allowed"
                       : "border-ink bg-ink text-paper hover:opacity-90"
                   )}
                 >
-                  {ffmpegDownload.active ? (
+                  {isFfmpegDownloading ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       <span>
@@ -502,21 +313,21 @@ export function StreamingPage() {
             <span className="font-tw text-xs font-bold text-ink">哔哩哔哩登录</span>
             <button
               type="button"
-              onClick={() => setLoginQr(null)}
+              onClick={stopLoginPolling}
               className="px-2 py-1 font-tw text-xs font-bold text-ink3 hover:text-stamp"
             >
               关闭
             </button>
           </div>
           <div className="mt-3 flex h-[184px] w-[184px] items-center justify-center border border-line bg-white">
-            {loginQrDataUrl ? (
-              <img src={loginQrDataUrl} alt="B 站登录二维码" className="h-[184px] w-[184px]" />
+            {loginQr.dataUrl ? (
+              <img src={loginQr.dataUrl} alt="B 站登录二维码" className="h-[184px] w-[184px]" />
             ) : (
               <Loader2 className="h-5 w-5 animate-spin text-brown" />
             )}
           </div>
           <p className="mt-2 truncate text-center font-tw text-xs font-semibold text-ink2">
-            {loginPollMessage || "等待扫码"}
+            {loginQr.message || "等待扫码"}
           </p>
         </div>
       ) : null}
@@ -525,4 +336,3 @@ export function StreamingPage() {
     </div>
   );
 }
-
