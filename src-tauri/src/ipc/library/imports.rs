@@ -4,6 +4,7 @@ use std::{
     hash::{Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -16,6 +17,7 @@ use encoding_rs::GBK;
 use flate2::read::ZlibDecoder;
 use lofty::{
     file::{AudioFile, TaggedFileExt},
+    picture::{MimeType, PictureType},
     prelude::Accessor,
     tag::{ItemKey, Tag},
 };

@@ -1,5 +1,6 @@
 import { ArrowLeft, Disc3 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
@@ -28,6 +29,8 @@ export function AlbumsPage() {
       const group = groups.get(key);
       if (group) {
         group.tracks.push(track);
+        // 专辑内部分曲目缺封面时，用组内第一张可用封面兜底
+        if (!group.cover && track.cover) group.cover = track.cover;
         return;
       }
 
@@ -55,7 +58,7 @@ export function AlbumsPage() {
 
   if (activeAlbum) {
     return (
-      <div className="flex min-h-0 flex-col gap-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-card p-3">
           <button
             type="button"
@@ -95,7 +98,7 @@ export function AlbumsPage() {
             {album.cover ? (
               <div className="overflow-hidden border-[1.5px] border-ink shrink-0">
                 <img
-                  src={album.cover}
+                  src={coverSrc(album.cover)}
                   alt=""
                   className="h-20 w-20 object-cover grayscale-[0.2] transition-transform duration-500 group-hover:scale-110"
                 />

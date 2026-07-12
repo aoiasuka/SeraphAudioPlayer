@@ -58,27 +58,29 @@ function PageHeader({ view }: { view: LibraryView }) {
   return (
     <header>
       <span className="file-tab">FILE — {meta.kicker.toUpperCase()}</span>
-      <div className="folder-card px-8 py-6">
-        <div className="absolute top-7 right-5 w-[70px] text-center font-tw text-[8px] font-bold tracking-wider text-stamp opacity-65 leading-[1.5] rotate-12 pointer-events-none">
-          SERAPH
-          <br />★<br />
-          VERIFIED
-        </div>
-        <div className="flex items-end justify-between gap-6">
-          <div>
-            <div className="flex items-baseline gap-4">
-              <h1 className="font-serif text-[34px] font-black text-ink leading-none">
-                {meta.title}
-              </h1>
-              <span className="font-tw italic text-[13px] text-ink3">
-                {meta.kicker.toLowerCase().replace(/\s+/g, "_")}.
-              </span>
-            </div>
-            <p className="font-tw text-[12px] text-ink2 mt-2.5 max-w-[560px] leading-relaxed">
+      {/* 方案二：页头单行化 —— 标题 / 描述 / 当前播放压进一行，纵向空间让给正文 */}
+      <div className="folder-card px-6 py-3">
+        <div className="flex items-center justify-between gap-5">
+          <div className="flex min-w-0 items-baseline gap-3">
+            <h1 className="shrink-0 font-serif text-[22px] font-black text-ink leading-none">
+              {meta.title}
+            </h1>
+            <span className="shrink-0 font-tw italic text-[12px] text-ink3">
+              {meta.kicker.toLowerCase().replace(/\s+/g, "_")}.
+            </span>
+            <p
+              className="hidden min-w-0 truncate font-tw text-[11px] text-ink2 lg:block"
+              title={meta.description}
+            >
               &gt; {meta.description}
             </p>
           </div>
-          <NowPlayingBadge />
+          <div className="flex shrink-0 items-center gap-4">
+            <span className="pointer-events-none hidden whitespace-nowrap font-tw text-[8px] font-bold tracking-wider text-stamp opacity-65 -rotate-3 2xl:block">
+              SERAPH ★ VERIFIED
+            </span>
+            <NowPlayingBadge />
+          </div>
         </div>
       </div>
     </header>
@@ -92,15 +94,13 @@ function NowPlayingBadge() {
   if (!track) return null;
 
   return (
-    <div className="hidden xl:flex items-center border-[1.5px] border-ink bg-paper2 px-3 py-2">
-      <div className="min-w-0">
-        <p className="font-tw text-[9px] tracking-wider text-ink3">
-          {isPlaying ? "● NOW PLAYING" : "○ CURRENT"}
-        </p>
-        <p className="max-w-[220px] truncate font-serif text-xs font-semibold text-ink mt-0.5">
-          {track.title}
-        </p>
-      </div>
+    <div className="hidden min-w-0 items-center gap-2 border-[1.5px] border-ink bg-paper2 px-3 py-1.5 xl:flex">
+      <span className="shrink-0 font-tw text-[9px] tracking-wider text-ink3">
+        {isPlaying ? "● NOW PLAYING" : "○ CURRENT"}
+      </span>
+      <span className="max-w-[200px] truncate font-serif text-xs font-semibold text-ink">
+        {track.title}
+      </span>
     </div>
   );
 }
@@ -137,7 +137,7 @@ export function MainPages() {
   const activeView = usePlayerStore((s) => s.activeView);
 
   return (
-    <main className="flex-1 min-w-0 min-h-0 flex flex-col gap-5 p-[clamp(18px,2.5vw,34px)] overflow-hidden z-10">
+    <main className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 p-[clamp(18px,2.5vw,34px)] overflow-hidden z-10">
       <PageHeader view={activeView} />
       <section className="min-h-0 flex-1 overflow-hidden">
         <div key={activeView} className="h-full w-full animate-page-transition flex flex-col min-h-0">

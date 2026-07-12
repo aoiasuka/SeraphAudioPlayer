@@ -191,6 +191,14 @@
     background: var(--ink);
     transform: translateX(-50%);
   }
+  /* 有封面时封面填满转盘（沿用 reel-spin），隐藏默认同心圆与指针刻度 */
+  .reel.has-cover {
+    overflow: hidden;
+  }
+  .reel.has-cover::before,
+  .reel.has-cover::after {
+    content: none;
+  }
 
   /* 正在播放声波小动画 */
   .bars {

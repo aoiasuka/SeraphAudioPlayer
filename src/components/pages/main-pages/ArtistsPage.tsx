@@ -41,7 +41,7 @@ export function ArtistsPage() {
 
   if (activeArtist) {
     return (
-      <div className="flex min-h-0 flex-col gap-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-card p-3">
           <button
             type="button"

@@ -99,7 +99,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   }
 
   return (
-    <div className="flex min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="font-tw text-[10px] tracking-[3px] text-ink3 mb-3 flex justify-between">
         <span>INDEX — 播放队列</span>
         <span>{tracks.length} RECORDS</span>

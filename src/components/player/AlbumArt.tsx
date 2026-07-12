@@ -1,13 +1,15 @@
+import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 
 export function AlbumArt() {
   const track = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
 
-  if (!track?.cover) return null;
+  const cover = coverSrc(track?.cover);
+  if (!cover) return null;
 
-  const glow1 = track.glow1 ?? "#06b6d4";
-  const glow2 = track.glow2 ?? "#8b5cf6";
+  const glow1 = track?.glow1 ?? "#06b6d4";
+  const glow2 = track?.glow2 ?? "#8b5cf6";
 
   return (
     <div
@@ -26,7 +28,7 @@ export function AlbumArt() {
         }}
       />
       <img
-        src={track.cover}
+        src={cover}
         alt="Album Art"
         className="w-full h-full object-cover rounded-2xl border border-white/80 album-breath shadow-[0_15px_40px_rgba(0,0,0,0.08)] z-10 relative"
       />

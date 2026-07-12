@@ -13,6 +13,7 @@ fn collect_audio_files(
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
     warnings: &mut Vec<String>,
+    covers_dir: Option<&Path>,
 ) -> Result<(), String> {
     if path.is_dir() {
         // L-14：symlink / Windows junction 可能指向祖先目录导致无限递归栈溢出。
@@ -49,6 +50,7 @@ fn collect_audio_files(
                 visited_dirs,
                 depth + 1,
                 warnings,
+                covers_dir,
             )?;
         }
         return Ok(());
@@ -57,7 +59,7 @@ fn collect_audio_files(
     if path.is_file() && is_audio_file(&path) {
         let key = import_dedupe_key(&path);
         if seen_files.insert(key) {
-            tracks.push(track_from_path(&path)?);
+            tracks.push(track_from_path(&path, covers_dir)?);
         }
     }
 
@@ -333,8 +335,9 @@ fn apply_track_lyrics(
     track_id: &str,
     lyrics: Vec<LyricLine>,
     track_path: Option<&str>,
+    covers_dir: Option<&Path>,
 ) -> Result<(), String> {
-    let index = ensure_track_for_lyrics(tracks, track_id, track_path)?;
+    let index = ensure_track_for_lyrics(tracks, track_id, track_path, covers_dir)?;
     let track = &mut tracks[index];
     track.lyrics = lyrics;
     Ok(())
@@ -344,6 +347,7 @@ fn ensure_track_for_lyrics(
     tracks: &mut Vec<ImportedTrack>,
     track_id: &str,
     track_path: Option<&str>,
+    covers_dir: Option<&Path>,
 ) -> Result<usize, String> {
     if let Some(index) = tracks.iter().position(|track| track.id == track_id) {
         return Ok(index);
@@ -361,7 +365,8 @@ fn ensure_track_for_lyrics(
         );
     }
 
-    let mut track = track_from_path(&path)?;
+    // 歌词保存时曲目不在缓存里才走到这里重建条目（罕见），封面同样在此提取
+    let mut track = track_from_path(&path, covers_dir)?;
     track.id = track_id.to_string();
     tracks.push(track);
     Ok(tracks.len() - 1)
@@ -494,7 +499,7 @@ fn is_dsd_format(format: &str) -> bool {
     format.eq_ignore_ascii_case("DSF") || format.eq_ignore_ascii_case("DFF")
 }
 
-fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
+fn track_from_path(path: &Path, covers_dir: Option<&Path>) -> Result<ImportedTrack, String> {
     let metadata = fs::metadata(path)
         .map_err(|err| format!("failed to read file metadata {}: {err}", path.display()))?;
     let path_string = path.to_string_lossy().to_string();
@@ -535,6 +540,14 @@ fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
         .unwrap_or_else(|| "Local Files".into());
     let size = format_file_size(metadata.len());
     let (glow1, glow2) = color_pair(hash);
+    // 内嵌封面按内容哈希落盘到 covers 目录（同专辑多曲共用一张图），
+    // cover 存文件绝对路径，前端经 asset 协议加载；无封面保持空串。
+    let cover = audio_metadata
+        .cover
+        .as_ref()
+        .zip(covers_dir)
+        .and_then(|(art, dir)| save_cover_art(dir, art))
+        .unwrap_or_default();
 
     Ok(ImportedTrack {
         id: format!("local-{hash:016x}"),
@@ -542,7 +555,7 @@ fn track_from_path(path: &Path) -> Result<ImportedTrack, String> {
         artist,
         album,
         album_year: audio_metadata.album_year,
-        cover: String::new(),
+        cover,
         format: format.clone(),
         bitdepth: format_audio_quality(
             &format,
@@ -605,9 +618,143 @@ fn parse_audio_metadata_with_dsd_hint(path: &Path, is_dsd_hint: bool) -> ParsedA
     }
 
     parsed.lyrics = lyrics_from_tags(tagged_file.tags());
+    parsed.cover = cover_art_from_tags(tagged_file.tags());
     enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
 
     parsed
+}
+
+/// 从标签中选内嵌封面：优先 CoverFront，否则取第一张非空图片。
+fn cover_art_from_tags(tags: &[Tag]) -> Option<CoverArt> {
+    let mut chosen = None;
+    for picture in tags.iter().flat_map(|tag| tag.pictures()) {
+        if picture.data().is_empty() {
+            continue;
+        }
+        if picture.pic_type() == PictureType::CoverFront {
+            chosen = Some(picture);
+            break;
+        }
+        if chosen.is_none() {
+            chosen = Some(picture);
+        }
+    }
+    let picture = chosen?;
+    let ext = cover_image_extension(picture.mime_type(), picture.data())?;
+    Some(CoverArt {
+        data: picture.data().to_vec(),
+        ext,
+    })
+}
+
+/// 由 MIME 或图片魔数推断扩展名；识别不了的类型不落盘（返回 None）。
+fn cover_image_extension(mime: Option<&MimeType>, data: &[u8]) -> Option<&'static str> {
+    match mime {
+        Some(MimeType::Jpeg) => return Some("jpg"),
+        Some(MimeType::Png) => return Some("png"),
+        Some(MimeType::Bmp) => return Some("bmp"),
+        Some(MimeType::Gif) => return Some("gif"),
+        Some(MimeType::Tiff) => return Some("tiff"),
+        _ => {}
+    }
+    if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if data.starts_with(b"GIF8") {
+        Some("gif")
+    } else if data.starts_with(b"BM") {
+        Some("bmp")
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// 封面落盘序号：并发导入时保证临时文件名互不相同。
+static COVER_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 封面按内容哈希写入 covers 目录并返回绝对路径；已存在同内容文件直接复用。
+fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String> {
+    let mut hasher = DefaultHasher::new();
+    art.data.hash(&mut hasher);
+    let content_hash = hasher.finish();
+    let target = covers_dir.join(format!("{content_hash:016x}.{}", art.ext));
+
+    if !target.is_file() {
+        fs::create_dir_all(covers_dir).ok()?;
+        // 临时文件 + rename 原子落盘；rename 失败但目标已存在说明并发写入者已完成
+        let seq = COVER_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = covers_dir.join(format!(".cover-{content_hash:016x}-{seq}.tmp"));
+        fs::write(&tmp, &art.data).ok()?;
+        if fs::rename(&tmp, &target).is_err() {
+            let _ = fs::remove_file(&tmp);
+            if !target.is_file() {
+                return None;
+            }
+        }
+    }
+
+    Some(target.to_string_lossy().to_string())
+}
+
+fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
+    Ok(dir.join("covers"))
+}
+
+/// 只读标签提取封面并落盘（启动补扫用，跳过 ffprobe 等重探测）。
+fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
+    let tagged_file = lofty::read_from_path(path).ok()?;
+    let art = cover_art_from_tags(tagged_file.tags())?;
+    save_cover_art(covers_dir, &art)
+}
+
+/// 旧版曲库缓存里的本地曲目没有封面（当时不提取）。启动时一次性补扫
+/// cover 为空且文件仍存在的本地曲目，完成后写标记文件，后续启动零成本；
+/// 新导入的曲目在导入时即提取封面，不依赖本流程。
+fn backfill_missing_covers(app: &AppHandle) {
+    let Ok(covers_dir) = covers_dir_path(app) else {
+        return;
+    };
+    let marker = covers_dir.join(".cover-backfill-v1");
+    if marker.is_file() {
+        return;
+    }
+
+    let _guard = LIBRARY_LOCK.lock();
+    let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
+        // 缓存损坏时不写标记，等缓存恢复后下次启动重试
+        return;
+    };
+
+    let mut changed = false;
+    for track in &mut tracks {
+        // B 站曲目封面来自视频封面 URL，这里只补本地文件
+        if !track.cover.is_empty() || track.source_url.is_some() {
+            continue;
+        }
+        let path = Path::new(&track.path);
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(cover) = extract_embedded_cover(path, &covers_dir) {
+            track.cover = cover;
+            changed = true;
+        }
+    }
+
+    if changed && write_cached_tracks(app, &tracks).is_err() {
+        // 写失败不落标记，下次启动重试
+        return;
+    }
+    if fs::create_dir_all(&covers_dir).is_ok() {
+        let _ = fs::write(&marker, b"v1");
+    }
 }
 
 fn enrich_with_decoder_probe_dsd(

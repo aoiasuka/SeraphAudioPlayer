@@ -58,6 +58,11 @@ pub fn run() {
         .setup(|app| {
             if let Ok(app_dir) = app.path().app_data_dir() {
                 seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
+                // 本地曲目内嵌封面提取到 covers 目录后经 asset 协议供 <img> 加载，
+                // 范围只放开这一个目录
+                let _ = app
+                    .asset_protocol_scope()
+                    .allow_directory(app_dir.join("covers"), false);
             }
             ipc::events::wire_event_bus(app.handle().clone());
             Ok(())

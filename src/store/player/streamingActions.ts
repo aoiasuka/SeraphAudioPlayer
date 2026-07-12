@@ -105,7 +105,12 @@ export function createStreamingActions(
           invoke<BilibiliLoginStatus>("bilibili_login_status"),
           invoke<BilibiliFfmpegStatus>("bilibili_ffmpeg_status"),
         ]);
-        set({ bilibiliLoginStatus: status, bilibiliFfmpegStatus: ffmpeg });
+        // 防御：某些环境下 invoke 可能返回 undefined，回退到当前值避免流媒体页因
+        // bilibiliLoginStatus 变 undefined 而崩溃（读取 loggedIn 抛错）
+        set({
+          bilibiliLoginStatus: status ?? get().bilibiliLoginStatus,
+          bilibiliFfmpegStatus: ffmpeg ?? get().bilibiliFfmpegStatus,
+        });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("Tauri command failed: bilibili status", err);

@@ -1,6 +1,13 @@
 #[tauri::command]
-pub fn get_playlist(app: AppHandle) -> Result<Vec<ImportedTrack>, String> {
-    read_cached_tracks(&app)
+pub async fn get_playlist(app: AppHandle) -> Result<Vec<ImportedTrack>, String> {
+    // 封面补扫含 lofty 标签解析（阻塞 IO），与读缓存一并放 spawn_blocking，
+    // 避免旧曲库首次补扫时卡住 IPC 调度线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        backfill_missing_covers(&app);
+        read_cached_tracks(&app)
+    })
+    .await
+    .map_err(|err| format!("get_playlist task panicked: {err}"))?
 }
 
 #[tauri::command]
@@ -53,6 +60,8 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<Imp
         let mut visited_dirs = HashSet::new();
         // P3-11：子目录读失败只累积警告，不中止整批导入。
         let mut warnings = Vec::new();
+        // 拿不到应用数据目录时封面提取降级跳过，不影响导入本身
+        let covers_dir = covers_dir_path(&app).ok();
 
         for path in paths {
             collect_audio_files(
@@ -62,6 +71,7 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<Imp
                 &mut visited_dirs,
                 0,
                 &mut warnings,
+                covers_dir.as_deref(),
             )?;
         }
 
@@ -123,6 +133,7 @@ pub fn save_track_lyrics(
         &track_id,
         lyrics.clone(),
         track_path.as_deref(),
+        covers_dir_path(&app).ok().as_deref(),
     )?;
     write_cached_tracks(&app, &tracks)?;
 
@@ -172,6 +183,7 @@ pub fn apply_online_lyrics(
         &track_id,
         lyrics.clone(),
         track_path.as_deref(),
+        covers_dir_path(&app).ok().as_deref(),
     )?;
     write_cached_tracks(&app, &tracks)?;
 

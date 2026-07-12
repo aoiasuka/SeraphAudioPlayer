@@ -83,6 +83,14 @@ struct ParsedAudioMetadata {
     bit_depth: Option<u8>,
     channels: Option<u8>,
     lyrics: Vec<LyricLine>,
+    cover: Option<CoverArt>,
+}
+
+/// 内嵌封面原始图片数据 + 由 MIME/魔数推断出的扩展名（落盘 covers 目录时用）
+#[derive(Debug)]
+struct CoverArt {
+    data: Vec<u8>,
+    ext: &'static str,
 }
 
 #[derive(Debug, Default)]

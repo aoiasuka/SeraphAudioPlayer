@@ -53,7 +53,7 @@ mod tests {
         assert!(is_audio_file(&path));
         assert_eq!(audio_format_label(&path), "DSF");
 
-        let track = track_from_path(&path).expect("track from dsf magic");
+        let track = track_from_path(&path, None).expect("track from dsf magic");
         assert_eq!(track.format, "DSF");
         assert_eq!(track.bitdepth, "DSF 24-bit / 44.1 kHz PCM");
         assert_eq!(track.sample_rate, "44.1 kHz PCM");
@@ -184,7 +184,7 @@ mod tests {
             text: "imported line".into(),
         }];
 
-        apply_track_lyrics(&mut tracks, "b", lyrics, None).expect("apply lyrics");
+        apply_track_lyrics(&mut tracks, "b", lyrics, None, None).expect("apply lyrics");
 
         assert!(tracks[0].lyrics.is_empty());
         assert_eq!(tracks[1].lyrics.len(), 1);
@@ -199,8 +199,8 @@ mod tests {
             text: "line".into(),
         }];
 
-        let err =
-            apply_track_lyrics(&mut tracks, "missing", lyrics, None).expect_err("missing track");
+        let err = apply_track_lyrics(&mut tracks, "missing", lyrics, None, None)
+            .expect_err("missing track");
 
         assert!(err.contains("track was not found"));
         assert!(tracks[0].lyrics.is_empty());

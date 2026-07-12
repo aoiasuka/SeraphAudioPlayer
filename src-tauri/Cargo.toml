@@ -25,7 +25,7 @@ seraph-decoder = { workspace = true }
 seraph-playlist = { workspace = true }
 seraph-visualizer = { workspace = true }
 
-tauri = { version = "2.1", features = [] }
+tauri = { version = "2.1", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 
 lofty = "0.24"
