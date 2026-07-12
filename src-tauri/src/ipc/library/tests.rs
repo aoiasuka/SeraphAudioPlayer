@@ -430,3 +430,42 @@ fn missing_library_cache_reads_as_empty() {
     let path = temp_audio_path("seraph-missing-cache", "json");
     assert_eq!(read_tracks_from_file(&path).unwrap().len(), 0);
 }
+
+#[test]
+fn splits_and_merges_lyrics_round_trip() {
+    let mut with_lyrics = test_imported_track("a", "C:/Music/a.flac", "A");
+    with_lyrics.lyrics = vec![LyricLine {
+        time: 1.0,
+        text: "line one".into(),
+    }];
+    let without = test_imported_track("b", "C:/Music/b.flac", "B");
+
+    let (stripped, sidecar) = split_lyrics_for_storage(&[with_lyrics.clone(), without.clone()]);
+
+    // 主记录歌词被清空，只有带歌词的曲目进边车
+    assert!(stripped[0].lyrics.is_empty());
+    assert!(stripped[1].lyrics.is_empty());
+    assert_eq!(sidecar.len(), 1);
+    assert_eq!(sidecar.get("a").unwrap()[0].text, "line one");
+    assert!(!sidecar.contains_key("b"));
+
+    // 合并回来后与原始曲目完全一致
+    let restored = merge_lyrics_from_storage(stripped, &sidecar);
+    assert_eq!(restored[0].lyrics.len(), 1);
+    assert_eq!(restored[0].lyrics[0].text, "line one");
+    assert!(restored[1].lyrics.is_empty());
+}
+
+#[test]
+fn merge_lyrics_keeps_inline_when_sidecar_absent() {
+    // 旧格式迁移：主文件内联歌词、边车缺失时，内联歌词必须保留
+    let mut inline = test_imported_track("a", "C:/Music/a.flac", "A");
+    inline.lyrics = vec![LyricLine {
+        time: 2.0,
+        text: "legacy inline".into(),
+    }];
+
+    let restored = merge_lyrics_from_storage(vec![inline], &std::collections::HashMap::new());
+    assert_eq!(restored[0].lyrics.len(), 1);
+    assert_eq!(restored[0].lyrics[0].text, "legacy inline");
+}

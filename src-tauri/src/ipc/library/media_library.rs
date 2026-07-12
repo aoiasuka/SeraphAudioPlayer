@@ -8,6 +8,12 @@ pub(crate) const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
 /// async 路径需先进 spawn_blocking 再调用。
 pub(crate) static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// 内存常驻曲库：首次访问从磁盘加载后常驻，读命令（get_playlist / get_track_info）
+/// 直接克隆内存快照，不再每次 IPC 全量读盘 + 解析 JSON。写路径落盘成功后同步刷新。
+/// 歌词在内存中仍内联于 ImportedTrack（前端契约不变），仅磁盘层拆分为边车文件。
+static LIBRARY_MEMORY: parking_lot::RwLock<Option<Vec<ImportedTrack>>> =
+    parking_lot::RwLock::new(None);
+
 pub(crate) fn collect_audio_files(
     path: PathBuf,
     tracks: &mut Vec<ImportedTrack>,
@@ -69,8 +75,28 @@ pub(crate) fn collect_audio_files(
 }
 
 pub(crate) fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
+    // 读命令：命中内存直接克隆；未加载则加载一次并常驻。
+    if let Some(tracks) = LIBRARY_MEMORY.read().as_ref() {
+        return Ok(tracks.clone());
+    }
+    let loaded = load_tracks_from_disk(app)?;
+    let mut guard = LIBRARY_MEMORY.write();
+    // 双检：加载期间可能已有写路径填充内存，避免覆盖更新的快照
+    if guard.is_none() {
+        *guard = Some(loaded);
+    }
+    Ok(guard.as_ref().cloned().unwrap_or_default())
+}
+
+/// 从磁盘加载曲库主文件并合并歌词边车，附加 enrich（补 B 站 source_url）。
+/// 主文件不存在视为空库；损坏则返回错误（读命令降级处理）。
+fn load_tracks_from_disk(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
     let path = library_cache_path(app)?;
-    read_tracks_from_file(&path).map(|tracks| tracks.into_iter().map(enrich_cached_track).collect())
+    let tracks = read_tracks_from_file(&path)?;
+    let lyrics_by_id = read_lyrics_sidecar(app)?;
+    // 边车有则覆盖；否则保留主文件内联歌词（兼容旧格式未迁移的库）
+    let merged = merge_lyrics_from_storage(tracks, &lyrics_by_id);
+    Ok(merged.into_iter().map(enrich_cached_track).collect())
 }
 
 pub(crate) fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
@@ -84,15 +110,33 @@ pub(crate) fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, S
         .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))
 }
 
-/// P0-2：读改写路径专用读取。文件存在但读取/解析失败时，把坏文件备份为
-/// `.corrupt` 并显式报错——绝不能把损坏缓存当空库，否则随后的覆盖写会把
-/// 用户整个曲库（含手动匹配的歌词）静默清空。
+/// 读取歌词边车文件（track_id → 歌词行）。不存在或损坏都返回空表——
+/// 歌词丢失可从主文件内联或重新匹配恢复，不阻断曲库读取。
+fn read_lyrics_sidecar(app: &AppHandle) -> Result<HashMap<String, Vec<LyricLine>>, String> {
+    let path = library_lyrics_path(app)?;
+    if !path.is_file() {
+        return Ok(HashMap::new());
+    }
+    match fs::read(&path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+        Err(_) => Ok(HashMap::new()),
+    }
+}
+
+/// P0-2：读改写路径专用读取。持锁调用，返回内存快照（已含歌词与 enrich）。
+/// 内存未加载时从磁盘加载；磁盘损坏时把坏文件备份为 `.corrupt` 并显式报错——
+/// 绝不能把损坏缓存当空库，否则随后的覆盖写会把用户整个曲库静默清空。
 pub(crate) fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
-    let path = library_cache_path(app)?;
-    match read_tracks_from_file(&path) {
-        Ok(tracks) => Ok(tracks.into_iter().map(enrich_cached_track).collect()),
+    if let Some(tracks) = LIBRARY_MEMORY.read().as_ref() {
+        return Ok(tracks.clone());
+    }
+    match load_tracks_from_disk(app) {
+        Ok(tracks) => {
+            *LIBRARY_MEMORY.write() = Some(tracks.clone());
+            Ok(tracks)
+        }
         Err(err) => {
-            let backup = backup_corrupt_file(&path);
+            let backup = backup_corrupt_file(&library_cache_path(app)?);
             Err(format!(
                 "曲库缓存损坏，已中止写入以免覆盖数据（坏文件已备份到 {}）: {err}",
                 backup.display()
@@ -118,10 +162,58 @@ pub(crate) fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> 
             )
         })?;
     }
-    let bytes = serde_json::to_vec_pretty(tracks)
+
+    // 磁盘层拆分：主文件存曲目元数据（歌词字段清空），歌词单独存边车文件。
+    // 大歌词不再随每次曲库写入反复序列化，主文件体积与写入成本显著下降。
+    let (stripped, lyrics_by_id) = split_lyrics_for_storage(tracks);
+
+    let main_bytes = serde_json::to_vec_pretty(&stripped)
         .map_err(|err| format!("failed to serialize library cache: {err}"))?;
     // P0-2：temp+rename 原子写，避免写一半崩溃/断电截断 JSON 丢曲库。
-    write_json_atomic(&path, &bytes)
+    write_json_atomic(&path, &main_bytes)?;
+
+    let lyrics_path = library_lyrics_path(app)?;
+    let lyrics_bytes = serde_json::to_vec(&lyrics_by_id)
+        .map_err(|err| format!("failed to serialize lyrics sidecar: {err}"))?;
+    write_json_atomic(&lyrics_path, &lyrics_bytes)?;
+
+    // 落盘成功后刷新内存快照（存完整含歌词版本，读命令零成本命中）
+    *LIBRARY_MEMORY.write() = Some(tracks.to_vec());
+    Ok(())
+}
+
+/// 把曲目拆成「歌词清空的主记录」+「track_id → 歌词」映射，供磁盘分离存储。
+/// 纯函数，便于测试往返一致性。
+pub(crate) fn split_lyrics_for_storage(
+    tracks: &[ImportedTrack],
+) -> (Vec<ImportedTrack>, HashMap<String, Vec<LyricLine>>) {
+    let mut lyrics_by_id = HashMap::new();
+    let stripped = tracks
+        .iter()
+        .map(|track| {
+            if !track.lyrics.is_empty() {
+                lyrics_by_id.insert(track.id.clone(), track.lyrics.clone());
+            }
+            ImportedTrack {
+                lyrics: Vec::new(),
+                ..track.clone()
+            }
+        })
+        .collect();
+    (stripped, lyrics_by_id)
+}
+
+/// 把歌词边车按 track_id 合并回主记录（读盘时用）。
+pub(crate) fn merge_lyrics_from_storage(
+    mut tracks: Vec<ImportedTrack>,
+    lyrics_by_id: &HashMap<String, Vec<LyricLine>>,
+) -> Vec<ImportedTrack> {
+    for track in &mut tracks {
+        if let Some(lyrics) = lyrics_by_id.get(&track.id) {
+            track.lyrics = lyrics.clone();
+        }
+    }
+    tracks
 }
 
 /// 原子写 JSON：先写同目录临时文件再 rename（Windows 同卷 rename 原子）。
@@ -188,6 +280,15 @@ pub(crate) fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
     Ok(dir.join("library-cache.json"))
+}
+
+/// 歌词边车文件路径：与主曲库文件同目录，track_id → 歌词行的 JSON 映射。
+pub(crate) fn library_lyrics_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
+    Ok(dir.join("library-lyrics.json"))
 }
 
 pub(crate) fn merge_cached_tracks(
