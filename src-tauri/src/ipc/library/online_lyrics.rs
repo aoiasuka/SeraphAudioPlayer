@@ -1,4 +1,6 @@
-fn online_lyrics_query(title: &str, artist: &str) -> String {
+use super::prelude::*;
+
+pub(crate) fn online_lyrics_query(title: &str, artist: &str) -> String {
     [title.trim(), artist.trim()]
         .into_iter()
         .filter(|value| !value.is_empty() && *value != "Unknown")
@@ -6,7 +8,7 @@ fn online_lyrics_query(title: &str, artist: &str) -> String {
         .join(" ")
 }
 
-fn online_lyrics_client() -> Result<Client, String> {
+pub(crate) fn online_lyrics_client() -> Result<Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -23,7 +25,7 @@ fn online_lyrics_client() -> Result<Client, String> {
         .map_err(|err| format!("failed to create lyrics client: {err}"))
 }
 
-async fn fetch_online_lyrics_from_sources(
+pub(crate) async fn fetch_online_lyrics_from_sources(
     client: &Client,
     query: &str,
     duration: u64,
@@ -35,7 +37,7 @@ async fn fetch_online_lyrics_from_sources(
     dedupe_online_lyrics_candidates(candidates)
 }
 
-async fn fetch_netease_lyrics(
+pub(crate) async fn fetch_netease_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
@@ -113,7 +115,7 @@ async fn fetch_netease_lyrics(
     results
 }
 
-async fn fetch_kugou_lyrics(
+pub(crate) async fn fetch_kugou_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
@@ -204,7 +206,7 @@ async fn fetch_kugou_lyrics(
     results
 }
 
-async fn fetch_qq_lyrics(
+pub(crate) async fn fetch_qq_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
@@ -280,7 +282,7 @@ async fn fetch_qq_lyrics(
     results
 }
 
-fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
+pub(crate) fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
     if let Some(yrc) = payload
         .get("yrc")
         .and_then(|value| value.get("lyric"))
@@ -311,7 +313,7 @@ fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
     normalize_lyric_lines(lyrics)
 }
 
-fn parse_qq_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
+pub(crate) fn parse_qq_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
     let mut lyrics = Vec::new();
     if let Some(lyric) = payload.get("lyric").and_then(Value::as_str) {
         lyrics.extend(parse_online_lyric_text(lyric));
@@ -322,7 +324,7 @@ fn parse_qq_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
     normalize_lyric_lines(lyrics)
 }
 
-fn parse_online_lyric_text(value: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_online_lyric_text(value: &str) -> Vec<LyricLine> {
     let compact = value.trim();
     if compact.contains('[') && compact.contains(']') {
         let lyrics = parse_lyrics_text(compact);
@@ -338,7 +340,7 @@ fn parse_online_lyric_text(value: &str) -> Vec<LyricLine> {
     parse_lyrics_text(&text)
 }
 
-fn normalize_lyric_lines(mut lyrics: Vec<LyricLine>) -> Option<Vec<LyricLine>> {
+pub(crate) fn normalize_lyric_lines(mut lyrics: Vec<LyricLine>) -> Option<Vec<LyricLine>> {
     lyrics.retain(|line| !line.text.trim().is_empty());
     lyrics.sort_by(|a, b| {
         a.time
@@ -349,7 +351,7 @@ fn normalize_lyric_lines(mut lyrics: Vec<LyricLine>) -> Option<Vec<LyricLine>> {
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
-fn ranked_provider_items(items: &[Value], duration: u64) -> Vec<&Value> {
+pub(crate) fn ranked_provider_items(items: &[Value], duration: u64) -> Vec<&Value> {
     let target_ms = duration.saturating_mul(1000);
     let mut ranked = items.iter().collect::<Vec<_>>();
     ranked.sort_by_key(|item| {
@@ -360,7 +362,7 @@ fn ranked_provider_items(items: &[Value], duration: u64) -> Vec<&Value> {
     ranked
 }
 
-fn dedupe_online_lyrics_candidates(
+pub(crate) fn dedupe_online_lyrics_candidates(
     candidates: Vec<OnlineLyricsCandidate>,
 ) -> Vec<OnlineLyricsCandidate> {
     let mut seen = HashSet::new();
@@ -394,7 +396,7 @@ fn dedupe_online_lyrics_candidates(
     deduped
 }
 
-fn normalize_text(value: &str) -> String {
+pub(crate) fn normalize_text(value: &str) -> String {
     value
         .chars()
         .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
@@ -402,7 +404,7 @@ fn normalize_text(value: &str) -> String {
         .collect()
 }
 
-fn value_string(item: &Value, key: &str) -> Option<String> {
+pub(crate) fn value_string(item: &Value, key: &str) -> Option<String> {
     item.get(key)
         .and_then(Value::as_str)
         .map(str::trim)
@@ -410,7 +412,7 @@ fn value_string(item: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn netease_artists(song: &Value) -> String {
+pub(crate) fn netease_artists(song: &Value) -> String {
     song.get("artists")
         .and_then(Value::as_array)
         .map(|artists| {
@@ -424,7 +426,7 @@ fn netease_artists(song: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn qq_singers(song: &Value) -> String {
+pub(crate) fn qq_singers(song: &Value) -> String {
     song.get("singer")
         .and_then(Value::as_array)
         .map(|singers| {
@@ -438,7 +440,7 @@ fn qq_singers(song: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn provider_duration_ms(item: &Value) -> Option<u64> {
+pub(crate) fn provider_duration_ms(item: &Value) -> Option<u64> {
     for key in ["duration", "interval", "dt", "song_duration"] {
         if let Some(value) = item.get(key).and_then(Value::as_u64) {
             return Some(if value < 10_000 { value * 1000 } else { value });

@@ -1,8 +1,10 @@
-const QRC_MAGIC_HEADER: &[u8] = b"\x98%\xb0\xac\xe3\x02\x83h\xe8\xfcl";
-const KRC_MAGIC_HEADER: &[u8] = b"krc18";
-const QRC_KEY: &[u8] = b"!@#)(*$%123ZXC!@!@#)(NHL";
-const KRC_KEY: &[u8] = b"@Gaw^2tGQ61-\xce\xd2ni";
-const QMC1_PRIVKEY: [u8; 128] = [
+use super::prelude::*;
+
+pub(crate) const QRC_MAGIC_HEADER: &[u8] = b"\x98%\xb0\xac\xe3\x02\x83h\xe8\xfcl";
+pub(crate) const KRC_MAGIC_HEADER: &[u8] = b"krc18";
+pub(crate) const QRC_KEY: &[u8] = b"!@#)(*$%123ZXC!@!@#)(NHL";
+pub(crate) const KRC_KEY: &[u8] = b"@Gaw^2tGQ61-\xce\xd2ni";
+pub(crate) const QMC1_PRIVKEY: [u8; 128] = [
     0xc3, 0x4a, 0xd6, 0xca, 0x90, 0x67, 0xf7, 0x52, 0xd8, 0xa1, 0x66, 0x62, 0x9f, 0x5b, 0x09, 0x00,
     0xc3, 0x5e, 0x95, 0x23, 0x9f, 0x13, 0x11, 0x7e, 0xd8, 0x92, 0x3f, 0xbc, 0x90, 0xbb, 0x74, 0x0e,
     0xc3, 0x47, 0x74, 0x3d, 0x90, 0xaa, 0x3f, 0x51, 0xd8, 0xf4, 0x11, 0x84, 0x9f, 0xde, 0x95, 0x1d,
@@ -13,7 +15,7 @@ const QMC1_PRIVKEY: [u8; 128] = [
     0xc3, 0x00, 0x09, 0x5b, 0x9f, 0x62, 0x66, 0xa1, 0xd8, 0x52, 0xf7, 0x67, 0x90, 0xca, 0xd6, 0x4a,
 ];
 
-fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
+pub(crate) fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
     if bytes.starts_with(QRC_MAGIC_HEADER) {
         if let Some(lyrics) = parse_encrypted_qrc_lyrics(bytes) {
             return lyrics;
@@ -35,19 +37,19 @@ fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
     parse_lyrics_text(&text)
 }
 
-fn parse_encrypted_qrc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
+pub(crate) fn parse_encrypted_qrc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
     let text = decrypt_qrc(bytes).ok()?;
     let lyrics = parse_qrc_text(&text);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
-fn parse_encrypted_krc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
+pub(crate) fn parse_encrypted_krc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
     let text = decrypt_krc(bytes).ok()?;
     let lyrics = parse_krc_text(&text);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
-fn decrypt_qrc(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decrypt_qrc(bytes: &[u8]) -> Result<String, String> {
     let mut data = bytes.to_vec();
     qmc1_decrypt(&mut data);
     let encrypted = data
@@ -68,7 +70,7 @@ fn decrypt_qrc(bytes: &[u8]) -> Result<String, String> {
     inflate_zlib_utf8(&decrypted)
 }
 
-fn decrypt_krc(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decrypt_krc(bytes: &[u8]) -> Result<String, String> {
     let encrypted = bytes
         .get(4..)
         .ok_or_else(|| "invalid krc data".to_string())?;
@@ -81,7 +83,7 @@ fn decrypt_krc(bytes: &[u8]) -> Result<String, String> {
     inflate_zlib_utf8(&decrypted)
 }
 
-fn qmc1_decrypt(data: &mut [u8]) {
+pub(crate) fn qmc1_decrypt(data: &mut [u8]) {
     for (index, value) in data.iter_mut().enumerate() {
         let key_index = if index > 0x7fff {
             (index % 0x7fff) & 0x7f
@@ -92,7 +94,7 @@ fn qmc1_decrypt(data: &mut [u8]) {
     }
 }
 
-fn inflate_zlib_utf8(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn inflate_zlib_utf8(bytes: &[u8]) -> Result<String, String> {
     // 防御 zlib bomb：解压超过 8MB 即视为异常输入。
     // 正常歌词解压后通常 < 100 KB；保留一个安全余量。
     const MAX_INFLATED_BYTES: u64 = 8 * 1024 * 1024;
@@ -111,7 +113,7 @@ fn inflate_zlib_utf8(bytes: &[u8]) -> Result<String, String> {
     Ok(text)
 }
 
-fn parse_provider_lyrics_text(text: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_provider_lyrics_text(text: &str) -> Vec<LyricLine> {
     let qrc_lyrics = parse_qrc_text(text);
     if !qrc_lyrics.is_empty() {
         return qrc_lyrics;
@@ -141,18 +143,18 @@ fn parse_provider_lyrics_text(text: &str) -> Vec<LyricLine> {
     Vec::new()
 }
 
-fn parse_qrc_text(text: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_qrc_text(text: &str) -> Vec<LyricLine> {
     let Some(content) = extract_qrc_lyric_content(text) else {
         return Vec::new();
     };
     provider_lines_to_lyrics(parse_qrc_content(&decode_xml_entities(&content)))
 }
 
-fn parse_qrc_content(text: &str) -> Vec<ProviderLyricLine> {
+pub(crate) fn parse_qrc_content(text: &str) -> Vec<ProviderLyricLine> {
     parse_timed_provider_lines(text, qrc_line_text)
 }
 
-fn parse_krc_text(text: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
     let mut language_tag = None;
     let mut original = Vec::new();
 
@@ -199,13 +201,13 @@ fn parse_krc_text(text: &str) -> Vec<LyricLine> {
     lyrics
 }
 
-fn parse_yrc_text(text: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_yrc_text(text: &str) -> Vec<LyricLine> {
     provider_lines_to_lyrics(parse_timed_provider_lines(text, |body| {
         tagged_line_text(body, '(', ')', 3)
     }))
 }
 
-fn parse_timed_provider_lines(
+pub(crate) fn parse_timed_provider_lines(
     text: &str,
     body_to_text: impl Fn(&str) -> String,
 ) -> Vec<ProviderLyricLine> {
@@ -218,7 +220,7 @@ fn parse_timed_provider_lines(
         .collect()
 }
 
-fn provider_lines_to_lyrics(mut lines: Vec<ProviderLyricLine>) -> Vec<LyricLine> {
+pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderLyricLine>) -> Vec<LyricLine> {
     lines.sort_by_key(|line| line.start_ms);
     let mut lyrics = lines
         .into_iter()
@@ -231,13 +233,13 @@ fn provider_lines_to_lyrics(mut lines: Vec<ProviderLyricLine>) -> Vec<LyricLine>
     lyrics
 }
 
-fn normalized_lyric_lines(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn normalized_lyric_lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines()
         .flat_map(|line| line.split('\r'))
         .map(|line| line.trim_start_matches('\u{feff}'))
 }
 
-fn split_provider_timed_line(line: &str) -> Option<(u64, u64, &str)> {
+pub(crate) fn split_provider_timed_line(line: &str) -> Option<(u64, u64, &str)> {
     let stripped = line.strip_prefix('[')?;
     let end = stripped.find(']')?;
     let (start, duration) = stripped[..end].split_once(',')?;
@@ -254,7 +256,7 @@ fn split_provider_timed_line(line: &str) -> Option<(u64, u64, &str)> {
     ))
 }
 
-fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
     let content = lrc_tag_content(line)?;
     let (key, value) = content.split_once(':')?;
     if key.chars().all(|ch| ch.is_ascii_alphabetic() || ch == '_') {
@@ -264,7 +266,7 @@ fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn extract_qrc_lyric_content(text: &str) -> Option<String> {
+pub(crate) fn extract_qrc_lyric_content(text: &str) -> Option<String> {
     // P3-3：正则只编译一次，批量解析歌词候选时避免每次重新编译。
     static QRC_CONTENT_PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let pattern = QRC_CONTENT_PATTERN.get_or_init(|| {
@@ -277,7 +279,7 @@ fn extract_qrc_lyric_content(text: &str) -> Option<String> {
         .map(|content| content.as_str().to_string())
 }
 
-fn qrc_line_text(body: &str) -> String {
+pub(crate) fn qrc_line_text(body: &str) -> String {
     let mut output = String::new();
     let mut cursor = 0;
     let mut matched = false;
@@ -306,7 +308,7 @@ fn qrc_line_text(body: &str) -> String {
     }
 }
 
-fn tagged_line_text(body: &str, open: char, close: char, tuple_len: usize) -> String {
+pub(crate) fn tagged_line_text(body: &str, open: char, close: char, tuple_len: usize) -> String {
     let markers = find_tuple_markers(body, open, close, tuple_len);
     if markers.is_empty() {
         return body.to_string();
@@ -325,7 +327,7 @@ fn tagged_line_text(body: &str, open: char, close: char, tuple_len: usize) -> St
     output
 }
 
-fn find_tuple_markers(
+pub(crate) fn find_tuple_markers(
     value: &str,
     open: char,
     close: char,
@@ -354,7 +356,7 @@ fn find_tuple_markers(
     markers
 }
 
-fn is_numeric_tuple(token: &str, expected_len: usize) -> bool {
+pub(crate) fn is_numeric_tuple(token: &str, expected_len: usize) -> bool {
     let parts = token.split(',').collect::<Vec<_>>();
     parts.len() == expected_len
         && parts
@@ -362,11 +364,16 @@ fn is_numeric_tuple(token: &str, expected_len: usize) -> bool {
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-fn contains_tuple_marker(value: &str, open: char, close: char, tuple_len: usize) -> bool {
+pub(crate) fn contains_tuple_marker(
+    value: &str,
+    open: char,
+    close: char,
+    tuple_len: usize,
+) -> bool {
     !find_tuple_markers(value, open, close, tuple_len).is_empty()
 }
 
-fn strip_provider_prefix_timestamp(value: &str) -> &str {
+pub(crate) fn strip_provider_prefix_timestamp(value: &str) -> &str {
     let trimmed = value.trim_start();
     let Some(stripped) = trimmed.strip_prefix('[') else {
         return value;
@@ -381,7 +388,7 @@ fn strip_provider_prefix_timestamp(value: &str) -> &str {
     }
 }
 
-fn parse_krc_translation_lines(
+pub(crate) fn parse_krc_translation_lines(
     language_tag: &str,
     original: &[ProviderLyricLine],
 ) -> Vec<LyricLine> {
@@ -422,7 +429,7 @@ fn parse_krc_translation_lines(
         .collect()
 }
 
-fn decode_xml_entities(value: &str) -> String {
+pub(crate) fn decode_xml_entities(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
 
@@ -448,7 +455,7 @@ fn decode_xml_entities(value: &str) -> String {
     output
 }
 
-fn decode_xml_entity(entity: &str) -> Option<char> {
+pub(crate) fn decode_xml_entity(entity: &str) -> Option<char> {
     match entity {
         "amp" => Some('&'),
         "lt" => Some('<'),
@@ -465,7 +472,7 @@ fn decode_xml_entity(entity: &str) -> Option<char> {
     }
 }
 
-fn decode_lyric_bytes(bytes: &[u8]) -> String {
+pub(crate) fn decode_lyric_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(&bytes[3..]).into_owned();
     }
@@ -510,15 +517,15 @@ fn decode_lyric_bytes(bytes: &[u8]) -> String {
     text.into_owned()
 }
 
-fn looks_like_utf16_le(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_utf16_le(bytes: &[u8]) -> bool {
     looks_like_utf16(bytes, 1)
 }
 
-fn looks_like_utf16_be(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_utf16_be(bytes: &[u8]) -> bool {
     looks_like_utf16(bytes, 0)
 }
 
-fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
+pub(crate) fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
     if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
         return false;
     }
@@ -532,7 +539,7 @@ fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
     zero_count * 100 / pairs >= 60
 }
 
-fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
+pub(crate) fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
     for tag in tags {
         for key in [ItemKey::Lyrics, ItemKey::UnsyncLyrics] {
             for value in tag.get_strings(key) {
@@ -547,7 +554,7 @@ fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
     Vec::new()
 }
 
-fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
+pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
     let normalized = text
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
@@ -608,7 +615,7 @@ fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
         .collect()
 }
 
-fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
+pub(crate) fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
     let mut rest = line.trim_start();
     let mut times = Vec::new();
 
@@ -628,7 +635,7 @@ fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
     (times, rest)
 }
 
-fn parse_lrc_offset(line: &str) -> Option<i64> {
+pub(crate) fn parse_lrc_offset(line: &str) -> Option<i64> {
     let content = lrc_tag_content(line)?;
     let (key, value) = content.split_once(':')?;
     if !key.trim().eq_ignore_ascii_case("offset") {
@@ -638,7 +645,7 @@ fn parse_lrc_offset(line: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok()
 }
 
-fn parse_lrc_time_token(token: &str) -> Option<f64> {
+pub(crate) fn parse_lrc_time_token(token: &str) -> Option<f64> {
     let token = token.trim();
     if token.is_empty() {
         return None;
@@ -668,7 +675,7 @@ fn parse_lrc_time_token(token: &str) -> Option<f64> {
     Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds)
 }
 
-fn parse_millisecond_lrc_token(token: &str) -> Option<f64> {
+pub(crate) fn parse_millisecond_lrc_token(token: &str) -> Option<f64> {
     let (start_ms, _) = token.split_once(',')?;
     if start_ms.is_empty() || !start_ms.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
@@ -677,7 +684,7 @@ fn parse_millisecond_lrc_token(token: &str) -> Option<f64> {
     Some(start_ms.parse::<u64>().ok()? as f64 / 1000.0)
 }
 
-fn is_lrc_metadata_line(line: &str) -> bool {
+pub(crate) fn is_lrc_metadata_line(line: &str) -> bool {
     let Some(content) = lrc_tag_content(line) else {
         return false;
     };
@@ -691,7 +698,7 @@ fn is_lrc_metadata_line(line: &str) -> bool {
     )
 }
 
-fn clean_lyric_text(value: &str) -> Option<String> {
+pub(crate) fn clean_lyric_text(value: &str) -> Option<String> {
     let text = strip_inline_time_tags(value)
         .replace(['\u{3000}', '\t'], " ")
         .replace("<br>", " ")
@@ -711,14 +718,14 @@ fn clean_lyric_text(value: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn lrc_tag_content(line: &str) -> Option<&str> {
+pub(crate) fn lrc_tag_content(line: &str) -> Option<&str> {
     line.trim()
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .map(str::trim)
 }
 
-fn strip_inline_time_tags(value: &str) -> String {
+pub(crate) fn strip_inline_time_tags(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
 
@@ -747,7 +754,7 @@ fn strip_inline_time_tags(value: &str) -> String {
     output
 }
 
-fn find_next_time_tag_open(value: &str) -> Option<(usize, char, char)> {
+pub(crate) fn find_next_time_tag_open(value: &str) -> Option<(usize, char, char)> {
     match (value.find('['), value.find('<')) {
         (Some(square), Some(angle)) if square <= angle => Some((square, '[', ']')),
         (Some(_), Some(angle)) => Some((angle, '<', '>')),

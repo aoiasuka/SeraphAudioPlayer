@@ -1,4 +1,6 @@
-fn extract_bvid(input: &str) -> Option<String> {
+use super::prelude::*;
+
+pub(crate) fn extract_bvid(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
@@ -15,7 +17,7 @@ fn extract_bvid(input: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-fn extract_media_id(input: &str) -> Option<String> {
+pub(crate) fn extract_media_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.chars().all(|ch| ch.is_ascii_digit()) && !trimmed.is_empty() {
         return Some(trimmed.to_string());
@@ -40,7 +42,7 @@ fn extract_media_id(input: &str) -> Option<String> {
     None
 }
 
-fn query_value(input: &str, key: &str) -> Option<String> {
+pub(crate) fn query_value(input: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=");
     let start = input.find(&marker)? + marker.len();
     let value = input[start..].split(['&', '#', '?', '/']).next()?.trim();
@@ -51,7 +53,7 @@ fn query_value(input: &str, key: &str) -> Option<String> {
     }
 }
 
-fn normalize_url(value: &str) -> String {
+pub(crate) fn normalize_url(value: &str) -> String {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix("//") {
         format!("https://{rest}")
@@ -62,7 +64,7 @@ fn normalize_url(value: &str) -> String {
     }
 }
 
-fn sanitize_file_component(value: &str) -> String {
+pub(crate) fn sanitize_file_component(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|ch| match ch {
@@ -79,7 +81,7 @@ fn sanitize_file_component(value: &str) -> String {
     }
 }
 
-fn format_from_codec(codec: &str) -> &'static str {
+pub(crate) fn format_from_codec(codec: &str) -> &'static str {
     let codec = codec.to_ascii_lowercase();
     if codec.contains("flac") {
         "FLAC"
@@ -94,7 +96,7 @@ fn format_from_codec(codec: &str) -> &'static str {
     }
 }
 
-fn format_bilibili_quality(
+pub(crate) fn format_bilibili_quality(
     format: &str,
     bitrate: Option<u32>,
     kind: &AudioKind,
@@ -119,19 +121,19 @@ fn format_bilibili_quality(
     }
 }
 
-fn format_bitrate(bitrate: Option<u32>) -> String {
+pub(crate) fn format_bitrate(bitrate: Option<u32>) -> String {
     match bitrate {
         Some(value) if value > 0 => format!("{value} kbps"),
         _ => "Unknown".into(),
     }
 }
 
-fn format_file_size(bytes: u64) -> String {
+pub(crate) fn format_file_size(bytes: u64) -> String {
     let mb = bytes as f64 / 1024.0 / 1024.0;
     format!("{mb:.1} MB")
 }
 
-fn color_pair(hash: u64) -> (String, String) {
+pub(crate) fn color_pair(hash: u64) -> (String, String) {
     const PAIRS: [(&str, &str); 6] = [
         ("#67e8f9", "#a5b4fc"),
         ("#7dd3fc", "#f0abfc"),
@@ -144,7 +146,7 @@ fn color_pair(hash: u64) -> (String, String) {
     (pair.0.into(), pair.1.into())
 }
 
-fn find_ffmpeg(app: &AppHandle) -> Option<PathBuf> {
+pub(crate) fn find_ffmpeg(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(app_dir) = app.path().app_data_dir() {
         seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
     }
@@ -152,7 +154,7 @@ fn find_ffmpeg(app: &AppHandle) -> Option<PathBuf> {
     seraph_decoder::find_ffmpeg()
 }
 
-fn login_poll_message(code: i32) -> String {
+pub(crate) fn login_poll_message(code: i32) -> String {
     match code {
         86101 => "等待扫码".into(),
         86090 => "已扫码，等待手机确认".into(),
@@ -162,7 +164,7 @@ fn login_poll_message(code: i32) -> String {
 }
 
 impl<T> ApiResponse<T> {
-    fn into_data(self, label: &str) -> Result<T, String> {
+    pub(crate) fn into_data(self, label: &str) -> Result<T, String> {
         if self.code != 0 {
             return Err(format!(
                 "{label} request failed: {}",

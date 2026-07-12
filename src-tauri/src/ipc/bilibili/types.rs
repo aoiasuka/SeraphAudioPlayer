@@ -1,52 +1,54 @@
+use super::prelude::*;
+
 #[derive(Debug, Deserialize)]
-struct ApiResponse<T> {
-    code: i32,
+pub(crate) struct ApiResponse<T> {
+    pub(crate) code: i32,
     #[serde(alias = "msg")]
-    message: Option<String>,
-    data: Option<T>,
+    pub(crate) message: Option<String>,
+    pub(crate) data: Option<T>,
 }
 
 #[derive(Debug, Deserialize)]
-struct VideoData {
-    bvid: String,
-    title: String,
-    cid: i64,
-    duration: u64,
-    pic: Option<String>,
-    owner: OwnerData,
+pub(crate) struct VideoData {
+    pub(crate) bvid: String,
+    pub(crate) title: String,
+    pub(crate) cid: i64,
+    pub(crate) duration: u64,
+    pub(crate) pic: Option<String>,
+    pub(crate) owner: OwnerData,
 }
 
 #[derive(Debug, Deserialize)]
-struct OwnerData {
-    name: String,
+pub(crate) struct OwnerData {
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct PlayUrlData {
-    dash: Option<DashData>,
+pub(crate) struct PlayUrlData {
+    pub(crate) dash: Option<DashData>,
 }
 
 #[derive(Debug, Deserialize)]
-struct DashData {
-    audio: Option<Vec<Value>>,
-    flac: Option<FlacData>,
-    dolby: Option<DolbyData>,
+pub(crate) struct DashData {
+    pub(crate) audio: Option<Vec<Value>>,
+    pub(crate) flac: Option<FlacData>,
+    pub(crate) dolby: Option<DolbyData>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FlacData {
-    audio: Option<Value>,
+pub(crate) struct FlacData {
+    pub(crate) audio: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
-struct DolbyData {
-    audio: Option<Vec<Value>>,
+pub(crate) struct DolbyData {
+    pub(crate) audio: Option<Vec<Value>>,
     #[serde(rename = "type")]
-    kind: Option<u32>,
+    pub(crate) kind: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
-enum AudioKind {
+pub(crate) enum AudioKind {
     DolbyAtmos,
     Flac,
     Dolby,
@@ -54,148 +56,148 @@ enum AudioKind {
 }
 
 #[derive(Debug, Clone)]
-struct AudioStream {
-    base_url: String,
-    backup_urls: Vec<String>,
-    bandwidth: Option<u32>,
-    codecs: Option<String>,
-    kind: AudioKind,
+pub(crate) struct AudioStream {
+    pub(crate) base_url: String,
+    pub(crate) backup_urls: Vec<String>,
+    pub(crate) bandwidth: Option<u32>,
+    pub(crate) codecs: Option<String>,
+    pub(crate) kind: AudioKind,
 }
 
-struct ResolvedAudio {
-    video: VideoData,
-    stream: AudioStream,
+pub(crate) struct ResolvedAudio {
+    pub(crate) video: VideoData,
+    pub(crate) stream: AudioStream,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliImportOptions {
-    prefer_flac: Option<bool>,
-    prefer_dolby_atmos: Option<bool>,
-    remux_with_ffmpeg: Option<bool>,
+    pub(crate) prefer_flac: Option<bool>,
+    pub(crate) prefer_dolby_atmos: Option<bool>,
+    pub(crate) remux_with_ffmpeg: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliLoginQrCode {
-    url: String,
-    qrcode_key: String,
+    pub(crate) url: String,
+    pub(crate) qrcode_key: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliLoginPollResult {
-    code: i32,
-    message: String,
-    url: Option<String>,
-    logged_in: bool,
-    profile: Option<BilibiliLoginStatus>,
+    pub(crate) code: i32,
+    pub(crate) message: String,
+    pub(crate) url: Option<String>,
+    pub(crate) logged_in: bool,
+    pub(crate) profile: Option<BilibiliLoginStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliLoginStatus {
-    logged_in: bool,
-    username: Option<String>,
-    mid: Option<u64>,
-    face: Option<String>,
+    pub(crate) logged_in: bool,
+    pub(crate) username: Option<String>,
+    pub(crate) mid: Option<u64>,
+    pub(crate) face: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliFfmpegStatus {
-    available: bool,
-    path: Option<String>,
+    pub(crate) available: bool,
+    pub(crate) path: Option<String>,
 }
 
 /// ffmpeg 下载/安装进度，通过 [`FFMPEG_DOWNLOAD_EVENT`] 推送给前端。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FfmpegDownloadProgress {
+pub(crate) struct FfmpegDownloadProgress {
     /// "download" | "extract" | "done" | "error"
-    stage: &'static str,
-    downloaded: u64,
-    total: u64,
+    pub(crate) stage: &'static str,
+    pub(crate) downloaded: u64,
+    pub(crate) total: u64,
     /// 0.0 - 100.0；total 未知时为 -1。
-    percent: f64,
-    message: Option<String>,
+    pub(crate) percent: f64,
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliBatchImportResult {
-    tracks: Vec<ImportedTrack>,
-    failed: Vec<BilibiliImportFailure>,
+    pub(crate) tracks: Vec<ImportedTrack>,
+    pub(crate) failed: Vec<BilibiliImportFailure>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliImportFailure {
-    input: String,
-    reason: String,
+    pub(crate) input: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct QrGenerateData {
-    url: String,
+pub(crate) struct QrGenerateData {
+    pub(crate) url: String,
     #[serde(rename = "qrcode_key")]
-    qrcode_key: String,
+    pub(crate) qrcode_key: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct QrPollData {
-    code: i32,
-    message: Option<String>,
-    url: Option<String>,
+pub(crate) struct QrPollData {
+    pub(crate) code: i32,
+    pub(crate) message: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct NavData {
+pub(crate) struct NavData {
     #[serde(rename = "isLogin")]
-    is_login: bool,
-    uname: Option<String>,
-    mid: Option<u64>,
-    face: Option<String>,
+    pub(crate) is_login: bool,
+    pub(crate) uname: Option<String>,
+    pub(crate) mid: Option<u64>,
+    pub(crate) face: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct BilibiliSession {
+pub(crate) struct BilibiliSession {
     #[serde(default)]
-    cookies: BTreeMap<String, String>,
+    pub(crate) cookies: BTreeMap<String, String>,
     #[serde(default)]
     /// Set-Cookie 解析出的过期时间（Unix 秒）。
     /// 没有 expires/max-age 信息的 cookie 不会出现在这个映射里——按 session cookie 处理（永远不过期）。
-    cookie_expires: BTreeMap<String, u64>,
+    pub(crate) cookie_expires: BTreeMap<String, u64>,
     #[serde(default)]
-    has_secure_cookies: bool,
-    saved_at: u64,
-    username: Option<String>,
-    mid: Option<u64>,
-    face: Option<String>,
+    pub(crate) has_secure_cookies: bool,
+    pub(crate) saved_at: u64,
+    pub(crate) username: Option<String>,
+    pub(crate) mid: Option<u64>,
+    pub(crate) face: Option<String>,
 }
 
 #[derive(Serialize)]
-struct BilibiliSessionFile<'a> {
-    saved_at: u64,
-    username: &'a Option<String>,
-    mid: Option<u64>,
-    face: &'a Option<String>,
-    has_secure_cookies: bool,
+pub(crate) struct BilibiliSessionFile<'a> {
+    pub(crate) saved_at: u64,
+    pub(crate) username: &'a Option<String>,
+    pub(crate) mid: Option<u64>,
+    pub(crate) face: &'a Option<String>,
+    pub(crate) has_secure_cookies: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cookies: Option<&'a BTreeMap<String, String>>,
-    // L-11：持久化 cookie 过期时间，重启后不再把已过期 cookie 当永不过期的 session cookie。
-    cookie_expires: &'a BTreeMap<String, u64>,
+    pub(crate) cookies: Option<&'a BTreeMap<String, String>>,
+    // L-11:持久化 cookie 过期时间，重启后不再把已过期 cookie 当永不过期的 session cookie。
+    pub(crate) cookie_expires: &'a BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FavListData {
-    medias: Option<Vec<FavMedia>>,
+pub(crate) struct FavListData {
+    pub(crate) medias: Option<Vec<FavMedia>>,
     #[serde(default)]
-    has_more: bool,
+    pub(crate) has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct FavMedia {
-    bvid: Option<String>,
-    title: Option<String>,
+pub(crate) struct FavMedia {
+    pub(crate) bvid: Option<String>,
+    pub(crate) title: Option<String>,
 }

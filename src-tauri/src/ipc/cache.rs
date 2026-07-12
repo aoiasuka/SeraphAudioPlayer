@@ -132,7 +132,7 @@ pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
     })
 }
 
-pub(super) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let settings = load_cache_settings(app)?;
     let path = PathBuf::from(settings.cache_dir);
     ensure_cache_dir(&path)?;
@@ -148,7 +148,7 @@ pub(super) fn enforce_cache_limit(app: &AppHandle) -> Result<CacheCleanupResult,
 /// 审2-S3：多路径 preserve 版本——收藏夹批量导入整批结束后统一清理一次，
 /// preserve 本批全部成功导入的文件，避免逐首清理把同批先导入的文件删掉。
 /// 单曲导入也走这里（传单元素切片）。
-pub(super) fn enforce_cache_limit_preserving_many(
+pub(crate) fn enforce_cache_limit_preserving_many(
     app: &AppHandle,
     preserve: &[PathBuf],
 ) -> Result<CacheCleanupResult, String> {
@@ -338,7 +338,7 @@ fn save_cache_settings(app: &AppHandle, settings: &CacheSettings) -> Result<(), 
 /// 审2-S4：生成唯一临时文件名（时间纳秒 + 进程内计数器），供 temp+rename
 /// 原子写使用；并发写同一目标时各自持有独立临时文件，互不交错/截断。
 /// 与 bilibili 下载临时名（temp_download_path）的唯一化模式一致。
-pub(super) fn unique_temp_path(path: &Path) -> PathBuf {
+pub(crate) fn unique_temp_path(path: &Path) -> PathBuf {
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let file_name = path
         .file_name()

@@ -1,4 +1,6 @@
-fn parse_filename_metadata(stem: &str) -> FilenameMetadata {
+use super::prelude::*;
+
+pub(crate) fn parse_filename_metadata(stem: &str) -> FilenameMetadata {
     let normalized = strip_track_number_prefix(stem);
     let parts: Vec<String> = normalized
         .split(" - ")
@@ -29,7 +31,7 @@ fn parse_filename_metadata(stem: &str) -> FilenameMetadata {
     }
 }
 
-fn strip_track_number_prefix(value: &str) -> &str {
+pub(crate) fn strip_track_number_prefix(value: &str) -> &str {
     let trimmed = value.trim();
     let digit_end = trimmed
         .char_indices()
@@ -51,7 +53,7 @@ fn strip_track_number_prefix(value: &str) -> &str {
     trimmed
 }
 
-fn clean_metadata_text(value: &str) -> Option<String> {
+pub(crate) fn clean_metadata_text(value: &str) -> Option<String> {
     let text = value
         .trim_matches('\0')
         .split_whitespace()
@@ -61,7 +63,11 @@ fn clean_metadata_text(value: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn format_audio_quality(format: &str, bit_depth: Option<u8>, sample_rate: Option<u32>) -> String {
+pub(crate) fn format_audio_quality(
+    format: &str,
+    bit_depth: Option<u8>,
+    sample_rate: Option<u32>,
+) -> String {
     let mut label = match bit_depth {
         Some(bits) if bits > 0 => format!("{format} {bits}-bit"),
         _ => format!("{format} Local"),
@@ -78,7 +84,7 @@ fn format_audio_quality(format: &str, bit_depth: Option<u8>, sample_rate: Option
     label
 }
 
-fn format_sample_rate(format: &str, sample_rate: Option<u32>) -> String {
+pub(crate) fn format_sample_rate(format: &str, sample_rate: Option<u32>) -> String {
     match sample_rate.and_then(sample_rate_label) {
         Some(mut label) => {
             if is_dsd_format(format) {
@@ -90,7 +96,7 @@ fn format_sample_rate(format: &str, sample_rate: Option<u32>) -> String {
     }
 }
 
-fn sample_rate_label(sample_rate: u32) -> Option<String> {
+pub(crate) fn sample_rate_label(sample_rate: u32) -> Option<String> {
     if sample_rate == 0 {
         return None;
     }
@@ -113,14 +119,14 @@ fn sample_rate_label(sample_rate: u32) -> Option<String> {
     Some(format!("{sample_rate} Hz"))
 }
 
-fn format_bitrate(bitrate: Option<u32>) -> String {
+pub(crate) fn format_bitrate(bitrate: Option<u32>) -> String {
     match bitrate {
         Some(value) if value > 0 => format!("{value} kbps"),
         _ => "Unknown".into(),
     }
 }
 
-fn format_channels(channels: Option<u8>) -> String {
+pub(crate) fn format_channels(channels: Option<u8>) -> String {
     match channels {
         Some(1) => "Mono".into(),
         Some(2) => "Stereo".into(),
@@ -131,12 +137,12 @@ fn format_channels(channels: Option<u8>) -> String {
     }
 }
 
-fn format_file_size(bytes: u64) -> String {
+pub(crate) fn format_file_size(bytes: u64) -> String {
     let mb = bytes as f64 / 1024.0 / 1024.0;
     format!("{mb:.1} MB")
 }
 
-fn color_pair(hash: u64) -> (String, String) {
+pub(crate) fn color_pair(hash: u64) -> (String, String) {
     const PAIRS: [(&str, &str); 6] = [
         ("#67e8f9", "#a5b4fc"),
         ("#7dd3fc", "#f0abfc"),

@@ -1,3 +1,5 @@
+use super::prelude::*;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutputDeviceInfo {
     pub id: String,
@@ -66,36 +68,36 @@ pub struct OnlineLyricsCandidate {
 }
 
 #[derive(Debug, Clone)]
-struct ProviderLyricLine {
-    start_ms: u64,
-    text: String,
+pub(crate) struct ProviderLyricLine {
+    pub(crate) start_ms: u64,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Default)]
-struct ParsedAudioMetadata {
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    album_year: Option<String>,
-    duration: Option<u64>,
-    bitrate: Option<u32>,
-    sample_rate: Option<u32>,
-    bit_depth: Option<u8>,
-    channels: Option<u8>,
-    lyrics: Vec<LyricLine>,
-    cover: Option<CoverArt>,
+pub(crate) struct ParsedAudioMetadata {
+    pub(crate) title: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) album: Option<String>,
+    pub(crate) album_year: Option<String>,
+    pub(crate) duration: Option<u64>,
+    pub(crate) bitrate: Option<u32>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) bit_depth: Option<u8>,
+    pub(crate) channels: Option<u8>,
+    pub(crate) lyrics: Vec<LyricLine>,
+    pub(crate) cover: Option<CoverArt>,
 }
 
 /// 内嵌封面原始图片数据 + 由 MIME/魔数推断出的扩展名（落盘 covers 目录时用）
 #[derive(Debug)]
-struct CoverArt {
-    data: Vec<u8>,
-    ext: &'static str,
+pub(crate) struct CoverArt {
+    pub(crate) data: Vec<u8>,
+    pub(crate) ext: &'static str,
 }
 
 #[derive(Debug, Default)]
-struct FilenameMetadata {
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
+pub(crate) struct FilenameMetadata {
+    pub(crate) title: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) album: Option<String>,
 }

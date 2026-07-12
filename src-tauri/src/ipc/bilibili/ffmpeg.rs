@@ -1,11 +1,13 @@
+use super::prelude::*;
+
 /// 审2-S5：ffmpeg 下载进行中标记。download_ffmpeg 命令可被前端重复触发，
 /// 并发下载会互相覆盖/截断落盘文件，这里全局串行化为同时最多一个任务。
-static FFMPEG_DOWNLOAD_IN_FLIGHT: std::sync::atomic::AtomicBool =
+pub(crate) static FFMPEG_DOWNLOAD_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 审2-S5：下载占位 guard——Drop 时复位标记，确保任何返回路径
 /// （成功 / 失败 / panic 展开）都能释放，不会把标记卡死在 true。
-struct FfmpegDownloadSlot;
+pub(crate) struct FfmpegDownloadSlot;
 
 impl Drop for FfmpegDownloadSlot {
     fn drop(&mut self) {
@@ -14,7 +16,7 @@ impl Drop for FfmpegDownloadSlot {
 }
 
 /// 审2-S5：compare_exchange(false→true) 抢占下载权，已有任务在跑则直接报错。
-fn acquire_ffmpeg_download_slot() -> Result<FfmpegDownloadSlot, String> {
+pub(crate) fn acquire_ffmpeg_download_slot() -> Result<FfmpegDownloadSlot, String> {
     if FFMPEG_DOWNLOAD_IN_FLIGHT
         .compare_exchange(
             false,
@@ -30,12 +32,14 @@ fn acquire_ffmpeg_download_slot() -> Result<FfmpegDownloadSlot, String> {
 }
 
 #[cfg(not(windows))]
-async fn download_ffmpeg_inner(_app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+pub(crate) async fn download_ffmpeg_inner(
+    _app: &AppHandle,
+) -> Result<BilibiliFfmpegStatus, String> {
     Err("自动下载暂仅支持 Windows，请手动安装 ffmpeg 并加入 PATH".into())
 }
 
 #[cfg(windows)]
-async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfmpegStatus, String> {
     let ffmpeg_dir = app
         .path()
         .app_data_dir()
@@ -95,13 +99,13 @@ async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfmpegStatus, 
     ))
 }
 
-fn emit_ffmpeg_progress(app: &AppHandle, progress: FfmpegDownloadProgress) {
+pub(crate) fn emit_ffmpeg_progress(app: &AppHandle, progress: FfmpegDownloadProgress) {
     use tauri::Emitter as _;
     let _ = app.emit(FFMPEG_DOWNLOAD_EVENT, progress);
 }
 
 #[cfg(windows)]
-fn ffmpeg_download_client() -> Result<Client, String> {
+pub(crate) fn ffmpeg_download_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .user_agent(USER_AGENT_VALUE)
@@ -113,7 +117,7 @@ fn ffmpeg_download_client() -> Result<Client, String> {
 /// 审2-S5：先写唯一临时名，完整落盘后 rename 到目标，失败路径清掉临时文件；
 /// 防止下载中断 / 并发写残留半截 zip 被后续解压流程误用。
 #[cfg(windows)]
-async fn download_to_file(
+pub(crate) async fn download_to_file(
     client: &Client,
     url: &str,
     dest: &Path,
@@ -131,7 +135,7 @@ async fn download_to_file(
 }
 
 #[cfg(windows)]
-async fn download_to_temp_file(
+pub(crate) async fn download_to_temp_file(
     client: &Client,
     url: &str,
     dest: &Path,
@@ -189,7 +193,7 @@ async fn download_to_temp_file(
 
 /// 从 zip 包中提取 ffmpeg.exe 与 ffprobe.exe 到目标目录（忽略包内层级）。
 #[cfg(windows)]
-fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+pub(crate) fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
     let file = fs::File::open(archive_path).map_err(|err| format!("无法打开压缩包: {err}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
 

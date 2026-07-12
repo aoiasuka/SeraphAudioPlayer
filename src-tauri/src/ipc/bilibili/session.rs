@@ -1,9 +1,11 @@
-fn bilibili_client_for_app(app: &AppHandle) -> Result<Client, String> {
+use super::prelude::*;
+
+pub(crate) fn bilibili_client_for_app(app: &AppHandle) -> Result<Client, String> {
     let cookie = load_session(app)?.and_then(|session| session.cookie_header());
     bilibili_client_with_cookie(cookie.as_deref())
 }
 
-fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client, String> {
+pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(30))
         .no_gzip()
@@ -17,7 +19,7 @@ fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client, String> {
 
 /// P1-1：音频下载专用 client。不设总超时（`Client::timeout` 是连接到 body
 /// 读完的整体上限，大文件必然超时），只用连接超时 + 两次读之间的空闲超时。
-fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
+pub(crate) fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
     let cookie = load_session(app)?.and_then(|session| session.cookie_header());
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -31,7 +33,7 @@ fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
         .map_err(|err| format!("failed to create download http client: {err}"))
 }
 
-fn bilibili_headers(cookie: Option<&str>) -> Result<HeaderMap, String> {
+pub(crate) fn bilibili_headers(cookie: Option<&str>) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, header_value(USER_AGENT_VALUE)?);
     headers.insert(REFERER, header_value(BILIBILI_REFERER)?);
@@ -48,11 +50,11 @@ fn bilibili_headers(cookie: Option<&str>) -> Result<HeaderMap, String> {
     Ok(headers)
 }
 
-fn header_value(value: &str) -> Result<HeaderValue, String> {
+pub(crate) fn header_value(value: &str) -> Result<HeaderValue, String> {
     HeaderValue::from_str(value).map_err(|err| format!("invalid http header: {err}"))
 }
 
-fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -60,7 +62,7 @@ fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("bilibili-session.json"))
 }
 
-fn load_session(app: &AppHandle) -> Result<Option<BilibiliSession>, String> {
+pub(crate) fn load_session(app: &AppHandle) -> Result<Option<BilibiliSession>, String> {
     let path = session_path(app)?;
     if !path.is_file() {
         return Ok(None);
@@ -95,7 +97,7 @@ fn load_session(app: &AppHandle) -> Result<Option<BilibiliSession>, String> {
     Ok(Some(session))
 }
 
-fn save_session(app: &AppHandle, session: &BilibiliSession) -> Result<(), String> {
+pub(crate) fn save_session(app: &AppHandle, session: &BilibiliSession) -> Result<(), String> {
     if !session.cookies.is_empty() {
         save_secure_bilibili_cookies(&session.cookies)?;
     }
@@ -106,9 +108,9 @@ fn save_session(app: &AppHandle, session: &BilibiliSession) -> Result<(), String
 /// bilibili_login_status 可能并发触发写（save_session / load_session 的
 /// 旧文件迁移路径都汇聚到 write_session_file），持锁串行化整个
 /// “序列化 → 临时文件 → rename → 收权限”序列。
-static SESSION_FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static SESSION_FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-fn write_session_file(
+pub(crate) fn write_session_file(
     app: &AppHandle,
     session: &BilibiliSession,
     include_cookies: bool,
@@ -148,10 +150,10 @@ fn write_session_file(
     Ok(())
 }
 
-const BILIBILI_CREDENTIAL_TARGET: &str = "SeraphAudioPlayer/BilibiliSession";
-const BILIBILI_CREDENTIAL_USER: &str = "bilibili";
+pub(crate) const BILIBILI_CREDENTIAL_TARGET: &str = "SeraphAudioPlayer/BilibiliSession";
+pub(crate) const BILIBILI_CREDENTIAL_USER: &str = "bilibili";
 
-fn load_secure_bilibili_cookies() -> Result<Option<BTreeMap<String, String>>, String> {
+pub(crate) fn load_secure_bilibili_cookies() -> Result<Option<BTreeMap<String, String>>, String> {
     let Some(bytes) = windows_read_credential(BILIBILI_CREDENTIAL_TARGET)? else {
         return Ok(None);
     };
@@ -160,7 +162,9 @@ fn load_secure_bilibili_cookies() -> Result<Option<BTreeMap<String, String>>, St
     Ok(Some(cookies))
 }
 
-fn save_secure_bilibili_cookies(cookies: &BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn save_secure_bilibili_cookies(
+    cookies: &BTreeMap<String, String>,
+) -> Result<(), String> {
     if cookies.is_empty() {
         return delete_secure_bilibili_cookies();
     }
@@ -169,12 +173,12 @@ fn save_secure_bilibili_cookies(cookies: &BTreeMap<String, String>) -> Result<()
     windows_write_credential(BILIBILI_CREDENTIAL_TARGET, BILIBILI_CREDENTIAL_USER, &bytes)
 }
 
-fn delete_secure_bilibili_cookies() -> Result<(), String> {
+pub(crate) fn delete_secure_bilibili_cookies() -> Result<(), String> {
     windows_delete_credential(BILIBILI_CREDENTIAL_TARGET)
 }
 
 #[cfg(windows)]
-fn windows_read_credential(target: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn windows_read_credential(target: &str) -> Result<Option<Vec<u8>>, String> {
     use std::{ptr, slice};
     use windows_sys::Win32::{
         Foundation::{GetLastError, ERROR_NOT_FOUND},
@@ -206,12 +210,16 @@ fn windows_read_credential(target: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 #[cfg(not(windows))]
-fn windows_read_credential(_target: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn windows_read_credential(_target: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(None)
 }
 
 #[cfg(windows)]
-fn windows_write_credential(target: &str, user: &str, secret: &[u8]) -> Result<(), String> {
+pub(crate) fn windows_write_credential(
+    target: &str,
+    user: &str,
+    secret: &[u8],
+) -> Result<(), String> {
     use windows_sys::Win32::{
         Foundation::GetLastError,
         Security::Credentials::{
@@ -241,12 +249,16 @@ fn windows_write_credential(target: &str, user: &str, secret: &[u8]) -> Result<(
 }
 
 #[cfg(not(windows))]
-fn windows_write_credential(_target: &str, _user: &str, _secret: &[u8]) -> Result<(), String> {
+pub(crate) fn windows_write_credential(
+    _target: &str,
+    _user: &str,
+    _secret: &[u8],
+) -> Result<(), String> {
     Err("secure credential storage is only implemented on Windows".into())
 }
 
 #[cfg(windows)]
-fn windows_delete_credential(target: &str) -> Result<(), String> {
+pub(crate) fn windows_delete_credential(target: &str) -> Result<(), String> {
     use windows_sys::Win32::{
         Foundation::{GetLastError, ERROR_NOT_FOUND},
         Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC},
@@ -264,16 +276,16 @@ fn windows_delete_credential(target: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn windows_delete_credential(_target: &str) -> Result<(), String> {
+pub(crate) fn windows_delete_credential(_target: &str) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn wide_null(value: &str) -> Vec<u16> {
+pub(crate) fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
+pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|err| {
@@ -327,7 +339,7 @@ fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn merge_set_cookie_headers(
+pub(crate) fn merge_set_cookie_headers(
     headers: &HeaderMap,
     cookies: &mut BTreeMap<String, String>,
     expires: &mut BTreeMap<String, u64>,
@@ -399,7 +411,7 @@ fn merge_set_cookie_headers(
 
 /// 解析 RFC 7231 IMF-fixdate / RFC 850 / asctime 三种 HTTP 日期为 Unix 秒。
 /// 这里仅做最小可用实现（IMF-fixdate 走 chrono-free 手解析）。失败返回 None。
-fn parse_http_date_to_unix(text: &str) -> Option<u64> {
+pub(crate) fn parse_http_date_to_unix(text: &str) -> Option<u64> {
     // 例：Sun, 06 Nov 1994 08:49:37 GMT
     let mut iter = text.split_whitespace();
     let _weekday = iter.next()?;
@@ -433,7 +445,7 @@ fn parse_http_date_to_unix(text: &str) -> Option<u64> {
     Some(secs)
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())

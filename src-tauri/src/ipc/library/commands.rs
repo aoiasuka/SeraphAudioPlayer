@@ -1,3 +1,5 @@
+use super::prelude::*;
+
 #[tauri::command]
 pub async fn get_playlist(app: AppHandle) -> Result<Vec<ImportedTrack>, String> {
     // 封面补扫含 lofty 标签解析（阻塞 IO），与读缓存一并放 spawn_blocking，
@@ -51,7 +53,10 @@ pub fn list_devices() -> Result<Vec<OutputDeviceInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> Result<Vec<ImportedTrack>, String> {
+pub async fn import_tracks(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<ImportedTrack>, String> {
     // L-18：文件遍历 + lofty 解析 + 可能的 ffprobe 子进程都是阻塞 IO，
     // 放到 spawn_blocking，避免占用 Tauri 命令调度线程、阻塞其它 IPC（含播放控制）。
     tauri::async_runtime::spawn_blocking(move || {

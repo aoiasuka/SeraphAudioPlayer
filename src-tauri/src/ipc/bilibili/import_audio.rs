@@ -1,4 +1,6 @@
-async fn import_bilibili_audio_inner(
+use super::prelude::*;
+
+pub(crate) async fn import_bilibili_audio_inner(
     app: &AppHandle,
     client: &Client,
     input: &str,
@@ -73,7 +75,7 @@ async fn import_bilibili_audio_inner(
 }
 
 /// P0-1：仅允许 B 站官方域名，防止把请求（尤其是登录 Cookie）发往任意用户输入的 URL。
-fn is_bilibili_host(url: &reqwest::Url) -> bool {
+pub(crate) fn is_bilibili_host(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("b23.tv")
             || host.eq_ignore_ascii_case("acg.tv")
@@ -85,7 +87,7 @@ fn is_bilibili_host(url: &reqwest::Url) -> bool {
     })
 }
 
-async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
+pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
     if let Some(bvid) = extract_bvid(input) {
         return Ok(bvid);
     }
@@ -124,7 +126,7 @@ async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
     extract_bvid(&body_str).ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
 }
 
-async fn resolve_audio(
+pub(crate) async fn resolve_audio(
     client: &Client,
     bvid: &str,
     options: &BilibiliImportOptions,
@@ -136,7 +138,7 @@ async fn resolve_audio(
     Ok(ResolvedAudio { video, stream })
 }
 
-async fn fetch_video_data(client: &Client, bvid: &str) -> Result<VideoData, String> {
+pub(crate) async fn fetch_video_data(client: &Client, bvid: &str) -> Result<VideoData, String> {
     let response = client
         .get(VIEW_API)
         .query(&[("bvid", bvid)])
@@ -151,7 +153,7 @@ async fn fetch_video_data(client: &Client, bvid: &str) -> Result<VideoData, Stri
     api.into_data("bilibili video info")
 }
 
-async fn fetch_audio_stream(
+pub(crate) async fn fetch_audio_stream(
     client: &Client,
     bvid: &str,
     cid: i64,
@@ -190,7 +192,7 @@ async fn fetch_audio_stream(
     )
 }
 
-fn select_audio_stream(
+pub(crate) fn select_audio_stream(
     dash: DashData,
     prefer_flac: bool,
     prefer_dolby_atmos: bool,
@@ -241,7 +243,7 @@ fn select_audio_stream(
         })
 }
 
-fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> AudioKind {
+pub(crate) fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> AudioKind {
     if is_dolby_atmos_stream(value, container_kind) {
         AudioKind::DolbyAtmos
     } else {
@@ -249,7 +251,7 @@ fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> AudioKind {
     }
 }
 
-fn is_dolby_atmos_stream(value: &Value, container_kind: Option<u32>) -> bool {
+pub(crate) fn is_dolby_atmos_stream(value: &Value, container_kind: Option<u32>) -> bool {
     if container_kind.is_some_and(|kind| kind > 0) {
         return true;
     }
@@ -289,7 +291,7 @@ fn is_dolby_atmos_stream(value: &Value, container_kind: Option<u32>) -> bool {
         || haystack.contains("全景声")
 }
 
-fn audio_stream_from_value(value: Value, kind: AudioKind) -> Option<AudioStream> {
+pub(crate) fn audio_stream_from_value(value: Value, kind: AudioKind) -> Option<AudioStream> {
     let base_url = value
         .get("baseUrl")
         .or_else(|| value.get("base_url"))
@@ -330,7 +332,7 @@ fn audio_stream_from_value(value: Value, kind: AudioKind) -> Option<AudioStream>
     })
 }
 
-async fn fetch_favorite_bvids(
+pub(crate) async fn fetch_favorite_bvids(
     client: &Client,
     media_id: &str,
     max_items: usize,
@@ -380,7 +382,7 @@ async fn fetch_favorite_bvids(
     Ok(all)
 }
 
-async fn parse_json_response<T: DeserializeOwned>(
+pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
     label: &str,
 ) -> Result<T, String> {
@@ -397,10 +399,10 @@ async fn parse_json_response<T: DeserializeOwned>(
 
 /// P2-1：进程内进行中下载任务表，拒绝对同一目标文件的并发下载，
 /// 防止交错写入产出损坏缓存又被 sentinel 标记为有效。
-static DOWNLOADS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<PathBuf>> =
+pub(crate) static DOWNLOADS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<PathBuf>> =
     parking_lot::Mutex::new(BTreeSet::new());
 
-struct DownloadSlot(PathBuf);
+pub(crate) struct DownloadSlot(PathBuf);
 
 impl Drop for DownloadSlot {
     fn drop(&mut self) {
@@ -408,7 +410,7 @@ impl Drop for DownloadSlot {
     }
 }
 
-fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
+pub(crate) fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
     let key = path.to_path_buf();
     let mut in_flight = DOWNLOADS_IN_FLIGHT.lock();
     if !in_flight.insert(key.clone()) {
@@ -417,7 +419,7 @@ fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
     Ok(DownloadSlot(key))
 }
 
-async fn ensure_audio_file(
+pub(crate) async fn ensure_audio_file(
     client: &Client,
     audio_urls: &[String],
     path: &Path,
@@ -477,7 +479,7 @@ async fn ensure_audio_file(
     Err(last_error.unwrap_or_else(|| "bilibili response has no audio download url".into()))
 }
 
-fn ok_sentinel_path(path: &Path) -> PathBuf {
+pub(crate) fn ok_sentinel_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -487,7 +489,7 @@ fn ok_sentinel_path(path: &Path) -> PathBuf {
 
 /// 审2-S8：缓存有效性判定收敛到一处——文件存在且非空、且对应 ok sentinel
 /// 存在，供原扩展名路径与 remux fallback `.m4a` 路径共用。
-fn cached_audio_file_is_valid(path: &Path) -> bool {
+pub(crate) fn cached_audio_file_is_valid(path: &Path) -> bool {
     path.is_file()
         && ok_sentinel_path(path).is_file()
         && fs::metadata(path)
@@ -495,7 +497,7 @@ fn cached_audio_file_is_valid(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-async fn download_audio_to_file(
+pub(crate) async fn download_audio_to_file(
     client: &Client,
     audio_url: &str,
     temp_path: &Path,
@@ -551,7 +553,7 @@ async fn download_audio_to_file(
 
 /// 增量读取响应体，超出上限即截断并报错；
 /// 避免恶意服务器或异常重定向把进程内存撑爆。
-async fn read_bytes_capped(
+pub(crate) async fn read_bytes_capped(
     mut response: reqwest::Response,
     cap: u64,
 ) -> std::result::Result<Vec<u8>, String> {
@@ -571,11 +573,14 @@ async fn read_bytes_capped(
 
 /// P2-8：头像 data URL 按源 URL 内存缓存，避免前端周期性查询登录状态时
 /// 每次都重新下载头像并 base64 编码。
-static AVATAR_DATA_URL_CACHE: parking_lot::Mutex<BTreeMap<String, String>> =
+pub(crate) static AVATAR_DATA_URL_CACHE: parking_lot::Mutex<BTreeMap<String, String>> =
     parking_lot::Mutex::new(BTreeMap::new());
-const MAX_AVATAR_CACHE_ENTRIES: usize = 8;
+pub(crate) const MAX_AVATAR_CACHE_ENTRIES: usize = 8;
 
-async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<String>, String> {
+pub(crate) async fn resolve_avatar_data_url(
+    client: &Client,
+    url: &str,
+) -> Result<Option<String>, String> {
     let url = normalize_url(url);
     if url.trim().is_empty() || url.starts_with("data:") {
         return Ok((!url.trim().is_empty()).then_some(url));
@@ -619,7 +624,7 @@ async fn resolve_avatar_data_url(client: &Client, url: &str) -> Result<Option<St
     Ok(Some(data_url))
 }
 
-fn avatar_mime_type(value: &str) -> Option<&'static str> {
+pub(crate) fn avatar_mime_type(value: &str) -> Option<&'static str> {
     let value = value.split(';').next()?.trim().to_ascii_lowercase();
     match value.as_str() {
         "image/jpeg" | "image/jpg" => Some("image/jpeg"),
@@ -630,7 +635,7 @@ fn avatar_mime_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn finalize_audio_file(
+pub(crate) fn finalize_audio_file(
     temp_path: &Path,
     path: &Path,
     ffmpeg_path: Option<&Path>,
@@ -666,7 +671,7 @@ fn finalize_audio_file(
     Ok(fallback_path)
 }
 
-fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
+pub(crate) fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
     let mut command = Command::new(ffmpeg_path);
     hide_console_window(&mut command);
     let result = command
@@ -699,7 +704,7 @@ fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), St
     Ok(())
 }
 
-fn track_from_resolved_audio(
+pub(crate) fn track_from_resolved_audio(
     resolved: &ResolvedAudio,
     path: &Path,
     remuxed: bool,
@@ -745,7 +750,7 @@ fn track_from_resolved_audio(
     })
 }
 
-fn audio_cache_path(
+pub(crate) fn audio_cache_path(
     app: &AppHandle,
     bvid: &str,
     cid: i64,
@@ -760,7 +765,7 @@ fn audio_cache_path(
 
 /// P2-1：临时文件名带进程内计数器 + 时间纳秒的唯一后缀，
 /// 保证并发下载即便命中同一目标也不会互相截断/交错写。
-fn temp_download_path(path: &Path) -> PathBuf {
+pub(crate) fn temp_download_path(path: &Path) -> PathBuf {
     static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let file_name = path
         .file_name()

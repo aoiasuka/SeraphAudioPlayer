@@ -1,12 +1,14 @@
-const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
+use super::prelude::*;
+
+pub(crate) const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
 
 /// P1-3：曲库缓存"读全量 → 内存合并 → 覆盖写"序列的模块级互斥锁。
 /// 所有读改写路径（导入、删除、歌词写入、缓存缺失标记）必须持有它，
 /// 防止并发命令互相覆盖丢更新。parking_lot Mutex 只在同步块内持有，
 /// async 路径需先进 spawn_blocking 再调用。
-static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-fn collect_audio_files(
+pub(crate) fn collect_audio_files(
     path: PathBuf,
     tracks: &mut Vec<ImportedTrack>,
     seen_files: &mut HashSet<String>,
@@ -66,12 +68,12 @@ fn collect_audio_files(
     Ok(())
 }
 
-fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
+pub(crate) fn read_cached_tracks(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
     let path = library_cache_path(app)?;
     read_tracks_from_file(&path).map(|tracks| tracks.into_iter().map(enrich_cached_track).collect())
 }
 
-fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
+pub(crate) fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
@@ -85,7 +87,7 @@ fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
 /// P0-2：读改写路径专用读取。文件存在但读取/解析失败时，把坏文件备份为
 /// `.corrupt` 并显式报错——绝不能把损坏缓存当空库，否则随后的覆盖写会把
 /// 用户整个曲库（含手动匹配的歌词）静默清空。
-fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
+pub(crate) fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
     let path = library_cache_path(app)?;
     match read_tracks_from_file(&path) {
         Ok(tracks) => Ok(tracks.into_iter().map(enrich_cached_track).collect()),
@@ -100,13 +102,13 @@ fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<ImportedTrack>, 
 }
 
 /// 把损坏的 JSON 文件备份为 `<原名>.corrupt`（复制而非移动，保留现场）。
-fn backup_corrupt_file(path: &Path) -> PathBuf {
+pub(crate) fn backup_corrupt_file(path: &Path) -> PathBuf {
     let backup = PathBuf::from(format!("{}.corrupt", path.display()));
     let _ = fs::copy(path, &backup);
     backup
 }
 
-fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
+pub(crate) fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
     let path = library_cache_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
@@ -123,7 +125,7 @@ fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), 
 }
 
 /// 原子写 JSON：先写同目录临时文件再 rename（Windows 同卷 rename 原子）。
-fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     fs::write(&tmp, bytes)
         .map_err(|err| format!("failed to write temp file {}: {err}", tmp.display()))?;
@@ -133,7 +135,7 @@ fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
-pub(super) fn merge_tracks_into_cache(
+pub(crate) fn merge_tracks_into_cache(
     app: &AppHandle,
     tracks: &[ImportedTrack],
 ) -> Result<Vec<ImportedTrack>, String> {
@@ -148,7 +150,7 @@ pub(super) fn merge_tracks_into_cache(
     Ok(imported_tracks_from_cache(&merged, tracks))
 }
 
-pub(super) fn mark_tracks_cache_missing_by_paths(
+pub(crate) fn mark_tracks_cache_missing_by_paths(
     app: &AppHandle,
     removed_paths: &[PathBuf],
 ) -> Result<(), String> {
@@ -180,7 +182,7 @@ pub(super) fn mark_tracks_cache_missing_by_paths(
     write_cached_tracks(app, &updated)
 }
 
-fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -188,7 +190,7 @@ fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("library-cache.json"))
 }
 
-fn merge_cached_tracks(
+pub(crate) fn merge_cached_tracks(
     mut cached: Vec<ImportedTrack>,
     imported: &[ImportedTrack],
 ) -> Vec<ImportedTrack> {
@@ -210,7 +212,7 @@ fn merge_cached_tracks(
     dedupe_cached_tracks(cached)
 }
 
-fn remove_cached_track(
+pub(crate) fn remove_cached_track(
     tracks: Vec<ImportedTrack>,
     track_id: &str,
     target_key: Option<&str>,
@@ -229,7 +231,7 @@ fn remove_cached_track(
     (updated, removed)
 }
 
-fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {
+pub(crate) fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {
     let mut output: Vec<ImportedTrack> = Vec::new();
     let mut index_by_key: HashMap<String, usize> = HashMap::new();
 
@@ -251,7 +253,10 @@ fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {
     output
 }
 
-fn merge_imported_track(cached: &ImportedTrack, imported: &ImportedTrack) -> ImportedTrack {
+pub(crate) fn merge_imported_track(
+    cached: &ImportedTrack,
+    imported: &ImportedTrack,
+) -> ImportedTrack {
     let mut merged = imported.clone();
     if merged.lyrics.is_empty() && !cached.lyrics.is_empty() {
         merged.lyrics = cached.lyrics.clone();
@@ -259,7 +264,7 @@ fn merge_imported_track(cached: &ImportedTrack, imported: &ImportedTrack) -> Imp
     merged
 }
 
-fn enrich_cached_track(mut track: ImportedTrack) -> ImportedTrack {
+pub(crate) fn enrich_cached_track(mut track: ImportedTrack) -> ImportedTrack {
     if track.source_url.is_none() && track.id.starts_with("bilibili-") {
         if let Some(source_id) = track
             .source_id
@@ -273,7 +278,7 @@ fn enrich_cached_track(mut track: ImportedTrack) -> ImportedTrack {
     track
 }
 
-fn bilibili_source_id_from_path(path: &str) -> Option<String> {
+pub(crate) fn bilibili_source_id_from_path(path: &str) -> Option<String> {
     let stem = Path::new(path).file_stem()?.to_str()?.trim();
     let (source_id, _) = stem.rsplit_once('-')?;
     if source_id.len() >= 12 && source_id.get(..2)?.eq_ignore_ascii_case("BV") {
@@ -283,7 +288,7 @@ fn bilibili_source_id_from_path(path: &str) -> Option<String> {
     }
 }
 
-fn imported_tracks_from_cache(
+pub(crate) fn imported_tracks_from_cache(
     cached: &[ImportedTrack],
     imported: &[ImportedTrack],
 ) -> Vec<ImportedTrack> {
@@ -303,7 +308,7 @@ fn imported_tracks_from_cache(
         .collect()
 }
 
-fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<String> {
+pub(crate) fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<String> {
     if let Some(source_id) = track
         .source_id
         .as_deref()
@@ -330,7 +335,7 @@ fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<String> {
     }
 }
 
-fn apply_track_lyrics(
+pub(crate) fn apply_track_lyrics(
     tracks: &mut Vec<ImportedTrack>,
     track_id: &str,
     lyrics: Vec<LyricLine>,
@@ -343,7 +348,7 @@ fn apply_track_lyrics(
     Ok(())
 }
 
-fn ensure_track_for_lyrics(
+pub(crate) fn ensure_track_for_lyrics(
     tracks: &mut Vec<ImportedTrack>,
     track_id: &str,
     track_path: Option<&str>,
@@ -372,7 +377,7 @@ fn ensure_track_for_lyrics(
     Ok(tracks.len() - 1)
 }
 
-fn import_track_key(track: &ImportedTrack) -> String {
+pub(crate) fn import_track_key(track: &ImportedTrack) -> String {
     if let Some(source_id) = track
         .source_id
         .as_deref()
@@ -392,14 +397,14 @@ fn import_track_key(track: &ImportedTrack) -> String {
     import_dedupe_key(Path::new(&track.path))
 }
 
-fn import_dedupe_key(path: &Path) -> String {
+pub(crate) fn import_dedupe_key(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .to_ascii_lowercase()
 }
 
-fn is_audio_file(path: &Path) -> bool {
+pub(crate) fn is_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
         .and_then(audio_format_from_extension)
@@ -408,7 +413,7 @@ fn is_audio_file(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-fn audio_format_label(path: &Path) -> String {
+pub(crate) fn audio_format_label(path: &Path) -> String {
     audio_format_from_magic(path)
         .or_else(|| {
             path.extension()
@@ -419,14 +424,14 @@ fn audio_format_label(path: &Path) -> String {
         .to_string()
 }
 
-fn audio_format_from_magic(path: &Path) -> Option<&'static str> {
+pub(crate) fn audio_format_from_magic(path: &Path) -> Option<&'static str> {
     let mut file = fs::File::open(path).ok()?;
     let mut header = [0_u8; 64];
     let read = file.read(&mut header).ok()?;
     audio_format_from_header(&header[..read])
 }
 
-fn audio_format_from_header(header: &[u8]) -> Option<&'static str> {
+pub(crate) fn audio_format_from_header(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(b"DSD ") {
         return Some("DSF");
     }
@@ -469,7 +474,7 @@ fn audio_format_from_header(header: &[u8]) -> Option<&'static str> {
     None
 }
 
-fn audio_format_from_extension(extension: &str) -> Option<&'static str> {
+pub(crate) fn audio_format_from_extension(extension: &str) -> Option<&'static str> {
     match extension.to_ascii_lowercase().as_str() {
         "aac" => Some("AAC"),
         "aif" | "aiff" => Some("AIFF"),
@@ -487,19 +492,22 @@ fn audio_format_from_extension(extension: &str) -> Option<&'static str> {
     }
 }
 
-fn is_mpeg_audio_header(header: &[u8]) -> bool {
+pub(crate) fn is_mpeg_audio_header(header: &[u8]) -> bool {
     header.len() >= 2 && header[0] == 0xff && (header[1] & 0xe0) == 0xe0 && (header[1] & 0x06) != 0
 }
 
-fn is_adts_header(header: &[u8]) -> bool {
+pub(crate) fn is_adts_header(header: &[u8]) -> bool {
     header.len() >= 2 && header[0] == 0xff && (header[1] & 0xf0) == 0xf0
 }
 
-fn is_dsd_format(format: &str) -> bool {
+pub(crate) fn is_dsd_format(format: &str) -> bool {
     format.eq_ignore_ascii_case("DSF") || format.eq_ignore_ascii_case("DFF")
 }
 
-fn track_from_path(path: &Path, covers_dir: Option<&Path>) -> Result<ImportedTrack, String> {
+pub(crate) fn track_from_path(
+    path: &Path,
+    covers_dir: Option<&Path>,
+) -> Result<ImportedTrack, String> {
     let metadata = fs::metadata(path)
         .map_err(|err| format!("failed to read file metadata {}: {err}", path.display()))?;
     let path_string = path.to_string_lossy().to_string();
@@ -512,10 +520,7 @@ fn track_from_path(path: &Path, covers_dir: Option<&Path>) -> Result<ImportedTra
         .extension()
         .and_then(|value| value.to_str())
         .and_then(audio_format_from_extension);
-    let format = magic_format
-        .or(ext_format)
-        .unwrap_or("AUDIO")
-        .to_string();
+    let format = magic_format.or(ext_format).unwrap_or("AUDIO").to_string();
     let stem = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -578,7 +583,10 @@ fn track_from_path(path: &Path, covers_dir: Option<&Path>) -> Result<ImportedTra
     })
 }
 
-fn parse_audio_metadata_with_dsd_hint(path: &Path, is_dsd_hint: bool) -> ParsedAudioMetadata {
+pub(crate) fn parse_audio_metadata_with_dsd_hint(
+    path: &Path,
+    is_dsd_hint: bool,
+) -> ParsedAudioMetadata {
     let Ok(tagged_file) = lofty::read_from_path(path) else {
         let mut parsed = ParsedAudioMetadata::default();
         enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
@@ -625,7 +633,7 @@ fn parse_audio_metadata_with_dsd_hint(path: &Path, is_dsd_hint: bool) -> ParsedA
 }
 
 /// 从标签中选内嵌封面：优先 CoverFront，否则取第一张非空图片。
-fn cover_art_from_tags(tags: &[Tag]) -> Option<CoverArt> {
+pub(crate) fn cover_art_from_tags(tags: &[Tag]) -> Option<CoverArt> {
     let mut chosen = None;
     for picture in tags.iter().flat_map(|tag| tag.pictures()) {
         if picture.data().is_empty() {
@@ -648,7 +656,7 @@ fn cover_art_from_tags(tags: &[Tag]) -> Option<CoverArt> {
 }
 
 /// 由 MIME 或图片魔数推断扩展名；识别不了的类型不落盘（返回 None）。
-fn cover_image_extension(mime: Option<&MimeType>, data: &[u8]) -> Option<&'static str> {
+pub(crate) fn cover_image_extension(mime: Option<&MimeType>, data: &[u8]) -> Option<&'static str> {
     match mime {
         Some(MimeType::Jpeg) => return Some("jpg"),
         Some(MimeType::Png) => return Some("png"),
@@ -673,10 +681,10 @@ fn cover_image_extension(mime: Option<&MimeType>, data: &[u8]) -> Option<&'stati
 }
 
 /// 封面落盘序号：并发导入时保证临时文件名互不相同。
-static COVER_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+pub(crate) static COVER_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 封面按内容哈希写入 covers 目录并返回绝对路径；已存在同内容文件直接复用。
-fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String> {
+pub(crate) fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String> {
     let mut hasher = DefaultHasher::new();
     art.data.hash(&mut hasher);
     let content_hash = hasher.finish();
@@ -699,7 +707,7 @@ fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String> {
     Some(target.to_string_lossy().to_string())
 }
 
-fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -708,7 +716,7 @@ fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 只读标签提取封面并落盘（启动补扫用，跳过 ffprobe 等重探测）。
-fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
+pub(crate) fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
     let tagged_file = lofty::read_from_path(path).ok()?;
     let art = cover_art_from_tags(tagged_file.tags())?;
     save_cover_art(covers_dir, &art)
@@ -717,7 +725,7 @@ fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
 /// 旧版曲库缓存里的本地曲目没有封面（当时不提取）。启动时一次性补扫
 /// cover 为空且文件仍存在的本地曲目，完成后写标记文件，后续启动零成本；
 /// 新导入的曲目在导入时即提取封面，不依赖本流程。
-fn backfill_missing_covers(app: &AppHandle) {
+pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     let Ok(covers_dir) = covers_dir_path(app) else {
         return;
     };
@@ -757,7 +765,7 @@ fn backfill_missing_covers(app: &AppHandle) {
     }
 }
 
-fn enrich_with_decoder_probe_dsd(
+pub(crate) fn enrich_with_decoder_probe_dsd(
     path: &Path,
     parsed: &mut ParsedAudioMetadata,
     is_dsd_hint: bool,
@@ -790,7 +798,7 @@ fn enrich_with_decoder_probe_dsd(
 }
 
 #[cfg(test)]
-fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
+pub(crate) fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
     let Ok(tagged_file) = lofty::read_from_path(path) else {
         let mut parsed = ParsedAudioMetadata::default();
         enrich_with_decoder_probe(path, &mut parsed);
@@ -836,7 +844,7 @@ fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
 }
 
 #[cfg(test)]
-fn enrich_with_decoder_probe(path: &Path, parsed: &mut ParsedAudioMetadata) {
+pub(crate) fn enrich_with_decoder_probe(path: &Path, parsed: &mut ParsedAudioMetadata) {
     if parsed.duration.is_some()
         && parsed.bit_depth.is_some()
         && parsed.sample_rate.is_some()
@@ -865,7 +873,7 @@ fn enrich_with_decoder_probe(path: &Path, parsed: &mut ParsedAudioMetadata) {
 }
 
 #[cfg(test)]
-fn write_test_dsf(path: &Path) {
+pub(crate) fn write_test_dsf(path: &Path) {
     use std::io::Write;
 
     let channels = 2_u32;
@@ -906,7 +914,7 @@ fn write_test_dsf(path: &Path) {
 }
 
 #[cfg(test)]
-fn temp_audio_path(prefix: &str, extension: &str) -> PathBuf {
+pub(crate) fn temp_audio_path(prefix: &str, extension: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -915,7 +923,7 @@ fn temp_audio_path(prefix: &str, extension: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-fn is_dsd_file(path: &Path) -> bool {
+pub(crate) fn is_dsd_file(path: &Path) -> bool {
     if let Some(format) = audio_format_from_magic(path) {
         return is_dsd_format(format);
     }
@@ -926,14 +934,14 @@ fn is_dsd_file(path: &Path) -> bool {
         .is_some_and(is_dsd_format)
 }
 
-fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
+pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
     let lyrics_path = find_lyrics_file(path)?;
     let bytes = fs::read(lyrics_path).ok()?;
     let lyrics = parse_lyrics_bytes(&bytes);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
-fn find_lyrics_file(path: &Path) -> Option<PathBuf> {
+pub(crate) fn find_lyrics_file(path: &Path) -> Option<PathBuf> {
     for extension in ["lrc", "qrc", "krc", "yrc"] {
         let exact = path.with_extension(extension);
         if exact.is_file() {

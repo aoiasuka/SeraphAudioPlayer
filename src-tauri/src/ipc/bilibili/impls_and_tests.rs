@@ -1,5 +1,7 @@
+use super::prelude::*;
+
 impl AudioStream {
-    fn audio_urls(&self) -> Vec<String> {
+    pub(crate) fn audio_urls(&self) -> Vec<String> {
         let mut urls = Vec::with_capacity(self.backup_urls.len() + 1);
         if !self.base_url.trim().is_empty() {
             urls.push(self.base_url.clone());
@@ -14,7 +16,7 @@ impl AudioStream {
         urls
     }
 
-    fn kind_rank(&self) -> u8 {
+    pub(crate) fn kind_rank(&self) -> u8 {
         match self.kind {
             AudioKind::DolbyAtmos => 4,
             AudioKind::Flac => 3,
@@ -23,7 +25,7 @@ impl AudioStream {
         }
     }
 
-    fn format_label(&self) -> &'static str {
+    pub(crate) fn format_label(&self) -> &'static str {
         match self.kind {
             AudioKind::DolbyAtmos | AudioKind::Dolby => "EAC3",
             AudioKind::Flac => "FLAC",
@@ -35,7 +37,7 @@ impl AudioStream {
         }
     }
 
-    fn output_extension(&self) -> &'static str {
+    pub(crate) fn output_extension(&self) -> &'static str {
         // 即使未 remux 也按真实编码落扩展名，避免 FLAC stream 被命名为 .m4a
         // 导致后续元数据探测失败 (M-2)。
         match self.format_label() {
@@ -48,7 +50,7 @@ impl AudioStream {
 }
 
 impl BilibiliSession {
-    fn cookie_header(&self) -> Option<String> {
+    pub(crate) fn cookie_header(&self) -> Option<String> {
         if self.cookies.is_empty() {
             return None;
         }
@@ -77,10 +79,8 @@ impl BilibiliSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        extract_bvid, extract_media_id, is_bilibili_host, parse_http_date_to_unix,
-        select_audio_stream, temp_download_path, AudioKind, DashData,
-    };
+    // 迁出 include! 后被测符号分散在各兄弟子模块，统一经 prelude 引入
+    use super::super::prelude::*;
     use serde_json::json;
 
     fn dash_with_dolby_and_flac() -> DashData {
@@ -177,10 +177,13 @@ mod tests {
         {
             let file = std::fs::File::create(&zip_path).unwrap();
             let mut writer = zip::ZipWriter::new(file);
-            let opts = SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
             for (name, body) in [
-                ("ffmpeg-7.0-essentials_build/bin/ffmpeg.exe", b"FFMPEGBIN" as &[u8]),
+                (
+                    "ffmpeg-7.0-essentials_build/bin/ffmpeg.exe",
+                    b"FFMPEGBIN" as &[u8],
+                ),
                 ("ffmpeg-7.0-essentials_build/bin/ffprobe.exe", b"FFPROBEBIN"),
                 ("ffmpeg-7.0-essentials_build/bin/ffplay.exe", b"IGNORED"),
                 ("ffmpeg-7.0-essentials_build/README.txt", b"docs"),
@@ -194,7 +197,10 @@ mod tests {
         extract_ffmpeg_tools(&zip_path, &dir).expect("extraction should succeed");
         assert!(dir.join("ffmpeg.exe").is_file());
         assert!(dir.join("ffprobe.exe").is_file());
-        assert!(!dir.join("ffplay.exe").exists(), "only wanted tools extracted");
+        assert!(
+            !dir.join("ffplay.exe").exists(),
+            "only wanted tools extracted"
+        );
         assert_eq!(std::fs::read(dir.join("ffmpeg.exe")).unwrap(), b"FFMPEGBIN");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -273,7 +279,10 @@ mod tests {
             parse_http_date_to_unix("SUN, 06 NOV 1994 08:49:37 GMT"),
             expected
         );
-        assert_eq!(parse_http_date_to_unix("sun, 06 xxx 1994 08:49:37 gmt"), None);
+        assert_eq!(
+            parse_http_date_to_unix("sun, 06 xxx 1994 08:49:37 gmt"),
+            None
+        );
     }
 
     #[test]
