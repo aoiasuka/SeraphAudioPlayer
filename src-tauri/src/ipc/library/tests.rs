@@ -469,3 +469,11 @@ fn merge_lyrics_keeps_inline_when_sidecar_absent() {
     assert_eq!(restored[0].lyrics.len(), 1);
     assert_eq!(restored[0].lyrics[0].text, "legacy inline");
 }
+
+#[test]
+fn cover_key_normalizes_case_and_separators() {
+    assert_eq!(
+        normalize_cover_key(r"C:\Users\X\covers\ABC.jpg"),
+        normalize_cover_key("c:/users/x/COVERS/abc.JPG")
+    );
+}

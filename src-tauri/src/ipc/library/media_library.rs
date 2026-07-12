@@ -866,6 +866,81 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     }
 }
 
+/// covers 目录孤儿封面 GC：删除不再被任何曲目引用的封面文件（曲目删除后
+/// 内容哈希共享的封面会残留）。
+/// - 持 LIBRARY_LOCK 取最新曲库快照，避免与并发导入的读改写竞态；
+/// - 1 小时宽限期：导入流程先落盘封面、后持锁入库，刚写入尚未入库的
+///   新封面不会被误删；
+/// - 每个进程生命周期只跑一次（启动后首次 get_playlist 触发）。
+pub(crate) fn gc_orphan_covers(app: &AppHandle) {
+    use std::sync::atomic::AtomicBool;
+    static GC_DONE: AtomicBool = AtomicBool::new(false);
+    if GC_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let Ok(covers_dir) = covers_dir_path(app) else {
+        return;
+    };
+    if !covers_dir.is_dir() {
+        return;
+    }
+
+    let _guard = LIBRARY_LOCK.lock();
+    let Ok(tracks) = read_cached_tracks_for_update(app) else {
+        return;
+    };
+    let referenced: HashSet<String> = tracks
+        .iter()
+        .filter(|track| !track.cover.is_empty() && !track.cover.starts_with("http"))
+        .map(|track| normalize_cover_key(&track.cover))
+        .collect();
+
+    let Ok(entries) = fs::read_dir(&covers_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        // 标记文件（.cover-backfill-v1 等点前缀且非 .tmp 残留）保留
+        if name.starts_with('.') && !name.ends_with(".tmp") {
+            continue;
+        }
+        if referenced.contains(&normalize_cover_key(&path.to_string_lossy())) {
+            continue;
+        }
+        let recently_modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .map(|age| age < Duration::from_secs(3600))
+            .unwrap_or(true);
+        if recently_modified {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!("cover GC: removed {removed} orphan cover file(s)");
+    }
+}
+
+/// 封面路径归一化（大小写与分隔符不敏感），用于引用集合比较。
+pub(crate) fn normalize_cover_key(path: &str) -> String {
+    path.to_ascii_lowercase().replace('/', "\\")
+}
+
 pub(crate) fn enrich_with_decoder_probe_dsd(
     path: &Path,
     parsed: &mut ParsedAudioMetadata,

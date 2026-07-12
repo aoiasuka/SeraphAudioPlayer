@@ -7,6 +7,7 @@ pub async fn get_playlist(app: AppHandle) -> IpcResult<Vec<ImportedTrack>> {
     // 避免旧曲库首次补扫时卡住 IPC 调度线程。
     let tracks = tauri::async_runtime::spawn_blocking(move || {
         backfill_missing_covers(&app);
+        gc_orphan_covers(&app);
         read_cached_tracks(&app)
     })
     .await
