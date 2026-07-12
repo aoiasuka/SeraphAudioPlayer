@@ -7,6 +7,7 @@ mod commands;
 mod lyrics;
 mod media_library;
 mod metadata;
+mod online_covers;
 mod online_lyrics;
 mod prelude;
 #[cfg(test)]
@@ -16,4 +17,5 @@ mod types;
 // 兄弟 ipc 模块（cache/bilibili）沿用 `super::library::xxx` 路径
 pub use commands::*;
 pub(crate) use media_library::{mark_tracks_cache_missing_by_paths, merge_tracks_into_cache};
+pub use online_covers::*;
 pub use types::ImportedTrack;

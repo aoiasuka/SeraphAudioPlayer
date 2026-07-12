@@ -1,4 +1,7 @@
+import { ImagePlus, Loader2 } from "lucide-react";
+import { useState } from "react";
 import { usePlayerStore } from "@/store/player";
+import { isStreamingTrack } from "@/components/pages/main-pages/trackFilters";
 
 interface Row {
   label: string;
@@ -7,6 +10,8 @@ interface Row {
 
 export function AudioInfoCard() {
   const track = usePlayerStore((s) => s.currentTrack());
+  const fetchOnlineCover = usePlayerStore((s) => s.fetchOnlineCoverForCurrentTrack);
+  const [matching, setMatching] = useState(false);
 
   if (!track) return null;
 
@@ -14,6 +19,18 @@ export function AudioInfoCard() {
     ? track.bitdepth.split(" / ").slice(1).join(" / ")
     : undefined;
   const sampleRate = track.sampleRate ?? parsedSampleRate ?? "Unknown";
+  // 本地曲目且无封面时提供在线匹配入口（B 站曲目封面来自视频，不提供）
+  const canMatchCover = !track.cover && !isStreamingTrack(track);
+
+  const handleMatchCover = async () => {
+    if (matching) return;
+    setMatching(true);
+    try {
+      await fetchOnlineCover();
+    } finally {
+      setMatching(false);
+    }
+  };
 
   const rows: Row[] = [
     { label: "Format:", value: track.format },
@@ -48,6 +65,22 @@ export function AudioInfoCard() {
             );
           })}
         </div>
+        {canMatchCover ? (
+          <button
+            type="button"
+            onClick={() => void handleMatchCover()}
+            disabled={matching}
+            className="stamp-btn mt-2.5 inline-flex h-7 items-center gap-1.5 px-2.5 font-tw text-[10px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
+            title="按标题与艺术家在线搜索专辑封面"
+          >
+            {matching ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <ImagePlus className="h-3 w-3" />
+            )}
+            {matching ? "匹配中…" : "在线匹配封面"}
+          </button>
+        ) : null}
       </div>
     </div>
   );

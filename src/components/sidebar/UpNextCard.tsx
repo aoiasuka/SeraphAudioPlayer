@@ -1,9 +1,17 @@
 import { MoreHorizontal } from "lucide-react";
+import { useEffect, useState } from "react";
+import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 
 export function UpNextCard() {
   const nextTrack = usePlayerStore((s) => s.nextTrack);
   const next = usePlayerStore((s) => s.nextTrackPreview());
+  const [coverFailed, setCoverFailed] = useState(false);
+  const cover = coverSrc(next?.cover);
+
+  useEffect(() => {
+    setCoverFailed(false);
+  }, [cover]);
 
   if (!next) return null;
 
@@ -14,10 +22,19 @@ export function UpNextCard() {
       </h3>
       <div
         onClick={nextTrack}
-        className="archive-card flex items-center justify-between p-2.5 cursor-pointer"
+        className="archive-card flex items-center justify-between gap-2.5 p-2.5 cursor-pointer"
       >
-        <div className="min-w-0">
-          <div>
+        <div className="flex min-w-0 items-center gap-2.5">
+          {cover && !coverFailed ? (
+            <img
+              src={cover}
+              alt=""
+              draggable={false}
+              onError={() => setCoverFailed(true)}
+              className="h-9 w-9 shrink-0 border border-ink/20 object-cover"
+            />
+          ) : null}
+          <div className="min-w-0">
             <h4 className="font-serif text-xs font-semibold text-ink line-clamp-1">
               {next.title}
             </h4>

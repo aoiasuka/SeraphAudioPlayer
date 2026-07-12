@@ -54,6 +54,7 @@ pub fn run() {
             ipc::bilibili::import_bilibili_favorites,
             ipc::library::apply_online_lyrics,
             ipc::library::fetch_online_lyrics,
+            ipc::library::fetch_online_cover,
             ipc::library::save_track_lyrics,
             ipc::library::list_devices,
             ipc::update::check_for_update,

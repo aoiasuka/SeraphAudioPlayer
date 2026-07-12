@@ -1,5 +1,6 @@
 import { ArrowLeft, User } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
@@ -72,6 +73,8 @@ export function ArtistsPage() {
     <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
       {artists.map((artist) => {
         const first = artist.tracks[0];
+        // 艺术家封面：取该艺术家第一首带封面的曲目
+        const cover = coverSrc(artist.tracks.find((track) => track.cover)?.cover);
         return (
           <button
             key={artist.name}
@@ -79,9 +82,15 @@ export function ArtistsPage() {
             onClick={() => setSelectedArtist(artist.name)}
             className="archive-card p-4 text-left"
           >
-            <span className="mb-4 flex h-10 w-10 items-center justify-center border-[1.5px] border-ink bg-paper2 text-brown">
-              <User className="h-4 w-4" />
-            </span>
+            {cover ? (
+              <span className="mb-4 block h-10 w-10 overflow-hidden border-[1.5px] border-ink">
+                <img src={cover} alt="" className="h-full w-full object-cover" />
+              </span>
+            ) : (
+              <span className="mb-4 flex h-10 w-10 items-center justify-center border-[1.5px] border-ink bg-paper2 text-brown">
+                <User className="h-4 w-4" />
+              </span>
+            )}
             <span className="block font-serif text-sm font-bold text-ink">{artist.name}</span>
             <span className="mt-1 block font-tw text-[11px] text-ink2">
               {artist.tracks.length} 首曲目 · {first.album}

@@ -1,4 +1,4 @@
-import { invoke } from "@/lib/tauri";
+import { invoke, normalizeIpcError } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 import { sendCommand } from "./commands";
 import { resetNextIndexCache } from "./playbackActions";
@@ -130,7 +130,7 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
 export function createLibraryActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "createUserPlaylist" | "deleteUserPlaylist" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
+): Pick<PlayerStore, "createUserPlaylist" | "deleteUserPlaylist" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
   return {
   createUserPlaylist: (name) => {
     const trimmedName = name.trim();
@@ -223,6 +223,35 @@ export function createLibraryActions(
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: delete_track", err);
       get().showNotification("删除曲库记录失败");
+    }
+  },
+
+  fetchOnlineCoverForCurrentTrack: async () => {
+    const track = get().currentTrack();
+    if (!track) return false;
+    if (track.cover) return true;
+
+    try {
+      const cover = await invoke<string>("fetch_online_cover", {
+        trackId: track.id,
+        title: track.title,
+        artist: track.artist,
+      });
+      set((state) => ({
+        playlist: state.playlist.map((item) =>
+          item.id === track.id ? { ...item, cover } : item
+        ),
+      }));
+      get().showNotification("封面匹配成功");
+      return true;
+    } catch (err) {
+      const { code, message } = normalizeIpcError(err);
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: fetch_online_cover", err);
+      get().showNotification(
+        code === "not_found" ? "未找到匹配的在线封面" : `封面匹配失败: ${message}`
+      );
+      return false;
     }
   },
 

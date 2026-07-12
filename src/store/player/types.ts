@@ -153,6 +153,7 @@ export interface PlayerStore {
   deleteTrack: (trackId: string) => Promise<void>;
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (paths: string[]) => Promise<void>;
+  fetchOnlineCoverForCurrentTrack: () => Promise<boolean>;
   importBilibiliAudio: (
     input: string,
     options?: BilibiliImportOptions
