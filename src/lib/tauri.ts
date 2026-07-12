@@ -128,3 +128,38 @@ export function coverSrc(cover: string | undefined | null): string {
 }
 
 export const FRONTEND_EVENT = "seraph://event";
+
+/** 结构化 IPC 错误码，与后端 IpcErrorCode 对齐。 */
+export type IpcErrorCode =
+  | "internal"
+  | "invalid_input"
+  | "not_found"
+  | "cache_corrupt"
+  | "io"
+  | "network";
+
+export interface IpcError {
+  code: IpcErrorCode;
+  message: string;
+}
+
+/**
+ * 把 invoke 抛出的错误归一化为 { code, message }。
+ * 后端结构化命令抛出 `{ code, message }` 对象；旧命令仍抛字符串——
+ * 两种形态都归一，前端可安全按 code 分支、按 message 展示。
+ */
+export function normalizeIpcError(err: unknown): IpcError {
+  if (err && typeof err === "object" && "code" in err && "message" in err) {
+    const e = err as { code: unknown; message: unknown };
+    if (typeof e.code === "string" && typeof e.message === "string") {
+      return { code: e.code as IpcErrorCode, message: e.message };
+    }
+  }
+  const message =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : String(err);
+  return { code: "internal", message };
+}

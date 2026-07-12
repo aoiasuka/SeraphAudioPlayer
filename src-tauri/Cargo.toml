@@ -33,6 +33,7 @@ encoding_rs = "0.8"
 des = "0.8"
 flate2 = "1"
 regex = "1"
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

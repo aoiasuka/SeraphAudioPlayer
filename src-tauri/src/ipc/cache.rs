@@ -9,6 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use super::error::IpcResult;
 use super::library::mark_tracks_cache_missing_by_paths;
 
 const SETTINGS_FILE: &str = "cache-settings.json";
@@ -58,15 +59,15 @@ pub struct CacheCleanupResult {
 }
 
 #[tauri::command]
-pub fn get_cache_status(app: AppHandle) -> Result<CacheStatus, String> {
-    cache_status(&app)
+pub fn get_cache_status(app: AppHandle) -> IpcResult<CacheStatus> {
+    Ok(cache_status(&app)?)
 }
 
 #[tauri::command]
 pub fn update_cache_settings(
     app: AppHandle,
     settings: UpdateCacheSettings,
-) -> Result<CacheStatus, String> {
+) -> IpcResult<CacheStatus> {
     let mut current = load_cache_settings(&app)?;
 
     if let Some(cache_dir) = settings.cache_dir {
@@ -90,11 +91,11 @@ pub fn update_cache_settings(
     ensure_cache_dir(Path::new(&current.cache_dir))?;
     save_cache_settings(&app, &current)?;
     enforce_cache_limit(&app)?;
-    cache_status(&app)
+    Ok(cache_status(&app)?)
 }
 
 #[tauri::command]
-pub fn clear_cache(app: AppHandle) -> Result<CacheCleanupResult, String> {
+pub fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
     let settings = load_cache_settings(&app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
     ensure_cache_dir(&cache_dir)?;
