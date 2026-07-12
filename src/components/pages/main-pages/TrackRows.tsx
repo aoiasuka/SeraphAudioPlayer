@@ -1,4 +1,4 @@
-import { Loader2, Heart, Search, Trash2, X } from "lucide-react";
+import { ListPlus, Loader2, Heart, Search, Trash2, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
@@ -29,11 +29,14 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const toggleLike = usePlayerStore((s) => s.toggleLike);
   const deleteTrack = usePlayerStore((s) => s.deleteTrack);
+  const userPlaylists = usePlayerStore((s) => s.userPlaylists);
+  const addTrackToUserPlaylist = usePlayerStore((s) => s.addTrackToUserPlaylist);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [trackToDeleteId, setTrackToDeleteId] = useState<string | null>(null);
   const [isDeletingTrack, setIsDeletingTrack] = useState(false);
+  const [trackToAddId, setTrackToAddId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<TrackSortKey>("default");
   // 搜索 + 排序后的视图列表。点击播放仍经 trackIndexById 映射回全局队列索引，
@@ -53,6 +56,13 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
       playlist.find((track) => track.id === trackToDeleteId) ??
       null,
     [playlist, trackToDeleteId, tracks]
+  );
+  const trackToAdd = useMemo(
+    () =>
+      tracks.find((track) => track.id === trackToAddId) ??
+      playlist.find((track) => track.id === trackToAddId) ??
+      null,
+    [playlist, trackToAddId, tracks]
   );
   const visibleRows = useMemo(() => {
     const start = Math.max(
@@ -195,7 +205,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
             <div
               key={track.id}
               className={cn(
-                "archive-card group relative grid h-[49px] grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px] items-center gap-3 px-4 mb-2.5",
+                "archive-card group relative grid h-[49px] grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-3 px-4 mb-2.5",
                 active && "is-playing"
               )}
             >
@@ -277,6 +287,15 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
               </button>
               <button
                 type="button"
+                onClick={() => setTrackToAddId(track.id)}
+                className="flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-ink focus:opacity-100 focus:text-ink group-hover:opacity-100"
+                aria-label={`把 ${track.title} 加入歌单`}
+                title="加入歌单"
+              >
+                <ListPlus className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
                 onClick={() => setTrackToDeleteId(track.id)}
                 className="flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-stamp focus:opacity-100 focus:text-stamp group-hover:opacity-100"
                 aria-label={`删除曲库记录 ${track.title}`}
@@ -328,6 +347,66 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
                 <Trash2 className="h-3.5 w-3.5" />
               )}
               <span>{isDeletingTrack ? "删除中" : "删除记录"}</span>
+            </button>
+          </div>
+        </div>
+      </Dialog>
+      <Dialog
+        open={Boolean(trackToAdd)}
+        onClose={() => setTrackToAddId(null)}
+        className="max-w-sm"
+      >
+        <div className="space-y-4">
+          <div>
+            <p className="font-tw text-[10px] font-bold uppercase tracking-[0.18em] text-stamp">
+              Add To Playlist
+            </p>
+            <h2 className="mt-1 font-serif text-lg font-bold text-ink">
+              加入歌单
+            </h2>
+            <p className="mt-2 truncate font-tw text-xs text-ink2">
+              「{trackToAdd?.title}」
+            </p>
+          </div>
+          {userPlaylists.length === 0 ? (
+            <p className="border-[1.5px] border-dashed border-line bg-card p-3 font-tw text-xs leading-relaxed text-ink3">
+              还没有歌单——先到「歌单」页新建一个。
+            </p>
+          ) : (
+            <div className="max-h-[240px] space-y-1.5 overflow-y-auto pr-1">
+              {userPlaylists.map((item) => {
+                const included = trackToAdd
+                  ? item.trackIds.includes(trackToAdd.id)
+                  : false;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    disabled={included}
+                    onClick={() => {
+                      if (trackToAdd) {
+                        addTrackToUserPlaylist(item.id, trackToAdd.id);
+                      }
+                      setTrackToAddId(null);
+                    }}
+                    className="flex w-full items-center justify-between border-[1.5px] border-line bg-card px-3 py-2 text-left font-tw text-xs font-bold text-ink transition-colors hover:border-ink disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <span className="min-w-0 truncate">{item.name}</span>
+                    <span className="shrink-0 text-[10px] text-ink3">
+                      {included ? "已加入" : `${item.trackIds.length} 首`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setTrackToAddId(null)}
+              className="stamp-btn h-9 px-3 font-tw text-xs font-bold"
+            >
+              关闭
             </button>
           </div>
         </div>

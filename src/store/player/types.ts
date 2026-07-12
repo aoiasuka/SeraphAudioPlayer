@@ -154,6 +154,15 @@ export interface PlayerStore {
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (paths: string[]) => Promise<void>;
   fetchOnlineCoverForCurrentTrack: () => Promise<boolean>;
+  addTrackToUserPlaylist: (playlistId: string, trackId: string) => void;
+  removeTrackFromUserPlaylist: (playlistId: string, trackId: string) => void;
+  moveTrackInUserPlaylist: (
+    playlistId: string,
+    trackId: string,
+    direction: "up" | "down"
+  ) => void;
+  importPlaylistFromM3u8: () => Promise<void>;
+  exportUserPlaylistToM3u8: (playlistId: string) => Promise<void>;
   importBilibiliAudio: (
     input: string,
     options?: BilibiliImportOptions

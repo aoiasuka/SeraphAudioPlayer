@@ -59,6 +59,8 @@ pub fn run() {
             ipc::library::list_devices,
             ipc::update::check_for_update,
             ipc::update::open_release_page,
+            ipc::playlist_io::import_playlist_m3u8,
+            ipc::playlist_io::export_playlist_m3u8,
         ])
         .setup(|app| {
             if let Ok(app_dir) = app.path().app_data_dir() {

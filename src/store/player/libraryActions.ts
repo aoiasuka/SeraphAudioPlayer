@@ -130,7 +130,7 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
 export function createLibraryActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "createUserPlaylist" | "deleteUserPlaylist" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
+): Pick<PlayerStore, "createUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
   return {
   createUserPlaylist: (name) => {
     const trimmedName = name.trim();
@@ -164,6 +164,152 @@ export function createLibraryActions(
       userPlaylists: state.userPlaylists.filter((item) => item.id !== playlistId),
     }));
     get().showNotification(`已删除歌单：${playlist.name}`);
+  },
+
+  addTrackToUserPlaylist: (playlistId, trackId) => {
+    const playlist = get().userPlaylists.find((item) => item.id === playlistId);
+    const track = get().playlist.find((item) => item.id === trackId);
+    if (!playlist || !track) return;
+    if (playlist.trackIds.includes(trackId)) {
+      get().showNotification(`已在歌单「${playlist.name}」中`);
+      return;
+    }
+
+    set((state) => ({
+      userPlaylists: state.userPlaylists.map((item) =>
+        item.id === playlistId
+          ? { ...item, trackIds: [...item.trackIds, trackId] }
+          : item
+      ),
+    }));
+    get().showNotification(`已加入歌单：${playlist.name}`);
+  },
+
+  removeTrackFromUserPlaylist: (playlistId, trackId) => {
+    set((state) => ({
+      userPlaylists: state.userPlaylists.map((item) =>
+        item.id === playlistId
+          ? { ...item, trackIds: item.trackIds.filter((id) => id !== trackId) }
+          : item
+      ),
+    }));
+  },
+
+  moveTrackInUserPlaylist: (playlistId, trackId, direction) => {
+    set((state) => ({
+      userPlaylists: state.userPlaylists.map((item) => {
+        if (item.id !== playlistId) return item;
+        const index = item.trackIds.indexOf(trackId);
+        const target = direction === "up" ? index - 1 : index + 1;
+        if (index < 0 || target < 0 || target >= item.trackIds.length) {
+          return item;
+        }
+        const trackIds = [...item.trackIds];
+        [trackIds[index], trackIds[target]] = [trackIds[target], trackIds[index]];
+        return { ...item, trackIds };
+      }),
+    }));
+  },
+
+  importPlaylistFromM3u8: async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "播放列表", extensions: ["m3u8", "m3u"] }],
+      });
+      if (typeof selected !== "string" || !selected) return;
+
+      const imported = await invoke<{
+        name: string;
+        paths: string[];
+        skipped: number;
+      }>("import_playlist_m3u8", { path: selected });
+
+      if (imported.paths.length === 0) {
+        get().showNotification("清单中没有可用的本地音频文件");
+        return;
+      }
+
+      // 先入库（内部有去重合并），再按物理路径映射回曲目 id 建歌单
+      await get().importLocalTracks(imported.paths);
+      const idByPath = new Map(
+        get().playlist.map((track) => [normalizePath(track.path), track.id])
+      );
+      const trackIds = imported.paths
+        .map((path) => idByPath.get(normalizePath(path)))
+        .filter((id): id is string => !!id);
+
+      if (trackIds.length === 0) {
+        get().showNotification("清单曲目导入失败");
+        return;
+      }
+
+      const names = new Set(get().userPlaylists.map((item) => item.name));
+      let name = imported.name.trim() || "导入歌单";
+      let suffix = 2;
+      while (names.has(name)) {
+        name = `${imported.name} ${suffix}`;
+        suffix += 1;
+      }
+
+      const createdAt = Date.now();
+      set((state) => ({
+        userPlaylists: [
+          ...state.userPlaylists,
+          {
+            id: `playlist-${createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+            name,
+            trackIds,
+            createdAt,
+          },
+        ],
+      }));
+      get().showNotification(
+        imported.skipped > 0
+          ? `已导入歌单「${name}」（${trackIds.length} 首，跳过 ${imported.skipped} 条）`
+          : `已导入歌单「${name}」（${trackIds.length} 首）`
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("import_playlist_m3u8 failed", err);
+      get().showNotification(`导入歌单失败: ${normalizeIpcError(err).message}`);
+    }
+  },
+
+  exportUserPlaylistToM3u8: async (playlistId) => {
+    const userPlaylist = get().userPlaylists.find((item) => item.id === playlistId);
+    if (!userPlaylist) return;
+    const trackById = new Map(get().playlist.map((track) => [track.id, track]));
+    const entries = userPlaylist.trackIds
+      .map((id) => trackById.get(id))
+      .filter((track): track is Track => !!track)
+      .map((track) => ({
+        title: track.title,
+        artist: track.artist,
+        duration: track.duration,
+        path: track.path,
+      }));
+    if (entries.length === 0) {
+      get().showNotification("歌单没有可导出的曲目");
+      return;
+    }
+
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        defaultPath: `${userPlaylist.name}.m3u8`,
+        filters: [{ name: "播放列表", extensions: ["m3u8"] }],
+      });
+      if (!target) return;
+
+      await invoke("export_playlist_m3u8", { path: target, entries });
+      get().showNotification(`已导出歌单：${userPlaylist.name}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("export_playlist_m3u8 failed", err);
+      get().showNotification(`导出歌单失败: ${normalizeIpcError(err).message}`);
+    }
   },
 
   deleteTrack: async (trackId) => {

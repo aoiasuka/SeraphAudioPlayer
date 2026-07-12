@@ -4,4 +4,5 @@ pub mod error;
 pub mod events;
 pub mod library;
 pub mod playback;
+pub mod playlist_io;
 pub mod update;
