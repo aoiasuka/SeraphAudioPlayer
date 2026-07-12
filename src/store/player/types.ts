@@ -92,6 +92,7 @@ export interface BilibiliLoginQrState {
 export interface PersistedPlayerState {
   currentTrackIndex: number;
   persistedCurrentTrackId: string | null;
+  persistedCurrentTime: number;
   recentTrackIds: string[];
   volume: number;
   isMuted: boolean;
@@ -109,6 +110,7 @@ export interface PlayerStore {
   playlist: Track[];
   currentTrackIndex: number;
   persistedCurrentTrackId: string | null;
+  persistedCurrentTime: number;
   recentTrackIds: string[];
   isPlaying: boolean;
   currentTime: number;

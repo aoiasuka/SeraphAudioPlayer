@@ -244,11 +244,29 @@ export function createLibraryActions(
         const remapped = prevId
           ? merged.playlist.findIndex((track) => track.id === prevId)
           : -1;
+        // 启动恢复播放进度：仅在未开播、进度仍为 0 的水合场景下应用持久化
+        // 位置（钳制到曲目时长内）；曲目已不存在则清零，避免下次误恢复。
+        const restoredTrack = remapped >= 0 ? merged.playlist[remapped] : null;
+        const shouldRestoreTime =
+          !state.isPlaying && state.currentTime === 0 && restoredTrack !== null;
+        const restoredTime = shouldRestoreTime
+          ? Math.min(
+              Math.max(0, state.persistedCurrentTime),
+              restoredTrack.duration > 0
+                ? Math.max(0, restoredTrack.duration - 1)
+                : Number.MAX_SAFE_INTEGER
+            )
+          : null;
         return {
           ...merged,
           currentTrackIndex: remapped >= 0 ? remapped : 0,
           persistedCurrentTrackId:
             (remapped >= 0 ? prevId : merged.playlist[0]?.id) ?? null,
+          ...(restoredTime !== null
+            ? { currentTime: restoredTime }
+            : remapped < 0
+              ? { currentTime: 0, persistedCurrentTime: 0 }
+              : {}),
         };
       });
     } catch (err) {

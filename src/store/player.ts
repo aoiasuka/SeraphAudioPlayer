@@ -83,6 +83,7 @@ export function migratePersistedPlayerState(persistedState: unknown) {
       typeof state.persistedCurrentTrackId === "string" && state.persistedCurrentTrackId
         ? state.persistedCurrentTrackId
         : null,
+    persistedCurrentTime: Math.max(0, finiteNumber(state.persistedCurrentTime, 0)),
     recentTrackIds: stringArray(state.recentTrackIds).slice(0, 12),
     volume,
     isMuted: typeof state.isMuted === "boolean" ? state.isMuted : volume === 0,
@@ -110,6 +111,7 @@ export const usePlayerStore = create<PlayerStore>()(
         playlist: [],
         currentTrackIndex: 0,
         persistedCurrentTrackId: null,
+        persistedCurrentTime: 0,
         recentTrackIds: [],
         isPlaying: false,
         currentTime: 0,
@@ -156,6 +158,9 @@ export const usePlayerStore = create<PlayerStore>()(
         // 发现1：持久化当前曲目 id；playlist 未加载（为空）时回退到已持久化的 id
         persistedCurrentTrackId:
           state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId,
+        // 播放进度按 5 秒粒度持久化：恢复误差 ≤5s，同时把播放中每秒 tick
+        // 触发的 localStorage 写频率压到 1/5Hz
+        persistedCurrentTime: Math.floor(Math.max(0, state.currentTime) / 5) * 5,
         recentTrackIds: state.recentTrackIds,
         volume: state.volume,
         isMuted: state.isMuted,

@@ -15,6 +15,7 @@ function isSamePersistedState(
   return (
     previous.currentTrackIndex === next.currentTrackIndex &&
     previous.persistedCurrentTrackId === next.persistedCurrentTrackId &&
+    previous.persistedCurrentTime === next.persistedCurrentTime &&
     previous.recentTrackIds === next.recentTrackIds &&
     previous.volume === next.volume &&
     previous.isMuted === next.isMuted &&
