@@ -56,6 +56,8 @@ pub fn run() {
             ipc::library::fetch_online_lyrics,
             ipc::library::save_track_lyrics,
             ipc::library::list_devices,
+            ipc::update::check_for_update,
+            ipc::update::open_release_page,
         ])
         .setup(|app| {
             if let Ok(app_dir) = app.path().app_data_dir() {
