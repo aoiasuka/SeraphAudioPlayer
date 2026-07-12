@@ -34,6 +34,7 @@ des = "0.8"
 flate2 = "1"
 regex = "1"
 thiserror = { workspace = true }
+crossbeam-channel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -46,3 +47,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+# SMTC 系统媒体控件（媒体键 / 系统媒体浮窗）
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }

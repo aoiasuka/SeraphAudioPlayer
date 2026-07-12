@@ -14,6 +14,12 @@ export function playbackQueueArgs(get: PlayerStoreGet) {
     tracks: playlist.map((track) => ({
       id: track.id,
       path: track.path,
+      // SMTC 系统媒体浮窗展示用元数据
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      cover: track.cover,
+      duration: track.duration,
     })),
     currentTrackIndex,
     recentTrackIds,

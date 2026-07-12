@@ -42,6 +42,17 @@ impl Default for AppState {
 pub struct PlaybackQueueTrack {
     pub id: String,
     pub path: String,
+    // SMTC 系统媒体浮窗展示用元数据（旧队列快照缺省为空，不影响播放）
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub cover: String,
+    #[serde(default)]
+    pub duration: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +112,25 @@ impl AppState {
 
     pub fn advance_track(&self, direction: TrackAdvance) -> Result<(), String> {
         self.advance_track_with_start(direction, PlaybackStart::PreserveState)
+    }
+
+    /// SMTC 媒体键 Play：无已加载会话（resume 失败）时，从队列当前曲目从头播放。
+    pub fn play_current_track(&self) -> Result<(), String> {
+        let track = self.playback_queue.read().current_track().cloned();
+        let Some(track) = track else {
+            return Ok(());
+        };
+        self.play_track(&track, PlaybackStart::ForcePlaying)
+    }
+
+    /// 按 id 查询队列内曲目（SMTC 元数据展示用）。
+    pub fn queue_track_by_id(&self, track_id: &str) -> Option<PlaybackQueueTrack> {
+        self.playback_queue
+            .read()
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .cloned()
     }
 
     pub fn handle_playback_ended(&self, track_id: &str) -> Result<(), String> {

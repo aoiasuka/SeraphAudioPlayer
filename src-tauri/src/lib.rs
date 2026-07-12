@@ -8,6 +8,8 @@
 //! 注意：所有真正的音频逻辑都不在这里写，而是交给 `crates/seraph-*`。
 
 mod ipc;
+#[cfg(windows)]
+mod smtc;
 mod state;
 
 use state::AppState;
@@ -65,6 +67,9 @@ pub fn run() {
                     .allow_directory(app_dir.join("covers"), false);
             }
             ipc::events::wire_event_bus(app.handle().clone());
+            // Windows 系统媒体控件：媒体键 + 锁屏/音量浮窗曲目展示
+            #[cfg(windows)]
+            smtc::init(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
