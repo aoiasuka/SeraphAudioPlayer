@@ -1,10 +1,15 @@
-import { Loader2, Heart, Trash2 } from "lucide-react";
+import { Loader2, Heart, Search, Trash2, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
+import {
+  filterAndSortTracks,
+  TRACK_SORT_OPTIONS,
+  type TrackSortKey,
+} from "./trackFilters";
 
 const TRACK_ROW_HEIGHT = 59;
 const TRACK_ROW_OVERSCAN = 6;
@@ -29,6 +34,14 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [trackToDeleteId, setTrackToDeleteId] = useState<string | null>(null);
   const [isDeletingTrack, setIsDeletingTrack] = useState(false);
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<TrackSortKey>("default");
+  // 搜索 + 排序后的视图列表。点击播放仍经 trackIndexById 映射回全局队列索引，
+  // 因此过滤/排序只改变展示，不影响播放队列与切歌逻辑。
+  const displayTracks = useMemo(
+    () => filterAndSortTracks(tracks, query, sortKey),
+    [tracks, query, sortKey]
+  );
   const trackIndexById = useMemo(() => {
     const indexById = new Map<string, number>();
     playlist.forEach((track, index) => indexById.set(track.id, index));
@@ -47,18 +60,18 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
       Math.floor(scrollTop / TRACK_ROW_HEIGHT) - TRACK_ROW_OVERSCAN
     );
     const end = Math.min(
-      tracks.length,
+      displayTracks.length,
       Math.ceil((scrollTop + viewportHeight) / TRACK_ROW_HEIGHT) +
         TRACK_ROW_OVERSCAN
     );
 
     return {
-      tracks: tracks.slice(start, end),
+      tracks: displayTracks.slice(start, end),
       start,
       paddingTop: start * TRACK_ROW_HEIGHT,
-      paddingBottom: (tracks.length - end) * TRACK_ROW_HEIGHT,
+      paddingBottom: (displayTracks.length - end) * TRACK_ROW_HEIGHT,
     };
-  }, [scrollTop, tracks, viewportHeight]);
+  }, [scrollTop, displayTracks, viewportHeight]);
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     setScrollTop(element.scrollTop);
@@ -90,6 +103,11 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     }
   };
 
+  const resetScroll = () => {
+    setScrollTop(0);
+    scrollRef.current?.scrollTo({ top: 0 });
+  };
+
   if (tracks.length === 0) {
     return (
       <div className="flex min-h-[260px] items-center justify-center border-[1.5px] border-dashed border-line bg-card font-tw text-sm text-ink3">
@@ -100,10 +118,63 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="font-tw text-[10px] tracking-[3px] text-ink3 mb-3 flex justify-between">
+      <div className="font-tw text-[10px] tracking-[3px] text-ink3 mb-2 flex justify-between">
         <span>INDEX — 播放队列</span>
-        <span>{tracks.length} RECORDS</span>
+        <span>
+          {query.trim() || sortKey !== "default"
+            ? `${displayTracks.length} / ${tracks.length} RECORDS`
+            : `${tracks.length} RECORDS`}
+        </span>
       </div>
+      {/* 检索 + 排序工具行 */}
+      <div className="mb-3 flex items-center gap-2">
+        <label className="flex h-8 min-w-0 flex-1 items-center gap-2 border-[1.5px] border-line bg-card px-2.5 transition-colors focus-within:border-ink">
+          <Search className="h-3.5 w-3.5 shrink-0 text-ink3" />
+          <input
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              resetScroll();
+            }}
+            placeholder="检索标题 / 艺术家 / 专辑…"
+            className="min-w-0 flex-1 bg-transparent font-tw text-xs text-ink outline-none placeholder:text-ink3"
+            aria-label="检索曲目"
+          />
+          {query ? (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                resetScroll();
+              }}
+              className="text-ink3 transition-colors hover:text-stamp"
+              aria-label="清除检索"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </label>
+        <select
+          value={sortKey}
+          onChange={(event) => {
+            setSortKey(event.target.value as TrackSortKey);
+            resetScroll();
+          }}
+          className="h-8 shrink-0 cursor-pointer border-[1.5px] border-line bg-card px-2 font-tw text-xs font-bold text-ink2 outline-none transition-colors hover:border-ink focus:border-ink"
+          aria-label="排序方式"
+        >
+          {TRACK_SORT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {displayTracks.length === 0 ? (
+        <div className="flex min-h-[160px] items-center justify-center border-[1.5px] border-dashed border-line bg-card font-tw text-sm text-ink3">
+          没有匹配「{query.trim()}」的曲目
+        </div>
+      ) : (
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-y-auto pr-1"
@@ -218,6 +289,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
         })}
         </div>
       </div>
+      )}
       <Dialog
         open={Boolean(trackToDelete)}
         onClose={closeDeleteDialog}
