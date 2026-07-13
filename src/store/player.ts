@@ -98,6 +98,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
         : "wasapi:hd-dac1",
     driverKind: migrateDriver(state.driverKind),
     activeView: migrateView(state.activeView),
+    // 旧版本无此字段时默认启用（与既有行为一致）
+    smtcEnabled: state.smtcEnabled !== false,
   };
 }
 
@@ -126,6 +128,7 @@ export const usePlayerStore = create<PlayerStore>()(
         currentDeviceId: "wasapi:hd-dac1",
         driverKind: "wasapi",
         activeView: "local",
+        smtcEnabled: true,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -172,6 +175,7 @@ export const usePlayerStore = create<PlayerStore>()(
         currentDeviceId: state.currentDeviceId,
         driverKind: state.driverKind,
         activeView: state.activeView,
+        smtcEnabled: state.smtcEnabled,
       }),
     }
   )

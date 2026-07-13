@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -165,6 +165,15 @@ export function createOutputActions(
   closeDeviceMenu: () => {
     if (!get().deviceMenuOpen) return;
     set({ deviceMenuOpen: false });
+  },
+
+  setSmtcEnabled: (enabled) => {
+    if (get().smtcEnabled === enabled) return;
+    set({ smtcEnabled: enabled });
+    sendCommand("set_smtc_enabled", { enabled });
+    get().showNotification(
+      enabled ? "已启用系统媒体控件" : "已停用系统媒体控件"
+    );
   },
   };
 }

@@ -26,7 +26,8 @@ function isSamePersistedState(
     previous.userPlaylists === next.userPlaylists &&
     previous.currentDeviceId === next.currentDeviceId &&
     previous.driverKind === next.driverKind &&
-    previous.activeView === next.activeView
+    previous.activeView === next.activeView &&
+    previous.smtcEnabled === next.smtcEnabled
   );
 }
 

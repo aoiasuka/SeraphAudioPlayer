@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { runWhenIdle } from "@/lib/startup";
+import { invoke, isTauriRuntime } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import { hydrationGate } from "@/store/player/persistStorage";
 
@@ -19,6 +20,12 @@ export function useHydratePlayerStore() {
         state.normalizeLibrary();
         void state.loadBackendLibrary();
         state.loadDevices();
+        // SMTC 默认在后端启用；用户此前关过则水合后同步停用状态
+        if (isTauriRuntime() && !state.smtcEnabled) {
+          void invoke("set_smtc_enabled", { enabled: false }).catch(() => {
+            // 非 Windows 或 SMTC 未初始化时静默
+          });
+        }
       });
     }, 1800);
   }, []);

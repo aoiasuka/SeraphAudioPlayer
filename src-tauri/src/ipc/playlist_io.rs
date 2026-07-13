@@ -124,10 +124,8 @@ mod tests {
     /// 每个测试独立子目录：cargo test 并行执行，共用目录会在
     /// remove_dir_all 清理时互删对方文件（CI 上稳定复现的竞态）。
     fn temp_dir(case: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "seraph-m3u8-test-{}-{case}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("seraph-m3u8-test-{}-{case}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         dir
     }

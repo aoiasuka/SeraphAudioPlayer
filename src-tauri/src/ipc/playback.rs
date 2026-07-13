@@ -142,3 +142,14 @@ pub fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(
         .map_err(|err| err.to_string())?;
     Ok(())
 }
+
+/// 启用/停用系统媒体控件（SMTC）。设置由前端持久化，启动水合后同步。
+#[tauri::command]
+pub fn set_smtc_enabled(enabled: bool) -> Result<(), String> {
+    debug!("ipc::set_smtc_enabled -> {enabled}");
+    #[cfg(windows)]
+    crate::smtc::set_enabled(enabled);
+    #[cfg(not(windows))]
+    let _ = enabled;
+    Ok(())
+}

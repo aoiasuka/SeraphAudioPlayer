@@ -18,9 +18,21 @@ use seraph_core::{PlayerEvent, PlayerState};
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tracing::{debug, warn};
+
+/// 设置页开关 → SMTC 线程的控制通道（true=启用 / false=停用）。
+static SMTC_CONTROL: OnceLock<crossbeam_channel::Sender<bool>> = OnceLock::new();
+
+/// 运行时启用/停用 SMTC（set_smtc_enabled 命令调用）。
+/// SMTC 线程未初始化（init 失败等）时静默忽略。
+pub fn set_enabled(enabled: bool) {
+    if let Some(sender) = SMTC_CONTROL.get() {
+        let _ = sender.send(enabled);
+    }
+}
 
 /// 在 Tauri setup 阶段调用。初始化失败只记日志，绝不阻断应用启动。
 pub fn init(app: &AppHandle) {
@@ -36,16 +48,27 @@ pub fn init(app: &AppHandle) {
         }
     };
 
+    let (control_tx, control_rx) = crossbeam_channel::unbounded();
+    if SMTC_CONTROL.set(control_tx).is_err() {
+        warn!("SMTC init skipped: already initialized");
+        return;
+    }
+
     let event_rx = app.state::<AppState>().event_bus.subscribe();
     let app_handle = app.clone();
     std::thread::Builder::new()
         .name("smtc".into())
-        .spawn(move || run_smtc(app_handle, event_rx, hwnd_addr))
+        .spawn(move || run_smtc(app_handle, event_rx, control_rx, hwnd_addr))
         .map(|_| ())
         .unwrap_or_else(|err| warn!("SMTC thread spawn failed: {err}"));
 }
 
-fn run_smtc(app: AppHandle, event_rx: crossbeam_channel::Receiver<PlayerEvent>, hwnd_addr: isize) {
+fn run_smtc(
+    app: AppHandle,
+    event_rx: crossbeam_channel::Receiver<PlayerEvent>,
+    control_rx: crossbeam_channel::Receiver<bool>,
+    hwnd_addr: isize,
+) {
     let config = PlatformConfig {
         display_name: "Seraph Audio Player",
         dbus_name: "seraph_audio_player",
@@ -60,51 +83,98 @@ fn run_smtc(app: AppHandle, event_rx: crossbeam_channel::Receiver<PlayerEvent>, 
         }
     };
 
-    let handler_app = app.clone();
-    if let Err(err) = controls.attach(move |event| handle_media_event(&handler_app, event)) {
-        warn!("SMTC attach failed: {err:?}");
-        return;
+    // 默认启用注册；用户此前关过开关时，前端水合后会立即发停用消息
+    let mut attached = attach_controls(&mut controls, &app);
+    if attached {
+        let _ = controls.set_playback(MediaPlayback::Stopped);
+        debug!("SMTC attached");
     }
-    let _ = controls.set_playback(MediaPlayback::Stopped);
-    debug!("SMTC attached");
 
     // Progress 事件频率高于每秒；SMTC 进度只需秒级精度，整秒变化才更新。
     let mut last_progress_sec = u64::MAX;
+    // 停用期间仍跟踪当前曲目，重新启用时立即恢复系统浮窗显示
+    let mut last_track_id: Option<String> = None;
 
-    while let Ok(event) = event_rx.recv() {
-        let result = match &event {
-            PlayerEvent::PlaybackStarted { track_id } | PlayerEvent::TrackChanged { track_id } => {
-                last_progress_sec = u64::MAX;
-                update_track_metadata(&app, &mut controls, track_id)
-            }
-            PlayerEvent::PlaybackResumed => {
-                controls.set_playback(MediaPlayback::Playing { progress: None })
-            }
-            PlayerEvent::PlaybackPaused => {
-                controls.set_playback(MediaPlayback::Paused { progress: None })
-            }
-            PlayerEvent::PlaybackStopped => controls.set_playback(MediaPlayback::Stopped),
-            PlayerEvent::Progress { seconds, .. } => {
-                let sec = seconds.max(0.0) as u64;
-                if sec == last_progress_sec {
-                    Ok(())
-                } else {
-                    last_progress_sec = sec;
-                    let progress = Some(MediaPosition(Duration::from_secs(sec)));
-                    let playing =
-                        *app.state::<AppState>().player_state.read() == PlayerState::Playing;
-                    controls.set_playback(if playing {
-                        MediaPlayback::Playing { progress }
-                    } else {
-                        MediaPlayback::Paused { progress }
-                    })
+    loop {
+        crossbeam_channel::select! {
+            recv(control_rx) -> message => {
+                let Ok(enable) = message else { break };
+                if enable && !attached {
+                    attached = attach_controls(&mut controls, &app);
+                    if attached {
+                        last_progress_sec = u64::MAX;
+                        if let Some(track_id) = last_track_id.clone() {
+                            let _ = update_track_metadata(&app, &mut controls, &track_id);
+                        }
+                        debug!("SMTC re-attached");
+                    }
+                } else if !enable && attached {
+                    let _ = controls.set_playback(MediaPlayback::Stopped);
+                    if let Err(err) = controls.detach() {
+                        warn!("SMTC detach failed: {err:?}");
+                    }
+                    attached = false;
+                    debug!("SMTC detached");
                 }
             }
-            _ => Ok(()),
-        };
+            recv(event_rx) -> message => {
+                let Ok(event) = message else { break };
+                if let PlayerEvent::PlaybackStarted { track_id }
+                | PlayerEvent::TrackChanged { track_id } = &event
+                {
+                    last_track_id = Some(track_id.clone());
+                }
+                if !attached {
+                    continue;
+                }
 
-        if let Err(err) = result {
-            debug!("SMTC update failed: {err:?}");
+                let result = match &event {
+                    PlayerEvent::PlaybackStarted { track_id }
+                    | PlayerEvent::TrackChanged { track_id } => {
+                        last_progress_sec = u64::MAX;
+                        update_track_metadata(&app, &mut controls, track_id)
+                    }
+                    PlayerEvent::PlaybackResumed => {
+                        controls.set_playback(MediaPlayback::Playing { progress: None })
+                    }
+                    PlayerEvent::PlaybackPaused => {
+                        controls.set_playback(MediaPlayback::Paused { progress: None })
+                    }
+                    PlayerEvent::PlaybackStopped => controls.set_playback(MediaPlayback::Stopped),
+                    PlayerEvent::Progress { seconds, .. } => {
+                        let sec = seconds.max(0.0) as u64;
+                        if sec == last_progress_sec {
+                            Ok(())
+                        } else {
+                            last_progress_sec = sec;
+                            let progress = Some(MediaPosition(Duration::from_secs(sec)));
+                            let playing = *app.state::<AppState>().player_state.read()
+                                == PlayerState::Playing;
+                            controls.set_playback(if playing {
+                                MediaPlayback::Playing { progress }
+                            } else {
+                                MediaPlayback::Paused { progress }
+                            })
+                        }
+                    }
+                    _ => Ok(()),
+                };
+
+                if let Err(err) = result {
+                    debug!("SMTC update failed: {err:?}");
+                }
+            }
+        }
+    }
+}
+
+fn attach_controls(controls: &mut MediaControls, app: &AppHandle) -> bool {
+    let handler_app = app.clone();
+    match controls.attach(move |event| handle_media_event(&handler_app, event)) {
+        Ok(()) => true,
+        Err(err) => {
+            warn!("SMTC attach failed: {err:?}");
+            false
         }
     }
 }

@@ -104,6 +104,7 @@ export interface PersistedPlayerState {
   currentDeviceId: string;
   driverKind: DriverKind;
   activeView: LibraryView;
+  smtcEnabled: boolean;
 }
 
 export interface PlayerStore {
@@ -125,6 +126,7 @@ export interface PlayerStore {
   currentDeviceId: string;
   driverKind: DriverKind;
   activeView: LibraryView;
+  smtcEnabled: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -187,6 +189,7 @@ export interface PlayerStore {
   loadDevices: () => void;
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;
+  setSmtcEnabled: (enabled: boolean) => void;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;

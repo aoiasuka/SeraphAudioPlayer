@@ -36,6 +36,7 @@ pub fn run() {
             ipc::playback::set_volume,
             ipc::playback::select_output_device,
             ipc::playback::set_output_driver,
+            ipc::playback::set_smtc_enabled,
             ipc::cache::clear_cache,
             ipc::cache::get_cache_status,
             ipc::cache::update_cache_settings,

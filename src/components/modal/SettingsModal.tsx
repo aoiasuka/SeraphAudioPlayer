@@ -4,6 +4,7 @@ import {
   Folder,
   HardDrive,
   Loader2,
+  MonitorSpeaker,
   RotateCw,
   Sliders,
   Sparkles,
@@ -70,6 +71,15 @@ function formatBytes(value: number) {
   return formatMb(value / 1024 / 1024);
 }
 
+type SettingsTab = "audio" | "cache" | "system" | "about";
+
+const SETTINGS_TABS: { value: SettingsTab; label: string }[] = [
+  { value: "audio", label: "音频输出" },
+  { value: "cache", label: "缓存管理" },
+  { value: "system", label: "系统集成" },
+  { value: "about", label: "关于与更新" },
+];
+
 export function SettingsModal() {
   const open = usePlayerStore((s) => s.settingsOpen);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
@@ -80,9 +90,12 @@ export function SettingsModal() {
   const loadDevices = usePlayerStore((s) => s.loadDevices);
   const selectDevice = usePlayerStore((s) => s.selectDevice);
   const showNotification = usePlayerStore((s) => s.showNotification);
+  const smtcEnabled = usePlayerStore((s) => s.smtcEnabled);
+  const setSmtcEnabled = usePlayerStore((s) => s.setSmtcEnabled);
   const markTracksCacheMissingByPaths = usePlayerStore(
     (s) => s.markTracksCacheMissingByPaths
   );
+  const [activeTab, setActiveTab] = useState<SettingsTab>("audio");
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const [cacheDir, setCacheDir] = useState("");
   const [maxSizeMb, setMaxSizeMb] = useState("5120");
@@ -204,17 +217,36 @@ export function SettingsModal() {
       </button>
 
       <span className="file-tab">FILE — SYSTEM / SETTINGS</span>
-      <div className="space-y-2">
-        <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
-          <Sliders className="w-4 h-4 text-brown" />
-          音频输出设置
-        </h3>
-        <p className="font-tw text-[11px] text-ink2 leading-relaxed">
-          管理当前播放设备和输出偏好。
-        </p>
+
+      {/* 功能分页：音频输出 / 缓存管理 / 系统集成 / 关于与更新 */}
+      <div className="flex flex-wrap gap-1.5 border-b-[1.5px] border-line pb-3">
+        {SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            onClick={() => setActiveTab(tab.value)}
+            className={
+              activeTab === tab.value
+                ? "h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper"
+                : "h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
+      {activeTab === "audio" && (
       <div className="space-y-4">
+        <div className="space-y-2">
+          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
+            <Sliders className="w-4 h-4 text-brown" />
+            音频输出设置
+          </h3>
+          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
+            管理当前播放设备和输出偏好。
+          </p>
+        </div>
         <div className="space-y-1.5">
           <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
             Driver Interface
@@ -270,6 +302,29 @@ export function SettingsModal() {
           </select>
         </div>
 
+        <div className="p-3 bg-stamp-soft border-[1.5px] border-stamp space-y-1.5">
+          <h4 className="font-serif text-xs font-semibold text-stamp flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            当前输出能力
+          </h4>
+          <p className="font-tw text-[10px] text-ink2 leading-relaxed">
+            本地解码、播放进度事件、系统共享输出和 WASAPI 独占输出已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP、Native DSD、ASIO 与 bit-perfect 旁路尚未开放。
+          </p>
+        </div>
+      </div>
+      )}
+
+      {activeTab === "cache" && (
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
+            <HardDrive className="w-4 h-4 text-brown" />
+            缓存管理
+          </h3>
+          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
+            管理流媒体音频的本地缓存目录与容量上限。
+          </p>
+        </div>
         <form
           onSubmit={saveCacheSettings}
           className="p-3 bg-paper2 border-[1.5px] border-ink space-y-3"
@@ -379,19 +434,49 @@ export function SettingsModal() {
             </button>
           </div>
         </form>
+      </div>
+      )}
 
-        <div className="p-3 bg-stamp-soft border-[1.5px] border-stamp space-y-1.5">
-          <h4 className="font-serif text-xs font-semibold text-stamp flex items-center gap-1.5">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            当前输出能力
-          </h4>
-          <p className="font-tw text-[10px] text-ink2 leading-relaxed">
-            本地解码、播放进度事件、系统共享输出和 WASAPI 独占输出已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP、Native DSD、ASIO 与 bit-perfect 旁路尚未开放。
+      {activeTab === "system" && (
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
+            <MonitorSpeaker className="w-4 h-4 text-brown" />
+            系统集成
+          </h3>
+          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
+            与 Windows 系统的集成能力。
           </p>
         </div>
-
-        <UpdateSection showNotification={showNotification} />
+        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+          <div className="min-w-0">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              系统媒体控件（SMTC）
+            </h4>
+            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+              键盘/蓝牙媒体键控制播放；系统音量浮窗与锁屏显示曲目标题、艺术家与封面。
+              停用后系统界面不再展示本应用的播放内容，媒体键也不再生效。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSmtcEnabled(!smtcEnabled)}
+            className={
+              smtcEnabled
+                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+            aria-pressed={smtcEnabled}
+          >
+            {smtcEnabled ? "已启用" : "已停用"}
+          </button>
+        </div>
       </div>
+      )}
+
+      {activeTab === "about" && (
+        <UpdateSection showNotification={showNotification} />
+      )}
 
       <div className="flex justify-end gap-3 pt-3 border-t border-line">
         <button
