@@ -38,7 +38,7 @@ const copy: Record<LibraryView, PageCopy> = {
   playlists: {
     title: "歌单",
     kicker: "Playlists",
-    description: "按听音场景组织曲库，后续可接入真实歌单文件。",
+    description: "创建歌单、加入曲目并排序，支持 M3U8 清单导入导出。",
   },
   artists: {
     title: "艺术家",
