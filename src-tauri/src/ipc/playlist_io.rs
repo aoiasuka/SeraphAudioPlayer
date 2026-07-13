@@ -121,15 +121,20 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("seraph-m3u8-test-{}", std::process::id()));
+    /// 每个测试独立子目录：cargo test 并行执行，共用目录会在
+    /// remove_dir_all 清理时互删对方文件（CI 上稳定复现的竞态）。
+    fn temp_dir(case: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "seraph-m3u8-test-{}-{case}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&dir);
         dir
     }
 
     #[test]
     fn imports_absolute_relative_and_skips_urls() {
-        let dir = temp_dir();
+        let dir = temp_dir("import");
         let audio_abs = dir.join("abs.flac");
         let audio_rel = dir.join("rel.mp3");
         fs::write(&audio_abs, b"x").unwrap();
@@ -155,7 +160,7 @@ mod tests {
 
     #[test]
     fn export_appends_extension_and_writes_extinf() {
-        let dir = temp_dir();
+        let dir = temp_dir("export");
         let target = dir.join("out-list");
         export_playlist_m3u8(
             target.to_string_lossy().to_string(),
