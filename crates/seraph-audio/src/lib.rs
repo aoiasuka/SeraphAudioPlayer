@@ -8,9 +8,11 @@
 pub mod backend;
 pub mod device;
 pub mod engine;
+pub mod spectrum;
 pub mod wasapi;
 
 pub use backend::{AudioBackend, BackendError};
 pub use device::{list_output_devices, AudioDevice, DeviceCapabilities, ShareMode};
 pub use engine::{PlaybackController, PlaybackEngine};
+pub use spectrum::SpectrumTap;
 pub use wasapi::WasapiExclusive;

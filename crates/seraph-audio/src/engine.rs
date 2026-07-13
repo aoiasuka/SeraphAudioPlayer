@@ -1,6 +1,7 @@
 use crate::{
     backend::{BackendError, Result},
     device::{output_device_by_id, resolve_output_device_id},
+    spectrum::SpectrumTap,
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -43,6 +44,8 @@ const EXCLUSIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 #[derive(Clone)]
 pub struct PlaybackController {
     tx: Sender<PlaybackRequest>,
+    /// 频谱可视化 tap（渲染线程写、IPC 层读），跨引擎线程共享
+    spectrum: Arc<SpectrumTap>,
 }
 
 struct PlaybackRequest {
@@ -69,8 +72,10 @@ enum PlaybackCommand {
 impl PlaybackController {
     pub fn new(event_bus: EventBus) -> Self {
         let (tx, rx) = mpsc::channel::<PlaybackRequest>();
+        let spectrum = SpectrumTap::new();
+        let engine_spectrum = spectrum.clone();
         thread::spawn(move || {
-            let mut engine = PlaybackEngine::new(event_bus.clone());
+            let mut engine = PlaybackEngine::with_spectrum_tap(event_bus.clone(), engine_spectrum);
             while let Ok(request) = rx.recv() {
                 let result = match request.command {
                     PlaybackCommand::PlayFile {
@@ -100,7 +105,12 @@ impl PlaybackController {
             }
         });
 
-        Self { tx }
+        Self { tx, spectrum }
+    }
+
+    /// 频谱可视化 tap：上层（Tauri IPC）定期 drain 后喂给 FFT。
+    pub fn spectrum_tap(&self) -> Arc<SpectrumTap> {
+        self.spectrum.clone()
     }
 
     pub fn play_file(&self, path: PathBuf, track_id: String, start_seconds: f64) -> Result<()> {
@@ -165,6 +175,8 @@ pub struct PlaybackEngine {
     volume: f32,
     selected_device_id: Option<String>,
     driver: OutputDriver,
+    /// 频谱 tap：跨 session 常驻，渲染循环写、Controller 暴露给上层读
+    spectrum: Arc<SpectrumTap>,
 }
 
 struct PlaybackSession {
@@ -196,6 +208,8 @@ struct PlaybackShared {
     output_rate: u32,
     output_channels: usize,
     max_buffer_samples: usize,
+    /// 频谱可视化 tap：渲染循环把最终输出样本旁路一份（实时安全，见 spectrum.rs）
+    spectrum: Arc<SpectrumTap>,
 }
 
 #[derive(Clone, Copy)]
@@ -240,12 +254,17 @@ impl OutputDriver {
 
 impl PlaybackEngine {
     pub fn new(event_bus: EventBus) -> Self {
+        Self::with_spectrum_tap(event_bus, SpectrumTap::new())
+    }
+
+    pub fn with_spectrum_tap(event_bus: EventBus, spectrum: Arc<SpectrumTap>) -> Self {
         Self {
             event_bus,
             session: None,
             volume: 0.7,
             selected_device_id: None,
             driver: OutputDriver::WasapiExclusive,
+            spectrum,
         }
     }
 
@@ -339,6 +358,7 @@ impl PlaybackEngine {
             output_rate,
             output_channels,
             self.volume,
+            self.spectrum.clone(),
         ));
         let (producer, consumer) = RingBuffer::new(shared.max_buffer_samples);
         shared.frame_position.store(
@@ -576,7 +596,12 @@ impl Drop for PlaybackEngine {
 }
 
 impl PlaybackShared {
-    fn new(output_rate: u32, output_channels: usize, volume: f32) -> Self {
+    fn new(
+        output_rate: u32,
+        output_channels: usize,
+        volume: f32,
+        spectrum: Arc<SpectrumTap>,
+    ) -> Self {
         let max_buffer_samples = output_rate as usize * output_channels * TARGET_BUFFER_SECONDS;
         Self {
             seek_request: Mutex::new(None),
@@ -588,6 +613,7 @@ impl PlaybackShared {
             output_rate,
             output_channels,
             max_buffer_samples,
+            spectrum,
         }
     }
 
@@ -1709,6 +1735,12 @@ fn render_output<T>(
     let step = gain_ramp_step(shared.output_rate);
     let channels = shared.output_channels.max(1);
 
+    // 频谱 tap：try_lock 失败（读侧正在 drain）就放弃本 quantum，绝不阻塞渲染。
+    let mut spectrum_writer = shared.spectrum.writer();
+    if let Some(writer) = spectrum_writer.as_mut() {
+        writer.set_channels(channels);
+    }
+
     let current_generation = shared.buffer_generation();
     if current_generation != state.observed_generation {
         state.observed_generation = current_generation;
@@ -1762,7 +1794,11 @@ fn render_output<T>(
                     Err(_) => break 0.0,
                 }
             };
-            write_sample(sample, value * state.gain);
+            let rendered = value * state.gain;
+            write_sample(sample, rendered);
+            if let Some(writer) = spectrum_writer.as_mut() {
+                writer.push(rendered);
+            }
         }
         consumed += channels;
     }
