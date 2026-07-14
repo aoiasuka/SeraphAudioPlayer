@@ -4,7 +4,7 @@ import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 
 export function UpNextCard() {
-  const nextTrack = usePlayerStore((s) => s.nextTrack);
+  const playNextPreview = usePlayerStore((s) => s.playNextPreview);
   const next = usePlayerStore((s) => s.nextTrackPreview());
   const [coverFailed, setCoverFailed] = useState(false);
   const cover = coverSrc(next?.cover);
@@ -21,7 +21,7 @@ export function UpNextCard() {
         UP NEXT — 下一首
       </h3>
       <div
-        onClick={nextTrack}
+        onClick={playNextPreview}
         className="archive-card flex items-center justify-between gap-2.5 p-2.5 cursor-pointer"
       >
         <div className="flex min-w-0 items-center gap-2.5">

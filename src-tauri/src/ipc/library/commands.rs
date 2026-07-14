@@ -28,19 +28,32 @@ pub fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Option<Impo
 }
 
 #[tauri::command]
-pub fn delete_track(app: AppHandle, track: DeleteTrackRequest) -> IpcResult<bool> {
+pub async fn delete_track(app: AppHandle, track: DeleteTrackRequest) -> IpcResult<bool> {
+    // H-1：读改写 + 可能的锁等待都是阻塞操作，放 spawn_blocking，避免占用主线程
+    // （Tauri 同步命令在主线程执行，与 backfill 抢 LIBRARY_LOCK 时会冻结整个窗口）。
+    tauri::async_runtime::spawn_blocking(move || delete_track_inner(&app, &track))
+        .await
+        .map_err(|err| {
+            IpcError::new(
+                crate::ipc::error::IpcErrorCode::Internal,
+                format!("delete_track task panicked: {err}"),
+            )
+        })?
+}
+
+fn delete_track_inner(app: &AppHandle, track: &DeleteTrackRequest) -> IpcResult<bool> {
     let track_id = track.id.trim();
-    let target_key = delete_track_request_key(&track);
+    let target_key = delete_track_request_key(track);
     if track_id.is_empty() && target_key.is_none() {
         return Err(IpcError::invalid_input("missing track identity"));
     }
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
-    let tracks = read_cached_tracks_for_update(&app)?;
+    let tracks = read_cached_tracks_for_update(app)?;
     let (updated, removed) = remove_cached_track(tracks, track_id, target_key.as_deref());
     if removed {
-        write_cached_tracks(&app, &updated)?;
+        write_cached_tracks(app, &updated)?;
     }
 
     Ok(removed)
@@ -112,11 +125,30 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
 }
 
 #[tauri::command]
-pub fn save_track_lyrics(
+pub async fn save_track_lyrics(
     app: AppHandle,
     track_id: String,
     lyrics_bytes: Vec<u8>,
     track_path: Option<String>,
+) -> IpcResult<Vec<LyricLine>> {
+    // H-1：持锁 + 可能的 lofty/ffprobe 探测（未入库曲目）都是阻塞操作，放 spawn_blocking。
+    tauri::async_runtime::spawn_blocking(move || {
+        save_track_lyrics_inner(&app, &track_id, &lyrics_bytes, track_path.as_deref())
+    })
+    .await
+    .map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Internal,
+            format!("save_track_lyrics task panicked: {err}"),
+        )
+    })?
+}
+
+fn save_track_lyrics_inner(
+    app: &AppHandle,
+    track_id: &str,
+    lyrics_bytes: &[u8],
+    track_path: Option<&str>,
 ) -> IpcResult<Vec<LyricLine>> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
@@ -137,22 +169,22 @@ pub fn save_track_lyrics(
         )));
     }
 
-    let lyrics = parse_lyrics_bytes(&lyrics_bytes);
+    let lyrics = parse_lyrics_bytes(lyrics_bytes);
     if lyrics.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
-    let mut tracks = read_cached_tracks_for_update(&app)?;
+    let mut tracks = read_cached_tracks_for_update(app)?;
     apply_track_lyrics(
         &mut tracks,
-        &track_id,
+        track_id,
         lyrics.clone(),
-        track_path.as_deref(),
-        covers_dir_path(&app).ok().as_deref(),
+        track_path,
+        covers_dir_path(app).ok().as_deref(),
     )?;
-    write_cached_tracks(&app, &tracks)?;
+    write_cached_tracks(app, &tracks)?;
 
     Ok(lyrics)
 }
@@ -179,11 +211,30 @@ pub async fn fetch_online_lyrics(
 }
 
 #[tauri::command]
-pub fn apply_online_lyrics(
+pub async fn apply_online_lyrics(
     app: AppHandle,
     track_id: String,
     lyrics: Vec<LyricLine>,
     track_path: Option<String>,
+) -> IpcResult<Vec<LyricLine>> {
+    // H-1：持锁 + 可能的 lofty/ffprobe 探测都是阻塞操作，放 spawn_blocking。
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_online_lyrics_inner(&app, &track_id, lyrics, track_path.as_deref())
+    })
+    .await
+    .map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Internal,
+            format!("apply_online_lyrics task panicked: {err}"),
+        )
+    })?
+}
+
+fn apply_online_lyrics_inner(
+    app: &AppHandle,
+    track_id: &str,
+    lyrics: Vec<LyricLine>,
+    track_path: Option<&str>,
 ) -> IpcResult<Vec<LyricLine>> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
@@ -194,15 +245,15 @@ pub fn apply_online_lyrics(
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
-    let mut tracks = read_cached_tracks_for_update(&app)?;
+    let mut tracks = read_cached_tracks_for_update(app)?;
     apply_track_lyrics(
         &mut tracks,
-        &track_id,
+        track_id,
         lyrics.clone(),
-        track_path.as_deref(),
-        covers_dir_path(&app).ok().as_deref(),
+        track_path,
+        covers_dir_path(app).ok().as_deref(),
     )?;
-    write_cached_tracks(&app, &tracks)?;
+    write_cached_tracks(app, &tracks)?;
 
     Ok(lyrics)
 }

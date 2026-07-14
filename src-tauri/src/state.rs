@@ -12,6 +12,10 @@ use std::{
 ///
 /// 真正实现音频功能后，这里会持有 `AudioEngine` / `Library` 等的句柄；
 /// 当前只暴露事件总线和状态机的占位。
+///
+/// 所有字段都是 `Arc`/可克隆句柄，共享同一份底层状态；`Clone` 只复制句柄，
+/// 便于把 AppState 移入 `spawn_blocking`（H-1：让阻塞的播放命令离开主线程）。
+#[derive(Clone)]
 pub struct AppState {
     pub event_bus: EventBus,
     pub player_state: Arc<RwLock<PlayerState>>,

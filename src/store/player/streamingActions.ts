@@ -18,6 +18,31 @@ import type {
 // 存 store 外的模块级变量，登录成功/二维码过期/手动关闭时自行清理。
 let loginPollTimer: number | null = null;
 
+// M-6：invoke("download_ffmpeg") 的返回与 "seraph://ffmpeg-download" 进度事件是两条
+// 独立 IPC 消息，到达顺序不保证。若最后一个非终态进度事件在 invoke resolve 之后才被处理，
+// 会把 stage 从 done 打回 downloading，按钮永久卡 spinner。用单调代际标记：invoke 一旦
+// 落定终态（done/error），listener 忽略此后到达的滞后非终态事件，直到下一次下载开始。
+const ffmpegDownloadSession = { epoch: 0, settled: false };
+
+/** 开始新一轮下载：递增代际、清除 settled，接纳后续进度事件。 */
+export function beginFfmpegDownloadSession() {
+  ffmpegDownloadSession.epoch += 1;
+  ffmpegDownloadSession.settled = false;
+  return ffmpegDownloadSession.epoch;
+}
+
+/** invoke 落定终态：标记 settled，让 listener 丢弃滞后的非终态事件。 */
+export function settleFfmpegDownloadSession(epoch: number) {
+  if (epoch === ffmpegDownloadSession.epoch) {
+    ffmpegDownloadSession.settled = true;
+  }
+}
+
+/** listener 判定：当前会话已落定时应忽略非终态进度事件。 */
+export function shouldIgnoreLaggingFfmpegProgress() {
+  return ffmpegDownloadSession.settled;
+}
+
 function clearLoginPollTimer() {
   if (loginPollTimer !== null) {
     window.clearInterval(loginPollTimer);
@@ -120,12 +145,15 @@ export function createStreamingActions(
     startFfmpegDownload: async () => {
       // 审2-R5：幂等——已在下载中时直接忽略，切页回来重复点击不会触发第二次下载
       if (get().ffmpegDownload.stage === "downloading") return;
+      const session = beginFfmpegDownloadSession();
       set({
         ffmpegDownload: { stage: "downloading", percent: 0, message: "准备下载…" },
       });
       get().showNotification("开始下载 FFmpeg，请保持网络畅通…");
       try {
         const status = await invoke<BilibiliFfmpegStatus>("download_ffmpeg");
+        // M-6：落定终态并忽略此后滞后的进度事件，避免 done 被打回 downloading。
+        settleFfmpegDownloadSession(session);
         set({
           bilibiliFfmpegStatus: status,
           ffmpegDownload: { stage: "done", percent: 100 },
@@ -136,6 +164,7 @@ export function createStreamingActions(
             : "FFmpeg 安装未完成"
         );
       } catch (err) {
+        settleFfmpegDownloadSession(session);
         set({ ffmpegDownload: { stage: "error", percent: 0 } });
         const reason = typeof err === "string" ? err : "下载失败";
         get().showNotification(reason);

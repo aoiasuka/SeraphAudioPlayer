@@ -267,6 +267,37 @@ mod tests {
     }
 
     #[test]
+    fn download_url_whitelist_accepts_official_cdn_https() {
+        for url in [
+            "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/a.m4s?e=x",
+            "https://cn-gotcha01.bilivideo.cn/xxx/audio.m4s",
+            "https://xy1x2x3.hdslb.com/audio.m4s",
+            "https://a.b.akamaized.net/audio.m4s",
+        ] {
+            assert!(is_safe_bilibili_download_url(url), "should accept {url}");
+        }
+    }
+
+    #[test]
+    fn download_url_whitelist_rejects_unsafe() {
+        for url in [
+            // 明文 http 一律拒绝（防被动监听截获 Cookie）
+            "http://upos-sz-mirrorcos.bilivideo.com/a.m4s",
+            // 第三方 / 仿冒 host
+            "https://evil.example/a.m4s",
+            "https://bilivideo.com.evil.example/a.m4s",
+            "https://notbilivideo.com/a.m4s",
+            // 裸后缀（无子域）不放行，避免仅凭后缀匹配放过奇怪构造
+            "https://bilivideo.com/a.m4s",
+            "https://akamaized.net/a.m4s",
+            "",
+            "not a url",
+        ] {
+            assert!(!is_safe_bilibili_download_url(url), "should reject {url:?}");
+        }
+    }
+
+    #[test]
     fn parses_expires_date_case_insensitively() {
         // 上游会把整段属性 to_ascii_lowercase，月份必须大小写不敏感匹配。
         let expected = parse_http_date_to_unix("Sun, 06 Nov 1994 08:49:37 GMT");

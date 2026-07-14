@@ -119,6 +119,15 @@ function clampVolume(volume: number) {
   return Math.max(0, Math.min(1, volume));
 }
 
+// H-2：跟踪“最近一次非零音量”。拖动音量条到 0 时会连续触发 setVolume(0.05)…(0)，
+// 若用上一次 set 的采样值（≈0）作为 previousVolume，取消静音只会恢复到 1-3%。
+// 用户拖动前真正的响度是最后一个非零采样，用它作为恢复基准。
+let lastNonZeroVolume = 0.7;
+
+export function rememberNonZeroVolume(volume: number) {
+  if (volume > 0) lastNonZeroVolume = volume;
+}
+
 function cancelQueuedVolumeCommand() {
   if (volumeDebounce.timer !== null) {
     window.clearTimeout(volumeDebounce.timer);
@@ -161,7 +170,7 @@ function reportPlaybackCommandError(
 export function createPlaybackActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "nextTrackPreview" | "togglePlayback" | "nextTrack" | "prevTrack" | "loadTrack" | "seek" | "tick" | "setVolume" | "toggleMute" | "toggleShuffle" | "toggleLoop" | "toggleLike"> {
+): Pick<PlayerStore, "nextTrackPreview" | "playNextPreview" | "togglePlayback" | "nextTrack" | "prevTrack" | "loadTrack" | "seek" | "tick" | "setVolume" | "toggleMute" | "toggleShuffle" | "toggleLoop" | "toggleLike"> {
   return {
   nextTrackPreview: () => {
     const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
@@ -172,6 +181,21 @@ export function createPlaybackActions(
       recentTrackIds
     );
     return next >= 0 ? playlist[next] ?? null : null;
+  },
+
+  // 中-11：点击 UpNext 卡片时播放“卡片上显示的那一首”（与 nextTrackPreview 同一缓存索引），
+  // 做到所见即所得。此前卡片点击走后端 next_track（后端独立掷随机），shuffle 模式下
+  // 显示 A 却播 B。顺序模式两者本就一致，此改动只影响 shuffle 的一致性。
+  playNextPreview: () => {
+    const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
+    const index = resolveNextIndex(
+      playlist,
+      currentTrackIndex,
+      shuffleMode,
+      recentTrackIds
+    );
+    if (index < 0 || index >= playlist.length) return;
+    get().loadTrack(index);
   },
 
   togglePlayback: () => {
@@ -345,11 +369,13 @@ export function createPlaybackActions(
     const volume = clampVolume(v);
     if (get().volume === volume) return;
 
+    // H-2：先记录本次非零音量，再处理归零。这样滑到 0 时 previousVolume 取到的是
+    // 拖动前真正的响度，而非倒数第二个≈0 的采样。
+    rememberNonZeroVolume(volume);
     queueVolumeCommand(volume);
-    // 审2-R8：滑到 0 时同步记录滑动前的音量，toggleMute 恢复时才不会回到过期的 previousVolume
     set((state) => {
       const next: Partial<PlayerStore> = { volume, isMuted: volume === 0 };
-      if (volume === 0 && state.volume > 0) next.previousVolume = state.volume;
+      if (volume === 0 && state.volume > 0) next.previousVolume = lastNonZeroVolume;
       return next;
     });
   },
@@ -357,13 +383,16 @@ export function createPlaybackActions(
   toggleMute: () => {
     const { isMuted, volume, previousVolume } = get();
     if (!isMuted) {
+      // 静音前记录当前响度，作为取消静音的恢复基准
+      rememberNonZeroVolume(volume);
       sendVolumeCommandNow(0);
-      set({ previousVolume: volume, volume: 0, isMuted: true });
+      set({ previousVolume: volume > 0 ? volume : lastNonZeroVolume, volume: 0, isMuted: true });
       get().showNotification("已静音");
       return;
     }
 
-    const restoredVolume = clampVolume(previousVolume || 0.7);
+    const restoredVolume = clampVolume(previousVolume || lastNonZeroVolume || 0.7);
+    rememberNonZeroVolume(restoredVolume);
     sendVolumeCommandNow(restoredVolume);
     set({ volume: restoredVolume, isMuted: false });
     get().showNotification(`音量恢复到 ${Math.round(restoredVolume * 100)}%`);

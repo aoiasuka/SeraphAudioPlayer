@@ -1,13 +1,26 @@
-//! 播放控制 IPC handlers（骨架）。
+//! 播放控制 IPC handlers。
 //!
-//! 当前所有命令都只更新前端可见的状态机并返回 `Ok(())`；
-//! 真正接通 `seraph-audio` 后再补实现。
+//! H-1/M-1：播放命令内部会同步等待音频引擎线程返回真实结果（可达数百毫秒，
+//! 引擎挂死时更久）。这些命令改为 async + spawn_blocking，把阻塞等待移出主线程，
+//! 避免独占初始化 / 慢速磁盘 / 引擎 hang 冻结整个窗口。AppState 全字段均为
+//! Arc/句柄，Clone 只复制句柄、共享同一底层状态，可安全移入 spawn_blocking。
 
 use crate::state::{AppState, PlaybackQueueTrack, TrackAdvance};
 use seraph_core::PlayerState;
 use std::path::PathBuf;
 use tauri::State;
 use tracing::debug;
+
+/// 把闭包丢到阻塞线程池执行并等待结果，join 失败归一化为错误字符串。
+async fn run_blocking<T, F>(job: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|err| format!("playback task panicked: {err}"))?
+}
 
 #[tauri::command]
 pub fn sync_playback_queue(
@@ -44,103 +57,115 @@ pub fn set_playback_modes(
 }
 
 #[tauri::command]
-pub fn play(
+pub async fn play(
     state: State<'_, AppState>,
     path: Option<String>,
     track_id: Option<String>,
     start_seconds: Option<f64>,
 ) -> Result<(), String> {
     debug!("ipc::play");
-    if let Some(path) = path {
-        state
-            .audio
-            .play_file(
-                PathBuf::from(path),
-                track_id.unwrap_or_default(),
-                start_seconds.unwrap_or(0.0),
-            )
-            .map_err(|err| err.to_string())?;
-    } else {
-        state.audio.resume().map_err(|err| err.to_string())?;
-    }
-    *state.player_state.write() = PlayerState::Playing;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || {
+        if let Some(path) = path {
+            state
+                .audio
+                .play_file(
+                    PathBuf::from(path),
+                    track_id.unwrap_or_default(),
+                    start_seconds.unwrap_or(0.0),
+                )
+                .map_err(|err| err.to_string())?;
+        } else {
+            state.audio.resume().map_err(|err| err.to_string())?;
+        }
+        *state.player_state.write() = PlayerState::Playing;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn pause(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn pause(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::pause");
-    state.audio.pause().map_err(|err| err.to_string())?;
-    *state.player_state.write() = PlayerState::Paused;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || {
+        state.audio.pause().map_err(|err| err.to_string())?;
+        *state.player_state.write() = PlayerState::Paused;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn stop(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::stop");
-    state.audio.stop().map_err(|err| err.to_string())?;
-    *state.player_state.write() = PlayerState::Stopped;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || {
+        state.audio.stop().map_err(|err| err.to_string())?;
+        *state.player_state.write() = PlayerState::Stopped;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
+pub async fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
     debug!("ipc::seek -> {seconds}s");
     // P2-7：IPC 层最后防线，拒绝 NaN / Infinity / 负值直达音频引擎。
     if !seconds.is_finite() || seconds < 0.0 {
         return Err(format!("无效的跳转位置: {seconds}"));
     }
-    state.audio.seek(seconds).map_err(|err| err.to_string())?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || state.audio.seek(seconds).map_err(|err| err.to_string())).await
 }
 
 #[tauri::command]
-pub fn next_track(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn next_track(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::next_track");
-    state.advance_track(TrackAdvance::Next)?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || state.advance_track(TrackAdvance::Next)).await
 }
 
 #[tauri::command]
-pub fn prev_track(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn prev_track(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::prev_track");
-    state.advance_track(TrackAdvance::Previous)?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || state.advance_track(TrackAdvance::Previous)).await
 }
 
 #[tauri::command]
-pub fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
+pub async fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
     debug!("ipc::set_volume -> {volume}");
     // P2-7：NaN/Infinity 直接拒绝，范围收敛到 0..=1，防止异常增益爆音。
     if !volume.is_finite() {
         return Err(format!("无效的音量值: {volume}"));
     }
     let volume = volume.clamp(0.0, 1.0);
-    state
-        .audio
-        .set_volume(volume)
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || state.audio.set_volume(volume).map_err(|err| err.to_string())).await
 }
 
 #[tauri::command]
-pub fn select_output_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+pub async fn select_output_device(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<(), String> {
     debug!("ipc::select_output_device -> {device_id}");
-    state
-        .audio
-        .set_output_device(device_id)
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || {
+        state
+            .audio
+            .set_output_device(device_id)
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(), String> {
+pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(), String> {
     debug!("ipc::set_output_driver -> {driver}");
-    state
-        .audio
-        .set_driver(driver)
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    let state = (*state).clone();
+    run_blocking(move || state.audio.set_driver(driver).map_err(|err| err.to_string())).await
 }
 
 /// 启用/停用系统媒体控件（SMTC）。设置由前端持久化，启动水合后同步。

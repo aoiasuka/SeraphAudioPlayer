@@ -87,6 +87,37 @@ pub(crate) fn is_bilibili_host(url: &reqwest::Url) -> bool {
     })
 }
 
+/// M-3：playurl 返回的 DASH 音频 URL 允许的 CDN host 后缀。
+/// 官方播放地址落在 B 站自有 / 授权 CDN 域名族；对下载 client 而言这些请求会携带
+/// 登录 Cookie（SESSDATA），必须限定在这些域内，避免响应里的第三方/畸形 URL 把凭据带走。
+const BILIBILI_CDN_HOST_SUFFIXES: &[&str] = &[
+    ".bilivideo.com",
+    ".bilivideo.cn",
+    ".hdslb.com",
+    ".akamaized.net",
+    ".bilibili.com",
+];
+
+/// M-3：校验 playurl 返回的音频下载 URL 是否可安全携带 Cookie 请求。
+/// 要求：scheme 必须是 https（拒绝 http 明文，防被动监听截获会话）；
+/// host 必须落在 [`BILIBILI_CDN_HOST_SUFFIXES`] 白名单内。
+pub(crate) fn is_safe_bilibili_download_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    BILIBILI_CDN_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+        || host == "bilibili.com"
+}
+
 pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
     if let Some(bvid) = extract_bvid(input) {
         return Ok(bvid);
@@ -504,6 +535,14 @@ pub(crate) async fn download_audio_to_file(
 ) -> Result<(), String> {
     if audio_url.trim().is_empty() {
         return Err("empty bilibili audio url".into());
+    }
+
+    // M-3：下载 client 携带登录 Cookie。playurl 响应里的 baseUrl/backupUrl 属外部输入，
+    // 必须先校验为 https + B 站系 CDN 域名，拒绝把 SESSDATA 发往第三方/明文地址。
+    if !is_safe_bilibili_download_url(audio_url) {
+        return Err(format!(
+            "拒绝从非 B 站 CDN 或非 https 地址下载音频: {audio_url}"
+        ));
     }
 
     let mut response = client

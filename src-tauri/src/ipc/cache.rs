@@ -59,16 +59,39 @@ pub struct CacheCleanupResult {
 }
 
 #[tauri::command]
-pub fn get_cache_status(app: AppHandle) -> IpcResult<CacheStatus> {
-    Ok(cache_status(&app)?)
+pub async fn get_cache_status(app: AppHandle) -> IpcResult<CacheStatus> {
+    // H-1：目录扫描是阻塞 IO，放 spawn_blocking。
+    tauri::async_runtime::spawn_blocking(move || Ok(cache_status(&app)?))
+        .await
+        .map_err(|err| {
+            crate::ipc::error::IpcError::new(
+                crate::ipc::error::IpcErrorCode::Internal,
+                format!("get_cache_status task panicked: {err}"),
+            )
+        })?
 }
 
 #[tauri::command]
-pub fn update_cache_settings(
+pub async fn update_cache_settings(
     app: AppHandle,
     settings: UpdateCacheSettings,
 ) -> IpcResult<CacheStatus> {
-    let mut current = load_cache_settings(&app)?;
+    // H-1：校验 + 落盘 + enforce（缓存扫描/删除）都是阻塞 IO，放 spawn_blocking。
+    tauri::async_runtime::spawn_blocking(move || update_cache_settings_inner(&app, settings))
+        .await
+        .map_err(|err| {
+            crate::ipc::error::IpcError::new(
+                crate::ipc::error::IpcErrorCode::Internal,
+                format!("update_cache_settings task panicked: {err}"),
+            )
+        })?
+}
+
+fn update_cache_settings_inner(
+    app: &AppHandle,
+    settings: UpdateCacheSettings,
+) -> IpcResult<CacheStatus> {
+    let mut current = load_cache_settings(app)?;
 
     if let Some(cache_dir) = settings.cache_dir {
         let cache_dir = cache_dir.trim();
@@ -89,17 +112,32 @@ pub fn update_cache_settings(
     }
 
     ensure_cache_dir(Path::new(&current.cache_dir))?;
-    save_cache_settings(&app, &current)?;
-    enforce_cache_limit(&app)?;
-    Ok(cache_status(&app)?)
+    save_cache_settings(app, &current)?;
+    enforce_cache_limit(app)?;
+    Ok(cache_status(app)?)
 }
 
 #[tauri::command]
-pub fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
-    let settings = load_cache_settings(&app)?;
+pub async fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
+    // H-1：目录扫描 + 逐文件删除 + 曲库读改写都是阻塞 IO，放 spawn_blocking，
+    // 避免占用主线程（同步命令在主线程执行会冻结窗口）。
+    tauri::async_runtime::spawn_blocking(move || clear_cache_inner(&app))
+        .await
+        .map_err(|err| {
+            crate::ipc::error::IpcError::new(
+                crate::ipc::error::IpcErrorCode::Internal,
+                format!("clear_cache task panicked: {err}"),
+            )
+        })?
+}
+
+fn clear_cache_inner(app: &AppHandle) -> IpcResult<CacheCleanupResult> {
+    let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
-    ensure_cache_dir(&cache_dir)?;
+    // M-5：必须先按磁盘真实状态校验 marker，再 ensure。ensure_cache_dir 会在 marker
+    // 缺失时无条件补写，若放在 require 之前会让保护检查永远通过（死代码）。
     require_managed_cache_dir(&cache_dir)?;
+    ensure_cache_dir(&cache_dir)?;
 
     let entries = collect_cache_files(&cache_dir)?;
     let mut removed_paths = Vec::new();
@@ -119,7 +157,7 @@ pub fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
         }
     }
 
-    mark_tracks_cache_missing_by_paths(&app, &removed_paths)?;
+    mark_tracks_cache_missing_by_paths(app, &removed_paths)?;
     let used_bytes = cache_size(&cache_dir)?;
     Ok(CacheCleanupResult {
         removed_files: removed_paths.len(),
@@ -162,8 +200,9 @@ fn enforce_cache_limit_inner(
 ) -> Result<CacheCleanupResult, String> {
     let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
-    ensure_cache_dir(&cache_dir)?;
+    // M-5：先按磁盘真实状态校验 marker，再 ensure（理由同 clear_cache）。
     require_managed_cache_dir(&cache_dir)?;
+    ensure_cache_dir(&cache_dir)?;
 
     if !settings.auto_cleanup || settings.max_size_mb == 0 {
         return Ok(CacheCleanupResult {
@@ -375,6 +414,11 @@ fn default_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
         }
     }
 
+    // M-5：所有候选都未通过安全校验时，不再直接返回未校验的 app_data 目录。
+    // 否则 load_cache_settings 会用 ensure_cache_dir 对它无条件补写 marker，
+    // 把一个已含用户文件、本不该受管的目录变成受管缓存并参与 mtime 删除。
+    // 这里再走一次安全校验：通过才返回，否则把错误上抛，让缓存功能失败而非误删。
+    ensure_cache_dir_safe(&app_data_dir)?;
     Ok(app_data_dir)
 }
 

@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -126,34 +126,49 @@ export function createOutputActions(
       return;
     }
     if (get().driverKind === k) return;
-    // M-7: 切换 driver 前先停掉正在播的 session，避免后端 same-track 优化路径
-    // 残留旧 driver 配置，导致用户切换后偶发音轨不切换。
+    // M-7 / 前端 M-5：切换 driver 前先停掉正在播的 session，避免后端 same-track 优化路径
+    // 残留旧 driver 配置。stop 与 set_output_driver 必须串行（await stop 后再发 driver），
+    // 否则 fire-and-forget 下两条命令到后端的顺序不保证，恰好触发想避免的“切换后不切音轨”。
     const wasPlaying = get().isPlaying;
-    sendCommand("stop");
-    sendCommand("set_output_driver", { driver: k });
     set({ driverKind: k, isPlaying: false, currentTime: 0 });
 
-    // 若刚才在播，driver 切换后自动从头继续播放当前曲目，体验上无感
-    if (wasPlaying) {
-      const track = get().currentTrack();
-      if (track) {
-        // 审2-R2：为续播链申请新代际；期间用户切歌/暂停则放弃续播。
-        const epoch = bumpPlayEpoch();
-        const isStillCurrent = () =>
-          epoch === currentPlayEpoch() && get().currentTrack()?.id === track.id;
-        void sendPlayCommand(track, get, set, 0, isStillCurrent)
-          .then(() => {
+    void (async () => {
+      try {
+        await sendCommandAsync("stop");
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("Failed to stop before driver switch", err);
+      }
+      try {
+        await sendCommandAsync("set_output_driver", { driver: k });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("Failed to set output driver", err);
+        get().showNotification(playbackErrorMessage(err));
+        return;
+      }
+
+      // 若刚才在播，driver 切换后自动从头继续播放当前曲目，体验上无感
+      if (wasPlaying) {
+        const track = get().currentTrack();
+        if (track) {
+          // 审2-R2：为续播链申请新代际；期间用户切歌/暂停则放弃续播。
+          const epoch = bumpPlayEpoch();
+          const isStillCurrent = () =>
+            epoch === currentPlayEpoch() && get().currentTrack()?.id === track.id;
+          try {
+            await sendPlayCommand(track, get, set, 0, isStillCurrent);
             // 审2-R2：Tauri 下 isPlaying 改由 playback_started 事件驱动（与发现15一致），
             // 删除乐观置位，避免后端实际起播失败时 UI 卡在播放态；stub 模式无事件，保留置位。
             if (!isTauriRuntime() && isStillCurrent()) set({ isPlaying: true });
-          })
-          .catch((err) => {
+          } catch (err) {
             // eslint-disable-next-line no-console
             console.warn("Failed to resume after driver switch", err);
             get().showNotification(playbackErrorMessage(err));
-          });
+          }
+        }
       }
-    }
+    })();
   },
 
   toggleDeviceMenu: () => {
@@ -173,6 +188,24 @@ export function createOutputActions(
     sendCommand("set_smtc_enabled", { enabled });
     get().showNotification(
       enabled ? "已启用系统媒体控件" : "已停用系统媒体控件"
+    );
+  },
+
+  setRememberPlayback: (enabled) => {
+    if (get().rememberPlayback === enabled) return;
+    // 关闭记忆播放时立即清掉已持久化的续播位置，避免磁盘上残留上次播放痕迹；
+    // partialize 也会在关闭时不再写入位置，双保险。
+    if (!enabled) {
+      set({
+        rememberPlayback: false,
+        persistedCurrentTrackId: null,
+        persistedCurrentTime: 0,
+      });
+    } else {
+      set({ rememberPlayback: true });
+    }
+    get().showNotification(
+      enabled ? "已开启记忆播放" : "已关闭记忆播放"
     );
   },
   };

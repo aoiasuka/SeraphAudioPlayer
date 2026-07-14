@@ -105,6 +105,8 @@ export interface PersistedPlayerState {
   driverKind: DriverKind;
   activeView: LibraryView;
   smtcEnabled: boolean;
+  // v0.4.2：记忆播放。关闭时启动不恢复上次曲目/位置，且不持久化播放进度。
+  rememberPlayback: boolean;
 }
 
 export interface PlayerStore {
@@ -127,6 +129,7 @@ export interface PlayerStore {
   driverKind: DriverKind;
   activeView: LibraryView;
   smtcEnabled: boolean;
+  rememberPlayback: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -138,6 +141,7 @@ export interface PlayerStore {
   isLoginBusy: boolean;
   currentTrack: () => Track | null;
   nextTrackPreview: () => Track | null;
+  playNextPreview: () => void;
   togglePlayback: () => void;
   nextTrack: () => void;
   prevTrack: () => void;
@@ -190,6 +194,7 @@ export interface PlayerStore {
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;
   setSmtcEnabled: (enabled: boolean) => void;
+  setRememberPlayback: (enabled: boolean) => void;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;

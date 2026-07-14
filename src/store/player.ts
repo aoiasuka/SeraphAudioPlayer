@@ -21,7 +21,8 @@ export type {
 } from "./player/types";
 
 // v2: 新增 persistedCurrentTrackId，用曲目 id（而非索引）恢复上次播放位置
-const PERSIST_VERSION = 2;
+// v3: 新增 rememberPlayback（记忆播放开关，默认开）
+const PERSIST_VERSION = 3;
 const validDrivers = new Set<DriverKind>(["wasapi", "direct", "asio"]);
 const validViews = new Set<LibraryView>([
   "local",
@@ -100,6 +101,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     activeView: migrateView(state.activeView),
     // 旧版本无此字段时默认启用（与既有行为一致）
     smtcEnabled: state.smtcEnabled !== false,
+    // v3：旧版本无此字段时默认启用记忆播放（保持既有“恢复上次播放”的行为）
+    rememberPlayback: state.rememberPlayback !== false,
   };
 }
 
@@ -129,6 +132,7 @@ export const usePlayerStore = create<PlayerStore>()(
         driverKind: "wasapi",
         activeView: "local",
         smtcEnabled: true,
+        rememberPlayback: true,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -158,12 +162,16 @@ export const usePlayerStore = create<PlayerStore>()(
       migrate: migratePersistedPlayerState,
       partialize: (state) => ({
         currentTrackIndex: state.currentTrackIndex,
-        // 发现1：持久化当前曲目 id；playlist 未加载（为空）时回退到已持久化的 id
-        persistedCurrentTrackId:
-          state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId,
+        // 发现1：持久化当前曲目 id；playlist 未加载（为空）时回退到已持久化的 id。
+        // v3：记忆播放关闭时不写入曲目/位置，磁盘上不留播放痕迹。
+        persistedCurrentTrackId: state.rememberPlayback
+          ? state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId
+          : null,
         // 播放进度按 5 秒粒度持久化：恢复误差 ≤5s，同时把播放中每秒 tick
         // 触发的 localStorage 写频率压到 1/5Hz
-        persistedCurrentTime: Math.floor(Math.max(0, state.currentTime) / 5) * 5,
+        persistedCurrentTime: state.rememberPlayback
+          ? Math.floor(Math.max(0, state.currentTime) / 5) * 5
+          : 0,
         recentTrackIds: state.recentTrackIds,
         volume: state.volume,
         isMuted: state.isMuted,
@@ -176,6 +184,7 @@ export const usePlayerStore = create<PlayerStore>()(
         driverKind: state.driverKind,
         activeView: state.activeView,
         smtcEnabled: state.smtcEnabled,
+        rememberPlayback: state.rememberPlayback,
       }),
     }
   )

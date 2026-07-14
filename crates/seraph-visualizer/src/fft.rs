@@ -37,6 +37,9 @@ pub struct SimpleVisualizer {
     latest: Mutex<Option<SpectrumFrame>>,
     fft: Arc<dyn rustfft::Fft<f32>>,
     window: Vec<f32>,
+    /// 中-1：窗相干增益（Σwindow）。加窗后满幅正弦的主 bin 幅度 ≈ A·Σwindow/2，
+    /// 用它做归一化分母才能让 0dBFS 满幅信号映射到 1.0。用 fft_size/2 会系统性低 ~6dB。
+    window_gain: f32,
 }
 
 impl std::fmt::Debug for SimpleVisualizer {
@@ -61,7 +64,9 @@ impl SimpleVisualizer {
 
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(fft_size);
-        let window = (0..fft_size).map(|i| hann_window(i, fft_size)).collect();
+        let window: Vec<f32> = (0..fft_size).map(|i| hann_window(i, fft_size)).collect();
+        // 中-1：相干增益取实际窗系数之和（Hann ≈ N/2），避免硬编码常量与窗函数不一致。
+        let window_gain = window.iter().sum::<f32>().max(1.0);
 
         Ok(Self {
             fft_size,
@@ -72,6 +77,7 @@ impl SimpleVisualizer {
             latest: Mutex::new(None),
             fft,
             window,
+            window_gain,
         })
     }
 
@@ -115,7 +121,7 @@ impl Visualizer for SimpleVisualizer {
             .collect();
         self.fft.process(&mut data);
 
-        let bins = spectrum_bins_from_fft(&data, self.bin_count, self.fft_size);
+        let bins = spectrum_bins_from_fft(&data, self.bin_count, self.fft_size, self.window_gain);
         *self.latest.lock() = Some(SpectrumFrame {
             bins,
             peak_left,
@@ -167,11 +173,20 @@ fn hann_window(index: usize, len: usize) -> f32 {
 }
 
 /// 把 FFT 输出按 log 频率聚合到 `bin_count` 个频段，便于 UI 直接绘制。
-fn spectrum_bins_from_fft(fft_output: &[Complex32], bin_count: usize, fft_size: usize) -> Vec<f32> {
+/// `window_gain` 是窗系数之和（Σwindow）：加窗后满幅正弦主 bin 幅度 ≈ A·window_gain/2，
+/// 以此为归一化分母，0dBFS 满幅信号才能到 1.0（中-1：修复此前用 fft_size/2 导致的 -6dB 偏差）。
+fn spectrum_bins_from_fft(
+    fft_output: &[Complex32],
+    bin_count: usize,
+    fft_size: usize,
+    window_gain: f32,
+) -> Vec<f32> {
     let nyquist = fft_size / 2;
     if nyquist == 0 || bin_count == 0 {
         return vec![0.0; bin_count];
     }
+    // 归一化分母：窗相干增益的一半（≈ fft_size/4）。
+    let norm = (window_gain * 0.5).max(1.0);
     // log 间隔分箱：低频区分辨率高，高频区聚合，符合人耳感受。
     let min_bin = 1.0_f32; // 跳过 DC
     let max_bin = nyquist as f32;
@@ -195,8 +210,8 @@ fn spectrum_bins_from_fft(fft_output: &[Complex32], bin_count: usize, fft_size: 
                 max_mag = mag;
             }
         }
-        // 归一化到 [0, 1]：除以 fft_size / 2，再 clamp
-        bins.push((max_mag / (fft_size as f32 * 0.5)).clamp(0.0, 1.0));
+        // 归一化到 [0, 1]：除以窗相干增益的一半，再 clamp
+        bins.push((max_mag / norm).clamp(0.0, 1.0));
     }
 
     map_bins_to_db(bins)
@@ -261,6 +276,34 @@ mod tests {
         let loud = map_bins_to_db(vec![0.5]);
         let quiet = map_bins_to_db(vec![0.05]);
         assert!(loud[0] > quiet[0]);
+    }
+
+    #[test]
+    fn full_scale_sine_normalizes_near_unity() {
+        // 中-1：满幅正弦（对准某个 bin）经加窗 FFT + 窗增益归一后，主 bin 幅度应 ≈ 1.0。
+        // 旧实现用 fft_size/2 归一会得到 ≈0.5（低 6dB），0dBFS 永远到不了满格。
+        let fft_size = 64;
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let window: Vec<f32> = (0..fft_size).map(|i| hann_window(i, fft_size)).collect();
+        let window_gain = window.iter().sum::<f32>().max(1.0);
+
+        // 频率 = 4 个周期/窗，正好对准 bin 4，避免频谱泄漏干扰主 bin 幅度。
+        let mut data: Vec<Complex32> = (0..fft_size)
+            .map(|i| {
+                let s = (2.0 * PI * 4.0 * i as f32 / fft_size as f32).sin();
+                Complex32::new(s * window[i], 0.0)
+            })
+            .collect();
+        fft.process(&mut data);
+
+        // 直接取主 bin（4）幅度做归一，不经 log 分箱，验证归一分母正确。
+        let mag = (data[4].re * data[4].re + data[4].im * data[4].im).sqrt();
+        let normalized = mag / (window_gain * 0.5);
+        assert!(
+            (normalized - 1.0).abs() < 0.05,
+            "满幅正弦主 bin 归一后应≈1.0，实得 {normalized}"
+        );
     }
 
     #[test]

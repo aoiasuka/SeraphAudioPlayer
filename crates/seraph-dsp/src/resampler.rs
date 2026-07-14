@@ -185,7 +185,7 @@ impl StatefulSincResampler {
             return Err(ResamplerError::InvalidChannelCount);
         }
         let radius = radius.max(2);
-        Ok(Self {
+        let mut resampler = Self {
             input_rate,
             output_rate,
             channels,
@@ -193,8 +193,24 @@ impl StatefulSincResampler {
             ratio: input_rate as f64 / output_rate as f64,
             cutoff: (output_rate as f64 / input_rate as f64).min(1.0),
             history: Vec::with_capacity(channels * radius * 4),
-            next_position: radius as f64, // 第一个输出从 history[radius] 处取
-        })
+            next_position: radius as f64, // 第一个输出中心对准 history[radius]
+        };
+        resampler.prime_history();
+        Ok(resampler)
+    }
+
+    /// 中-2：向 history 头部预填充 `radius` 帧零，作为第一个真实输入帧的左侧滤波上下文。
+    /// 否则 next_position 从 radius 起步、history 从空开始时，输入前 radius 帧只当上下文、
+    /// 永不作为输出中心——每个会话开头永久丢弃 radius 帧，gapless 连播接缝处可闻。
+    /// 与曲尾 flush（喂零冲出尾部）对称。
+    fn prime_history(&mut self) {
+        if self.input_rate == self.output_rate {
+            return;
+        }
+        self.history.clear();
+        self.history
+            .resize(self.channels * self.radius, 0.0_f32);
+        self.next_position = self.radius as f64;
     }
 
     pub fn input_rate(&self) -> u32 {
@@ -210,8 +226,8 @@ impl StatefulSincResampler {
     }
 
     pub fn reset(&mut self) {
-        self.history.clear();
-        self.next_position = self.radius as f64;
+        // 中-2：reset 后同样预填充左侧上下文，seek 之后的第一段也不丢首帧。
+        self.prime_history();
     }
 
     /// 处理一段输入并追加输出到 `out`。

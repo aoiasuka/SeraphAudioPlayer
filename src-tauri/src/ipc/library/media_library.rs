@@ -362,6 +362,12 @@ pub(crate) fn merge_imported_track(
     if merged.lyrics.is_empty() && !cached.lyrics.is_empty() {
         merged.lyrics = cached.lyrics.clone();
     }
+    // M-4：重新导入同一文件时，若本次提取不到封面（内嵌封面缺失/covers 目录暂不可写/
+    // 在线匹配的封面本就不在文件里），保留已缓存的封面引用。否则封面引用被清空后，
+    // gc_orphan_covers 会把封面文件当孤儿物理删除，造成用户成果静默丢失。
+    if merged.cover.is_empty() && !cached.cover.is_empty() {
+        merged.cover = cached.cover.clone();
+    }
     merged
 }
 
@@ -835,32 +841,64 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
         return;
     }
 
-    let _guard = LIBRARY_LOCK.lock();
-    let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
-        // 缓存损坏时不写标记，等缓存恢复后下次启动重试
-        return;
+    // H-1：封面提取含 lofty 全标签解析（每首数十毫秒，大曲库累计到分钟级），
+    // 绝不能持 LIBRARY_LOCK 期间做。这里先短暂持锁取一份快照识别候选，随即释放锁，
+    // 在锁外完成所有重 IO；最后再短暂持锁读改写落盘。
+    // 期间若有并发导入改动了曲库，以并发写为准：只回填“候选仍存在且封面仍为空”的曲目。
+    let candidates: Vec<String> = {
+        let _guard = LIBRARY_LOCK.lock();
+        let Ok(tracks) = read_cached_tracks_for_update(app) else {
+            // 缓存损坏时不写标记，等缓存恢复后下次启动重试
+            return;
+        };
+        tracks
+            .iter()
+            .filter(|track| track.cover.is_empty() && track.source_url.is_none())
+            .map(|track| track.path.clone())
+            .collect()
     };
 
-    let mut changed = false;
-    for track in &mut tracks {
-        // B 站曲目封面来自视频封面 URL，这里只补本地文件
-        if !track.cover.is_empty() || track.source_url.is_some() {
-            continue;
+    if candidates.is_empty() {
+        if fs::create_dir_all(&covers_dir).is_ok() {
+            let _ = fs::write(&marker, b"v1");
         }
-        let path = Path::new(&track.path);
+        return;
+    }
+
+    // 锁外做重 IO：逐候选提取封面，得到 path -> cover 映射。
+    let mut extracted: HashMap<String, String> = HashMap::new();
+    for path_string in &candidates {
+        let path = Path::new(path_string);
         if !path.is_file() {
             continue;
         }
         if let Some(cover) = extract_embedded_cover(path, &covers_dir) {
-            track.cover = cover;
-            changed = true;
+            extracted.insert(path_string.clone(), cover);
         }
     }
 
-    if changed && write_cached_tracks(app, &tracks).is_err() {
-        // 写失败不落标记，下次启动重试
-        return;
+    if !extracted.is_empty() {
+        // 重新持锁读改写：只回填仍然缺封面的本地曲目，尊重期间的并发导入结果。
+        let _guard = LIBRARY_LOCK.lock();
+        let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
+            return;
+        };
+        let mut changed = false;
+        for track in &mut tracks {
+            if !track.cover.is_empty() || track.source_url.is_some() {
+                continue;
+            }
+            if let Some(cover) = extracted.get(&track.path) {
+                track.cover = cover.clone();
+                changed = true;
+            }
+        }
+        if changed && write_cached_tracks(app, &tracks).is_err() {
+            // 写失败不落标记，下次启动重试
+            return;
+        }
     }
+
     if fs::create_dir_all(&covers_dir).is_ok() {
         let _ = fs::write(&marker, b"v1");
     }

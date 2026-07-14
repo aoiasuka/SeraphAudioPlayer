@@ -68,9 +68,20 @@ export function SpectrumPanel() {
     let pollTimer: number | null = null;
     let disposed = false;
 
+    // 中-12：仅在“正在播放，或仍有非零柱需要衰减动画”时续帧。
+    // 暂停且频谱归零后停掉 RAF，避免以刷新率持续重绘一张全零图空转 CPU/GPU。
+    // 播放恢复时 effect 依赖 isPlaying 变化会重跑，重新启动渲染循环。
+    const needsRender = () =>
+      isPlaying || binsRef.current.some((value) => value > 0.001);
+
     const renderLoop = () => {
+      if (disposed) return;
       draw();
-      rafRef.current = window.requestAnimationFrame(renderLoop);
+      if (needsRender()) {
+        rafRef.current = window.requestAnimationFrame(renderLoop);
+      } else {
+        rafRef.current = 0;
+      }
     };
     rafRef.current = window.requestAnimationFrame(renderLoop);
 

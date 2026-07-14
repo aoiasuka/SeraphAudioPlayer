@@ -27,7 +27,8 @@ function isSamePersistedState(
     previous.currentDeviceId === next.currentDeviceId &&
     previous.driverKind === next.driverKind &&
     previous.activeView === next.activeView &&
-    previous.smtcEnabled === next.smtcEnabled
+    previous.smtcEnabled === next.smtcEnabled &&
+    previous.rememberPlayback === next.rememberPlayback
   );
 }
 

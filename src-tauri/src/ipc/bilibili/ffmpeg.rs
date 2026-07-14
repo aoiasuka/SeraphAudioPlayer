@@ -108,6 +108,10 @@ pub(crate) fn emit_ffmpeg_progress(app: &AppHandle, progress: FfmpegDownloadProg
 pub(crate) fn ffmpeg_download_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        // M-6：只设 connect_timeout 时，连接建立后服务端/网络静默停滞会让 chunk().await
+        // 永不返回，download_ffmpeg 命令永久挂起且 in-flight 槽位不释放，后续重试全被拒。
+        // 加两次读之间的空闲超时（与 bilibili_download_client_for_app 一致）打破挂死。
+        .read_timeout(Duration::from_secs(30))
         .user_agent(USER_AGENT_VALUE)
         .build()
         .map_err(|err| format!("无法创建下载客户端: {err}"))

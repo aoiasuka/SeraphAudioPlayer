@@ -1,7 +1,10 @@
 import { useEffect } from "react";
 import { listen } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
-import { ffmpegDownloadStateFromProgress } from "@/store/player/streamingActions";
+import {
+  ffmpegDownloadStateFromProgress,
+  shouldIgnoreLaggingFfmpegProgress,
+} from "@/store/player/streamingActions";
 import type { FfmpegDownloadProgress } from "@/store/player/types";
 
 /**
@@ -16,9 +19,13 @@ export function useStreamingEvents() {
     let unlisten: (() => void) | undefined;
     void listen<FfmpegDownloadProgress>("seraph://ffmpeg-download", (progress) => {
       if (disposed) return;
-      usePlayerStore.setState({
-        ffmpegDownload: ffmpegDownloadStateFromProgress(progress),
-      });
+      const next = ffmpegDownloadStateFromProgress(progress);
+      // M-6：invoke 已落定终态后，忽略滞后到达的非终态（downloading）事件，
+      // 避免把 done/error 打回 downloading 导致按钮永久卡 spinner。终态事件仍放行。
+      if (next.stage === "downloading" && shouldIgnoreLaggingFfmpegProgress()) {
+        return;
+      }
+      usePlayerStore.setState({ ffmpegDownload: next });
     }).then((fn) => {
       // cleanup 已先于 listen resolve 执行时立即注销，避免监听器泄漏
       if (disposed) {

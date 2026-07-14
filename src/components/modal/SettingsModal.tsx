@@ -92,6 +92,8 @@ export function SettingsModal() {
   const showNotification = usePlayerStore((s) => s.showNotification);
   const smtcEnabled = usePlayerStore((s) => s.smtcEnabled);
   const setSmtcEnabled = usePlayerStore((s) => s.setSmtcEnabled);
+  const rememberPlayback = usePlayerStore((s) => s.rememberPlayback);
+  const setRememberPlayback = usePlayerStore((s) => s.setRememberPlayback);
   const markTracksCacheMissingByPaths = usePlayerStore(
     (s) => s.markTracksCacheMissingByPaths
   );
@@ -469,6 +471,29 @@ export function SettingsModal() {
             aria-pressed={smtcEnabled}
           >
             {smtcEnabled ? "已启用" : "已停用"}
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+          <div className="min-w-0">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              记忆播放
+            </h4>
+            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+              重启应用后自动恢复上次播放的曲目与播放位置。关闭后每次启动都从头开始，
+              且不会在本地记录上次的播放进度。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRememberPlayback(!rememberPlayback)}
+            className={
+              rememberPlayback
+                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+            aria-pressed={rememberPlayback}
+          >
+            {rememberPlayback ? "已启用" : "已停用"}
           </button>
         </div>
       </div>

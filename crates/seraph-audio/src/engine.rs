@@ -40,6 +40,9 @@ const RESAMPLER_FLUSH_FRAMES: usize = 32;
 const STOP_RAMP_GRACE: Duration = Duration::from_millis(30);
 /// 审2-5：独占模式退出前等待设备缓冲排空的上限（缓冲总深约 185ms，超时兜底防挂）。
 const EXCLUSIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
+/// M-1：引擎命令回执的最大等待时长。正常操作（含独占初始化 8s 内部超时）远小于此，
+/// 超时即判定引擎线程挂死，返回错误而非无限阻塞调用线程。
+const ENGINE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct PlaybackController {
@@ -164,8 +167,18 @@ impl PlaybackController {
         self.tx
             .send(PlaybackRequest { command, reply })
             .map_err(|_| BackendError::Internal("audio thread is not available".into()))?;
-        rx.recv()
-            .map_err(|_| BackendError::Internal("audio thread did not return a result".into()))?
+        // M-1：有界等待引擎回执。正常操作（含 WASAPI 独占初始化的 8s 内部超时、
+        // 打开慢速磁盘文件）远快于此；超时说明引擎线程真的挂死（解码 hang / 驱动死锁），
+        // 返回错误而非无限等待，避免调用方（尤其经 spawn_blocking 的 IPC 命令）永久阻塞。
+        match rx.recv_timeout(ENGINE_REPLY_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(BackendError::Internal(
+                "audio engine did not respond in time".into(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(BackendError::Internal(
+                "audio thread did not return a result".into(),
+            )),
+        }
     }
 }
 
@@ -1179,11 +1192,15 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
         }))
         .unwrap_or_else(|_| Err(BackendError::Internal("decode worker panicked".into())));
         if let Err(err) = result {
-            shared.stopped.store(true, Ordering::Release);
-            event_bus.publish(PlayerEvent::Error {
-                message: format!("{}: {err}", path.display()),
-            });
-            event_bus.publish(PlayerEvent::PlaybackStopped);
+            // L-1：用 swap 而非 store，与 stop_session/report_render_failure 并发时
+            // 保证“宣告结束”全局只发生一次。若渲染线程已因设备丢失先 swap→true 并发过
+            // Error/PlaybackStopped，这里不再重复补发。
+            if !shared.stopped.swap(true, Ordering::AcqRel) {
+                event_bus.publish(PlayerEvent::Error {
+                    message: format!("{}: {err}", path.display()),
+                });
+                event_bus.publish(PlayerEvent::PlaybackStopped);
+            }
             return;
         }
 
@@ -1241,7 +1258,12 @@ fn run_decode_worker(
                 return Ok(());
             }
 
-            if let Some(request) = shared.seek_request.lock().take() {
+            // 中-8：先 take() 释放锁，再执行可能很慢的 decoder.seek()（ffmpeg 远距 seek
+            // 会重启进程，50-100ms）。Rust 2021 下 `if let Some(x) = m.lock().take()` 的
+            // MutexGuard 生命周期会延长到整个 if-let 块尾，导致持锁跨越慢调用，阻塞
+            // engine.seek() 背后的命令线程。分两步即可把锁作用域收窄到 take()。
+            let seek_request = shared.seek_request.lock().take();
+            if let Some(request) = seek_request {
                 match decoder.seek(request.seconds) {
                     // seek 后 resampler 内部 history 已属过去时间段，必须 reset
                     Ok(()) => resampler.reset(),

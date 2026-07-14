@@ -96,6 +96,26 @@ describe("player store startup and persistence", () => {
     expect(migrated.currentDeviceId).toBe("wasapi:hd-dac1");
     expect(migrated.driverKind).toBe("wasapi");
     expect(migrated.activeView).toBe("local");
+    // v3：旧状态无 rememberPlayback 字段时默认开启（保持既有恢复行为）
+    expect(migrated.rememberPlayback).toBe(true);
+  });
+
+  it("honors explicit rememberPlayback=false in persisted state", () => {
+    const migrated = migratePersistedPlayerState({ rememberPlayback: false });
+    expect(migrated.rememberPlayback).toBe(false);
+  });
+
+  it("clears persisted playback position when memory playback is turned off", () => {
+    usePlayerStore.setState({
+      rememberPlayback: true,
+      persistedCurrentTrackId: "track-x",
+      persistedCurrentTime: 123,
+    });
+    usePlayerStore.getState().setRememberPlayback(false);
+    const state = usePlayerStore.getState();
+    expect(state.rememberPlayback).toBe(false);
+    expect(state.persistedCurrentTrackId).toBe(null);
+    expect(state.persistedCurrentTime).toBe(0);
   });
 });
 
