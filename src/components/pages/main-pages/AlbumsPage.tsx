@@ -86,25 +86,29 @@ export function AlbumsPage() {
   }
 
   return (
-    <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 overflow-y-auto pr-1">
       {albums.map((album) => {
         return (
           <button
             key={album.key}
             type="button"
             onClick={() => setSelectedAlbumKey(album.key)}
-            className="archive-card group flex gap-4 p-3 text-left"
+            className="archive-card group flex flex-col p-4 text-left"
           >
             {album.cover ? (
-              <div className="overflow-hidden border-[1.5px] border-ink shrink-0">
+              <span className="mb-4 block w-full aspect-square overflow-hidden border-[1.5px] border-ink shrink-0">
                 <img
                   src={coverSrc(album.cover)}
                   alt=""
-                  className="h-20 w-20 object-cover grayscale-[0.2] transition-transform duration-500 group-hover:scale-110"
+                  className="h-full w-full object-cover grayscale-[0.2] transition-transform duration-500 group-hover:scale-110"
                 />
-              </div>
-            ) : null}
-            <span className="min-w-0 self-center">
+              </span>
+            ) : (
+              <span className="mb-4 flex w-full aspect-square items-center justify-center border-[1.5px] border-ink bg-paper2 text-brown shrink-0">
+                <Disc3 className="h-8 w-8" />
+              </span>
+            )}
+            <span className="min-w-0 self-start w-full">
               <span className="block truncate font-serif text-sm font-bold text-ink">
                 {album.title}
               </span>
@@ -114,7 +118,7 @@ export function AlbumsPage() {
               <span className="mt-1 block truncate font-tw text-[11px] text-ink3">
                 {album.tracks.length} 首曲目
               </span>
-              <span className="mt-2 inline-flex items-center gap-1 border border-brown bg-paper2 px-1.5 py-0.5 font-tw text-[9px] font-bold text-brown">
+              <span className="mt-3 inline-flex items-center gap-1 border border-brown bg-paper2 px-1.5 py-0.5 font-tw text-[9px] font-bold text-brown">
                 <Disc3 className="h-2.5 w-2.5" />
                 {album.format}
               </span>

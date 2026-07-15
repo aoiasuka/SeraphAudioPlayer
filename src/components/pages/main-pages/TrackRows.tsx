@@ -205,7 +205,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
             <div
               key={track.id}
               className={cn(
-                "archive-card group relative grid h-[49px] grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-3 px-4 mb-2.5",
+                "archive-card group relative grid h-[49px] grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
                 active && "is-playing"
               )}
             >
@@ -248,7 +248,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
 
               <div
                 className={cn(
-                  "font-tw text-[10px] leading-tight text-ink2",
+                  "font-tw text-[10px] leading-tight text-ink2 hidden xl:block",
                   track.cacheMissing && "text-stamp"
                 )}
                 title={track.bitdepth}

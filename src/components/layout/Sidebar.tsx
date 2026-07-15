@@ -52,9 +52,10 @@ export function Sidebar() {
   const activeView = usePlayerStore((s) => s.activeView);
   const setActiveView = usePlayerStore((s) => s.setActiveView);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
+  const loginStatus = usePlayerStore((s) => s.bilibiliLoginStatus);
 
   return (
-    <aside className="box-border w-[228px] min-w-[228px] max-w-[228px] flex-none flex flex-col border-r-2 border-ink bg-paper pt-6 pb-5 z-20 overflow-hidden">
+    <aside className="box-border w-[clamp(180px,18vw,228px)] min-w-[180px] max-w-[228px] flex-none flex flex-col border-r-2 border-ink bg-paper pt-6 pb-5 z-20 overflow-hidden">
       <div className="px-6 pb-5 border-b-2 border-ink">
         <h2 className="font-tw text-2xl font-bold tracking-tight text-ink">
           SERAPH<span className="text-stamp">_</span>
@@ -105,15 +106,17 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="mt-auto mx-6 pt-4 border-t border-dashed border-line">
-        <div className="font-tw text-[11px] leading-[1.9] text-ink2">
-          OPERATOR
-          <br />
-          <b className="text-ink text-[13px]">羿昔落</b>
-          <br />
-          SERAPH ARCHIVE <span className="text-brown">● ONLINE</span>
+      {loginStatus.loggedIn && loginStatus.username && (
+        <div className="mt-auto mx-6 pt-4 border-t border-dashed border-line">
+          <div className="font-tw text-[11px] leading-[1.9] text-ink2">
+            OPERATOR
+            <br />
+            <b className="text-ink text-[13px]">{loginStatus.username}</b>
+            <br />
+            SERAPH ARCHIVE <span className="text-brown">● ONLINE</span>
+          </div>
         </div>
-      </div>
+      )}
     </aside>
   );
 }

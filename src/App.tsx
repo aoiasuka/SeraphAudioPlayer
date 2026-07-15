@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { SplashScreen } from "@/components/layout/SplashScreen";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { MainPages } from "@/components/pages/MainPages";
 import { useFileDropImport } from "@/hooks/useFileDropImport";
@@ -53,6 +54,7 @@ function App() {
 
   return (
     <div className="h-full w-full overflow-hidden flex flex-col app-shell">
+      <SplashScreen />
       <div className="relative w-full h-full min-h-0 min-w-0 overflow-hidden flex flex-col app-shell select-none">
         <TitleBar />
 

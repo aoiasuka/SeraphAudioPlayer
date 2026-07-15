@@ -150,7 +150,7 @@ export function PlaylistsPage() {
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-4 overflow-y-auto pr-1">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 overflow-y-auto pr-1">
         {cards.map((card) => {
           const Icon = card.icon;
           return (

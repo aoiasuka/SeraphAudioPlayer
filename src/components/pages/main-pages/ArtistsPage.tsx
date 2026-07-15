@@ -70,7 +70,7 @@ export function ArtistsPage() {
   }
 
   return (
-    <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-1">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 overflow-y-auto pr-1">
       {artists.map((artist) => {
         const first = artist.tracks[0];
         // 艺术家封面：取该艺术家第一首带封面的曲目
