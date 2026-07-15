@@ -142,7 +142,13 @@ pub async fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), S
     }
     let volume = volume.clamp(0.0, 1.0);
     let state = (*state).clone();
-    run_blocking(move || state.audio.set_volume(volume).map_err(|err| err.to_string())).await
+    run_blocking(move || {
+        state
+            .audio
+            .set_volume(volume)
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -165,7 +171,13 @@ pub async fn select_output_device(
 pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(), String> {
     debug!("ipc::set_output_driver -> {driver}");
     let state = (*state).clone();
-    run_blocking(move || state.audio.set_driver(driver).map_err(|err| err.to_string())).await
+    run_blocking(move || {
+        state
+            .audio
+            .set_driver(driver)
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 /// 启用/停用系统媒体控件（SMTC）。设置由前端持久化，启动水合后同步。

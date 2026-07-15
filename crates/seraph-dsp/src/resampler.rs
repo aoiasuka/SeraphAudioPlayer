@@ -208,8 +208,7 @@ impl StatefulSincResampler {
             return;
         }
         self.history.clear();
-        self.history
-            .resize(self.channels * self.radius, 0.0_f32);
+        self.history.resize(self.channels * self.radius, 0.0_f32);
         self.next_position = self.radius as f64;
     }
 
