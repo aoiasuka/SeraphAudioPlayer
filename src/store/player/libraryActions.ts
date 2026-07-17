@@ -130,23 +130,24 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
 export function createLibraryActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "createUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
+): Pick<PlayerStore, "createUserPlaylist" | "renameUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
   return {
   createUserPlaylist: (name) => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       get().showNotification("请输入歌单名称");
-      return;
+      return null;
     }
 
     const createdAt = Date.now();
+    const id = `playlist-${createdAt}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
     set((state) => ({
       userPlaylists: [
         ...state.userPlaylists,
         {
-          id: `playlist-${createdAt}-${Math.random()
-            .toString(36)
-            .slice(2, 8)}`,
+          id,
           name: trimmedName,
           trackIds: [],
           createdAt,
@@ -154,6 +155,24 @@ export function createLibraryActions(
       ],
     }));
     get().showNotification(`已创建歌单：${trimmedName}`);
+    return id;
+  },
+
+  renameUserPlaylist: (playlistId, name) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      get().showNotification("请输入歌单名称");
+      return;
+    }
+    const playlist = get().userPlaylists.find((item) => item.id === playlistId);
+    if (!playlist || playlist.name === trimmedName) return;
+
+    set((state) => ({
+      userPlaylists: state.userPlaylists.map((item) =>
+        item.id === playlistId ? { ...item, name: trimmedName } : item
+      ),
+    }));
+    get().showNotification(`已重命名歌单：${trimmedName}`);
   },
 
   deleteUserPlaylist: (playlistId) => {

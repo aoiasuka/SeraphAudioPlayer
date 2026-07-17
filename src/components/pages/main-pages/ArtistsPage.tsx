@@ -1,6 +1,8 @@
 import { ArrowLeft, User } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { coverSrc } from "@/lib/tauri";
+import { buildTrackGroupMenuEntries } from "@/lib/trackMenu";
+import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
@@ -80,6 +82,14 @@ export function ArtistsPage() {
             key={artist.name}
             type="button"
             onClick={() => setSelectedArtist(artist.name)}
+            onContextMenu={(event) =>
+              showContextMenu(
+                event,
+                buildTrackGroupMenuEntries(artist.tracks, () =>
+                  setSelectedArtist(artist.name)
+                )
+              )
+            }
             className="archive-card p-4 text-left"
           >
             {cover ? (

@@ -1,8 +1,10 @@
-import { ListPlus, Loader2, Heart, Search, Trash2, X } from "lucide-react";
+import { ListPlus, Heart, Search, Trash2, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
+import { buildTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
+import { showContextMenu, useContextMenuStore } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import {
@@ -28,14 +30,13 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const liked = usePlayerStore((s) => s.liked);
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const toggleLike = usePlayerStore((s) => s.toggleLike);
-  const deleteTrack = usePlayerStore((s) => s.deleteTrack);
   const userPlaylists = usePlayerStore((s) => s.userPlaylists);
   const addTrackToUserPlaylist = usePlayerStore((s) => s.addTrackToUserPlaylist);
+  // v0.4.3：删除确认弹窗全局化（右键菜单与行内按钮共用），此处只发起请求
+  const requestDeleteTrack = useContextMenuStore((s) => s.requestDeleteTrack);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [trackToDeleteId, setTrackToDeleteId] = useState<string | null>(null);
-  const [isDeletingTrack, setIsDeletingTrack] = useState(false);
   const [trackToAddId, setTrackToAddId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<TrackSortKey>("default");
@@ -50,13 +51,6 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     playlist.forEach((track, index) => indexById.set(track.id, index));
     return indexById;
   }, [playlist]);
-  const trackToDelete = useMemo(
-    () =>
-      tracks.find((track) => track.id === trackToDeleteId) ??
-      playlist.find((track) => track.id === trackToDeleteId) ??
-      null,
-    [playlist, trackToDeleteId, tracks]
-  );
   const trackToAdd = useMemo(
     () =>
       tracks.find((track) => track.id === trackToAddId) ??
@@ -98,20 +92,6 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     resizeObserver.observe(element);
     return () => resizeObserver.disconnect();
   }, [hasTracks]);
-  const closeDeleteDialog = () => {
-    if (!isDeletingTrack) setTrackToDeleteId(null);
-  };
-  const handleDeleteTrack = async () => {
-    if (!trackToDelete || isDeletingTrack) return;
-
-    setIsDeletingTrack(true);
-    try {
-      await deleteTrack(trackToDelete.id);
-      setTrackToDeleteId(null);
-    } finally {
-      setIsDeletingTrack(false);
-    }
-  };
 
   const resetScroll = () => {
     setScrollTop(0);
@@ -204,6 +184,9 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
           return (
             <div
               key={track.id}
+              onContextMenu={(event) =>
+                showContextMenu(event, buildTrackMenuEntries(track))
+              }
               className={cn(
                 "archive-card group relative grid h-[49px] grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
                 active && "is-playing"
@@ -296,7 +279,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
               </button>
               <button
                 type="button"
-                onClick={() => setTrackToDeleteId(track.id)}
+                onClick={() => requestDeleteTrack(track.id)}
                 className="flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-stamp focus:opacity-100 focus:text-stamp group-hover:opacity-100"
                 aria-label={`删除曲库记录 ${track.title}`}
                 title="删除曲库记录"
@@ -309,48 +292,6 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
         </div>
       </div>
       )}
-      <Dialog
-        open={Boolean(trackToDelete)}
-        onClose={closeDeleteDialog}
-        className="max-w-sm"
-      >
-        <div className="space-y-4">
-          <div>
-            <p className="font-tw text-[10px] font-bold uppercase tracking-[0.18em] text-stamp">
-              Delete Track
-            </p>
-            <h2 className="mt-1 font-serif text-lg font-bold text-ink">
-              删除曲库记录
-            </h2>
-            <p className="mt-2 font-tw text-xs leading-relaxed text-ink2">
-              确定从曲库中移除「{trackToDelete?.title}」吗？这只会删除软件内记录，不会删除磁盘上的音频文件。
-            </p>
-          </div>
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={closeDeleteDialog}
-              disabled={isDeletingTrack}
-              className="stamp-btn h-9 px-3 font-tw text-xs font-bold disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={handleDeleteTrack}
-              disabled={isDeletingTrack}
-              className="inline-flex h-9 items-center gap-2 border-[1.5px] border-stamp bg-stamp px-3 font-tw text-xs font-bold text-paper transition-colors hover:brightness-110 disabled:cursor-wait disabled:opacity-70"
-            >
-              {isDeletingTrack ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Trash2 className="h-3.5 w-3.5" />
-              )}
-              <span>{isDeletingTrack ? "删除中" : "删除记录"}</span>
-            </button>
-          </div>
-        </div>
-      </Dialog>
       <Dialog
         open={Boolean(trackToAdd)}
         onClose={() => setTrackToAddId(null)}

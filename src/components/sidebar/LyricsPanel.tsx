@@ -7,9 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { CloudDownload, Loader2, Search, Upload } from "lucide-react";
+import { CloudDownload, Copy, Loader2, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
+import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { LyricLine, OnlineLyricsCandidate } from "@/types/track";
 
@@ -220,6 +222,59 @@ export function LyricsPanel() {
     await runOnlineLyricsSearch();
   };
 
+  // v0.4.3：播放条右键菜单「在线匹配歌词」经全局事件打开本面板的搜索弹窗。
+  // handler 每次渲染变化，经 ref 转发保持监听器只挂一次。
+  const openLyricsSearchRef = useRef(handleOnlineLyricsClick);
+  openLyricsSearchRef.current = handleOnlineLyricsClick;
+  useEffect(() => {
+    const onOpenSearch = () => void openLyricsSearchRef.current();
+    window.addEventListener("seraph:open-lyrics-search", onOpenSearch);
+    return () =>
+      window.removeEventListener("seraph:open-lyrics-search", onOpenSearch);
+  }, []);
+
+  const copyLyricsText = async (text: string) => {
+    const copied = await copyText(text);
+    showNotification(copied ? "已复制歌词" : "复制失败");
+  };
+
+  /** 歌词稿右键菜单；在具体歌词行上触发时附带「复制这句」。 */
+  const buildLyricsMenuEntries = (line?: string): ContextMenuEntry[] => {
+    const entries: ContextMenuEntry[] = [];
+    if (line) {
+      entries.push({
+        key: "copy-line",
+        label: "复制这句",
+        icon: Copy,
+        onSelect: () => void copyLyricsText(line),
+      });
+    }
+    entries.push(
+      {
+        key: "copy-all",
+        label: "复制整篇歌词",
+        icon: Copy,
+        disabled: lyrics.length === 0,
+        onSelect: () =>
+          void copyLyricsText(lyrics.map((item) => item.text).join("\n")),
+      },
+      { type: "separator", key: "sep-actions" },
+      {
+        key: "search-online",
+        label: "在线匹配歌词",
+        icon: CloudDownload,
+        onSelect: () => void handleOnlineLyricsClick(),
+      },
+      {
+        key: "import-local",
+        label: "导入本地歌词…",
+        icon: Upload,
+        onSelect: handleImportClick,
+      }
+    );
+    return entries;
+  };
+
   const handleManualLyricsSearch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // 审2-R9：手动搜索是对“发起搜索时的当前曲目”的新意图。弹窗打开期间自动切歌后，
@@ -329,6 +384,9 @@ export function LyricsPanel() {
         </div>
         <div
           className="relative flex-1 min-h-0 overflow-hidden flex flex-col border-[1.5px] border-line bg-card p-5"
+          onContextMenu={(event) =>
+            showContextMenu(event, buildLyricsMenuEntries())
+          }
           style={{
             backgroundImage:
               "repeating-linear-gradient(0deg, transparent 0 27px, rgba(122,92,62,0.07) 27px 28px)",
@@ -358,6 +416,16 @@ export function LyricsPanel() {
                       }}
                       onClick={() => {
                         if (canSeek) seek(group.time);
+                      }}
+                      onContextMenu={(event) => {
+                        // 阻断冒泡：外层歌词稿容器也挂了菜单，避免二次打开覆盖行级条目
+                        event.stopPropagation();
+                        showContextMenu(
+                          event,
+                          buildLyricsMenuEntries(
+                            group.lines.map((item) => item.text).join("\n")
+                          )
+                        );
                       }}
                       className={cn(
                         "flex items-start gap-2 px-1 transition-all duration-300 ease-out origin-left",

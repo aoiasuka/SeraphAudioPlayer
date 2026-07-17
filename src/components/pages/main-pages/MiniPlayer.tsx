@@ -4,7 +4,9 @@ import { PlaybackControls } from "@/components/player/PlaybackControls";
 import { VolumeControl } from "@/components/player/VolumeControl";
 import { WaveformProgress } from "@/components/player/WaveformProgress";
 import { coverSrc } from "@/lib/tauri";
+import { buildCurrentTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
+import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 
 export function MiniPlayer() {
@@ -23,7 +25,12 @@ export function MiniPlayer() {
   return (
     <footer className="border-t-2 border-ink bg-card px-4 py-3">
       <div className="flex items-center justify-between gap-5">
-        <div className="flex min-w-0 items-center gap-4">
+        <div
+          className="flex min-w-0 items-center gap-4"
+          onContextMenu={(event) => {
+            if (track) showContextMenu(event, buildCurrentTrackMenuEntries(track));
+          }}
+        >
           <div className={cn("reel", showCover && "has-cover", isPlaying && "spinning")}>
             {showCover ? (
               <img

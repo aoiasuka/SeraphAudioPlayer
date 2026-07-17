@@ -1,6 +1,8 @@
 import { MoreHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { coverSrc } from "@/lib/tauri";
+import { buildUpNextMenuEntries } from "@/lib/trackMenu";
+import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 
 export function UpNextCard() {
@@ -22,6 +24,9 @@ export function UpNextCard() {
       </h3>
       <div
         onClick={playNextPreview}
+        onContextMenu={(event) =>
+          showContextMenu(event, buildUpNextMenuEntries(next))
+        }
         className="archive-card flex items-center justify-between gap-2.5 p-2.5 cursor-pointer"
       >
         <div className="flex min-w-0 items-center gap-2.5">
@@ -41,9 +46,13 @@ export function UpNextCard() {
             <p className="font-tw text-[10px] text-ink2 mt-0.5">{next.artist}</p>
           </div>
         </div>
+        {/* v0.4.3：「更多」按钮左键打开与右键相同的菜单 */}
         <button
           className="w-6 h-6 flex items-center justify-center text-ink3 hover:text-ink transition-colors"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            showContextMenu(e, buildUpNextMenuEntries(next));
+          }}
           aria-label="更多"
         >
           <MoreHorizontal className="w-3 h-3" />

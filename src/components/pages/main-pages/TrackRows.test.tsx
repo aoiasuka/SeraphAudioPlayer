@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrackRows } from "./TrackRows";
+import { isSeparator, useContextMenuStore } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
@@ -141,5 +142,32 @@ describe("TrackRows", () => {
     await user.click(screen.getByRole("button", { name: /驾车歌单/ }));
 
     expect(usePlayerStore.getState().userPlaylists[0].trackIds).toEqual(["t1"]);
+  });
+
+  it("右键曲目行打开全局右键菜单（v0.4.3）", () => {
+    useContextMenuStore.getState().closeContextMenu();
+    render(<TrackRows tracks={TRACKS} empty="空" />);
+
+    fireEvent.contextMenu(screen.getByText("夜曲"));
+
+    const menu = useContextMenuStore.getState();
+    expect(menu.open).toBe(true);
+    const labels = menu.entries
+      .filter((entry) => !isSeparator(entry))
+      .map((entry) => (isSeparator(entry) ? "" : entry.label));
+    expect(labels).toContain("播放");
+    expect(labels).toContain("加入歌单");
+    expect(labels).toContain("曲目信息…");
+    expect(labels).toContain("删除曲库记录");
+  });
+
+  it("行内删除按钮改走全局删除确认（v0.4.3）", async () => {
+    useContextMenuStore.setState({ confirmDeleteTrackId: null });
+    const user = userEvent.setup();
+    render(<TrackRows tracks={TRACKS} empty="空" />);
+
+    await user.click(screen.getByLabelText("删除曲库记录 夜曲"));
+
+    expect(useContextMenuStore.getState().confirmDeleteTrackId).toBe("t1");
   });
 });

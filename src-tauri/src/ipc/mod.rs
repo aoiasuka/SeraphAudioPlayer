@@ -5,5 +5,6 @@ pub mod events;
 pub mod library;
 pub mod playback;
 pub mod playlist_io;
+pub mod system;
 pub mod update;
 pub mod visualizer;

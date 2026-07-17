@@ -62,6 +62,7 @@ pub fn run() {
             ipc::update::open_release_page,
             ipc::playlist_io::import_playlist_m3u8,
             ipc::playlist_io::export_playlist_m3u8,
+            ipc::system::reveal_in_explorer,
             ipc::visualizer::get_spectrum_frame,
         ])
         .setup(|app| {

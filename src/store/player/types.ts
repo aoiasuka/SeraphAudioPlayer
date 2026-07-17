@@ -154,7 +154,8 @@ export interface PlayerStore {
   toggleShuffle: () => void;
   toggleLoop: () => void;
   toggleLike: (trackId: string) => void;
-  createUserPlaylist: (name: string) => void;
+  createUserPlaylist: (name: string) => string | null;
+  renameUserPlaylist: (playlistId: string, name: string) => void;
   deleteUserPlaylist: (playlistId: string) => void;
   deleteTrack: (trackId: string) => Promise<void>;
   loadBackendLibrary: () => Promise<void>;

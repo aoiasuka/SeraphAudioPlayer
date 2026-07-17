@@ -1,12 +1,14 @@
 import {
   ArrowDown,
   ArrowLeft,
+  ArrowRight,
   ArrowUp,
   Download,
   FileUp,
   Heart,
   ListMusic,
   Music2,
+  Pencil,
   Play,
   Plus,
   Trash2,
@@ -15,6 +17,8 @@ import {
 import { useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
+import { buildTrackMenuEntries } from "@/lib/trackMenu";
+import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { LibraryView, Track } from "@/types/track";
 import { isLocalTrack } from "./trackFilters";
@@ -27,12 +31,18 @@ export function PlaylistsPage() {
   const userPlaylists = usePlayerStore((s) => s.userPlaylists);
   const createUserPlaylist = usePlayerStore((s) => s.createUserPlaylist);
   const deleteUserPlaylist = usePlayerStore((s) => s.deleteUserPlaylist);
+  const renameUserPlaylist = usePlayerStore((s) => s.renameUserPlaylist);
+  const exportUserPlaylistToM3u8 = usePlayerStore(
+    (s) => s.exportUserPlaylistToM3u8
+  );
   const importPlaylistFromM3u8 = usePlayerStore((s) => s.importPlaylistFromM3u8);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [playlistToDeleteId, setPlaylistToDeleteId] = useState<string | null>(
     null
   );
+  const [renameTargetId, setRenameTargetId] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(
     null
   );
@@ -107,6 +117,56 @@ export function PlaylistsPage() {
     deleteUserPlaylist(playlistToDelete.id);
     setPlaylistToDeleteId(null);
   };
+  const renameTarget = useMemo(
+    () =>
+      userPlaylists.find((playlist) => playlist.id === renameTargetId) ?? null,
+    [renameTargetId, userPlaylists]
+  );
+  const handleRenamePlaylist = (event: FormEvent) => {
+    event.preventDefault();
+    if (!renameTarget || !renameName.trim()) return;
+    renameUserPlaylist(renameTarget.id, renameName);
+    setRenameTargetId(null);
+  };
+  /** 歌单卡片右键菜单：打开 / 重命名 / 导出 M3U8 / 删除。 */
+  const openPlaylistCardMenu = (
+    event: React.MouseEvent,
+    item: { id: string; name: string; trackIds: string[] }
+  ) => {
+    const entries: ContextMenuEntry[] = [
+      {
+        key: "open",
+        label: "打开",
+        icon: ArrowRight,
+        onSelect: () => setSelectedPlaylistId(item.id),
+      },
+      {
+        key: "rename",
+        label: "重命名…",
+        icon: Pencil,
+        onSelect: () => {
+          setRenameTargetId(item.id);
+          setRenameName(item.name);
+        },
+      },
+      {
+        key: "export",
+        label: "导出 M3U8",
+        icon: Download,
+        disabled: item.trackIds.length === 0,
+        onSelect: () => void exportUserPlaylistToM3u8(item.id),
+      },
+      { type: "separator", key: "sep-danger" },
+      {
+        key: "delete",
+        label: "删除歌单",
+        icon: Trash2,
+        danger: true,
+        onSelect: () => setPlaylistToDeleteId(item.id),
+      },
+    ];
+    showContextMenu(event, entries);
+  };
   const selectedPlaylist = useMemo(
     () =>
       userPlaylists.find((playlist) => playlist.id === selectedPlaylistId) ??
@@ -174,6 +234,7 @@ export function PlaylistsPage() {
             role="button"
             tabIndex={0}
             onClick={() => setSelectedPlaylistId(item.id)}
+            onContextMenu={(event) => openPlaylistCardMenu(event, item)}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 setSelectedPlaylistId(item.id);
@@ -284,6 +345,50 @@ export function PlaylistsPage() {
           </div>
         </div>
       </Dialog>
+      <Dialog
+        open={Boolean(renameTarget)}
+        onClose={() => setRenameTargetId(null)}
+        className="max-w-sm"
+      >
+        <form onSubmit={handleRenamePlaylist} className="space-y-4">
+          <div>
+            <p className="font-tw text-[10px] font-bold uppercase tracking-[0.18em] text-stamp">
+              Rename Playlist
+            </p>
+            <h2 className="mt-1 font-serif text-lg font-bold text-ink">
+              重命名歌单
+            </h2>
+          </div>
+          <label className="block space-y-1.5">
+            <span className="font-tw text-[11px] font-bold text-ink2">
+              歌单名称
+            </span>
+            <input
+              value={renameName}
+              onChange={(event) => setRenameName(event.target.value)}
+              autoFocus
+              className="h-10 w-full border-[1.5px] border-ink bg-card px-3 font-tw text-sm font-semibold text-ink outline-none transition-colors placeholder:text-ink3 focus:border-stamp"
+              placeholder="输入歌单名称"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setRenameTargetId(null)}
+              className="stamp-btn h-9 px-3 font-tw text-xs font-bold"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={!renameName.trim()}
+              className="h-9 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp disabled:cursor-not-allowed disabled:bg-line disabled:border-line disabled:text-ink2"
+            >
+              保存
+            </button>
+          </div>
+        </form>
+      </Dialog>
     </>
   );
 }
@@ -373,6 +478,18 @@ function UserPlaylistDetail({
             return (
               <div
                 key={track.id}
+                onContextMenu={(event) =>
+                  showContextMenu(
+                    event,
+                    buildTrackMenuEntries(track, {
+                      inPlaylist: {
+                        playlistId,
+                        position: index,
+                        total: tracks.length,
+                      },
+                    })
+                  )
+                }
                 className="archive-card group mb-2 grid h-[46px] grid-cols-[44px_minmax(0,1fr)_64px_112px] items-center gap-3 px-3"
               >
                 <span className="font-tw text-[11px] font-bold text-ink3">

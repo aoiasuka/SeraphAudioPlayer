@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { SplashScreen } from "@/components/layout/SplashScreen";
 import { TitleBar } from "@/components/layout/TitleBar";
+import { ContextMenuLayer } from "@/components/menu/ContextMenuLayer";
 import { MainPages } from "@/components/pages/MainPages";
 import { useFileDropImport } from "@/hooks/useFileDropImport";
 import { useHydratePlayerStore } from "@/hooks/useHydratePlayerStore";
@@ -68,6 +69,9 @@ function App() {
           )}
         </div>
       </div>
+
+      {/* v0.4.3：全局右键菜单层（屏蔽默认菜单 + 自绘菜单 + 曲目信息/新建歌单/删除确认弹窗） */}
+      <ContextMenuLayer />
 
       {settingsOpen && (
         <Suspense fallback={null}>

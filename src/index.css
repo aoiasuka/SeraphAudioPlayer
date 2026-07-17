@@ -261,3 +261,20 @@
     transform: translateY(0);
   }
 }
+
+/* v0.4.3：右键菜单入场（约 100ms 淡入 + 轻微上移） */
+@keyframes ctx-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ctx-menu-panel {
+  animation: ctx-menu-in 100ms ease-out;
+}
+

@@ -1,6 +1,8 @@
 import { ArrowLeft, Disc3 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { coverSrc } from "@/lib/tauri";
+import { buildTrackGroupMenuEntries } from "@/lib/trackMenu";
+import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
@@ -93,6 +95,14 @@ export function AlbumsPage() {
             key={album.key}
             type="button"
             onClick={() => setSelectedAlbumKey(album.key)}
+            onContextMenu={(event) =>
+              showContextMenu(
+                event,
+                buildTrackGroupMenuEntries(album.tracks, () =>
+                  setSelectedAlbumKey(album.key)
+                )
+              )
+            }
             className="archive-card group flex flex-col p-4 text-left"
           >
             {album.cover ? (

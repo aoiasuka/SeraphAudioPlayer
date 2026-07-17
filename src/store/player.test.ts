@@ -119,6 +119,43 @@ describe("player store startup and persistence", () => {
   });
 });
 
+describe("player store user playlists (v0.4.3)", () => {
+  beforeEach(() => {
+    usePlayerStore.setState({ userPlaylists: [], notification: null });
+  });
+
+  it("createUserPlaylist returns the new playlist id", () => {
+    const id = usePlayerStore.getState().createUserPlaylist("新建测试");
+
+    const playlists = usePlayerStore.getState().userPlaylists;
+    expect(id).toBeTruthy();
+    expect(playlists).toHaveLength(1);
+    expect(playlists[0].id).toBe(id);
+    expect(playlists[0].name).toBe("新建测试");
+  });
+
+  it("rejects blank playlist names and returns null", () => {
+    const id = usePlayerStore.getState().createUserPlaylist("   ");
+
+    expect(id).toBe(null);
+    expect(usePlayerStore.getState().userPlaylists).toHaveLength(0);
+  });
+
+  it("renames an existing playlist with trimmed name", () => {
+    const id = usePlayerStore.getState().createUserPlaylist("旧名字");
+    usePlayerStore.getState().renameUserPlaylist(id!, "  新名字  ");
+
+    expect(usePlayerStore.getState().userPlaylists[0].name).toBe("新名字");
+  });
+
+  it("keeps the old name when renaming to blank", () => {
+    const id = usePlayerStore.getState().createUserPlaylist("保持原名");
+    usePlayerStore.getState().renameUserPlaylist(id!, "   ");
+
+    expect(usePlayerStore.getState().userPlaylists[0].name).toBe("保持原名");
+  });
+});
+
 describe("player store track deletion", () => {
   beforeEach(() => {
     usePlayerStore.setState({
