@@ -72,7 +72,9 @@ mod tests {
             IpcErrorCode::InvalidInput
         );
         assert_eq!(
-            validate_reveal_target("relative/file.flac").unwrap_err().code,
+            validate_reveal_target("relative/file.flac")
+                .unwrap_err()
+                .code,
             IpcErrorCode::InvalidInput
         );
     }
@@ -88,7 +90,9 @@ mod tests {
     fn rejects_directory_but_accepts_real_file() {
         let dir = std::env::temp_dir();
         assert_eq!(
-            validate_reveal_target(&dir.to_string_lossy()).unwrap_err().code,
+            validate_reveal_target(&dir.to_string_lossy())
+                .unwrap_err()
+                .code,
             IpcErrorCode::InvalidInput
         );
 
