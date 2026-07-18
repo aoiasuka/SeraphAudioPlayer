@@ -64,8 +64,9 @@ impl AnalysisHub {
     fn new(channels: usize, sample_rate: u32) -> IpcResult<Self> {
         let sidebar = SimpleVisualizer::new(SIDEBAR_FFT_SIZE, SIDEBAR_BIN_COUNT, channels)
             .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
-        let analysis_fft = SimpleVisualizer::new(ANALYSIS_FFT_SIZE, ANALYSIS_BIN_COUNT, channels)
-            .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
+        let analysis_fft =
+            SimpleVisualizer::new(ANALYSIS_FFT_SIZE, ANALYSIS_BIN_COUNT, channels)
+                .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
         Ok(Self {
             channels,
             sample_rate,
@@ -80,7 +81,9 @@ impl AnalysisHub {
 static HUB: Mutex<Option<AnalysisHub>> = Mutex::new(None);
 
 /// drain tap 一次，喂给全部消费者。返回持有 hub 的锁守卫。
-fn pump(state: &State<'_, AppState>) -> IpcResult<parking_lot::MutexGuard<'static, Option<AnalysisHub>>> {
+fn pump(
+    state: &State<'_, AppState>,
+) -> IpcResult<parking_lot::MutexGuard<'static, Option<AnalysisHub>>> {
     let tap = state.audio.spectrum_tap();
     let mut samples = Vec::new();
     let TapMeta {

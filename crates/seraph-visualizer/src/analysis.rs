@@ -275,8 +275,7 @@ impl AnalysisEngine {
             0.0
         };
         self.true_peak_linear = Some(block_tp);
-        self.true_peak_max_linear =
-            Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
+        self.true_peak_max_linear = Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
 
         // 声场散点：等距抽取 ≤160 对
         let stride = frames.div_ceil(MAX_SCATTER_PAIRS).max(1);
@@ -443,12 +442,7 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
 
 /// Catmull-Rom 样条在 p1..p2 段内 3 个四分点的最大绝对值（真峰内插近似）。
 fn catmull_rom_peak(p0: f32, p1: f32, p2: f32, p3: f32) -> f32 {
-    let (p0, p1, p2, p3) = (
-        f64::from(p0),
-        f64::from(p1),
-        f64::from(p2),
-        f64::from(p3),
-    );
+    let (p0, p1, p2, p3) = (f64::from(p0), f64::from(p1), f64::from(p2), f64::from(p3));
     let mut max_abs = 0.0_f64;
     for t in [0.25_f64, 0.5, 0.75] {
         let t2 = t * t;
@@ -561,10 +555,7 @@ mod tests {
         engine.push(&stereo_sine(997.0, 10.0_f64.powf(-33.0 / 20.0), 12.0));
         engine.push(&stereo_sine(997.0, 10.0_f64.powf(-13.0 / 20.0), 12.0));
 
-        let lra = engine
-            .snapshot()
-            .loudness_range_lu
-            .expect("LRA after 24s");
+        let lra = engine.snapshot().loudness_range_lu.expect("LRA after 24s");
         assert!(
             (f64::from(lra) - 20.0).abs() < 3.0,
             "两段相差 20dB 的信号 LRA 应≈20 LU，实得 {lra}"
