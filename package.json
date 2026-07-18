@@ -1,7 +1,7 @@
 {
   "name": "seraph-audio-player",
   "private": true,
-  "version": "0.4.5",
+  "version": "0.4.6",
   "type": "module",
   "description": "Premium local HiFi audio player — Rust + Tauri + React",
   "scripts": {
