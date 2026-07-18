@@ -10,6 +10,7 @@ Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器
 - **WASAPI Exclusive**：支持 Windows WASAPI 独占输出，绕过系统混音路径。
 - **多格式解码**：基于 Symphonia / FFmpeg 的多级解码路径，支持常见本地音频与部分流媒体缓存文件。
 - **DSD/高采样率处理**：包含 DSD PCM 转换与重采样处理模块。
+- **参数均衡器（EQ）+ Crossfeed**：侧栏「系统 → EQ 均衡器」提供细粒度参数 EQ（RBJ biquad，峰化/搁架/低高通多类型、逐段频率·增益·Q 可调）、预放大、耳机 crossfeed；内置 10 种曲风预设，支持 AutoEq / EqualizerAPO 预设导入与 JSON/APO 导出、用户预设保存；可选是否对 DSD 生效。DSP 运行在解码线程、播放中热更新、seek 自动重置滤波状态。
 - **系统媒体控件（SMTC）**：键盘/蓝牙媒体键控制播放，系统音量浮窗与锁屏展示曲目标题、艺术家、封面与进度；可在设置 → 系统集成中停用。
 - **实时频谱可视化**：渲染线程实时安全旁路输出样本，FFT log 频段柱状频谱（48 段）随播放展示。
 - **本地封面识别**：导入时提取音频内嵌封面（按内容哈希本地缓存、同专辑去重），经 Tauri asset 协议在播放条转盘、专辑/艺术家视图中展示；旧曲库首次启动自动补扫，孤儿封面自动清理；无内嵌封面的曲目支持在线匹配（QQ 音乐 / iTunes）。
@@ -144,6 +145,23 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.4.4
+
+新功能——**EQ 均衡器与 DSP 链**（侧栏「DRAWER C — 系统」新增入口）：
+
+- **参数均衡器**：RBJ biquad（Audio EQ Cookbook）级联实现，默认 10 段（31Hz–16kHz，首尾搁架 + 中间峰化），支持逐段编辑频率/增益/Q/滤波类型（峰化 PK / 低架 LSC / 高架 HSC / 低通 LP / 高通 HP）、添加/删除频段（最多 40 段）、预放大（±24dB）；实时频响曲线预览（20Hz–20kHz 对数轴）。
+- **Crossfeed（耳机串扰馈送）**：对侧信号经一阶低通后按强度混入，缓解耳机硬声像分离的听感疲劳；强度与截止频率可调。
+- **曲风预设**：内置平直/摇滚/流行/爵士/古典/电子/嘻哈/人声/低音增强/高音增强 10 种预设（带防削波 preamp）。
+- **AutoEq / EqualizerAPO 导入**：直接导入 AutoEq 的 `ParametricEQ.txt`（Filter 行）与 `GraphicEQ.txt`（点列自动转参数段）；识别 PK/LSC/HSC/LP/HP 类型与 Preamp 行。
+- **用户预设与导入导出**：当前配置可命名保存为本地预设；支持导出为 JSON（完整配置）或 EqualizerAPO txt（可回导 APO/其它播放器）。
+- **DSD 生效开关**：EQ 页内提供「EQ 对 DSD 生效」开关，默认关闭（DSD 解码为 PCM 后默认直通保持「原汁」），开启后 DSP 链同样作用于 DSD 曲目。
+- **引擎集成**：DSP 链运行在解码线程（重采样后、写入环形缓冲前），实时回调零改动；配置经版本号热更新（拖动 slider 播放中即时生效、滤波状态跨包保留）；seek 时与重采样器一同重置滤波状态；EOF flush 样本同样过链，gapless 接缝能量连续；链禁用/平直时 bit-exact 零成本直通。
+
+工程化：
+
+- 后端测试 124 → 145（EQ 系数/稳定性/直通、crossfeed、DSP 链热更新与 serde、预设文件 IPC）；前端测试 49 → 63（APO/AutoEq 解析器、EQ store）。
+- `seraph-dsp` 新增 `eq` / `crossfeed` / `chain` 模块；`seraph-decoder` 导出 `is_dsd_file`；新增 `set_dsp_settings` / `import_eq_preset` / `export_eq_preset` IPC 命令。
+
 ### v0.4.3
 
 新功能——**全局右键菜单**（自绘纸质档案风格，屏蔽 WebView2 浏览器默认菜单）：
@@ -249,8 +267,8 @@ target/release/bundle/msi/
 示例：
 
 ```bash
-git tag v0.4.3
-git push origin v0.4.3
+git tag v0.4.4
+git push origin v0.4.4
 ```
 
 ## 许可证

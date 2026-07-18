@@ -10,6 +10,7 @@ description = "Seraph audio player — DSP traits (resampler, DSD converter)"
 seraph-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
 
-# TODO: 真正实现重采样时启用
-# rubato = "0.16"
+[dev-dependencies]
+serde_json = { workspace = true }

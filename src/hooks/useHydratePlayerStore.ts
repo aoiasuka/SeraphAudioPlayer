@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { runWhenIdle } from "@/lib/startup";
 import { invoke, isTauriRuntime } from "@/lib/tauri";
+import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
 import { hydrationGate } from "@/store/player/persistStorage";
 
@@ -27,6 +28,8 @@ export function useHydratePlayerStore() {
           });
         }
       });
+      // v0.4.4：EQ/DSP 配置独立持久化，水合后经 onRehydrateStorage 同步到引擎。
+      void Promise.resolve(useEqStore.persist.rehydrate());
     }, 1800);
   }, []);
 }

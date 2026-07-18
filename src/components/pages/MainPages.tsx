@@ -2,6 +2,7 @@ import { usePlayerStore } from "@/store/player";
 import type { LibraryView } from "@/types/track";
 import { AlbumsPage } from "./main-pages/AlbumsPage";
 import { ArtistsPage } from "./main-pages/ArtistsPage";
+import { EqPage } from "./main-pages/EqPage";
 import { LocalPage } from "./main-pages/LocalPage";
 import { MiniPlayer } from "./main-pages/MiniPlayer";
 import { PlaylistsPage } from "./main-pages/PlaylistsPage";
@@ -49,6 +50,11 @@ const copy: Record<LibraryView, PageCopy> = {
     title: "专辑",
     kicker: "Albums",
     description: "按专辑浏览本地收藏。",
+  },
+  eq: {
+    title: "EQ 均衡器",
+    kicker: "Equalizer",
+    description: "参数均衡 + crossfeed；支持 AutoEq / EqualizerAPO 预设导入。",
   },
 };
 
@@ -130,6 +136,7 @@ function PageBody({ view }: { view: LibraryView }) {
   if (view === "playlists") return <PlaylistsPage />;
   if (view === "artists") return <ArtistsPage />;
   if (view === "albums") return <AlbumsPage />;
+  if (view === "eq") return <EqPage />;
   return <LocalPage />;
 }
 

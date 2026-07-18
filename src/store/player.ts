@@ -32,6 +32,7 @@ const validViews = new Set<LibraryView>([
   "playlists",
   "artists",
   "albums",
+  "eq",
 ]);
 
 function asRecord(value: unknown): Record<string, unknown> {

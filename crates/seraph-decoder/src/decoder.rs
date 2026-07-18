@@ -95,6 +95,12 @@ fn is_dsd_stream(path: &Path) -> bool {
     }
 }
 
+/// 公开的 DSD 判定：供上层（DSP 链的「EQ 是否对 DSD 生效」开关）判断当前曲目是否为 DSD。
+/// 与 `open_decoder` 用同一套魔数优先 / 扩展名兜底的逻辑，判定口径一致。
+pub fn is_dsd_file(path: &Path) -> bool {
+    is_dsd_stream(path)
+}
+
 fn dsd_magic_match(path: &Path) -> Option<bool> {
     let Ok(mut file) = File::open(path) else {
         return None;

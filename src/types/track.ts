@@ -60,4 +60,5 @@ export type LibraryView =
   | "liked"
   | "playlists"
   | "artists"
-  | "albums";
+  | "albums"
+  | "eq";

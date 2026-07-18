@@ -10,8 +10,8 @@ use cpal::{
 use parking_lot::Mutex;
 use rtrb::{Consumer, Producer, RingBuffer};
 use seraph_core::{EventBus, PlayerEvent};
-use seraph_decoder::{open_decoder, Decoder, StreamInfo};
-use seraph_dsp::{resample_interleaved_linear, StatefulSincResampler};
+use seraph_decoder::{is_dsd_file, open_decoder, Decoder, StreamInfo};
+use seraph_dsp::{resample_interleaved_linear, DspProcessor, DspSettings, StatefulSincResampler};
 use std::{
     path::PathBuf,
     sync::{
@@ -49,6 +49,41 @@ pub struct PlaybackController {
     tx: Sender<PlaybackRequest>,
     /// 频谱可视化 tap（渲染线程写、IPC 层读），跨引擎线程共享
     spectrum: Arc<SpectrumTap>,
+    /// DSP 链配置（EQ + crossfeed），跨曲目常驻，解码线程按版本号热更新
+    dsp: Arc<DspControl>,
+}
+
+/// DSP 链的共享配置槽。
+///
+/// 上层（IPC）写 settings 并递增 version；解码线程每包检查 version，
+/// 变化时才克隆一份 settings 重建系数（保留滤波器状态，实现无缝热更新）。
+/// 用 Mutex 而非无锁——写极低频（用户拖动 slider），解码线程只在版本变化时取锁。
+pub struct DspControl {
+    settings: Mutex<DspSettings>,
+    version: AtomicU64,
+}
+
+impl DspControl {
+    fn new() -> Self {
+        Self {
+            settings: Mutex::new(DspSettings::default()),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// 上层下发新配置：替换 settings 并递增版本号，通知解码线程重建。
+    pub fn set(&self, settings: DspSettings) {
+        *self.settings.lock() = settings;
+        self.version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    fn snapshot(&self) -> DspSettings {
+        self.settings.lock().clone()
+    }
 }
 
 struct PlaybackRequest {
@@ -76,9 +111,12 @@ impl PlaybackController {
     pub fn new(event_bus: EventBus) -> Self {
         let (tx, rx) = mpsc::channel::<PlaybackRequest>();
         let spectrum = SpectrumTap::new();
+        let dsp = Arc::new(DspControl::new());
         let engine_spectrum = spectrum.clone();
+        let engine_dsp = dsp.clone();
         thread::spawn(move || {
-            let mut engine = PlaybackEngine::with_spectrum_tap(event_bus.clone(), engine_spectrum);
+            let mut engine =
+                PlaybackEngine::with_spectrum_tap(event_bus.clone(), engine_spectrum, engine_dsp);
             while let Ok(request) = rx.recv() {
                 let result = match request.command {
                     PlaybackCommand::PlayFile {
@@ -108,12 +146,17 @@ impl PlaybackController {
             }
         });
 
-        Self { tx, spectrum }
+        Self { tx, spectrum, dsp }
     }
 
     /// 频谱可视化 tap：上层（Tauri IPC）定期 drain 后喂给 FFT。
     pub fn spectrum_tap(&self) -> Arc<SpectrumTap> {
         self.spectrum.clone()
+    }
+
+    /// 下发 DSP 链配置（EQ + crossfeed）。立即生效于正在播放的曲目（解码线程热更新）。
+    pub fn set_dsp_settings(&self, settings: DspSettings) {
+        self.dsp.set(settings);
     }
 
     pub fn play_file(&self, path: PathBuf, track_id: String, start_seconds: f64) -> Result<()> {
@@ -190,6 +233,8 @@ pub struct PlaybackEngine {
     driver: OutputDriver,
     /// 频谱 tap：跨 session 常驻，渲染循环写、Controller 暴露给上层读
     spectrum: Arc<SpectrumTap>,
+    /// DSP 链配置：跨 session 常驻，解码线程按版本热更新
+    dsp: Arc<DspControl>,
 }
 
 struct PlaybackSession {
@@ -243,6 +288,9 @@ struct DecodeWorkerInput {
     producer: Producer<QueuedSample>,
     event_bus: EventBus,
     start_seconds: f64,
+    /// DSP 链共享配置 + 当前曲目是否为 DSD（决定 applyToDsd 开关是否放行）
+    dsp: Arc<DspControl>,
+    is_dsd: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,10 +315,14 @@ impl OutputDriver {
 
 impl PlaybackEngine {
     pub fn new(event_bus: EventBus) -> Self {
-        Self::with_spectrum_tap(event_bus, SpectrumTap::new())
+        Self::with_spectrum_tap(event_bus, SpectrumTap::new(), Arc::new(DspControl::new()))
     }
 
-    pub fn with_spectrum_tap(event_bus: EventBus, spectrum: Arc<SpectrumTap>) -> Self {
+    pub fn with_spectrum_tap(
+        event_bus: EventBus,
+        spectrum: Arc<SpectrumTap>,
+        dsp: Arc<DspControl>,
+    ) -> Self {
         Self {
             event_bus,
             session: None,
@@ -278,6 +330,7 @@ impl PlaybackEngine {
             selected_device_id: None,
             driver: OutputDriver::WasapiExclusive,
             spectrum,
+            dsp,
         }
     }
 
@@ -422,6 +475,8 @@ impl PlaybackEngine {
             producer,
             event_bus: self.event_bus.clone(),
             start_seconds,
+            dsp: self.dsp.clone(),
+            is_dsd: is_dsd_file(&path),
         });
 
         debug!(
@@ -1176,6 +1231,8 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
             producer,
             event_bus,
             start_seconds,
+            dsp,
+            is_dsd,
         } = input;
         // F-5：解码栈（symphonia/ffmpeg 等）对畸形文件可能 panic；catch_unwind 兜底，
         // panic 时同 Err 分支处理，避免 stopped 不置位导致 UI 永久停在「播放中」假状态。
@@ -1188,6 +1245,8 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
                 producer,
                 &event_bus,
                 start_seconds,
+                &dsp,
+                is_dsd,
             )
         }))
         .unwrap_or_else(|_| Err(BackendError::Internal("decode worker panicked".into())));
@@ -1221,6 +1280,61 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
     })
 }
 
+/// 解码线程侧的 DSP 会话：按版本号轮询共享配置，变化时重建系数（保留滤波状态，
+/// 实现播放中的无缝热更新）。
+struct DspWorkerSession {
+    processor: DspProcessor,
+    observed_version: u64,
+    /// 坑 6：DSD 曲目（已解码为 PCM）在 applyToDsd=false 时整条链被门禁
+    is_dsd: bool,
+    sample_rate: f32,
+    channels: usize,
+    gated: bool,
+}
+
+impl DspWorkerSession {
+    fn new(control: &DspControl, is_dsd: bool, output_rate: u32, channels: usize) -> Self {
+        let mut session = Self {
+            processor: DspProcessor::default(),
+            observed_version: 0,
+            is_dsd,
+            sample_rate: output_rate.max(1) as f32,
+            channels: channels.max(1),
+            gated: false,
+        };
+        session.sync(control, true);
+        session
+    }
+
+    /// 轮询共享版本号；变化（或 force）时快照配置并重建系数。
+    fn sync(&mut self, control: &DspControl, force: bool) {
+        let version = control.version();
+        if !force && version == self.observed_version {
+            return;
+        }
+        self.observed_version = version;
+        let settings = control.snapshot();
+        self.gated = self.is_dsd && !settings.apply_to_dsd;
+        self.processor
+            .configure(&settings, self.sample_rate, self.channels);
+    }
+
+    /// 就地处理一包样本。链不活跃 / 被 DSD 门禁时零成本返回（坑 5/6）。
+    fn process(&mut self, control: &DspControl, samples: &mut [f32]) {
+        self.sync(control, false);
+        if self.gated || !self.processor.is_active() {
+            return;
+        }
+        self.processor.process(samples, self.channels);
+    }
+
+    /// 坑 1：seek 后与重采样器一起清零滤波状态。
+    fn reset(&mut self) {
+        self.processor.reset();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_decode_worker(
     mut decoder: Box<dyn Decoder>,
     track_id: &str,
@@ -1229,6 +1343,8 @@ fn run_decode_worker(
     mut producer: Producer<QueuedSample>,
     event_bus: &EventBus,
     start_seconds: f64,
+    dsp: &DspControl,
+    is_dsd: bool,
 ) -> Result<()> {
     if start_seconds > 0.0 {
         // F-3：seek 失败降级为忽略（从头播放）+ warning，而非终止整曲。
@@ -1245,6 +1361,9 @@ fn run_decode_worker(
     let mut resampler =
         StatefulSincResampler::new(input_rate, shared.output_rate, shared.output_channels)
             .map_err(|err| BackendError::Internal(err.to_string()))?;
+    // DSP 链会话：EQ + crossfeed，运行在解码线程，样本重采样到输出率/声道后就地处理。
+    let mut dsp_session =
+        DspWorkerSession::new(dsp, is_dsd, shared.output_rate, shared.output_channels);
     let mut progress = ProgressTracker::new();
     let mut remap_scratch: Vec<f32> = Vec::new();
     let mut output_scratch: Vec<f32> = Vec::new();
@@ -1266,7 +1385,11 @@ fn run_decode_worker(
             if let Some(request) = seek_request {
                 match decoder.seek(request.seconds) {
                     // seek 后 resampler 内部 history 已属过去时间段，必须 reset
-                    Ok(()) => resampler.reset(),
+                    // 坑 1：DSP 滤波器状态同样跨越了时间断点，一并清零避免跳转点杂音。
+                    Ok(()) => {
+                        resampler.reset();
+                        dsp_session.reset();
+                    }
                     // F-3：seek 失败降级为忽略该次 seek + warning，而非终止整曲。
                     // 审2-4：engine.seek() 已前置更新 frame_position / generation，
                     // 失败时把进度回滚到 seek 前的位置并告知前端，
@@ -1327,6 +1450,8 @@ fn run_decode_worker(
                 &mut remap_scratch,
                 &mut output_scratch,
             )?;
+            // DSP 链：样本已是输出率/声道的 f32 交错，就地 EQ + crossfeed。
+            dsp_session.process(dsp, &mut output_scratch);
             push_samples(
                 &output_scratch,
                 shared,
@@ -1352,6 +1477,9 @@ fn run_decode_worker(
             )
             .is_ok()
             {
+                // 坑 2：EOF flush 的样本同样过 DSP 链（含 biquad 的自然拖尾），
+                // 保持曲尾能量连续、gapless 接缝无跳变。
+                dsp_session.process(dsp, &mut output_scratch);
                 push_samples(
                     &output_scratch,
                     shared,

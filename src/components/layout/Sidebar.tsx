@@ -6,6 +6,7 @@ import {
   Music,
   Radio,
   Sliders,
+  SlidersHorizontal,
   User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -44,7 +45,10 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     tab: "DRAWER C — 系统",
-    items: [{ key: "settings", label: "设置", icon: Sliders }],
+    items: [
+      { key: "eq", label: "EQ 均衡器", icon: SlidersHorizontal },
+      { key: "settings", label: "设置", icon: Sliders },
+    ],
   },
 ];
 

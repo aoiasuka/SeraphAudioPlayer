@@ -278,3 +278,9 @@
   animation: ctx-menu-in 100ms ease-out;
 }
 
+/* v0.4.4：EQ 竖直 slider（图形均衡器视图）——WebKit 需要显式宽度撑开轨道 */
+.eq-vertical-slider {
+  width: 24px;
+  cursor: pointer;
+}
+
