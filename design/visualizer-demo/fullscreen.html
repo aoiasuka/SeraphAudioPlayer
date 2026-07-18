@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seraph — 声学分析 · 全屏模式设计稿</title>
+    <link rel="stylesheet" href="assets/seraph-viz.css" />
+    <style>
+      /* ========== 应用外壳模拟（全屏分析模式）==========
+         点击「声学分析」后：右栏的频谱/下一首/音频信息全部让位，
+         仅保留歌词栏；分析五仪表撑满中央区；底部播放控制栏横贯。 */
+      html, body { height: 100%; }
+      body { margin: 0; overflow: hidden; }
+      .app {
+        display: grid;
+        grid-template-columns: 216px minmax(0, 1fr) clamp(260px, 21vw, 320px);
+        grid-template-rows: minmax(0, 1fr) auto;
+        height: 100vh;
+        background: var(--paper);
+      }
+
+      /* ---- 左侧导航（应用原样，仅示意）---- */
+      .nav {
+        grid-row: 1 / 3;
+        border-right: 2px solid var(--ink);
+        padding: 22px 18px;
+        display: flex; flex-direction: column; gap: 6px;
+        overflow: hidden;
+      }
+      .nav h1 { font: bold 26px "Courier Prime", monospace; letter-spacing: 2px; margin: 0; color: var(--ink); }
+      .nav .sub { font: 10px "Courier Prime", monospace; letter-spacing: 2px; color: var(--ink2); border-bottom: 1.5px solid var(--ink); padding-bottom: 14px; margin-bottom: 10px; }
+      .nav .drawer { font: bold 9px "Courier Prime", monospace; letter-spacing: 2px; color: var(--ink3); margin: 12px 0 4px; }
+      .nav a { display: flex; align-items: center; gap: 10px; padding: 7px 8px; font: bold 13px "Courier Prime", monospace; color: var(--ink2); text-decoration: none; border: 1.5px solid transparent; }
+      .nav a.on { color: var(--ink); border-color: var(--ink); background: var(--card); box-shadow: 3px 3px 0 rgba(43,39,34,.12); }
+      .nav a::before { content: "□"; font-size: 10px; color: var(--ink3); }
+      .nav a.on::before { content: "■"; color: var(--stamp); }
+
+      /* ---- 中央：分析套件撑满 ---- */
+      .stage {
+        min-width: 0; min-height: 0;
+        padding: 14px 14px 10px;
+        display: grid; gap: 12px;
+        grid-template-columns: minmax(320px, 30%) minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+      }
+      .stage-head {
+        grid-column: 1 / 3;
+        display: flex; align-items: baseline; gap: 14px;
+        border: 1.5px solid var(--ink); background: var(--card);
+        box-shadow: 3px 3px 0 rgba(43,39,34,.1);
+        padding: 8px 14px; position: relative;
+      }
+      .stage-head .tab { position: absolute; top: -1.5px; left: -1.5px; transform: translateY(-100%); background: var(--ink); color: var(--paper); font: bold 9px "Courier Prime", monospace; letter-spacing: 3px; padding: 4px 12px; }
+      .stage-head h2 { margin: 0; font: bold 22px "Noto Serif SC", "Courier Prime", serif; color: var(--ink); }
+      .stage-head .crumb { font: italic 12px "Courier Prime", monospace; color: var(--ink3); }
+      .stage-head .cur { margin-left: auto; font: bold 11px "Courier Prime", monospace; color: var(--brown); border: 1.5px solid var(--line); padding: 3px 10px; white-space: nowrap; }
+      .stage-head .cur b { color: var(--ink); }
+
+      /* 面板落位：左列纵排（响度自适应 + 电平表撑满）；右列频谱大幅、下排瀑布+声场 */
+      .viz-panel { min-height: 0; min-width: 0; }
+      .p-left  { grid-column: 1; grid-row: 2 / 4; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+      .p-loud  { flex: none; }
+      .p-lvl   { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      .p-spec  { grid-column: 2; grid-row: 2; }
+      .p-row3  { grid-column: 2; grid-row: 3; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) minmax(240px, 34%); min-height: 0; }
+      .viz-panel__body { min-height: 0; }
+      .viz-canvas-wrap { min-height: 0; }
+
+      /* ---- 右侧：仅保留歌词栏 ---- */
+      .lyrics {
+        border-left: 2px solid var(--ink);
+        background: var(--paper2, var(--paper));
+        padding: 16px;
+        display: flex; flex-direction: column; gap: 10px;
+        overflow: hidden;
+      }
+      .lyrics .cap { font: bold 11px "Courier Prime", monospace; letter-spacing: 3px; color: var(--ink2); display: flex; justify-content: space-between; }
+      .lyrics .sheet { flex: 1; min-height: 0; border: 1.5px solid var(--ink); background: var(--card); box-shadow: 3px 3px 0 rgba(43,39,34,.1); padding: 18px 16px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 14px; }
+      .lyrics p { margin: 0; font: 15px "Noto Serif SC", serif; color: var(--ink3); text-align: center; line-height: 1.6; }
+      .lyrics p.now { font-size: 19px; font-weight: bold; color: var(--ink); background: var(--stamp-soft, #f3e2dc); padding: 6px 4px; }
+
+      /* ---- 底部播放控制栏（横贯中央+歌词）---- */
+      .playbar {
+        grid-column: 2 / 4; grid-row: 2;
+        border-top: 2px solid var(--ink);
+        background: var(--card);
+        display: flex; align-items: center; gap: 16px;
+        padding: 10px 18px;
+      }
+      .playbar .cover { width: 52px; height: 52px; border: 1.5px solid var(--ink); background: #111; flex: none; }
+      .playbar .meta { min-width: 0; width: 190px; }
+      .playbar .meta b { display: block; font: bold 15px "Noto Serif SC", serif; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .playbar .meta span { font: 11px "Courier Prime", monospace; color: var(--ink3); }
+      .playbar .btn { width: 44px; height: 44px; border: 1.5px solid var(--ink); background: var(--card); box-shadow: 2px 2px 0 rgba(43,39,34,.15); display: grid; place-items: center; font: bold 14px "Courier Prime", monospace; color: var(--ink); cursor: pointer; }
+      .playbar .btn.play { background: var(--ink); color: var(--paper); width: 56px; }
+      .playbar .track { flex: 1; display: flex; align-items: center; gap: 10px; font: bold 12px "Courier Prime", monospace; color: var(--ink2); }
+      .playbar .rail { flex: 1; height: 22px; border: 1.5px solid var(--line); background: var(--card); position: relative; }
+      .playbar .rail i { position: absolute; inset: 2px auto 2px 2px; width: 38%; background: repeating-linear-gradient(90deg, var(--ink2) 0 2px, transparent 2px 5px); }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <!-- 左侧导航 -->
+      <nav class="nav">
+        <h1>SERAPH_</h1>
+        <div class="sub">AUDIO ARCHIVE SYSTEM v2.0</div>
+        <div class="drawer">DRAWER A — 资料库</div>
+        <a href="#">本地音乐</a><a href="#">流媒体</a><a href="#">最近播放</a><a href="#">我喜欢</a>
+        <div class="drawer">DRAWER B — 浏览</div>
+        <a href="#">歌单</a><a href="#">艺术家</a><a href="#">专辑</a>
+        <div class="drawer">DRAWER C — 系统</div>
+        <a href="#">EQ 均衡器</a><a class="on" href="#">声学分析</a><a href="#">设置</a>
+      </nav>
+
+      <!-- 中央：五仪表撑满 -->
+      <main class="stage">
+        <div class="stage-head">
+          <span class="tab">FILE — ANALYSIS SUITE · FULLSCREEN</span>
+          <h2>声学分析</h2>
+          <span class="crumb">analysis_suite. &gt; 全屏模式 · 右栏折叠，仅保留歌词</span>
+          <span class="cur">● CURRENT <b>Beat It</b></span>
+        </div>
+
+        <div class="p-left">
+        <section class="viz-panel p-loud" data-panel="loudness" aria-labelledby="t-loud">
+          <header class="viz-panel__head">
+            <span class="viz-panel__no">NO.01</span>
+            <h2 class="viz-panel__title" id="t-loud">LOUDNESS · 响度</h2>
+            <span class="viz-panel__meta" data-meta></span>
+          </header>
+          <div class="viz-panel__body"></div>
+        </section>
+
+        <section class="viz-panel viz-panel--levels p-lvl" data-panel="levels" aria-labelledby="t-lvl">
+          <header class="viz-panel__head">
+            <span class="viz-panel__no">NO.02</span>
+            <h2 class="viz-panel__title" id="t-lvl">LEVELS · 电平表</h2>
+            <span class="viz-panel__meta" data-meta></span>
+          </header>
+          <div class="viz-panel__body"></div>
+        </section>
+        </div>
+
+        <section class="viz-panel viz-panel--spectrum p-spec" data-panel="spectrum" aria-labelledby="t-sp">
+          <header class="viz-panel__head">
+            <span class="viz-panel__no">NO.04</span>
+            <h2 class="viz-panel__title" id="t-sp">SPECTRUM · 频谱</h2>
+            <span class="viz-panel__meta" data-meta></span>
+          </header>
+          <div class="viz-panel__body"></div>
+        </section>
+
+        <div class="p-row3">
+          <section class="viz-panel viz-panel--cascade" data-panel="spectrogram" aria-labelledby="t-sg">
+            <header class="viz-panel__head">
+              <span class="viz-panel__no">NO.05</span>
+              <h2 class="viz-panel__title" id="t-sg">SPECTROGRAM · 频谱瀑布</h2>
+              <span class="viz-panel__meta" data-meta></span>
+            </header>
+            <div class="viz-panel__body"></div>
+          </section>
+          <section class="viz-panel viz-panel--field" data-panel="soundfield" aria-labelledby="t-sf">
+            <header class="viz-panel__head">
+              <span class="viz-panel__no">NO.03</span>
+              <h2 class="viz-panel__title" id="t-sf">SOUND FIELD · 声场</h2>
+              <span class="viz-panel__meta" data-meta></span>
+            </header>
+            <div class="viz-panel__body"></div>
+          </section>
+        </div>
+      </main>
+
+      <!-- 右侧：仅保留歌词栏 -->
+      <aside class="lyrics">
+        <div class="cap"><span>歌词稿 — LYRICS</span><span>SYNC ●</span></div>
+        <div class="sheet">
+          <p>They told him don't you ever come around here</p>
+          <p>Don't wanna see your face, you better disappear</p>
+          <p class="now">Beat It - Michael Jackson (迈克尔·杰克逊)</p>
+          <p>Lyrics by: Michael Jackson</p>
+          <p>Composed by: Michael Jackson</p>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 底部播放控制栏（绝对定位横贯，示意与应用一致） -->
+    <div class="playbar" style="position:fixed; left:216px; right:0; bottom:0;">
+      <div class="cover"></div>
+      <div class="meta"><b>Beat It</b><span>Unknown Artist · PLAYING</span></div>
+      <button class="btn" aria-label="随机">⤨</button>
+      <button class="btn" aria-label="上一首">|◀</button>
+      <button class="btn play" aria-label="播放">▶</button>
+      <button class="btn" aria-label="下一首">▶|</button>
+      <button class="btn" aria-label="循环">⟳</button>
+      <div class="track"><span>01:37</span><div class="rail"><i></i></div><span>04:18</span></div>
+    </div>
+
+    <script src="assets/engine.js"></script>
+    <script src="assets/panels.js"></script>
+    <script>
+      // 播放栏是 fixed 的，给 app 网格底部留出高度
+      const bar = document.querySelector(".playbar");
+      const app = document.querySelector(".app");
+      function pad() { app.style.height = `calc(100vh - ${bar.offsetHeight}px)`; }
+      pad(); addEventListener("resize", pad);
+
+      const engine = SeraphViz.createEngine();
+      SeraphPanels.mountAll(engine);
+    </script>
+  </body>
+</html>

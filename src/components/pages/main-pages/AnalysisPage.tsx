@@ -290,9 +290,9 @@ export function AnalysisPage() {
   const standby = isTauriRuntime() && !isPlaying;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1 xl:flex-row">
-      {/* 左列：响度 / 电平 / 声场 */}
-      <div className="flex min-h-0 flex-col gap-3 xl:w-[42%] xl:min-w-[340px]">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1 2xl:grid 2xl:grid-cols-[minmax(300px,29%)_minmax(0,1fr)_minmax(230px,18%)] 2xl:grid-rows-[minmax(0,1fr)_minmax(0,1.05fr)] 2xl:overflow-hidden 2xl:pr-0">
+      {/* 左列：响度（自适应高度）+ 电平表（吃掉剩余高度） */}
+      <div className="flex shrink-0 flex-col gap-3 2xl:row-span-2 2xl:min-h-0 2xl:shrink">
         <Panel no="NO.01" title="LOUDNESS · 响度" metaRef={loudMeta} className="shrink-0">
           {standby ? (
             <p className="mb-1.5 border-[1.5px] border-dashed border-brown px-2 py-1 font-tw text-[10px] font-bold text-brown">
@@ -306,7 +306,7 @@ export function AnalysisPage() {
               </span>
               <span
                 ref={setReadout("loudS")}
-                className="font-tw text-[24px] font-bold leading-tight text-ink [font-variant-numeric:tabular-nums]"
+                className="font-tw text-[clamp(21px,1.4vw,27px)] font-bold leading-tight text-ink [font-variant-numeric:tabular-nums]"
               >
                 --.-
               </span>
@@ -320,7 +320,7 @@ export function AnalysisPage() {
               </span>
               <span
                 ref={setReadout("loudI")}
-                className="font-tw text-[34px] font-bold leading-tight text-stamp [font-variant-numeric:tabular-nums]"
+                className="font-tw text-[clamp(29px,2vw,40px)] font-bold leading-tight text-stamp [font-variant-numeric:tabular-nums]"
               >
                 --.-
               </span>
@@ -334,7 +334,7 @@ export function AnalysisPage() {
               </span>
               <span
                 ref={setReadout("loudM")}
-                className="font-tw text-[24px] font-bold leading-tight text-ink [font-variant-numeric:tabular-nums]"
+                className="font-tw text-[clamp(21px,1.4vw,27px)] font-bold leading-tight text-ink [font-variant-numeric:tabular-nums]"
               >
                 --.-
               </span>
@@ -387,7 +387,7 @@ export function AnalysisPage() {
           no="NO.02"
           title="LEVELS · 电平表"
           metaText="dBFS · PEAK+RMS"
-          className="min-h-[260px] flex-1 xl:min-h-[170px]"
+          className="min-h-[280px] flex-1 2xl:min-h-0"
         >
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pb-2 font-tw text-[10px] font-bold tracking-[1px] text-ink3">
             <span>
@@ -414,13 +414,15 @@ export function AnalysisPage() {
             />
           </div>
         </Panel>
+      </div>
 
-        <Panel
-          no="NO.03"
-          title="SOUND FIELD · 声场"
-          metaRef={fieldMeta}
-          className="min-h-[280px] flex-[1.15] xl:min-h-[190px]"
-        >
+      {/* 右下角：声场（近方形，极坐标不变形） */}
+      <Panel
+        no="NO.03"
+        title="SOUND FIELD · 声场"
+        metaRef={fieldMeta}
+        className="min-h-[280px] shrink-0 2xl:col-start-3 2xl:row-start-2 2xl:min-h-0"
+      >
           <div className="relative min-h-0 flex-1">
             <canvas
               ref={fieldCanvas}
@@ -446,17 +448,15 @@ export function AnalysisPage() {
               ρ&gt;0 同相 · ρ&lt;0 反相
             </span>
           </div>
-        </Panel>
-      </div>
+      </Panel>
 
-      {/* 右列：频谱 / 瀑布 */}
-      <div className="flex min-h-0 flex-col gap-3 xl:min-w-0 xl:flex-1">
-        <Panel
-          no="NO.04"
-          title="SPECTRUM · 频谱"
-          metaRef={spectrumMeta}
-          className="min-h-[300px] flex-[1.05] xl:min-h-[220px]"
-        >
+      {/* 右上：频谱独占最大幅面 */}
+      <Panel
+        no="NO.04"
+        title="SPECTRUM · 频谱"
+        metaRef={spectrumMeta}
+        className="min-h-[300px] shrink-0 2xl:col-start-2 2xl:col-span-2 2xl:row-start-1 2xl:min-h-0"
+      >
           <div className="relative min-h-0 flex-1">
             <canvas
               ref={spectrumCanvas}
@@ -480,7 +480,7 @@ export function AnalysisPage() {
           </div>
         </Panel>
 
-        <Panel no="NO.05" title="SPECTROGRAM · 频谱瀑布" className="min-h-[280px] flex-1 xl:min-h-[200px]">
+        <Panel no="NO.05" title="SPECTROGRAM · 频谱瀑布" className="min-h-[280px] shrink-0 2xl:col-start-2 2xl:row-start-2 2xl:min-h-0">
           <div className="relative min-h-0 flex-1">
             <canvas
               ref={cascadeCanvas}
@@ -509,7 +509,6 @@ export function AnalysisPage() {
             </span>
           </div>
         </Panel>
-      </div>
     </div>
   );
 }
