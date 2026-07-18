@@ -145,7 +145,7 @@ export interface PlayerStore {
   togglePlayback: () => void;
   nextTrack: () => void;
   prevTrack: () => void;
-  loadTrack: (index: number) => void;
+  loadTrack: (index: number, options?: { forcePlay?: boolean }) => void;
   setActiveView: (view: LibraryView) => void;
   seek: (sec: number) => void;
   tick: () => void;
@@ -178,6 +178,11 @@ export interface PlayerStore {
     input: string,
     options?: BilibiliImportOptions
   ) => Promise<BilibiliBatchImportResult | null>;
+  // v0.4.4：按当次勾选的音质选项重新加载 B 站流媒体曲目，原位替换。
+  reloadStreamingTrack: (
+    trackId: string,
+    options?: BilibiliImportOptions
+  ) => Promise<boolean>;
   // 审2-R5：流媒体页 actions（生命周期归 store 管，组件卸载不清理）
   refreshBilibiliState: () => Promise<void>;
   startFfmpegDownload: () => Promise<void>;

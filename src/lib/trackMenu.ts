@@ -25,6 +25,7 @@ import {
 } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
+import { isStreamingTrack } from "@/components/pages/main-pages/trackFilters";
 
 /**
  * 各表面右键菜单的条目构建器。
@@ -164,6 +165,15 @@ export function buildTrackMenuEntries(
     );
   }
 
+  if (isStreamingTrack(track)) {
+    entries.push({
+      key: "reload-streaming",
+      label: "重新加载…",
+      icon: RotateCw,
+      onSelect: () => menu.openReloadStreaming(track.id),
+    });
+  }
+
   entries.push(
     { type: "separator", key: "sep-info" },
     {
@@ -171,8 +181,7 @@ export function buildTrackMenuEntries(
       label: "曲目信息…",
       icon: Info,
       onSelect: () => menu.openTrackInfo(track.id),
-    },
-    {
+    },    {
       key: "copy",
       label: "复制",
       icon: Copy,

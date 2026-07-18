@@ -184,11 +184,15 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
           return (
             <div
               key={track.id}
+              onDoubleClick={() => {
+                // 双击行内任意处即从头强制播放本曲目（含停止态）
+                if (index >= 0) loadTrack(index, { forcePlay: true });
+              }}
               onContextMenu={(event) =>
                 showContextMenu(event, buildTrackMenuEntries(track))
               }
               className={cn(
-                "archive-card group relative grid h-[49px] grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
+                "archive-card group relative grid h-[49px] select-none grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
                 active && "is-playing"
               )}
             >

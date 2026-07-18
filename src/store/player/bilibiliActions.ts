@@ -2,7 +2,13 @@ import { invoke } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 import { mergeIncomingTrack, mergeTracksByPathWithStats } from "./libraryActions";
 import { streamingSourceInput, trackMergeKey } from "./trackIdentity";
-import type { BilibiliBatchImportResult, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
+import type {
+  BilibiliBatchImportResult,
+  BilibiliImportOptions,
+  PlayerStore,
+  PlayerStoreGet,
+  PlayerStoreSet,
+} from "./types";
 
 // 审2-R3：同一曲目在途的重缓存请求去重——并发触发（如快速重复点击）复用同一 Promise，
 // 避免对同一曲目发起第二次下载。
@@ -80,7 +86,7 @@ export function bilibiliImportErrorMessage(err: unknown) {
 export function createBilibiliActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites"> {
+): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites" | "reloadStreamingTrack"> {
   return {
   importBilibiliAudio: async (input, options) => {
     // 审2-R10：返回是否导入成功，调用方（StreamingPage）据此决定是否清空输入框（L-7）
@@ -187,6 +193,59 @@ export function createBilibiliActions(
       console.warn("Tauri command failed: import_bilibili_favorites", err);
       get().showNotification(bilibiliImportErrorMessage(err));
       return null;
+    }
+  },
+
+  // v0.4.4：B 站流媒体曲目「重新加载」——用用户当次勾选的音质选项
+  // （杜比 / FLAC / 混流，默认全不勾选）重新解析下载，原位替换曲库中的记录。
+  reloadStreamingTrack: async (trackId, options) => {
+    const track = get().playlist.find((item) => item.id === trackId);
+    if (!track) {
+      get().showNotification("找不到要重新加载的曲目");
+      return false;
+    }
+
+    const sourceInput = streamingSourceInput(track);
+    if (!sourceInput) {
+      get().showNotification("这首曲目缺少 B 站来源信息，无法重新加载");
+      return false;
+    }
+
+    const reloadOptions: BilibiliImportOptions = {
+      preferFlac: options?.preferFlac ?? false,
+      preferDolbyAtmos: options?.preferDolbyAtmos ?? false,
+      remuxWithFfmpeg: options?.remuxWithFfmpeg ?? false,
+    };
+
+    get().showNotification(`正在重新加载: ${track.title}`);
+    try {
+      const imported = await invoke<Track>("import_bilibili_audio_with_options", {
+        input: sourceInput,
+        options: reloadOptions,
+      });
+
+      if (!imported?.path) {
+        get().showNotification("没有解析到可用的 B 站音频");
+        return false;
+      }
+
+      // 用来源身份（mergeKey）定位并原位替换，保留原 id / 收藏 / 歌单归属。
+      const incomingKey = trackMergeKey(imported);
+      set((state) => ({
+        playlist: state.playlist.map((item) =>
+          item.id === trackId || trackMergeKey(item) === incomingKey
+            ? mergeIncomingTrack(item, imported)
+            : item
+        ),
+      }));
+
+      get().showNotification(`已重新加载: ${imported.title}`);
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: reload streaming track", err);
+      get().showNotification(bilibiliImportErrorMessage(err));
+      return false;
     }
   },
   };

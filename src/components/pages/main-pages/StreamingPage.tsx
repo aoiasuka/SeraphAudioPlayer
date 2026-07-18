@@ -29,9 +29,11 @@ export function StreamingPage() {
   const [favoriteInput, setFavoriteInput] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [isBatchImporting, setIsBatchImporting] = useState(false);
-  const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(true);
-  const [preferFlac, setPreferFlac] = useState(true);
-  const [remuxWithFfmpeg, setRemuxWithFfmpeg] = useState(true);
+  // B 站流媒体默认走普通音质：杜比 / FLAC / 混流三项默认全不勾选，
+  // 需要时用户在工具条上手动开启。
+  const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(false);
+  const [preferFlac, setPreferFlac] = useState(false);
+  const [remuxWithFfmpeg, setRemuxWithFfmpeg] = useState(false);
 
   const isFfmpegDownloading = ffmpegDownload.stage === "downloading";
 

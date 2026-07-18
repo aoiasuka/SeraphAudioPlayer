@@ -67,7 +67,7 @@ function migrateDriver(value: unknown): DriverKind {
   if (value === "asio") return "direct";
   return typeof value === "string" && validDrivers.has(value as DriverKind)
     ? value as DriverKind
-    : "wasapi";
+    : "direct";
 }
 
 function migrateView(value: unknown): LibraryView {
@@ -130,7 +130,9 @@ export const usePlayerStore = create<PlayerStore>()(
         userPlaylists: [],
         devices: mockDevices,
         currentDeviceId: "wasapi:hd-dac1",
-        driverKind: "wasapi",
+        // 默认使用系统共享输出（兼容性最高，适合普通扬声器/蓝牙），
+        // 已选过其它 driver 的老用户仍从持久化状态恢复自己的选择。
+        driverKind: "direct",
         activeView: "local",
         smtcEnabled: true,
         rememberPlayback: true,

@@ -478,6 +478,9 @@ function UserPlaylistDetail({
             return (
               <div
                 key={track.id}
+                onDoubleClick={() => {
+                  if (globalIndex >= 0) loadTrack(globalIndex, { forcePlay: true });
+                }}
                 onContextMenu={(event) =>
                   showContextMenu(
                     event,
@@ -490,7 +493,7 @@ function UserPlaylistDetail({
                     })
                   )
                 }
-                className="archive-card group mb-2 grid h-[46px] grid-cols-[44px_minmax(0,1fr)_64px_112px] items-center gap-3 px-3"
+                className="archive-card group mb-2 grid h-[46px] select-none grid-cols-[44px_minmax(0,1fr)_64px_112px] items-center gap-3 px-3"
               >
                 <span className="font-tw text-[11px] font-bold text-ink3">
                   {(index + 1).toString().padStart(3, "0")}

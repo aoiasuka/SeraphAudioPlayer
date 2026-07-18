@@ -8,6 +8,7 @@ import {
 } from "@/store/contextMenu";
 import { CreatePlaylistWithTracksDialog } from "./CreatePlaylistWithTracksDialog";
 import { DeleteTrackConfirmDialog } from "./DeleteTrackConfirmDialog";
+import { ReloadStreamingDialog } from "./ReloadStreamingDialog";
 import { TrackInfoDialog } from "./TrackInfoDialog";
 
 /** 菜单面板通用样式：沿用 DeviceMenu 确立的纸质档案弹层视觉。 */
@@ -219,6 +220,7 @@ export function ContextMenuLayer() {
       <TrackInfoDialog />
       <CreatePlaylistWithTracksDialog />
       <DeleteTrackConfirmDialog />
+      <ReloadStreamingDialog />
     </>
   );
 }

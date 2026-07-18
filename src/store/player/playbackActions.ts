@@ -279,21 +279,24 @@ export function createPlaybackActions(
       );
   },
 
-  loadTrack: (index) => {
+  loadTrack: (index, options) => {
     const track = get().playlist[index];
     if (!track) return;
+    // v0.4.4：双击曲目行强制起播（forcePlay）。此前单击在停止态只选中不播放，
+    // 双击需要能从停止态直接播放，故用 shouldPlay 合并两种意图。
+    const forcePlay = options?.forcePlay ?? false;
     // 审2-R6：切歌使上一次 seek 的抑制窗口失效
     seekGuard.until = 0;
     // 发现2：任何新的选曲都会使先前挂起的播放续体过期
     const epoch = bumpPlayEpoch();
-    const wasPlaying = get().isPlaying;
+    const shouldPlay = get().isPlaying || forcePlay;
     set({
       currentTrackIndex: index,
       currentTime: 0,
       recentTrackIds: withRecentTrack(get().recentTrackIds, track.id),
     });
     resetNextIndexCache();
-    if (wasPlaying) {
+    if (shouldPlay) {
       void ensurePlayableTrack(
         track,
         (updatedTrack) => {
@@ -313,10 +316,23 @@ export function createPlaybackActions(
           void sendPlayCommand(playableTrack, get, set, 0, () =>
             epoch === currentPlayEpoch() &&
             get().currentTrack()?.id === playableTrack.id
-          ).catch((err) => {
-            reportPlaybackCommandError(get, "Failed to start playback", err);
-            if (epoch === currentPlayEpoch()) set({ isPlaying: false });
-          });
+          )
+            .then(() => {
+              // 双击从停止态起播时，stub 模式无 playback_started 事件，手动置位；
+              // Tauri 模式仍由事件驱动 isPlaying（与 togglePlayback 一致）。
+              if (
+                forcePlay &&
+                !isTauriRuntime() &&
+                epoch === currentPlayEpoch() &&
+                get().currentTrack()?.id === playableTrack.id
+              ) {
+                set({ isPlaying: true });
+              }
+            })
+            .catch((err) => {
+              reportPlaybackCommandError(get, "Failed to start playback", err);
+              if (epoch === currentPlayEpoch()) set({ isPlaying: false });
+            });
         })
         .catch((err) => {
           // eslint-disable-next-line no-console

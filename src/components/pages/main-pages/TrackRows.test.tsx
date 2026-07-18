@@ -170,4 +170,45 @@ describe("TrackRows", () => {
 
     expect(useContextMenuStore.getState().confirmDeleteTrackId).toBe("t1");
   });
+
+  it("双击曲目行强制起播（v0.4.4）", () => {
+    const loadTrack = vi.fn();
+    usePlayerStore.setState({ loadTrack });
+    render(<TrackRows tracks={TRACKS} empty="空" />);
+
+    // 双击第二行（First Love，全局索引 1）
+    fireEvent.doubleClick(screen.getByText("First Love"));
+
+    expect(loadTrack).toHaveBeenCalledWith(1, { forcePlay: true });
+  });
+
+  it("右键流媒体曲目出现「重新加载…」，本地曲目不出现（v0.4.4）", () => {
+    const streamingTrack = {
+      ...makeTrack("bili-1", "B站音频", "UP主", 200),
+      album: "Bilibili",
+      sourceId: "BV1xx411c7mD",
+      sourceUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+    } as Track;
+    usePlayerStore.setState({ playlist: [...TRACKS, streamingTrack] });
+    useContextMenuStore.getState().closeContextMenu();
+    render(<TrackRows tracks={[streamingTrack]} empty="空" />);
+
+    fireEvent.contextMenu(screen.getByText("B站音频"));
+    const streamingLabels = useContextMenuStore
+      .getState()
+      .entries.filter((entry) => !isSeparator(entry))
+      .map((entry) => (isSeparator(entry) ? "" : entry.label));
+    expect(streamingLabels).toContain("重新加载…");
+
+    // 本地曲目右键无「重新加载…」
+    cleanup();
+    useContextMenuStore.getState().closeContextMenu();
+    render(<TrackRows tracks={TRACKS} empty="空" />);
+    fireEvent.contextMenu(screen.getByText("夜曲"));
+    const localLabels = useContextMenuStore
+      .getState()
+      .entries.filter((entry) => !isSeparator(entry))
+      .map((entry) => (isSeparator(entry) ? "" : entry.label));
+    expect(localLabels).not.toContain("重新加载…");
+  });
 });

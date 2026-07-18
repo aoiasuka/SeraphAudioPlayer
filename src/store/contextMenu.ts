@@ -48,6 +48,8 @@ interface ContextMenuState {
   createPlaylistTrackIds: string[] | null;
   /** 全局删除曲库记录确认弹窗锁定的曲目 id */
   confirmDeleteTrackId: string | null;
+  /** B 站流媒体「重新加载」弹窗锁定的曲目 id */
+  reloadStreamingTrackId: string | null;
   openContextMenu: (
     position: { x: number; y: number },
     entries: ContextMenuEntry[]
@@ -59,6 +61,8 @@ interface ContextMenuState {
   closeCreatePlaylistWith: () => void;
   requestDeleteTrack: (trackId: string) => void;
   closeDeleteTrack: () => void;
+  openReloadStreaming: (trackId: string) => void;
+  closeReloadStreaming: () => void;
 }
 
 export const useContextMenuStore = create<ContextMenuState>()((set) => ({
@@ -69,6 +73,7 @@ export const useContextMenuStore = create<ContextMenuState>()((set) => ({
   infoTrackId: null,
   createPlaylistTrackIds: null,
   confirmDeleteTrackId: null,
+  reloadStreamingTrackId: null,
   openContextMenu: ({ x, y }, entries) => set({ open: true, x, y, entries }),
   closeContextMenu: () => set({ open: false, entries: [] }),
   openTrackInfo: (trackId) =>
@@ -80,6 +85,9 @@ export const useContextMenuStore = create<ContextMenuState>()((set) => ({
   requestDeleteTrack: (trackId) =>
     set({ confirmDeleteTrackId: trackId, open: false, entries: [] }),
   closeDeleteTrack: () => set({ confirmDeleteTrackId: null }),
+  openReloadStreaming: (trackId) =>
+    set({ reloadStreamingTrackId: trackId, open: false, entries: [] }),
+  closeReloadStreaming: () => set({ reloadStreamingTrackId: null }),
 }));
 
 /**

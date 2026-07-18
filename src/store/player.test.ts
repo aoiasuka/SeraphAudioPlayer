@@ -358,3 +358,147 @@ describe("player store playback epoch (发现2)", () => {
     expect(state.notification?.text ?? "").not.toContain("正在播放");
   });
 });
+
+describe("player store double-click force play (v0.4.4)", () => {
+  beforeEach(() => {
+    invokeMock.mockImplementation(async () => undefined);
+    usePlayerStore.setState({
+      playlist: [
+        testTrack({ id: "track-a", title: "Track A", path: "C:/Music/a.flac" }),
+        testTrack({ id: "track-b", title: "Track B", path: "C:/Music/b.flac" }),
+      ],
+      currentTrackIndex: 0,
+      recentTrackIds: [],
+      isPlaying: false,
+      currentTime: 0,
+      notification: null,
+    });
+  });
+
+  it("starts playback from a stopped state when forcePlay is set (stub mode)", async () => {
+    // 双击语义：即使当前处于停止态，也从头强制起播选中的曲目
+    usePlayerStore.getState().loadTrack(1, { forcePlay: true });
+    await flushAsyncQueue();
+
+    const state = usePlayerStore.getState();
+    expect(state.currentTrack()?.id).toBe("track-b");
+    expect(state.isPlaying).toBe(true);
+  });
+
+  it("only selects the track without playing when forcePlay is absent", async () => {
+    // 单击语义：停止态下只切换选中曲目，不自动起播
+    usePlayerStore.getState().loadTrack(1);
+    await flushAsyncQueue();
+
+    const state = usePlayerStore.getState();
+    expect(state.currentTrack()?.id).toBe("track-b");
+    expect(state.isPlaying).toBe(false);
+  });
+});
+
+describe("player store reload streaming track (v0.4.4)", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    usePlayerStore.setState({
+      playlist: [
+        testTrack({
+          id: "bilibili-BV1xx411c7mD",
+          title: "老流媒体",
+          artist: "UP",
+          album: "Bilibili",
+          format: "M4A",
+          path: "C:/cache/BV1xx411c7mD-1.m4a",
+          sourceUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+          sourceId: "BV1xx411c7mD",
+        }),
+      ],
+      liked: { "bilibili-BV1xx411c7mD": true },
+      userPlaylists: [
+        {
+          id: "pl-1",
+          name: "收藏夹",
+          trackIds: ["bilibili-BV1xx411c7mD"],
+          createdAt: 1,
+        },
+      ],
+      notification: null,
+    });
+  });
+
+  it("passes the user-picked options through and replaces the record in place", async () => {
+    const reloaded = testTrack({
+      id: "bilibili-BV1xx411c7mD",
+      title: "老流媒体（无损）",
+      artist: "UP",
+      album: "Bilibili",
+      format: "FLAC",
+      path: "C:/cache/BV1xx411c7mD-1.flac",
+      sourceUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      sourceId: "BV1xx411c7mD",
+    });
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "import_bilibili_audio_with_options" ? reloaded : undefined
+    );
+
+    const ok = await usePlayerStore.getState().reloadStreamingTrack(
+      "bilibili-BV1xx411c7mD",
+      { preferFlac: true, preferDolbyAtmos: false, remuxWithFfmpeg: true }
+    );
+
+    expect(ok).toBe(true);
+    // 用当次勾选的选项调用后端（此处：FLAC + 混流，杜比关）
+    const call = invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "import_bilibili_audio_with_options"
+    );
+    expect(call?.[1]).toMatchObject({
+      input: "https://www.bilibili.com/video/BV1xx411c7mD",
+      options: { preferFlac: true, preferDolbyAtmos: false, remuxWithFfmpeg: true },
+    });
+
+    const state = usePlayerStore.getState();
+    // 原位替换：id 不变，收藏与歌单归属保留，内容已更新为无损
+    expect(state.playlist).toHaveLength(1);
+    expect(state.playlist[0].id).toBe("bilibili-BV1xx411c7mD");
+    expect(state.playlist[0].format).toBe("FLAC");
+    expect(state.liked["bilibili-BV1xx411c7mD"]).toBe(true);
+    expect(state.userPlaylists[0].trackIds).toEqual(["bilibili-BV1xx411c7mD"]);
+  });
+
+  it("defaults every quality option to false when none are passed", async () => {
+    const reloaded = testTrack({
+      id: "bilibili-BV1xx411c7mD",
+      title: "老流媒体",
+      album: "Bilibili",
+      path: "C:/cache/BV1xx411c7mD-1.m4a",
+      sourceId: "BV1xx411c7mD",
+      sourceUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+    });
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "import_bilibili_audio_with_options" ? reloaded : undefined
+    );
+
+    await usePlayerStore.getState().reloadStreamingTrack("bilibili-BV1xx411c7mD");
+
+    const call = invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "import_bilibili_audio_with_options"
+    );
+    expect(call?.[1]).toMatchObject({
+      options: { preferFlac: false, preferDolbyAtmos: false, remuxWithFfmpeg: false },
+    });
+  });
+
+  it("reports failure without touching the playlist when reimport throws", async () => {
+    invokeMock.mockImplementation(async () => {
+      throw new Error("403 forbidden");
+    });
+
+    const ok = await usePlayerStore.getState().reloadStreamingTrack(
+      "bilibili-BV1xx411c7mD"
+    );
+
+    expect(ok).toBe(false);
+    const state = usePlayerStore.getState();
+    expect(state.playlist[0].format).toBe("M4A");
+    expect(state.notification?.text ?? "").toContain("B 站");
+  });
+});
