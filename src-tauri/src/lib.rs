@@ -67,6 +67,8 @@ pub fn run() {
             ipc::dsp::import_eq_preset,
             ipc::dsp::export_eq_preset,
             ipc::visualizer::get_spectrum_frame,
+            ipc::visualizer::get_analysis_frame,
+            ipc::visualizer::reset_analysis_meters,
         ])
         .setup(|app| {
             if let Ok(app_dir) = app.path().app_data_dir() {

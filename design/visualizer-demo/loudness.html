@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seraph — 声学分析档案 · 响度</title>
+    <link rel="stylesheet" href="assets/seraph-viz.css" />
+  </head>
+  <body>
+    <div class="viz-shell">
+      <header class="viz-masthead">
+        <div>
+          <div class="viz-masthead__eyebrow">SERAPH AUDIO PLAYER — FILE NO. SA-VIZ-2026 / 01</div>
+          <h1 class="viz-masthead__title">响度计 <small>LOUDNESS · EBU R128</small></h1>
+        </div>
+        <div class="viz-masthead__side">
+          <span class="viz-badge" data-reduced hidden>系统已开启「减少动态」· 动画默认暂停</span>
+          <button type="button" class="viz-btn" id="run-toggle" aria-pressed="true">运行中 RUN</button>
+          <nav class="viz-nav" aria-label="演示页导航">
+            <a href="index.html">总览 SUITE</a>
+            <a href="loudness.html" aria-current="page">响度</a>
+            <a href="levels.html">电平</a>
+            <a href="soundfield.html">声场</a>
+            <a href="spectrum.html">频谱</a>
+            <a href="spectrogram.html">瀑布</a>
+          </nav>
+        </div>
+      </header>
+
+      <main class="viz-single">
+        <section class="viz-panel viz-panel--hero viz-panel--auto" data-panel="loudness" data-detail aria-labelledby="t-loud">
+          <header class="viz-panel__head">
+            <span class="viz-panel__no">NO.01</span>
+            <h2 class="viz-panel__title" id="t-loud">LOUDNESS · 响度</h2>
+            <span class="viz-panel__meta" data-meta></span>
+            <a class="viz-panel__expand" href="index.html" aria-label="返回总览" title="返回总览">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            </a>
+          </header>
+          <div class="viz-panel__body"></div>
+        </section>
+
+        <section class="viz-notes" aria-labelledby="notes-title">
+          <h2 id="notes-title">DESIGN NOTES · 设计说明</h2>
+          <div class="viz-notes__cols">
+            <ul>
+              <li><b>三窗读数</b>：瞬时 M（400ms）/ 短期 S（3s）/ 整体 I，遵循 EBU R128 语义；整体响度是「盖章定档」的最终值，故用<b>印章红大字</b>居中，M/S 为墨色辅读。</li>
+              <li><b>目标制</b>：下拉切换 -14（流媒体）/ -16（播客）/ -23（EBU 广播）/ -9（母带参考）；底部偏差标尺以 <b>±9 LU</b> 为量程，鎏金竖线为目标位。</li>
+              <li><b>偏差条色彩语义</b>：±1 LU 内 = 档案棕（合格）；偏响超 1 LU = 印章红（需压）；偏轻超 1 LU = 淡墨（可提）。细条为 M 实时偏差。</li>
+              <li><b>TRUE PEAK MAX</b> 超过 -1 dBTP 时数字变红并盖「OVER」印章，色彩之外有文字标记，不依赖颜色单独传达。</li>
+            </ul>
+            <ul>
+              <li><b>字体</b>：所有数字用 Courier 打字机等宽体（天然表格数字），刷新时不抖动布局。</li>
+              <li><b>实装建议</b>：Rust 侧按 ITU-R BS.1770 做 K 加权 + 门限积分，前端仅接收 {m, s, i, lra, truePeak} 五个标量，10Hz 推送即可，无需每帧。</li>
+              <li><b>面板头右侧</b>为实时 Δ TARGET 读数，与总览页共用同一挂载器，保证两处视觉一致。</li>
+              <li>动画可随时 <b>HOLD</b> 暂停；系统「减少动态」开启时默认暂停，仅显示静态帧。</li>
+            </ul>
+          </div>
+        </section>
+      </main>
+
+      <footer class="viz-footer">
+        <span>※ 设计演示 · 内置模拟信号驱动，非真实音频</span>
+        <span>SERAPH ARCHIVE · 2026-07</span>
+      </footer>
+    </div>
+
+    <script src="assets/engine.js"></script>
+    <script src="assets/panels.js"></script>
+    <script>
+      const engine = SeraphViz.createEngine();
+      SeraphPanels.mountAll(engine);
+      SeraphViz.bindRunToggle(
+        engine,
+        document.getElementById("run-toggle"),
+        document.querySelector("[data-reduced]")
+      );
+    </script>
+  </body>
+</html>

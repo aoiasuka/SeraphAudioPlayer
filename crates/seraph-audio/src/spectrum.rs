@@ -17,6 +17,13 @@ pub struct SpectrumTap {
     inner: Mutex<TapInner>,
 }
 
+/// drain 时随样本一起带出的流元数据（声学分析需要采样率设计 K 加权滤波器）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TapMeta {
+    pub channels: usize,
+    pub sample_rate: u32,
+}
+
 struct TapInner {
     ring: Vec<f32>,
     /// 单调递增的逻辑写位置（对容量取模得物理下标）
@@ -24,6 +31,7 @@ struct TapInner {
     /// 读侧已消费到的逻辑位置
     read_pos: u64,
     channels: usize,
+    sample_rate: u32,
 }
 
 impl SpectrumTap {
@@ -34,6 +42,7 @@ impl SpectrumTap {
                 write_pos: 0,
                 read_pos: 0,
                 channels: 2,
+                sample_rate: 48_000,
             }),
         })
     }
@@ -43,9 +52,9 @@ impl SpectrumTap {
         self.inner.try_lock().map(|guard| TapWriter { guard })
     }
 
-    /// 读侧：取出自上次调用以来的新样本（追加到 `out`），返回声道数。
+    /// 读侧：取出自上次调用以来的新样本（追加到 `out`），返回流元数据。
     /// 溢出（读得太慢）时自动跳到最近 TAP_CAPACITY 个样本。
-    pub fn drain(&self, out: &mut Vec<f32>) -> usize {
+    pub fn drain(&self, out: &mut Vec<f32>) -> TapMeta {
         let mut inner = self.inner.lock();
         let capacity = inner.ring.len() as u64;
         if inner.write_pos - inner.read_pos > capacity {
@@ -57,7 +66,10 @@ impl SpectrumTap {
             out.push(inner.ring[(pos % capacity) as usize]);
         }
         inner.read_pos = write;
-        inner.channels
+        TapMeta {
+            channels: inner.channels,
+            sample_rate: inner.sample_rate,
+        }
     }
 }
 
@@ -69,6 +81,11 @@ impl TapWriter<'_> {
     #[inline]
     pub(crate) fn set_channels(&mut self, channels: usize) {
         self.guard.channels = channels.max(1);
+    }
+
+    #[inline]
+    pub(crate) fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.guard.sample_rate = sample_rate.max(1);
     }
 
     #[inline]
@@ -90,14 +107,16 @@ mod tests {
         {
             let mut writer = tap.writer().expect("uncontended lock");
             writer.set_channels(2);
+            writer.set_sample_rate(44_100);
             for i in 0..8 {
                 writer.push(i as f32);
             }
         }
 
         let mut out = Vec::new();
-        let channels = tap.drain(&mut out);
-        assert_eq!(channels, 2);
+        let meta = tap.drain(&mut out);
+        assert_eq!(meta.channels, 2);
+        assert_eq!(meta.sample_rate, 44_100);
         assert_eq!(out, (0..8).map(|i| i as f32).collect::<Vec<_>>());
 
         // 再次 drain 没有新数据

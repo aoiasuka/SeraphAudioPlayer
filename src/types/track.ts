@@ -61,4 +61,5 @@ export type LibraryView =
   | "playlists"
   | "artists"
   | "albums"
-  | "eq";
+  | "eq"
+  | "analysis";

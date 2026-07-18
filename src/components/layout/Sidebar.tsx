@@ -1,4 +1,5 @@
 import {
+  Activity,
   Disc3,
   Heart,
   History,
@@ -47,6 +48,7 @@ const NAV_GROUPS: NavGroup[] = [
     tab: "DRAWER C — 系统",
     items: [
       { key: "eq", label: "EQ 均衡器", icon: SlidersHorizontal },
+      { key: "analysis", label: "声学分析", icon: Activity },
       { key: "settings", label: "设置", icon: Sliders },
     ],
   },

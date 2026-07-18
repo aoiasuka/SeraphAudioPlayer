@@ -5,6 +5,8 @@
 //! - 前端用 `requestAnimationFrame` 主动拉，避免高频 IPC
 //! - 不阻塞音频回调 / 不阻塞 Tauri IPC
 
+pub mod analysis;
 pub mod fft;
 
+pub use analysis::{AnalysisEngine, AnalysisSnapshot};
 pub use fft::{SimpleVisualizer, SpectrumFrame, Visualizer, VisualizerError};

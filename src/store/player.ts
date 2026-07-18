@@ -33,6 +33,7 @@ const validViews = new Set<LibraryView>([
   "artists",
   "albums",
   "eq",
+  "analysis",
 ]);
 
 function asRecord(value: unknown): Record<string, unknown> {

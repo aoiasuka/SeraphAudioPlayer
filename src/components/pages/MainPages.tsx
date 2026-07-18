@@ -1,6 +1,7 @@
 import { usePlayerStore } from "@/store/player";
 import type { LibraryView } from "@/types/track";
 import { AlbumsPage } from "./main-pages/AlbumsPage";
+import { AnalysisPage } from "./main-pages/AnalysisPage";
 import { ArtistsPage } from "./main-pages/ArtistsPage";
 import { EqPage } from "./main-pages/EqPage";
 import { LocalPage } from "./main-pages/LocalPage";
@@ -55,6 +56,11 @@ const copy: Record<LibraryView, PageCopy> = {
     title: "EQ 均衡器",
     kicker: "Equalizer",
     description: "参数均衡 + crossfeed；支持 AutoEq / EqualizerAPO 预设导入。",
+  },
+  analysis: {
+    title: "声学分析",
+    kicker: "Analysis Suite",
+    description: "响度 EBU R128 / 电平 / 声场 / 频谱 / 瀑布五仪表，实时分析当前播放。",
   },
 };
 
@@ -137,6 +143,7 @@ function PageBody({ view }: { view: LibraryView }) {
   if (view === "artists") return <ArtistsPage />;
   if (view === "albums") return <AlbumsPage />;
   if (view === "eq") return <EqPage />;
+  if (view === "analysis") return <AnalysisPage />;
   return <LocalPage />;
 }
 

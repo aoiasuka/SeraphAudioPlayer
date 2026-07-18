@@ -1889,6 +1889,7 @@ fn render_output<T>(
     let mut spectrum_writer = shared.spectrum.writer();
     if let Some(writer) = spectrum_writer.as_mut() {
         writer.set_channels(channels);
+        writer.set_sample_rate(shared.output_rate);
     }
 
     let current_generation = shared.buffer_generation();

@@ -14,5 +14,5 @@ pub mod wasapi;
 pub use backend::{AudioBackend, BackendError};
 pub use device::{list_output_devices, AudioDevice, DeviceCapabilities, ShareMode};
 pub use engine::{PlaybackController, PlaybackEngine};
-pub use spectrum::SpectrumTap;
+pub use spectrum::{SpectrumTap, TapMeta};
 pub use wasapi::WasapiExclusive;

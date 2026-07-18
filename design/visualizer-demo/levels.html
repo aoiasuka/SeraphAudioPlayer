@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seraph — 声学分析档案 · 电平表</title>
+    <link rel="stylesheet" href="assets/seraph-viz.css" />
+  </head>
+  <body>
+    <div class="viz-shell">
+      <header class="viz-masthead">
+        <div>
+          <div class="viz-masthead__eyebrow">SERAPH AUDIO PLAYER — FILE NO. SA-VIZ-2026 / 02</div>
+          <h1 class="viz-masthead__title">电平表 <small>LEVELS · PEAK + RMS</small></h1>
+        </div>
+        <div class="viz-masthead__side">
+          <span class="viz-badge" data-reduced hidden>系统已开启「减少动态」· 动画默认暂停</span>
+          <button type="button" class="viz-btn" id="run-toggle" aria-pressed="true">运行中 RUN</button>
+          <nav class="viz-nav" aria-label="演示页导航">
+            <a href="index.html">总览 SUITE</a>
+            <a href="loudness.html">响度</a>
+            <a href="levels.html" aria-current="page">电平</a>
+            <a href="soundfield.html">声场</a>
+            <a href="spectrum.html">频谱</a>
+            <a href="spectrogram.html">瀑布</a>
+          </nav>
+        </div>
+      </header>
+
+      <main class="viz-single">
+        <section class="viz-panel viz-panel--hero" data-panel="levels" data-detail aria-labelledby="t-lvl">
+          <header class="viz-panel__head">
+            <span class="viz-panel__no">NO.02</span>
+            <h2 class="viz-panel__title" id="t-lvl">LEVELS · 电平表</h2>
+            <span class="viz-panel__meta" data-meta></span>
+            <a class="viz-panel__expand" href="index.html" aria-label="返回总览" title="返回总览">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            </a>
+          </header>
+          <div class="viz-panel__body"></div>
+        </section>
+
+        <section class="viz-notes" aria-labelledby="notes-title">
+          <h2 id="notes-title">DESIGN NOTES · 设计说明</h2>
+          <div class="viz-notes__cols">
+            <ul>
+              <li><b>双层条</b>：实墨填充 = RMS（听感能量），浅棕填充 = 瞬时峰值，两层同槽叠放；专业表习惯 + 纸面「深浅墨」的档案质感。</li>
+              <li><b>峰值保持线</b>：横杠保持 1.4s 后以 14 dB/s 回落；进入红区（&gt; -6 dBFS）时保持线由档案棕转<b>印章红</b>。</li>
+              <li><b>红区</b>（0 ~ -6 dBFS）用印章红斜阴影线铺底——不靠纯色块，色弱用户也能靠纹理识别危险区。</li>
+              <li><b>刻度</b>：0 / -6 / -12 / -24 / -40 / -60 主刻度带数字，-3 / -9 / -18 / -30 / -50 为细分线；dB 线性布尺。</li>
+            </ul>
+            <ul>
+              <li><b>CLIP 印章</b>：任一声道峰值触及 -1.2 dBFS 即盖章，保持 3s 自动解除；数字读数同步变红（双通道语义）。</li>
+              <li><b>数字读数</b>置于条形之上：PEAK 显示保持值、RMS 显示积分值，Courier 等宽避免跳动。</li>
+              <li><b>实装建议</b>：复用 seraph-audio 输出回调里的样本块，RMS 用 300ms 滑窗，峰值直接取块内最大绝对值；每帧只需 4 个标量。</li>
+              <li>条宽自适应面板宽度（22–52px 之间），窄窗不挤压、宽窗不虚胖。</li>
+            </ul>
+          </div>
+        </section>
+      </main>
+
+      <footer class="viz-footer">
+        <span>※ 设计演示 · 内置模拟信号驱动，非真实音频</span>
+        <span>SERAPH ARCHIVE · 2026-07</span>
+      </footer>
+    </div>
+
+    <script src="assets/engine.js"></script>
+    <script src="assets/panels.js"></script>
+    <script>
+      const engine = SeraphViz.createEngine();
+      SeraphPanels.mountAll(engine);
+      SeraphViz.bindRunToggle(
+        engine,
+        document.getElementById("run-toggle"),
+        document.querySelector("[data-reduced]")
+      );
+    </script>
+  </body>
+</html>
