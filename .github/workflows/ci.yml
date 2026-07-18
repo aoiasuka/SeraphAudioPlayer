@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    # 只对分支推送触发；tag 推送的门禁由 release.yml 自己执行，
+    # 避免每次发版多出一条检出 tag 提交的重复 CI（易被误读为发布失败）
+    branches:
+      - "**"
   pull_request:
 
 jobs:
