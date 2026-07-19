@@ -15,6 +15,7 @@ import {
 
 const BPM = 96;
 const SCATTER_PAIRS = 150;
+const WAVE_POINTS = 1024;
 
 function mulberry32(seed: number) {
   let a = seed >>> 0;
@@ -141,6 +142,29 @@ export function createAnalysisSimulator(seed = 20260718): AnalysisSimulator {
         slr += left * right;
       }
 
+      // 示波器波形：低音基波 + 泛音 + kick 冲击 + 噪底，L/R 相位/幅度略异
+      const waveform: number[] = new Array(WAVE_POINTS * 2);
+      const waveAmp = clamp(0.28 + 0.5 * kick + 0.2 * snare, 0.05, 0.95);
+      const waveWindowSec = (WAVE_POINTS * 2) / 48000;
+      for (let k3 = 0; k3 < WAVE_POINTS; k3 += 1) {
+        const tk = t - waveWindowSec + (k3 / WAVE_POINTS) * waveWindowSec;
+        const phase = TAU * root * tk;
+        const body =
+          0.62 * Math.sin(phase) +
+          0.22 * Math.sin(2 * phase + 0.6) +
+          0.12 * Math.sin(3.02 * phase + 1.9) +
+          0.1 * Math.sin(TAU * melF * tk) * melAmp;
+        const noise = (rng() * 2 - 1) * 0.05;
+        const left = clamp(waveAmp * (body + noise) * (1 + 0.12 * pan), -1, 1);
+        const right = clamp(
+          waveAmp * (0.94 * body + noise) * (1 - 0.12 * pan),
+          -1,
+          1
+        );
+        waveform[k3 * 2] = Math.round(left * 32767);
+        waveform[k3 * 2 + 1] = Math.round(right * 32767);
+      }
+
       return {
         spectrum,
         peakLeft: db2lin(peakDbL),
@@ -155,6 +179,7 @@ export function createAnalysisSimulator(seed = 20260718): AnalysisSimulator {
         truePeakMaxDb: tpMax,
         correlation: slr / Math.sqrt(sll * srr + 1e-9),
         scatter,
+        waveform,
         sampleRate: 48000,
       };
     },

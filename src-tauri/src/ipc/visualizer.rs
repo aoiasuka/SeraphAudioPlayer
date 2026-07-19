@@ -49,6 +49,8 @@ pub struct AnalysisFrameDto {
     pub correlation: f32,
     /// 交错 L,R 抽取样本对（声场散点）
     pub scatter: Vec<f32>,
+    /// 交错 L,R 的 i16 量化波形（时间正序），示波器用
+    pub waveform: Vec<i16>,
     pub sample_rate: u32,
 }
 
@@ -147,6 +149,7 @@ pub fn get_analysis_frame(state: State<'_, AppState>) -> IpcResult<Option<Analys
         true_peak_max_db: snapshot.true_peak_max_db,
         correlation: snapshot.correlation,
         scatter: snapshot.scatter,
+        waveform: snapshot.waveform,
         sample_rate: hub.sample_rate,
     }))
 }

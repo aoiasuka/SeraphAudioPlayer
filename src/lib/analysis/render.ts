@@ -94,12 +94,21 @@ export const formatFreq = (freq: number) =>
 
 /** 画布 DPR 适配；jsdom（测试）无 2D 上下文时返回 null 跳过绘制 */
 export function prepCanvas(
-  canvas: HTMLCanvasElement
+  canvas: HTMLCanvasElement,
+  cachedSize?: { w: number; h: number }
 ): { ctx: CanvasRenderingContext2D; w: number; h: number } | null {
-  const parent = canvas.parentElement;
-  if (!parent) return null;
-  const w = parent.clientWidth;
-  const h = parent.clientHeight;
+  // 尺寸优先取 ResizeObserver 缓存，避免渲染循环每帧读 clientWidth 强制 layout
+  let w: number;
+  let h: number;
+  if (cachedSize) {
+    w = cachedSize.w;
+    h = cachedSize.h;
+  } else {
+    const parent = canvas.parentElement;
+    if (!parent) return null;
+    w = parent.clientWidth;
+    h = parent.clientHeight;
+  }
   if (w < 40 || h < 30) return null;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
@@ -112,6 +121,43 @@ export function prepCanvas(
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, w, h };
+}
+
+/**
+ * Catmull-Rom 样条路径（转三次贝塞尔）：让频谱 / 山脊迹线摆脱折线感。
+ * 假定 ctx 已 beginPath；`connect` 为 true 时用 lineTo 接入首点（供填充路径
+ * 与已有子路径相连），否则 moveTo 起笔。陡变处的轻微过冲由调用方 clip 兜住。
+ */
+export function traceSmoothPath(
+  ctx: CanvasRenderingContext2D,
+  xAt: (index: number) => number,
+  yAt: (index: number) => number,
+  count: number,
+  connect = false
+) {
+  if (count < 2) return;
+  if (connect) ctx.lineTo(xAt(0), yAt(0));
+  else ctx.moveTo(xAt(0), yAt(0));
+  if (count === 2) {
+    ctx.lineTo(xAt(1), yAt(1));
+    return;
+  }
+  for (let i = 0; i < count - 1; i += 1) {
+    const prev = Math.max(0, i - 1);
+    const next2 = Math.min(count - 1, i + 2);
+    const x1 = xAt(i);
+    const y1 = yAt(i);
+    const x2 = xAt(i + 1);
+    const y2 = yAt(i + 1);
+    ctx.bezierCurveTo(
+      x1 + (x2 - xAt(prev)) / 6,
+      y1 + (y2 - yAt(prev)) / 6,
+      x2 - (xAt(next2) - x1) / 6,
+      y2 - (yAt(next2) - y1) / 6,
+      x2,
+      y2
+    );
+  }
 }
 
 // ============================================================
@@ -181,12 +227,159 @@ export function drawLoudnessDeviationBar(
 }
 
 // ============================================================
-// No.02 电平表
+// No.02 电平表（分行条表 / 模拟 VU 表）
 // ============================================================
 const LEVEL_SCALE = [0, -3, -6, -9, -12, -18, -24, -30, -40, -50, -60];
 const LEVEL_LABELED = new Set([0, -6, -12, -24, -40, -60]);
 
+export interface LevelsMeterOptions {
+  showPeak: boolean;
+  showRms: boolean;
+}
+
+/** PEAK 与 RMS 分行的水平条表：每声道最多两行，右端 0dBFS、红区 0～-6。 */
 export function drawLevelsMeter(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  view: AnalysisView,
+  colors: ArchiveColors,
+  options: LevelsMeterOptions
+) {
+  ctx.clearRect(0, 0, w, h);
+
+  interface Row {
+    label: string;
+    kind: "peak" | "rms";
+    ch: typeof view.levels.l;
+    groupEnd: boolean;
+  }
+  const rows: Row[] = [];
+  for (const [tag, ch] of [
+    ["L", view.levels.l],
+    ["R", view.levels.r],
+  ] as const) {
+    if (options.showPeak)
+      rows.push({ label: `${tag}·PEAK`, kind: "peak", ch, groupEnd: false });
+    if (options.showRms)
+      rows.push({ label: `${tag}·RMS`, kind: "rms", ch, groupEnd: false });
+    if (rows.length > 0) rows[rows.length - 1].groupEnd = true;
+  }
+
+  const labelW = 52;
+  const x0 = labelW + 6;
+  const x1 = w - 8;
+  const top = 6;
+  const axisH = 16;
+  const bottom = h - axisH;
+  if (x1 <= x0 || bottom <= top) return;
+  const dbX = (db: number) => lerp(x1, x0, clamp(-db, 0, 60) / 60);
+
+  if (rows.length === 0) {
+    ctx.font = TW10;
+    ctx.textAlign = "center";
+    ctx.fillStyle = colors.ink3;
+    ctx.fillText("PEAK / RMS 行均已隐藏", w / 2, h / 2);
+    return;
+  }
+
+  // 底部 dB 刻度 + 贯穿网格
+  ctx.font = TW9;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  for (const db of LEVEL_SCALE) {
+    const x = dbX(db);
+    ctx.strokeStyle = colors.line;
+    ctx.lineWidth = LEVEL_LABELED.has(db) ? 1 : 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom + 3);
+    ctx.stroke();
+    if (LEVEL_LABELED.has(db)) {
+      ctx.fillStyle = colors.ink2;
+      ctx.fillText(String(db), x, h - 3);
+    }
+  }
+
+  // 行布局：声道分组之间留大间隔
+  const groupGap = 10;
+  const rowGap = 4;
+  const gaps = rows.reduce(
+    (sum, row, index) =>
+      sum + (index === rows.length - 1 ? 0 : row.groupEnd ? groupGap : rowGap),
+    0
+  );
+  const rowH = Math.max(8, (bottom - top - gaps) / rows.length);
+  let y = top;
+
+  for (const row of rows) {
+    const { ch, kind } = row;
+    // 槽底 + 红区（0 ~ -6 dBFS）阴影线
+    ctx.fillStyle = colors.paper2;
+    ctx.fillRect(x0, y, x1 - x0, rowH);
+    const redX = dbX(-6);
+    ctx.fillStyle = colors.stampSoft;
+    ctx.fillRect(redX, y, x1 - redX, rowH);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(redX, y, x1 - redX, rowH);
+    ctx.clip();
+    ctx.strokeStyle = hexAlpha(colors.stamp, 0.35);
+    ctx.lineWidth = 1;
+    for (let sx = redX - rowH; sx < x1; sx += 5) {
+      ctx.beginPath();
+      ctx.moveTo(sx, y + rowH + 2);
+      ctx.lineTo(sx + rowH + 4, y - 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    if (kind === "peak") {
+      // 峰值条（浅棕）+ 峰值保持竖线
+      ctx.fillStyle = hexAlpha(colors.brown, 0.4);
+      ctx.fillRect(x0, y, dbX(ch.peakDb) - x0, rowH);
+      ctx.strokeStyle = ch.holdDb > -6 ? colors.stamp : colors.brown;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(dbX(ch.holdDb), y - 2);
+      ctx.lineTo(dbX(ch.holdDb), y + rowH + 2);
+      ctx.stroke();
+    } else {
+      // RMS 条（实墨）
+      ctx.fillStyle = hexAlpha(colors.ink, 0.85);
+      ctx.fillRect(x0, y, dbX(ch.rmsDb) - x0, rowH);
+    }
+
+    ctx.strokeStyle = colors.ink;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y, x1 - x0, rowH);
+
+    // 行标签
+    ctx.font = TW9;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = kind === "peak" ? colors.brown : colors.ink2;
+    ctx.fillText(row.label, labelW, y + rowH / 2);
+    ctx.textBaseline = "alphabetic";
+
+    y += rowH + (row.groupEnd ? groupGap : rowGap);
+  }
+}
+
+/** VU 刻度非线性位置：-20..0 占 76% 弧长，0..+3 占 24%（模拟表盘惯例）。 */
+const vuPos = (vu: number) => {
+  const value = clamp(vu, -20, 3);
+  return value <= 0 ? (0.76 * (value + 20)) / 20 : 0.76 + (0.24 * value) / 3;
+};
+
+const VU_ARC_SPAN = (100 * Math.PI) / 180;
+const VU_TICKS = [-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3];
+const VU_LABELED = new Set([-20, -10, -7, -5, -3, 0, 3]);
+/** 0 VU 参考电平（EBU R68 语义：0 VU = -18 dBFS） */
+export const VU_REF_DBFS = -18;
+
+/** 模拟 VU 双表盘（L/R）：300ms 表针弹道在 view.vuDb，绘制只负责表盘与指针。 */
+export function drawVuMeter(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
@@ -194,81 +387,104 @@ export function drawLevelsMeter(
   colors: ArchiveColors
 ) {
   ctx.clearRect(0, 0, w, h);
-  const top = 8;
-  const bottom = h - 18;
-  const axisW = 34;
-  const dbY = (db: number) => lerp(top, bottom, clamp(-db, 0, 60) / 60);
-  const meterX0 = axisW + 6;
-  const barW = clamp((w - meterX0 - 10) / 4.6, 22, 52);
-  const gap = barW * 0.7;
-  const cx = (w + meterX0) / 2;
-  const bars = [
-    { x: cx - gap / 2 - barW, ch: view.levels.l, tag: "L" },
-    { x: cx + gap / 2, ch: view.levels.r, tag: "R" },
+  const gap = 10;
+  const dialW = (w - gap) / 2;
+  const dials = [
+    { x: 0, ch: view.levels.l, tag: "L" },
+    { x: dialW + gap, ch: view.levels.r, tag: "R" },
   ];
 
-  ctx.font = TW9;
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (const db of LEVEL_SCALE) {
-    const y = dbY(db);
-    ctx.strokeStyle = colors.line;
-    ctx.lineWidth = LEVEL_LABELED.has(db) ? 1 : 0.5;
-    ctx.beginPath();
-    ctx.moveTo(meterX0 - 3, y);
-    ctx.lineTo(w - 6, y);
-    ctx.stroke();
-    if (LEVEL_LABELED.has(db)) {
-      ctx.fillStyle = colors.ink2;
-      ctx.fillText(String(db), axisW, y);
-    }
-  }
+  for (const dial of dials) {
+    const { x, ch, tag } = dial;
+    const vu = clamp(ch.vuDb - VU_REF_DBFS, -20, 3);
+    const cx = x + dialW / 2;
+    const radius = Math.max(24, Math.min(dialW * 0.46, h * 0.82));
+    // 高面板时表盘垂直居中，扁面板时贴底
+    const pivotY = Math.min(h - 12, (h + radius) / 2 + 14);
+    const angleAt = (value: number) =>
+      -Math.PI / 2 - VU_ARC_SPAN / 2 + vuPos(value) * VU_ARC_SPAN;
 
-  for (const bar of bars) {
-    const { x, ch, tag } = bar;
-    ctx.fillStyle = colors.paper2;
-    ctx.fillRect(x, top, barW, bottom - top);
-    // 红区（0 ~ -6 dBFS）阴影线
-    const redY = dbY(-6);
-    ctx.fillStyle = colors.stampSoft;
-    ctx.fillRect(x, top, barW, redY - top);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, top, barW, redY - top);
-    ctx.clip();
-    ctx.strokeStyle = hexAlpha(colors.stamp, 0.35);
-    ctx.lineWidth = 1;
-    for (let sx = x - (bottom - top); sx < x + barW; sx += 5) {
-      ctx.beginPath();
-      ctx.moveTo(sx, redY + 2);
-      ctx.lineTo(sx + (redY - top) + 4, top - 2);
-      ctx.stroke();
-    }
-    ctx.restore();
-    // 峰值（浅棕）与 RMS（实墨）
-    ctx.fillStyle = hexAlpha(colors.brown, 0.34);
-    ctx.fillRect(x, dbY(ch.peakDb), barW, bottom - dbY(ch.peakDb));
-    ctx.fillStyle = hexAlpha(colors.ink, 0.85);
-    ctx.fillRect(x, dbY(ch.rmsDb), barW, bottom - dbY(ch.rmsDb));
-    // 峰值保持线
-    ctx.strokeStyle = ch.holdDb > -6 ? colors.stamp : colors.brown;
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(x - 2, dbY(ch.holdDb));
-    ctx.lineTo(x + barW + 2, dbY(ch.holdDb));
-    ctx.stroke();
-    // 外框 + 声道标签
+    // 表盘卡片
+    ctx.fillStyle = colors.card;
+    ctx.fillRect(x, 0, dialW, h);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(x, top, barW, bottom - top);
-    ctx.font = TW10;
-    ctx.textAlign = "center";
-    ctx.fillStyle = colors.ink2;
-    ctx.fillText(tag, x + barW / 2, h - 6);
+    ctx.strokeRect(x, 0, dialW, h);
+
+    // 主弧 + 红区弧（0 VU 以上）
+    const arcAt = (value: number) => angleAt(value);
+    ctx.strokeStyle = colors.ink;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(cx, pivotY, radius, arcAt(-20), arcAt(0));
+    ctx.stroke();
+    ctx.strokeStyle = colors.stamp;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.arc(cx, pivotY, radius, arcAt(0), arcAt(3));
+    ctx.stroke();
+
+    // 刻度线与标签
     ctx.font = TW9;
-    ctx.textAlign = "right";
+    ctx.textAlign = "center";
+    for (const tick of VU_TICKS) {
+      const angle = angleAt(tick);
+      const major = VU_LABELED.has(tick);
+      const inner = radius - (major ? 7 : 4);
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      ctx.strokeStyle = tick >= 0 ? colors.stamp : colors.ink;
+      ctx.lineWidth = major ? 1.4 : 0.8;
+      ctx.beginPath();
+      ctx.moveTo(cx + cos * inner, pivotY + sin * inner);
+      ctx.lineTo(cx + cos * radius, pivotY + sin * radius);
+      ctx.stroke();
+      if (major) {
+        ctx.fillStyle = tick >= 0 ? colors.stamp : colors.ink2;
+        ctx.fillText(
+          tick > 0 ? `+${tick}` : String(tick),
+          cx + cos * (radius - 15),
+          pivotY + sin * (radius - 15) + 3
+        );
+      }
+    }
+
+    // 指针 + 枢轴铆钉
+    const needleAngle = angleAt(vu);
+    ctx.strokeStyle = colors.ink;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, pivotY);
+    ctx.lineTo(
+      cx + Math.cos(needleAngle) * radius * 0.94,
+      pivotY + Math.sin(needleAngle) * radius * 0.94
+    );
+    ctx.stroke();
+    ctx.fillStyle = colors.ink;
+    ctx.beginPath();
+    ctx.arc(cx, pivotY, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 通道标 / VU 字样 / OVER 灯
+    ctx.font = TW10;
+    ctx.fillStyle = colors.ink2;
+    ctx.textAlign = "left";
+    ctx.fillText(tag, x + 7, 14);
+    ctx.textAlign = "center";
+    ctx.fillStyle = colors.ink3;
+    ctx.fillText("VU", cx, pivotY - radius * 0.32);
+    const over = vu > 0;
+    ctx.beginPath();
+    ctx.arc(x + dialW - 12, 11, 4, 0, Math.PI * 2);
+    if (over) {
+      ctx.fillStyle = colors.stamp;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = colors.line;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
   }
-  ctx.textBaseline = "alphabetic";
 }
 
 // ============================================================
@@ -284,10 +500,11 @@ export function drawSoundField(
   view: AnalysisView,
   colors: ArchiveColors,
   mode: SoundFieldMode,
-  trail: Float32Array[]
+  trail: Float32Array[],
+  showCorrelation = true
 ) {
   ctx.clearRect(0, 0, w, h);
-  const corrH = 34;
+  const corrH = showCorrelation ? 34 : 0;
   const mainH = h - corrH;
   if (mainH < 40) return;
 
@@ -407,6 +624,7 @@ export function drawSoundField(
   }
 
   // 相关度表
+  if (!showCorrelation) return;
   const corr = view.stereo.corr;
   const y0 = h - corrH + 8;
   const bx0 = 86;
@@ -454,13 +672,18 @@ export interface SpectrumGeometry {
   x1: number;
 }
 
+export interface SpectrumChartOptions {
+  showPeakHold: boolean;
+}
+
 export function drawSpectrumChart(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
   view: AnalysisView,
   colors: ArchiveColors,
-  cursorBin: number | null
+  cursorBin: number | null,
+  options: SpectrumChartOptions = { showPeakHold: true }
 ): SpectrumGeometry {
   ctx.clearRect(0, 0, w, h);
   const x0 = 6;
@@ -513,23 +736,27 @@ export function drawSpectrumChart(
   const count = view.spectrumDb.length;
   const px = (index: number) => freqToX(binLogF(index, count), x0, x1);
 
-  // 峰值保持（墨灰虚线）
-  ctx.strokeStyle = hexAlpha(colors.ink2, 0.75);
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
+  // 迹线区 clip：样条平滑在陡变处的轻微过冲不越出坐标区
+  ctx.save();
   ctx.beginPath();
-  for (let i = 0; i < count; i += 1) {
-    const y = dbY(view.peakHoldDb[i]);
-    if (i === 0) ctx.moveTo(px(i), y);
-    else ctx.lineTo(px(i), y);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.rect(x0, y0 - 1, x1 - x0, y1 - y0 + 2);
+  ctx.clip();
 
-  // 主频谱迹线 + 淡填充
+  // 峰值保持（墨灰虚线，样条平滑）
+  if (options.showPeakHold) {
+    ctx.strokeStyle = hexAlpha(colors.ink2, 0.75);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    traceSmoothPath(ctx, px, (i) => dbY(view.peakHoldDb[i]), count);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // 主频谱迹线 + 淡填充（样条平滑）
   ctx.beginPath();
   ctx.moveTo(x0, y1);
-  for (let i = 0; i < count; i += 1) ctx.lineTo(px(i), dbY(view.spectrumDb[i]));
+  traceSmoothPath(ctx, px, (i) => dbY(view.spectrumDb[i]), count, true);
   ctx.lineTo(x1, y1);
   ctx.closePath();
   ctx.fillStyle = hexAlpha(colors.stamp, 0.08);
@@ -537,12 +764,9 @@ export function drawSpectrumChart(
   ctx.strokeStyle = colors.stamp;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  for (let i = 0; i < count; i += 1) {
-    const y = dbY(view.spectrumDb[i]);
-    if (i === 0) ctx.moveTo(px(i), y);
-    else ctx.lineTo(px(i), y);
-  }
+  traceSmoothPath(ctx, px, (i) => dbY(view.spectrumDb[i]), count);
   ctx.stroke();
+  ctx.restore();
 
   // 游标
   if (cursorBin !== null && cursorBin >= 0 && cursorBin < count) {
@@ -616,6 +840,10 @@ const HEAT_LUT = (() => {
 const ridgeNorm = (db: number) =>
   clamp((db - SPECTRUM_DB_FLOOR + -6) / (-SPECTRUM_DB_FLOOR - 6), 0, 1);
 
+/** 山脊行绘制的复用缓冲（山脊值 / y 坐标），避免每行分配 */
+const ridgeVs = new Float32Array(256);
+const ridgeYs = new Float32Array(256);
+
 export function drawSpectrogram(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -639,13 +867,17 @@ export function drawSpectrogram(
       const xR = lerp(w * 0.84, w * 0.95, depth);
       const base = lerp(topY, botY, depth);
       const amp = lerp(0.11, 0.24, depth) * h;
-      // 遮挡填充
-      ctx.beginPath();
-      ctx.moveTo(xL, base);
       for (let i = 0; i < count; i += 1) {
         const v = Math.pow(ridgeNorm(row[i]), 1.3);
-        ctx.lineTo(lerp(xL, xR, i / (count - 1)), base - v * amp);
+        ridgeVs[i] = v;
+        ridgeYs[i] = base - v * amp;
       }
+      const rx = (i: number) => lerp(xL, xR, i / (count - 1));
+      const ry = (i: number) => ridgeYs[i];
+      // 遮挡填充（样条平滑，与墨线同轨）
+      ctx.beginPath();
+      ctx.moveTo(xL, base);
+      traceSmoothPath(ctx, rx, ry, count, true);
       ctx.lineTo(xR, base);
       ctx.closePath();
       ctx.fillStyle = colors.card;
@@ -654,32 +886,31 @@ export function drawSpectrogram(
       ctx.strokeStyle = hexAlpha(colors.ink, lerp(0.16, 0.85, depth));
       ctx.lineWidth = lerp(0.6, 1.3, depth);
       ctx.beginPath();
-      for (let i = 0; i < count; i += 1) {
-        const v = Math.pow(ridgeNorm(row[i]), 1.3);
-        const x = lerp(xL, xR, i / (count - 1));
-        const y = base - v * amp;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
+      traceSmoothPath(ctx, rx, ry, count);
       ctx.stroke();
-      // 高能量段描印章红
+      // 高能量段描印章红（按连续段样条描摹）
       ctx.strokeStyle = hexAlpha(colors.stamp, lerp(0.14, 0.8, depth));
       ctx.lineWidth = lerp(0.7, 1.5, depth);
-      let inSegment = false;
-      ctx.beginPath();
-      for (let i = 0; i < count; i += 1) {
-        const v = Math.pow(ridgeNorm(row[i]), 1.3);
-        const x = lerp(xL, xR, i / (count - 1));
-        const y = base - v * amp;
-        if (v > 0.52) {
-          if (inSegment) ctx.lineTo(x, y);
-          else ctx.moveTo(x, y);
-          inSegment = true;
-        } else {
-          inSegment = false;
+      let segStart = -1;
+      for (let i = 0; i <= count; i += 1) {
+        const hot = i < count && ridgeVs[i] > 0.52;
+        if (hot && segStart < 0) segStart = i;
+        if (!hot && segStart >= 0) {
+          const segLen = i - segStart;
+          if (segLen >= 2) {
+            const offset = segStart;
+            ctx.beginPath();
+            traceSmoothPath(
+              ctx,
+              (j) => rx(offset + j),
+              (j) => ry(offset + j),
+              segLen
+            );
+            ctx.stroke();
+          }
+          segStart = -1;
         }
       }
-      ctx.stroke();
     }
     ctx.font = TW9;
     ctx.textAlign = "center";
@@ -726,6 +957,7 @@ export function drawSpectrogram(
     }
     offCtx.putImageData(image, 0, 0);
     ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(heatCanvas, x0, y0, x1 - x0, y1 - y0);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.5;
@@ -746,5 +978,141 @@ export function drawSpectrogram(
     ctx.fillStyle = colors.ink3;
     ctx.fillText("NOW", x1 + 6, y1 - 2);
     ctx.fillText("-5.8S", x1 + 6, y0 + 9);
+  }
+}
+
+// ============================================================
+// No.06 示波器（时间域波形）
+// ============================================================
+export interface OscilloscopeOptions {
+  /** L/R 上下分离显示（false = 叠加） */
+  split: boolean;
+  /** 零交叉触发对齐：显示最新半窗并锁定上升沿，稳定周期波形 */
+  trigger: boolean;
+}
+
+export function drawOscilloscope(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  view: AnalysisView,
+  colors: ArchiveColors,
+  options: OscilloscopeOptions
+) {
+  ctx.clearRect(0, 0, w, h);
+  const x0 = 6;
+  const x1 = w - 8;
+  const yTop = 6;
+  const yBot = h - 16;
+  if (x1 <= x0 || yBot <= yTop) return;
+  const { l, r, points, windowSec } = view.wave;
+
+  const midOverlay = (yTop + yBot) / 2;
+  const midL = options.split ? yTop + (yBot - yTop) * 0.26 : midOverlay;
+  const midR = options.split ? yTop + (yBot - yTop) * 0.76 : midOverlay;
+  const amp = options.split
+    ? (yBot - yTop) * 0.22
+    : ((yBot - yTop) / 2) * 0.92;
+
+  // 中线与满幅参考
+  const drawBaseline = (mid: number) => {
+    ctx.strokeStyle = hexAlpha(colors.ink3, 0.7);
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x0, mid);
+    ctx.lineTo(x1, mid);
+    ctx.stroke();
+    ctx.strokeStyle = hexAlpha(colors.line, 0.8);
+    ctx.setLineDash([3, 4]);
+    for (const sign of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(x0, mid + sign * amp);
+      ctx.lineTo(x1, mid + sign * amp);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  };
+  drawBaseline(midL);
+  if (options.split) drawBaseline(midR);
+
+  if (points < 2) {
+    ctx.font = TW10;
+    ctx.textAlign = "center";
+    ctx.fillStyle = colors.ink3;
+    ctx.fillText("NO SIGNAL · 无信号", w / 2, midOverlay - 6);
+    return;
+  }
+
+  // 触发窗口：显示最新半窗，向前搜最近的 L 声道上升零交叉锁相
+  let start = 0;
+  let win = points;
+  if (options.trigger && points > 16) {
+    win = points >> 1;
+    start = points - win;
+    for (let i = start; i >= 1; i -= 1) {
+      if (l[i - 1] <= 0 && l[i] > 0) {
+        start = i;
+        break;
+      }
+    }
+  }
+  const dispSec = windowSec > 0 ? windowSec * (win / points) : 0;
+
+  // 时间竖网格（约 4~8 格）
+  if (dispSec > 0) {
+    const stepMs = dispSec * 1000 > 34 ? 10 : 5;
+    const totalMs = dispSec * 1000;
+    ctx.strokeStyle = hexAlpha(colors.line, 0.55);
+    ctx.lineWidth = 0.5;
+    ctx.font = TW9;
+    ctx.textAlign = "center";
+    ctx.fillStyle = colors.ink3;
+    for (let ms = stepMs; ms < totalMs; ms += stepMs) {
+      const x = lerp(x1, x0, ms / totalMs);
+      ctx.beginPath();
+      ctx.moveTo(x, yTop);
+      ctx.lineTo(x, yBot);
+      ctx.stroke();
+      ctx.fillText(`-${ms}`, x, h - 4);
+    }
+    ctx.textAlign = "right";
+    ctx.fillText("0ms", x1, h - 4);
+  }
+
+  // 迹线：L 墨、R 印章红
+  const drawTrace = (
+    data: Float32Array,
+    mid: number,
+    style: string,
+    width: number
+  ) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (let k = 0; k < win; k += 1) {
+      const x = lerp(x0, x1, k / (win - 1));
+      const y = mid - clamp(data[start + k], -1.05, 1.05) * amp;
+      if (k === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+  drawTrace(l, midL, hexAlpha(colors.ink, 0.9), 1.6);
+  drawTrace(r, midR, hexAlpha(colors.stamp, options.split ? 0.9 : 0.72), 1.3);
+
+  // 通道图例
+  ctx.font = TW9;
+  ctx.textAlign = "left";
+  if (options.split) {
+    ctx.fillStyle = colors.ink2;
+    ctx.fillText("L", x0 + 2, midL - amp - 3);
+    ctx.fillStyle = colors.stamp;
+    ctx.fillText("R", x0 + 2, midR - amp - 3);
+  } else {
+    ctx.fillStyle = colors.ink2;
+    ctx.fillText("L 墨", x0 + 2, yTop + 9);
+    ctx.fillStyle = colors.stamp;
+    ctx.fillText("R 红", x0 + 30, yTop + 9);
   }
 }

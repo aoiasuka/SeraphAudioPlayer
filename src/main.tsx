@@ -1,3 +1,5 @@
+// 必须最先执行：把上次导入的配置写回 localStorage，再让各 store 水合
+import "./boot/applyConfigImport";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";

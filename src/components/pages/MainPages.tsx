@@ -60,7 +60,7 @@ const copy: Record<LibraryView, PageCopy> = {
   analysis: {
     title: "声学分析",
     kicker: "Analysis Suite",
-    description: "响度 EBU R128 / 电平 / 声场 / 频谱 / 瀑布五仪表，实时分析当前播放。",
+    description: "响度 EBU R128 / 电平·VU / 声场 / 频谱 / 瀑布 / 示波器六仪表，实时分析当前播放。",
   },
 };
 

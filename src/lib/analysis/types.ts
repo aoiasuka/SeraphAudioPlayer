@@ -18,6 +18,8 @@ export const HISTORY_INTERVAL_SEC = 0.09;
 /** 频轴范围（log） */
 export const FREQ_MIN = 20;
 export const FREQ_MAX = 20000;
+/** 示波器波形 i16 量化满幅 */
+export const WAVE_I16_SCALE = 32767;
 
 /** 后端 get_analysis_frame 返回的一帧（serde camelCase） */
 export interface AnalysisFrame {
@@ -34,6 +36,8 @@ export interface AnalysisFrame {
   truePeakMaxDb: number | null;
   correlation: number;
   scatter: number[];
+  /** 交错 L,R 的 i16 量化波形（时间正序，约 43ms 窗、每 2 帧 1 点） */
+  waveform: number[];
   sampleRate: number;
 }
 
@@ -43,6 +47,8 @@ export interface ChannelLevelView {
   peakDb: number;
   holdDb: number;
   holdAt: number;
+  /** VU 弹道值（dBFS；0 VU = -18 dBFS 参考，300ms 表针积分） */
+  vuDb: number;
 }
 
 /** 面板显示状态：由帧摄入 + 每帧步进共同维护 */
@@ -70,8 +76,18 @@ export interface AnalysisView {
     count: number;
     corr: number;
   };
+  /** 示波器：拆分后的 L/R 波形（-1..1）与元数据 */
+  wave: {
+    l: Float32Array;
+    r: Float32Array;
+    points: number;
+    /** 波形窗口时长（秒），由采样率与抽取步长换算 */
+    windowSec: number;
+  };
   history: Float32Array[];
   historyHead: number;
+  /** 瀑布推进计数（每写一行 +1），离屏缓存据此判断是否需要重绘 */
+  historyVersion: number;
   /** 内部时间戳（秒） */
   lastFrameAt: number;
   lastStepAt: number;

@@ -1,5 +1,6 @@
 pub mod bilibili;
 pub mod cache;
+pub mod config;
 pub mod dsp;
 pub mod error;
 pub mod events;

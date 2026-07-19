@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AnalysisPage } from "./AnalysisPage";
+import { useAnalysisSettingsStore } from "@/store/analysisSettings";
 import { usePlayerStore } from "@/store/player";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -22,12 +23,16 @@ beforeAll(() => {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
 });
 
-describe("AnalysisPage (v0.4.6)", () => {
+describe("AnalysisPage (v0.4.6+)", () => {
+  beforeEach(() => {
+    useAnalysisSettingsStore.getState().resetAnalysisSettings();
+  });
+
   afterEach(() => {
     cleanup();
   });
 
-  it("渲染五个仪表面板", () => {
+  it("渲染六个仪表面板", () => {
     usePlayerStore.setState({ isPlaying: false });
     render(<AnalysisPage />);
 
@@ -36,9 +41,10 @@ describe("AnalysisPage (v0.4.6)", () => {
     expect(screen.getByText("SOUND FIELD · 声场")).toBeInTheDocument();
     expect(screen.getByText("SPECTRUM · 频谱")).toBeInTheDocument();
     expect(screen.getByText("SPECTROGRAM · 频谱瀑布")).toBeInTheDocument();
+    expect(screen.getByText("OSCILLOSCOPE · 示波器")).toBeInTheDocument();
     // 档案编号
     expect(screen.getByText("NO.01")).toBeInTheDocument();
-    expect(screen.getByText("NO.05")).toBeInTheDocument();
+    expect(screen.getByText("NO.06")).toBeInTheDocument();
   });
 
   it("声场与瀑布的模式切换更新按压态", () => {
@@ -64,5 +70,46 @@ describe("AnalysisPage (v0.4.6)", () => {
     expect(select.value).toBe("-14");
     fireEvent.change(select, { target: { value: "-23" } });
     expect(select.value).toBe("-23");
+  });
+
+  it("电平表可切换到 VU 表盘模式并写入设置", () => {
+    render(<AnalysisPage />);
+
+    const vuTab = screen.getByRole("button", { name: "VU 表盘" });
+    fireEvent.click(vuTab);
+    expect(vuTab).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("VU · 0VU = -18 dBFS")).toBeInTheDocument();
+    expect(useAnalysisSettingsStore.getState().levelsMode).toBe("vu");
+  });
+
+  it("面板设置浮层可隐藏示波器并持久化到设置 store", () => {
+    render(<AnalysisPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /PANELS 面板设置/ }));
+    const scopeToggle = screen.getByLabelText(/NO\.06 OSCILLOSCOPE/);
+    fireEvent.click(scopeToggle);
+
+    expect(useAnalysisSettingsStore.getState().panels.scope).toBe(false);
+    expect(screen.queryByText("OSCILLOSCOPE · 示波器")).not.toBeInTheDocument();
+
+    // 恢复默认后面板回归
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认设置" }));
+    expect(screen.getByText("OSCILLOSCOPE · 示波器")).toBeInTheDocument();
+  });
+
+  it("全部面板隐藏时展示空态提示", () => {
+    const settings = useAnalysisSettingsStore.getState();
+    for (const id of [
+      "loudness",
+      "levels",
+      "field",
+      "spectrum",
+      "scope",
+      "spectrogram",
+    ] as const) {
+      settings.setPanelVisible(id, false);
+    }
+    render(<AnalysisPage />);
+    expect(screen.getByText(/全部面板已隐藏/)).toBeInTheDocument();
   });
 });

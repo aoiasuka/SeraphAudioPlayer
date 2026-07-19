@@ -66,6 +66,8 @@ pub fn run() {
             ipc::dsp::set_dsp_settings,
             ipc::dsp::import_eq_preset,
             ipc::dsp::export_eq_preset,
+            ipc::config::export_app_config,
+            ipc::config::import_app_config,
             ipc::visualizer::get_spectrum_frame,
             ipc::visualizer::get_analysis_frame,
             ipc::visualizer::reset_analysis_meters,

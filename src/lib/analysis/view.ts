@@ -14,6 +14,7 @@ import {
   HISTORY_ROWS,
   LEVEL_DB_FLOOR,
   SPECTRUM_DB_FLOOR,
+  WAVE_I16_SCALE,
   clamp,
   linearToDb,
   type AnalysisFrame,
@@ -27,6 +28,10 @@ const CLIP_HOLD_SECONDS = 3;
 const CLIP_THRESHOLD_DB = -1.2;
 /** 断流判定：超过该间隔没有新帧就进入衰减模式 */
 const STALE_AFTER_SEC = 0.25;
+/** VU 表针一阶弹道时间常数：300ms 到稳态 99%（IEC 60268-17 语义）→ τ≈65ms */
+const VU_TAU_SEC = 0.065;
+/** 后端波形抽取步长（每 2 帧 1 点），换算窗口时长用 */
+const WAVE_DECIMATION = 2;
 
 function emptyChannel(): ChannelLevelView {
   return {
@@ -34,6 +39,7 @@ function emptyChannel(): ChannelLevelView {
     peakDb: LEVEL_DB_FLOOR,
     holdDb: LEVEL_DB_FLOOR,
     holdAt: 0,
+    vuDb: LEVEL_DB_FLOOR,
   };
 }
 
@@ -52,11 +58,18 @@ export function createAnalysisView(): AnalysisView {
       target: -14,
     },
     stereo: { pts: new Float32Array(0), count: 0, corr: 0 },
+    wave: {
+      l: new Float32Array(0),
+      r: new Float32Array(0),
+      points: 0,
+      windowSec: 0,
+    },
     history: Array.from(
       { length: HISTORY_ROWS },
       () => new Float32Array(ANALYSIS_BIN_COUNT).fill(SPECTRUM_DB_FLOOR)
     ),
     historyHead: HISTORY_ROWS - 1,
+    historyVersion: 0,
     lastFrameAt: -10,
     lastStepAt: -10,
     lastHistoryAt: -10,
@@ -93,7 +106,8 @@ export function applyAnalysisFrame(
     view.spectrumDb[i] += (target - view.spectrumDb[i]) * k;
   }
 
-  // 电平：RMS 平滑；峰值直接置位（保持逻辑在 step 里）
+  // 电平：RMS 平滑；峰值直接置位（保持逻辑在 step 里）；VU 表针 300ms 积分
+  const kVu = 1 - Math.exp(-dt / VU_TAU_SEC);
   const ingestChannel = (
     channel: ChannelLevelView,
     peakLinear: number,
@@ -103,6 +117,7 @@ export function applyAnalysisFrame(
     const peakDb = clamp(linearToDb(peakLinear), LEVEL_DB_FLOOR, 0);
     const kRms = Math.min(1, dt * (rmsDb > channel.rmsDb ? 9 : 2.6));
     channel.rmsDb += (rmsDb - channel.rmsDb) * kRms;
+    channel.vuDb += (rmsDb - channel.vuDb) * kVu;
     channel.peakDb = Math.max(peakDb, channel.peakDb - dt * 60);
     if (channel.peakDb > channel.holdDb) {
       channel.holdDb = channel.peakDb;
@@ -139,6 +154,23 @@ export function applyAnalysisFrame(
     view.stereo.count = frame.scatter.length / 2;
   }
   view.stereo.corr += (frame.correlation - view.stereo.corr) * Math.min(1, dt * 6);
+
+  // 示波器：交错 i16 拆 L/R（-1..1）
+  const waveform = frame.waveform;
+  if (waveform && waveform.length >= 2) {
+    const points = waveform.length >> 1;
+    if (view.wave.l.length !== points) {
+      view.wave.l = new Float32Array(points);
+      view.wave.r = new Float32Array(points);
+    }
+    for (let i = 0; i < points; i += 1) {
+      view.wave.l[i] = waveform[i * 2] / WAVE_I16_SCALE;
+      view.wave.r[i] = waveform[i * 2 + 1] / WAVE_I16_SCALE;
+    }
+    view.wave.points = points;
+    view.wave.windowSec =
+      frame.sampleRate > 0 ? (points * WAVE_DECIMATION) / frame.sampleRate : 0;
+  }
 }
 
 /** 每帧步进：峰值保持、CLIP 超时、瀑布走纸、断流衰减（rAF 节奏调用） */
@@ -177,8 +209,15 @@ export function stepAnalysisView(view: AnalysisView, now: number) {
     for (const channel of [view.levels.l, view.levels.r]) {
       channel.rmsDb += (LEVEL_DB_FLOOR - channel.rmsDb) * kDecay;
       channel.peakDb += (LEVEL_DB_FLOOR - channel.peakDb) * kDecay;
+      channel.vuDb += (LEVEL_DB_FLOOR - channel.vuDb) * kDecay;
     }
     view.stereo.corr *= 1 - Math.min(1, dt * 1.5);
+    // 示波器迹线淡出归零
+    const kWave = 1 - Math.min(1, dt * 2);
+    for (let i = 0; i < view.wave.points; i += 1) {
+      view.wave.l[i] *= kWave;
+      view.wave.r[i] *= kWave;
+    }
   }
 
   // 瀑布历史（有数据后固定 90ms 一行）
@@ -186,5 +225,6 @@ export function stepAnalysisView(view: AnalysisView, now: number) {
     view.lastHistoryAt = now;
     view.historyHead = (view.historyHead + 1) % HISTORY_ROWS;
     view.history[view.historyHead].set(view.spectrumDb);
+    view.historyVersion += 1;
   }
 }

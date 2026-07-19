@@ -26,6 +26,7 @@ function frame(overrides: Partial<AnalysisFrame> = {}): AnalysisFrame {
     truePeakMaxDb: null,
     correlation: 0,
     scatter: [],
+    waveform: [],
     sampleRate: 48000,
     ...overrides,
   };
@@ -117,5 +118,64 @@ describe("analysis view ballistics (v0.4.6)", () => {
     expect(view.loud.i).toBe(null);
     expect(view.loud.lra).toBe(null);
     expect(view.loud.tpMax).toBe(null);
+  });
+});
+
+describe("analysis view v0.4.8 additions", () => {
+  it("splits interleaved i16 waveform into L/R and derives the window length", () => {
+    const view = createAnalysisView();
+    // 交错 [L=+满幅, R=-半幅] × 4 点
+    const waveform = [32767, -16384, 32767, -16384, 32767, -16384, 32767, -16384];
+    applyAnalysisFrame(view, frame({ waveform, sampleRate: 48000 }), 1);
+
+    expect(view.wave.points).toBe(4);
+    expect(view.wave.l[0]).toBeCloseTo(1, 3);
+    expect(view.wave.r[0]).toBeCloseTo(-0.5, 2);
+    // 每点代表 2 帧（后端抽取步长）→ 窗口 = 8 帧 / 48000
+    expect(view.wave.windowSec).toBeCloseTo(8 / 48000, 8);
+  });
+
+  it("drives the VU needle with ~300ms ballistics toward the rms level", () => {
+    const view = createAnalysisView();
+    // 0 VU = -18 dBFS 的稳态正弦 RMS
+    const rms = Math.pow(10, -18 / 20);
+    let now = 1;
+    // 60ms：表针应仍明显低于目标
+    for (let i = 0; i < 2; i += 1) {
+      now += 0.03;
+      applyAnalysisFrame(view, frame({ rmsLeft: rms, peakLeft: rms }), now);
+    }
+    expect(view.levels.l.vuDb).toBeLessThan(-19);
+    // 再 600ms：应收敛到 -18 dBFS 附近
+    for (let i = 0; i < 20; i += 1) {
+      now += 0.03;
+      applyAnalysisFrame(view, frame({ rmsLeft: rms, peakLeft: rms }), now);
+    }
+    expect(view.levels.l.vuDb).toBeGreaterThan(-18.5);
+    expect(view.levels.l.vuDb).toBeLessThan(-17.5);
+  });
+
+  it("bumps historyVersion each time the spectrogram advances a row", () => {
+    const view = createAnalysisView();
+    applyAnalysisFrame(view, frame({ spectrum: new Array(ANALYSIS_BIN_COUNT).fill(1) }), 1);
+    const before = view.historyVersion;
+    stepAnalysisView(view, 1.0);
+    stepAnalysisView(view, 1.05); // 未到 90ms 不推进
+    const afterFirst = view.historyVersion;
+    stepAnalysisView(view, 1.15);
+    expect(afterFirst).toBe(before + 1);
+    expect(view.historyVersion).toBe(before + 2);
+  });
+
+  it("fades the waveform toward zero when frames stop arriving", () => {
+    const view = createAnalysisView();
+    applyAnalysisFrame(view, frame({ waveform: [32767, 32767] }), 1);
+    stepAnalysisView(view, 1.016);
+    let now = 1.3;
+    for (let i = 0; i < 120; i += 1) {
+      now += 0.016;
+      stepAnalysisView(view, now);
+    }
+    expect(Math.abs(view.wave.l[0])).toBeLessThan(0.05);
   });
 });

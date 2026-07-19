@@ -7,6 +7,7 @@
 //! - 真峰估计（Catmull-Rom 4x 内插近似，非全规格多相 FIR，标注 ≈）
 //! - 每声道瞬时 Peak / RMS（弹道学交给前端）
 //! - 立体声相关度与抽取散点（声场仪）
+//! - 最近 ~43ms 波形窗口（示波器时间域显示，i16 量化）
 //!
 //! 仅分析前两个声道（面板均为立体声语义）；单声道复制为双声道。
 
@@ -25,6 +26,10 @@ const MAX_LRA_SAMPLES: usize = 20_000;
 const MAX_SCATTER_PAIRS: usize = 160;
 /// 绝对门限 -70 LUFS 对应的块能量。
 const ABSOLUTE_GATE_LUFS: f64 = -70.0;
+/// 示波器环形缓冲帧数（@48kHz ≈ 42.7ms 时间窗）。
+const WAVEFORM_FRAMES: usize = 2048;
+/// 快照输出的每通道波形点数（缓冲 1/2 抽取，i16 量化压 IPC 体积）。
+const WAVEFORM_OUT_POINTS: usize = 1024;
 
 /// 转置直接 II 型双二阶，f64 状态保证低频高 Q 滤波器数值稳定。
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +130,8 @@ pub struct AnalysisSnapshot {
     pub correlation: f32,
     /// 交错 L,R 抽取样本对（声场散点），最多 [`MAX_SCATTER_PAIRS`] 对
     pub scatter: Vec<f32>,
+    /// 交错 L,R 的 i16 量化波形（时间正序，最旧在前），示波器时间域显示用
+    pub waveform: Vec<i16>,
 }
 
 /// 声学分析引擎：喂样本、出快照。
@@ -154,6 +161,12 @@ pub struct AnalysisEngine {
     rms: [f32; 2],
     correlation: f32,
     scatter: Vec<f32>,
+    /// 示波器环形缓冲（交错 L,R），容量 [`WAVEFORM_FRAMES`] 帧
+    wave_ring: Vec<f32>,
+    /// 下一写入帧位置
+    wave_head: usize,
+    /// 已写入帧数（≤ [`WAVEFORM_FRAMES`]）
+    wave_len: usize,
 }
 
 impl AnalysisEngine {
@@ -179,6 +192,9 @@ impl AnalysisEngine {
             rms: [0.0; 2],
             correlation: 0.0,
             scatter: Vec::new(),
+            wave_ring: vec![0.0; WAVEFORM_FRAMES * 2],
+            wave_head: 0,
+            wave_len: 0,
         }
     }
 
@@ -210,6 +226,9 @@ impl AnalysisEngine {
         self.rms = [0.0; 2];
         self.correlation = 0.0;
         self.scatter.clear();
+        self.wave_ring.fill(0.0);
+        self.wave_head = 0;
+        self.wave_len = 0;
     }
 
     /// 喂一批交错样本（渲染 tap drain 的结果）。
@@ -234,6 +253,15 @@ impl AnalysisEngine {
                 left
             };
             let pair = [left, right];
+
+            // 示波器环形缓冲
+            let wave_offset = self.wave_head * 2;
+            self.wave_ring[wave_offset] = left;
+            self.wave_ring[wave_offset + 1] = right;
+            self.wave_head = (self.wave_head + 1) % WAVEFORM_FRAMES;
+            if self.wave_len < WAVEFORM_FRAMES {
+                self.wave_len += 1;
+            }
 
             for (ch, &sample) in pair.iter().enumerate() {
                 let abs = sample.abs();
@@ -411,6 +439,24 @@ impl AnalysisEngine {
         Some(energy_to_lufs(p95) - energy_to_lufs(p10))
     }
 
+    /// 环形缓冲按时间正序抽取为 i16 波形（每 2 帧取 1 点）。
+    fn waveform_snapshot(&self) -> Vec<i16> {
+        if self.wave_len == 0 {
+            return Vec::new();
+        }
+        let stride = (WAVEFORM_FRAMES / WAVEFORM_OUT_POINTS).max(1);
+        let points = self.wave_len / stride;
+        let oldest = (self.wave_head + WAVEFORM_FRAMES - self.wave_len) % WAVEFORM_FRAMES;
+        let quantize = |sample: f32| (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let mut out = Vec::with_capacity(points * 2);
+        for point in 0..points {
+            let frame = (oldest + point * stride) % WAVEFORM_FRAMES;
+            out.push(quantize(self.wave_ring[frame * 2]));
+            out.push(quantize(self.wave_ring[frame * 2 + 1]));
+        }
+        out
+    }
+
     pub fn snapshot(&self) -> AnalysisSnapshot {
         let to_db = |linear: f32| 20.0 * linear.max(1.0e-7).log10();
         AnalysisSnapshot {
@@ -426,6 +472,7 @@ impl AnalysisEngine {
             rms_right: self.rms[1],
             correlation: self.correlation,
             scatter: self.scatter.clone(),
+            waveform: self.waveform_snapshot(),
         }
     }
 }
@@ -589,5 +636,45 @@ mod tests {
         assert!(snapshot.correlation > 0.99);
         assert_eq!(snapshot.scatter.len() % 2, 0);
         assert!(!snapshot.scatter.is_empty());
+    }
+
+    #[test]
+    fn waveform_outputs_recent_window_in_time_order() {
+        // 缓冲填满后：抽取输出应为固定点数、时间正序（斜坡信号单调递增）。
+        let mut engine = AnalysisEngine::new(FS, 2);
+        let frames = 4_096;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for n in 0..frames {
+            let value = -1.0 + 2.0 * (n as f32 / frames as f32);
+            samples.push(value);
+            samples.push(-value);
+        }
+        engine.push(&samples);
+
+        let waveform = engine.snapshot().waveform;
+        assert_eq!(waveform.len(), 1024 * 2, "满缓冲输出 1024 帧点 × L/R");
+        let left: Vec<i16> = waveform.iter().step_by(2).copied().collect();
+        assert!(
+            left.windows(2).all(|pair| pair[0] <= pair[1]),
+            "斜坡输入的波形窗口应时间正序"
+        );
+        // 右声道是反相斜坡
+        let right: Vec<i16> = waveform.iter().skip(1).step_by(2).copied().collect();
+        assert!(right.windows(2).all(|pair| pair[0] >= pair[1]));
+        // 量化幅度大致覆盖后半程斜坡（缓冲只留最近 2048 帧 → 左声道全为正）
+        assert!(left.first().copied().unwrap_or(0) >= 0);
+    }
+
+    #[test]
+    fn waveform_clears_on_session_reset_and_clamps_overs() {
+        let mut engine = AnalysisEngine::new(FS, 2);
+        // 超 0dBFS 的样本应被钳制到 ±32767 而不是环绕
+        engine.push(&[1.5, -1.5, 1.5, -1.5]);
+        let waveform = engine.snapshot().waveform;
+        assert!(waveform.iter().step_by(2).all(|&v| v == 32767));
+        assert!(waveform.iter().skip(1).step_by(2).all(|&v| v == -32767));
+
+        engine.reset_session();
+        assert!(engine.snapshot().waveform.is_empty());
     }
 }
