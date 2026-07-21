@@ -5,6 +5,7 @@ import {
   migrateAnalysisSettings,
   useAnalysisSettingsStore,
 } from "./analysisSettings";
+import { DEFAULT_GRID_LAYOUT } from "@/lib/analysis/gridLayout";
 
 describe("analysis settings store (v0.4.8)", () => {
   beforeEach(() => {
@@ -71,5 +72,67 @@ describe("analysis settings store (v0.4.8)", () => {
     expect(migrated.levelsMode).toBe("bar");
     expect(migrated.fieldMode).toBe("lissajous");
     expect(migrated.scopeTrigger).toBe(true);
+  });
+});
+
+describe("analysis layout settings (v0.4.9)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    useAnalysisSettingsStore.getState().resetAnalysisSettings();
+  });
+
+  it("defaults to auto layout without custom rects", () => {
+    const state = useAnalysisSettingsStore.getState();
+    expect(state.layoutMode).toBe("auto");
+    expect(state.customLayout).toBeNull();
+  });
+
+  it("setCustomLayout switches to custom mode and persists as v2", () => {
+    useAnalysisSettingsStore.getState().setCustomLayout({ ...DEFAULT_GRID_LAYOUT });
+    const state = useAnalysisSettingsStore.getState();
+    expect(state.layoutMode).toBe("custom");
+    expect(state.customLayout).toEqual(DEFAULT_GRID_LAYOUT);
+
+    const raw = JSON.parse(
+      window.localStorage.getItem("seraph-analysis-settings")!
+    ) as { version: number; state: { layoutMode: string; customLayout: unknown } };
+    expect(raw.version).toBe(2);
+    expect(raw.state.layoutMode).toBe("custom");
+    expect(raw.state.customLayout).toEqual(DEFAULT_GRID_LAYOUT);
+  });
+
+  it("migrate keeps a valid custom layout and clamps stray rects", () => {
+    const migrated = migrateAnalysisSettings({
+      layoutMode: "custom",
+      customLayout: {
+        ...DEFAULT_GRID_LAYOUT,
+        field: { x: 99, y: -5, w: 4, h: 5 },
+      },
+    });
+    expect(migrated.layoutMode).toBe("custom");
+    expect(migrated.customLayout!.field).toEqual({ x: 8, y: 0, w: 4, h: 5 });
+    expect(migrated.customLayout!.scope).toEqual(DEFAULT_GRID_LAYOUT.scope);
+  });
+
+  it("migrate falls back to auto for v1 data or corrupt layouts", () => {
+    const v1 = migrateAnalysisSettings({ levelsMode: "vu" });
+    expect(v1.layoutMode).toBe("auto");
+    expect(v1.customLayout).toBeNull();
+
+    const corrupt = migrateAnalysisSettings({
+      layoutMode: "custom",
+      customLayout: { loudness: { x: 0, y: 0, w: 3, h: 5 } }, // 缺其余面板
+    });
+    expect(corrupt.layoutMode).toBe("auto");
+    expect(corrupt.customLayout).toBeNull();
+  });
+
+  it("resetAnalysisSettings clears the custom layout", () => {
+    const state = useAnalysisSettingsStore.getState();
+    state.setCustomLayout({ ...DEFAULT_GRID_LAYOUT });
+    state.resetAnalysisSettings();
+    const next = useAnalysisSettingsStore.getState();
+    expect(next.layoutMode).toBe("auto");
+    expect(next.customLayout).toBeNull();
   });
 });

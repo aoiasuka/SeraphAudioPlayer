@@ -50,14 +50,14 @@ describe("AnalysisPage (v0.4.6+)", () => {
   it("声场与瀑布的模式切换更新按压态", () => {
     render(<AnalysisPage />);
 
-    const polar = screen.getByRole("button", { name: "POLAR 极坐标" });
-    const lissajous = screen.getByRole("button", { name: "LISSAJOUS 李萨如" });
+    const polar = screen.getByRole("button", { name: "POLAR" });
+    const lissajous = screen.getByRole("button", { name: "LISSAJOUS" });
     expect(polar).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(lissajous);
     expect(lissajous).toHaveAttribute("aria-pressed", "true");
     expect(polar).toHaveAttribute("aria-pressed", "false");
 
-    const heat = screen.getByRole("button", { name: "HEAT 热图" });
+    const heat = screen.getByRole("button", { name: "HEAT" });
     fireEvent.click(heat);
     expect(heat).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText(/色带/)).toBeInTheDocument();
@@ -75,7 +75,7 @@ describe("AnalysisPage (v0.4.6+)", () => {
   it("电平表可切换到 VU 表盘模式并写入设置", () => {
     render(<AnalysisPage />);
 
-    const vuTab = screen.getByRole("button", { name: "VU 表盘" });
+    const vuTab = screen.getByRole("button", { name: "VU" });
     fireEvent.click(vuTab);
     expect(vuTab).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("VU · 0VU = -18 dBFS")).toBeInTheDocument();
@@ -111,5 +111,83 @@ describe("AnalysisPage (v0.4.6+)", () => {
     }
     render(<AnalysisPage />);
     expect(screen.getByText(/全部面板已隐藏/)).toBeInTheDocument();
+  });
+});
+
+describe("AnalysisPage 布局编辑 (v0.4.9)", () => {
+  beforeEach(() => {
+    useAnalysisSettingsStore.getState().resetAnalysisSettings();
+    // 宽屏（≥1536px）才开放布局编辑
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      configurable: true,
+      value: (query: string) => ({
+        matches: true,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+    // jsdom 无布局：编辑器网格按 1200×900 换算（格 100×75）
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 1200,
+      bottom: 900,
+      width: 1200,
+      height: 900,
+      toJSON: () => ({}),
+    } as DOMRect);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    delete (window as { matchMedia?: unknown }).matchMedia;
+  });
+
+  it("宽屏点击 LAYOUT 进入图纸编辑模式", () => {
+    render(<AnalysisPage />);
+    fireEvent.click(screen.getByRole("button", { name: "LAYOUT 布局" }));
+    expect(screen.getByTestId("analysis-layout-editor")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "完成 ✓" })).toBeInTheDocument();
+    // 仪表面板被图框替换
+    expect(screen.queryByText("LOUDNESS · 响度")).not.toBeInTheDocument();
+  });
+
+  it("拖拽交换位置后「完成」提交 custom 布局到 store", () => {
+    render(<AnalysisPage />);
+    fireEvent.click(screen.getByRole("button", { name: "LAYOUT 布局" }));
+
+    // 示波器（y4，标题约在 310px）拖到顶部 → 与频谱交换
+    const handle = screen.getByTestId("layout-handle-scope");
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      clientX: 400,
+      clientY: 310,
+    });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 400, clientY: 20 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+
+    fireEvent.click(screen.getByRole("button", { name: "完成 ✓" }));
+    const state = useAnalysisSettingsStore.getState();
+    expect(state.layoutMode).toBe("custom");
+    expect(state.customLayout!.scope).toMatchObject({ x: 3, y: 0 });
+    expect(state.customLayout!.spectrum).toMatchObject({ x: 3, y: 3 });
+    // 提交后回到仪表视图
+    expect(screen.getByText("OSCILLOSCOPE · 示波器")).toBeInTheDocument();
+  });
+
+  it("取消编辑不写入 store", () => {
+    render(<AnalysisPage />);
+    fireEvent.click(screen.getByRole("button", { name: "LAYOUT 布局" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    const state = useAnalysisSettingsStore.getState();
+    expect(state.layoutMode).toBe("auto");
+    expect(state.customLayout).toBeNull();
+    expect(screen.getByText("LOUDNESS · 响度")).toBeInTheDocument();
   });
 });

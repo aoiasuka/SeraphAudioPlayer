@@ -15,6 +15,15 @@ import {
   type ArchiveColors,
   type SpectrumGeometry,
 } from "@/lib/analysis/render";
+import {
+  DEFAULT_GRID_LAYOUT,
+  GRID_COLS,
+  GRID_ROWS,
+  orderForNarrow,
+  resolveLayout,
+  type GridLayout,
+  type GridRect,
+} from "@/lib/analysis/gridLayout";
 import { createAnalysisSimulator } from "@/lib/analysis/simulator";
 import {
   applyAnalysisFrame,
@@ -26,10 +35,12 @@ import { ANALYSIS_BIN_COUNT, type AnalysisFrame } from "@/lib/analysis/types";
 import { invoke, isTauriRuntime } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import {
+  ANALYSIS_PANEL_IDS,
   useAnalysisSettingsStore,
   type AnalysisPanelId,
 } from "@/store/analysisSettings";
 import { usePlayerStore } from "@/store/player";
+import { AnalysisLayoutEditor } from "./AnalysisLayoutEditor";
 
 const POLL_INTERVAL_MS = 33; // ~30fps 数据泵
 /** 渲染节流：播放时 ~30fps，待机衰减时 ~14fps，都低于 rAF 的 60fps */
@@ -60,7 +71,7 @@ function Panel({
     <section
       style={style}
       className={cn(
-        "flex min-h-0 flex-col border-[1.5px] border-ink bg-card shadow-[3px_3px_0_rgba(43,39,34,0.1)]",
+        "flex min-h-0 flex-col overflow-hidden border-[1.5px] border-ink bg-card shadow-[3px_3px_0_rgba(43,39,34,0.1)]",
         className
       )}
     >
@@ -173,6 +184,23 @@ const RIGHT_PANEL_ORDER: AnalysisPanelId[] = [
   "field",
 ];
 
+/** custom 网格：GridRect → 内联 grid 定位（Tailwind 动态类名不参与 JIT，走 style） */
+const gridAreaStyle = (rect: GridRect): React.CSSProperties => ({
+  gridColumn: `${rect.x + 1} / span ${rect.w}`,
+  gridRow: `${rect.y + 1} / span ${rect.h}`,
+  minWidth: 0,
+  minHeight: 0,
+});
+
+/** custom 布局容器：12×12 视口分数网格 */
+const CUSTOM_GRID_CONTAINER: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: `repeat(${GRID_COLS}, minmax(0,1fr))`,
+  gridTemplateRows: `repeat(${GRID_ROWS}, minmax(0,1fr))`,
+  gap: "0.75rem",
+  overflow: "hidden",
+};
+
 interface WideLayout {
   container: React.CSSProperties;
   leftCol: React.CSSProperties | null;
@@ -266,17 +294,50 @@ export function AnalysisPage() {
     spectrogramMode,
     scopeSplit,
     scopeTrigger,
+    layoutMode,
+    customLayout,
     setPanelVisible,
   } = settings;
 
   const wide = useWideLayout();
-  const layout = wide ? computeWideLayout(panels) : null;
-  const visibleCount = RIGHT_PANEL_ORDER.filter((id) => panels[id]).length
-    + (panels.loudness ? 1 : 0)
-    + (panels.levels ? 1 : 0);
+  const visibleIds = ANALYSIS_PANEL_IDS.filter((id) => panels[id]);
+  const visibleCount = visibleIds.length;
+
+  // custom 布局：可见子集压缩补位后的实际格位；auto 沿用智能补位模板
+  const activeCustom = layoutMode === "custom" ? customLayout : null;
+  const layout = wide && !activeCustom ? computeWideLayout(panels) : null;
+  const customPlace =
+    wide && activeCustom ? resolveLayout(activeCustom, visibleIds) : null;
+  const narrowOrder =
+    !wide && activeCustom ? orderForNarrow(activeCustom, visibleIds) : null;
+  // custom 下左列 wrapper 打散（display:contents），响度/电平各自入格
+  const splitLeftCol = activeCustom !== null;
+
+  const placeFor = (id: AnalysisPanelId): React.CSSProperties | undefined => {
+    if (customPlace) {
+      const rect = customPlace[id];
+      return rect ? gridAreaStyle(rect) : undefined;
+    }
+    if (narrowOrder) return { order: narrowOrder.indexOf(id) };
+    return wide ? layout?.place[id] : undefined;
+  };
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsBoxRef = useRef<HTMLDivElement | null>(null);
+
+  // 图纸编辑模式：draft 由本组件持有，「完成」才一次性提交 store（避免拖拽中刷 persist）
+  const [editing, setEditing] = useState(false);
+  const [draftLayout, setDraftLayout] = useState<GridLayout>(DEFAULT_GRID_LAYOUT);
+  const startLayoutEdit = () => {
+    setDraftLayout(customLayout ?? DEFAULT_GRID_LAYOUT);
+    setSettingsOpen(false);
+    setEditing(true);
+  };
+  const commitLayoutEdit = () => {
+    settings.setCustomLayout(draftLayout);
+    setEditing(false);
+  };
+  const cancelLayoutEdit = () => setEditing(false);
 
   const viewRef = useRef(createAnalysisView());
   const colorsRef = useRef<ArchiveColors | null>(null);
@@ -311,6 +372,9 @@ export function AnalysisPage() {
   optsRef.current.spectrumShowPeakHold = spectrumShowPeakHold;
   optsRef.current.scopeSplit = scopeSplit;
   optsRef.current.scopeTrigger = scopeTrigger;
+
+  const editingRef = useRef(false);
+  editingRef.current = editing;
 
   const loudBarCanvas = useRef<HTMLCanvasElement | null>(null);
   const levelsCanvas = useRef<HTMLCanvasElement | null>(null);
@@ -383,6 +447,11 @@ export function AnalysisPage() {
     if (isTauriRuntime()) void invoke("reset_analysis_meters").catch(() => {});
   }, [currentTrackId]);
 
+  // 窗口变窄（<1536px）时布局编辑不可用，强制退出
+  useEffect(() => {
+    if (!wide) setEditing(false);
+  }, [wide]);
+
   // 设置浮层外点关闭
   useEffect(() => {
     if (!settingsOpen) return undefined;
@@ -402,6 +471,7 @@ export function AnalysisPage() {
     const renderLoop = () => {
       if (disposed) return;
       raf = window.requestAnimationFrame(renderLoop);
+      if (editingRef.current) return; // 图纸模式：冻结仪表渲染，帧预算让给拖拽
       const now = performance.now() / 1000;
       const opts = optsRef.current;
       const minInterval = opts.standby
@@ -581,7 +651,48 @@ export function AnalysisPage() {
             待机 HOLD · 播放后实时运行
           </span>
         ) : null}
-        <div ref={settingsBoxRef} className="relative ml-auto">
+        <div
+          ref={settingsBoxRef}
+          className="relative ml-auto flex items-center gap-1.5"
+        >
+          {editing ? (
+            <>
+              <span className="hidden border-[1.5px] border-dashed border-brown px-2 py-0.5 font-tw text-[9px] font-bold tracking-[1px] text-brown xl:inline">
+                BLUEPRINT · 拖拽标题移动 · 右下角缩放 · ESC 退出
+              </span>
+              <button
+                type="button"
+                onClick={() => setDraftLayout({ ...DEFAULT_GRID_LAYOUT })}
+                className="border-[1.5px] border-line bg-card px-2.5 py-0.5 font-tw text-[10px] font-bold tracking-[1.5px] text-ink2 transition-colors hover:border-ink hover:text-ink"
+              >
+                恢复默认布局
+              </button>
+              <button
+                type="button"
+                onClick={cancelLayoutEdit}
+                className="border-[1.5px] border-line bg-card px-2.5 py-0.5 font-tw text-[10px] font-bold tracking-[1.5px] text-ink2 transition-colors hover:border-ink hover:text-ink"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={commitLayoutEdit}
+                className="border-[1.5px] border-ink bg-ink px-2.5 py-0.5 font-tw text-[10px] font-bold tracking-[1.5px] text-paper transition-colors hover:bg-ink2"
+              >
+                完成 ✓
+              </button>
+            </>
+          ) : null}
+          {!editing && wide && visibleCount > 0 ? (
+            <button
+              type="button"
+              onClick={startLayoutEdit}
+              className="border-[1.5px] border-ink bg-card px-2.5 py-0.5 font-tw text-[10px] font-bold tracking-[1.5px] text-ink transition-colors hover:bg-paper2"
+            >
+              LAYOUT 布局
+            </button>
+          ) : null}
+          {editing ? null : (
           <button
             type="button"
             aria-expanded={settingsOpen}
@@ -595,6 +706,7 @@ export function AnalysisPage() {
           >
             PANELS 面板设置
           </button>
+          )}
           {settingsOpen ? (
             <div className="absolute right-0 top-8 z-40 max-h-[70vh] w-[300px] overflow-y-auto border-[1.5px] border-ink bg-card p-3 shadow-[4px_4px_0_rgba(43,39,34,0.18)]">
               <p className="mb-2 border-b-[1.5px] border-line pb-1.5 font-tw text-[10px] font-bold tracking-[2px] text-ink2">
@@ -716,9 +828,16 @@ export function AnalysisPage() {
             全部面板已隐藏 —— 在右上角「PANELS 面板设置」中重新开启
           </p>
         </div>
+      ) : editing && wide ? (
+        <AnalysisLayoutEditor
+          layout={draftLayout}
+          visible={visibleIds}
+          onChange={setDraftLayout}
+          onRequestCancel={cancelLayoutEdit}
+        />
       ) : (
         <div
-          style={layout?.container}
+          style={customPlace ? CUSTOM_GRID_CONTAINER : layout?.container}
           className={cn(
             "min-h-0 flex-1",
             !wide && "flex flex-col gap-3 overflow-y-auto pr-1"
@@ -727,15 +846,24 @@ export function AnalysisPage() {
           {/* 左列：响度（自适应高度）+ 电平表（吃掉剩余高度） */}
           {panels.loudness || panels.levels ? (
             <div
-              style={layout?.leftCol ?? undefined}
-              className={cn("flex flex-col gap-3", wide ? "min-h-0" : "shrink-0")}
+              style={
+                splitLeftCol
+                  ? { display: "contents" }
+                  : (layout?.leftCol ?? undefined)
+              }
+              className={
+                splitLeftCol
+                  ? undefined
+                  : cn("flex flex-col gap-3", wide ? "min-h-0" : "shrink-0")
+              }
             >
               {panels.loudness ? (
                 <Panel
                   no="NO.01"
                   title="LOUDNESS · 响度"
                   metaRef={loudMeta}
-                  className="shrink-0"
+                  style={splitLeftCol ? placeFor("loudness") : undefined}
+                  className={splitLeftCol && wide ? "min-h-0" : "shrink-0"}
                 >
                   <div className="grid grid-cols-3 items-end gap-2 border-b-[1.5px] border-line pb-2.5 pt-1 text-center">
                     <div>
@@ -837,6 +965,7 @@ export function AnalysisPage() {
                   metaText={
                     levelsMode === "vu" ? "VU · 0VU = -18 dBFS" : "dBFS · PEAK+RMS"
                   }
+                  style={splitLeftCol ? placeFor("levels") : undefined}
                   className={cn("flex-1", wide ? "min-h-0" : "min-h-[280px]")}
                 >
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pb-2 font-tw text-[10px] font-bold tracking-[1px] text-ink3">
@@ -873,12 +1002,12 @@ export function AnalysisPage() {
                     <div className="flex gap-1.5">
                       <ModeTab
                         active={levelsMode === "bar"}
-                        label="BAR 条表"
+                        label="BAR"
                         onClick={() => settings.setLevelsMode("bar")}
                       />
                       <ModeTab
                         active={levelsMode === "vu"}
-                        label="VU 表盘"
+                        label="VU"
                         onClick={() => settings.setLevelsMode("vu")}
                       />
                     </div>
@@ -899,7 +1028,7 @@ export function AnalysisPage() {
               no="NO.03"
               title="SOUND FIELD · 声场"
               metaRef={fieldMeta}
-              style={layout?.place.field}
+              style={placeFor("field")}
               className={cn(!wide && narrowPanel)}
             >
               <div ref={observeBox} className="relative min-h-0 flex-1">
@@ -914,12 +1043,12 @@ export function AnalysisPage() {
                 <div className="flex gap-1.5">
                   <ModeTab
                     active={fieldMode === "polar"}
-                    label="POLAR 极坐标"
+                    label="POLAR"
                     onClick={() => settings.setFieldMode("polar")}
                   />
                   <ModeTab
                     active={fieldMode === "lissajous"}
-                    label="LISSAJOUS 李萨如"
+                    label="LISSAJOUS"
                     onClick={() => settings.setFieldMode("lissajous")}
                   />
                 </div>
@@ -936,7 +1065,7 @@ export function AnalysisPage() {
               no="NO.04"
               title="SPECTRUM · 频谱"
               metaRef={spectrumMeta}
-              style={layout?.place.spectrum}
+              style={placeFor("spectrum")}
               className={cn(!wide && "min-h-[300px] shrink-0")}
             >
               <div ref={observeBox} className="relative min-h-0 flex-1">
@@ -969,7 +1098,7 @@ export function AnalysisPage() {
               no="NO.06"
               title="OSCILLOSCOPE · 示波器"
               metaText={scopeTrigger ? "≈21MS 窗 · 锁相" : "≈43MS 窗 · 走带"}
-              style={layout?.place.scope}
+              style={placeFor("scope")}
               className={cn(!wide && "min-h-[220px] shrink-0")}
             >
               <div ref={observeBox} className="relative min-h-0 flex-1">
@@ -988,7 +1117,7 @@ export function AnalysisPage() {
             <Panel
               no="NO.05"
               title="SPECTROGRAM · 频谱瀑布"
-              style={layout?.place.spectrogram}
+              style={placeFor("spectrogram")}
               className={cn(!wide && narrowPanel)}
             >
               <div ref={observeBox} className="relative min-h-0 flex-1">
@@ -1003,12 +1132,12 @@ export function AnalysisPage() {
                 <div className="flex gap-1.5">
                   <ModeTab
                     active={spectrogramMode === "ridge"}
-                    label="RIDGE 山脊"
+                    label="RIDGE"
                     onClick={() => settings.setSpectrogramMode("ridge")}
                   />
                   <ModeTab
                     active={spectrogramMode === "heat"}
-                    label="HEAT 热图"
+                    label="HEAT"
                     onClick={() => settings.setSpectrogramMode("heat")}
                   />
                 </div>

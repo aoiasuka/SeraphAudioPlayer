@@ -90,8 +90,13 @@ describe("config export / import (v0.4.8)", () => {
             version: 3,
           },
           "seraph-analysis-settings": {
-            state: { levelsMode: "vu", panels: { scope: false } },
-            version: 1,
+            state: {
+              levelsMode: "vu",
+              panels: { scope: false },
+              layoutMode: "custom",
+              customLayout: { loudness: { x: 0, y: 0, w: 3, h: 5 } },
+            },
+            version: 2,
           },
         },
       })
@@ -112,8 +117,14 @@ describe("config export / import (v0.4.8)", () => {
 
     const analysis = JSON.parse(
       window.localStorage.getItem("seraph-analysis-settings")!
-    ) as { state: Record<string, unknown> };
+    ) as { state: Record<string, unknown>; version: number };
     expect(analysis.state.levelsMode).toBe("vu");
+    // v0.4.9 布局字段随 envelope 透传（结构校验由 store migrate 水合时兜底）
+    expect(analysis.version).toBe(2);
+    expect(analysis.state.layoutMode).toBe("custom");
+    expect(analysis.state.customLayout).toEqual({
+      loudness: { x: 0, y: 0, w: 3, h: 5 },
+    });
 
     // 应用后暂存清空，二次调用为空操作
     expect(applyPendingConfigImport()).toBe(false);

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { SoundFieldMode, SpectrogramMode } from "@/lib/analysis/render";
+import { sanitizeGridLayout, type GridLayout } from "@/lib/analysis/gridLayout";
 
 /** 声学分析六仪表面板 id（NO.01–NO.06） */
 export type AnalysisPanelId =
@@ -12,6 +13,9 @@ export type AnalysisPanelId =
   | "spectrogram";
 
 export type LevelsDisplayMode = "bar" | "vu";
+
+/** auto = 智能补位布局（v0.4.7 语义）；custom = 用户在编辑模式拖拽定制的 12×12 网格 */
+export type AnalysisLayoutMode = "auto" | "custom";
 
 export const ANALYSIS_PANEL_IDS: AnalysisPanelId[] = [
   "loudness",
@@ -44,6 +48,10 @@ interface AnalysisSettingsData {
   scopeSplit: boolean;
   /** 示波器零交叉触发对齐（稳定周期波形） */
   scopeTrigger: boolean;
+  /** 宽屏布局模式：自动补位 / 用户自定义网格 */
+  layoutMode: AnalysisLayoutMode;
+  /** 自定义 12×12 网格布局（六面板 rect；隐藏面板的位置也保留） */
+  customLayout: GridLayout | null;
 }
 
 interface AnalysisSettingsState extends AnalysisSettingsData {
@@ -59,10 +67,14 @@ interface AnalysisSettingsState extends AnalysisSettingsData {
   setSpectrogramMode: (mode: SpectrogramMode) => void;
   setScopeSplit: (value: boolean) => void;
   setScopeTrigger: (value: boolean) => void;
+  /** 提交编辑模式的布局（同时切到 custom 模式） */
+  setCustomLayout: (layout: GridLayout) => void;
+  /** 回到自动布局（保留 customLayout 以便再次切回） */
+  setLayoutMode: (mode: AnalysisLayoutMode) => void;
   resetAnalysisSettings: () => void;
 }
 
-const ANALYSIS_SETTINGS_VERSION = 1;
+const ANALYSIS_SETTINGS_VERSION = 2;
 
 export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettingsData = {
   panels: {
@@ -84,6 +96,8 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettingsData = {
   spectrogramMode: "ridge",
   scopeSplit: false,
   scopeTrigger: true,
+  layoutMode: "auto",
+  customLayout: null,
 };
 
 function asBool(value: unknown, fallback: boolean) {
@@ -105,6 +119,10 @@ export function migrateAnalysisSettings(persisted: unknown): AnalysisSettingsDat
     ANALYSIS_PANEL_IDS.map((id) => [id, asBool(rawPanels[id], true)])
   ) as Record<AnalysisPanelId, boolean>;
   const target = state.loudnessTarget;
+  // 自定义布局：结构/数值非法整体判废并回 auto（resolveLayout 对轻微重叠自愈）
+  const customLayout = sanitizeGridLayout(state.customLayout);
+  const layoutMode: AnalysisLayoutMode =
+    state.layoutMode === "custom" && customLayout !== null ? "custom" : "auto";
   return {
     panels,
     loudnessTarget:
@@ -121,6 +139,8 @@ export function migrateAnalysisSettings(persisted: unknown): AnalysisSettingsDat
     spectrogramMode: state.spectrogramMode === "heat" ? "heat" : "ridge",
     scopeSplit: asBool(state.scopeSplit, false),
     scopeTrigger: asBool(state.scopeTrigger, true),
+    layoutMode,
+    customLayout,
   };
 }
 
@@ -145,6 +165,9 @@ export const useAnalysisSettingsStore = create<AnalysisSettingsState>()(
       setSpectrogramMode: (spectrogramMode) => set({ spectrogramMode }),
       setScopeSplit: (scopeSplit) => set({ scopeSplit }),
       setScopeTrigger: (scopeTrigger) => set({ scopeTrigger }),
+      setCustomLayout: (customLayout) =>
+        set({ customLayout, layoutMode: "custom" }),
+      setLayoutMode: (layoutMode) => set({ layoutMode }),
       resetAnalysisSettings: () =>
         set({
           ...DEFAULT_ANALYSIS_SETTINGS,
@@ -168,6 +191,8 @@ export const useAnalysisSettingsStore = create<AnalysisSettingsState>()(
         spectrogramMode: state.spectrogramMode,
         scopeSplit: state.scopeSplit,
         scopeTrigger: state.scopeTrigger,
+        layoutMode: state.layoutMode,
+        customLayout: state.customLayout,
       }),
     }
   )
