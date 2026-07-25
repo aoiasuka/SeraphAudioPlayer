@@ -275,12 +275,17 @@ impl AnalysisEngine {
                 block_tp = block_tp.max(abs).max(catmull_rom_peak(p0, p1, p2, sample));
                 self.tp_history[ch] = [p1, p2, sample];
 
-                // K 加权能量（响度）
-                let mut weighted = f64::from(sample);
-                for stage in &mut self.filters[ch] {
-                    weighted = stage.process(weighted);
+                // K 加权能量（响度）。M-19：mono 复制出的第二路不计入——
+                // BS.1770-4 对单声道定义为单通道 G=1.0，复制成 L/R 求和会让
+                // momentary/short-term/integrated 全部系统性 +3.01 LU。
+                // （peak/RMS/示波器/散点仍用复制值，那是显示层的有意设计。）
+                if channels > 1 || ch == 0 {
+                    let mut weighted = f64::from(sample);
+                    for stage in &mut self.filters[ch] {
+                        weighted = stage.process(weighted);
+                    }
+                    self.hop_energy_accum += weighted * weighted;
                 }
-                self.hop_energy_accum += weighted * weighted;
             }
             cross_sum += f64::from(left) * f64::from(right);
 

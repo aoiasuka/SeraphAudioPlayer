@@ -36,6 +36,16 @@ export interface BilibiliImportFailure {
 export interface BilibiliBatchImportResult {
   tracks: Track[];
   failed: BilibiliImportFailure[];
+  /** 用户中途取消（已导入部分照常返回） */
+  cancelled?: boolean;
+}
+
+/** 收藏夹批量导入进度（`seraph://bilibili-batch` 事件 payload） */
+export interface BilibiliBatchProgress {
+  current: number;
+  total: number;
+  title: string;
+  ok: boolean;
 }
 
 // 审2-R5：以下流媒体页状态从 StreamingPage 组件提升到 store（非持久化，不进 partialize），
@@ -137,6 +147,8 @@ export interface PlayerStore {
   bilibiliLoginStatus: BilibiliLoginStatus;
   bilibiliFfmpegStatus: BilibiliFfmpegStatus;
   ffmpegDownload: FfmpegDownloadState;
+  /** 收藏夹批量导入进度（导入中非 null；App 级事件监听写入，切页不丢） */
+  bilibiliBatchProgress: BilibiliBatchProgress | null;
   loginQr: BilibiliLoginQrState | null;
   isLoginBusy: boolean;
   currentTrack: () => Track | null;
@@ -159,7 +171,10 @@ export interface PlayerStore {
   deleteUserPlaylist: (playlistId: string) => void;
   deleteTrack: (trackId: string) => Promise<void>;
   loadBackendLibrary: () => Promise<void>;
-  importLocalTracks: (paths: string[]) => Promise<void>;
+  importLocalTracks: (
+    paths: string[],
+    options?: { keepView?: boolean }
+  ) => Promise<void>;
   fetchOnlineCoverForCurrentTrack: () => Promise<boolean>;
   addTrackToUserPlaylist: (playlistId: string, trackId: string) => void;
   removeTrackFromUserPlaylist: (playlistId: string, trackId: string) => void;
@@ -178,6 +193,8 @@ export interface PlayerStore {
     input: string,
     options?: BilibiliImportOptions
   ) => Promise<BilibiliBatchImportResult | null>;
+  /** 请求中断进行中的收藏夹批量导入（当前一首完成后停止） */
+  cancelBilibiliFavoritesImport: () => Promise<void>;
   // v0.4.4：按当次勾选的音质选项重新加载 B 站流媒体曲目，原位替换。
   reloadStreamingTrack: (
     trackId: string,

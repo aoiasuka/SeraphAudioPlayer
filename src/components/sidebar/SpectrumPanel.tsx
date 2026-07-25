@@ -10,6 +10,9 @@ interface SpectrumFrame {
 
 const POLL_INTERVAL_MS = 33; // ~30fps
 const BIN_COUNT = 48;
+/** 柱体快攻慢放系数（每 rAF 帧向目标逼近的比例），消除逐帧 FFT 硬跳变 */
+const BAR_ATTACK = 0.5;
+const BAR_RELEASE = 0.22;
 
 /**
  * 实时频谱面板：播放中轮询后端 FFT 帧绘制柱状频谱，
@@ -19,6 +22,7 @@ export function SpectrumPanel() {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const binsRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
+  const targetRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
   const rafRef = useRef<number>(0);
 
   useEffect(() => {
@@ -43,14 +47,25 @@ export function SpectrumPanel() {
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       if (width === 0 || height === 0) return;
-      if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
-        canvas.width = width * ratio;
-        canvas.height = height * ratio;
+      // canvas.width 是整数，非整数 DPR（125%/150% 缩放）下与 width*ratio
+      // 浮点比较恒不等会导致每帧重建 backing store，必须先取整再比较。
+      const deviceWidth = Math.round(width * ratio);
+      const deviceHeight = Math.round(height * ratio);
+      if (canvas.width !== deviceWidth || canvas.height !== deviceHeight) {
+        canvas.width = deviceWidth;
+        canvas.height = deviceHeight;
       }
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, width, height);
 
+      // 显示值向轮询目标快攻慢放，柱体平滑升降而不是逐帧硬跳
       const bins = binsRef.current;
+      const target = targetRef.current;
+      for (let i = 0; i < bins.length; i += 1) {
+        const goal = Math.min(1, Math.max(0, target[i] ?? 0));
+        const k = goal > bins[i] ? BAR_ATTACK : BAR_RELEASE;
+        bins[i] += (goal - bins[i]) * k;
+      }
       const gap = 2;
       const barWidth = (width - gap * (bins.length - 1)) / bins.length;
       for (let i = 0; i < bins.length; i += 1) {
@@ -90,25 +105,15 @@ export function SpectrumPanel() {
         void invoke<SpectrumFrame | null>("get_spectrum_frame")
           .then((frame) => {
             if (disposed || !frame) return;
-            binsRef.current = frame.bins;
+            targetRef.current = frame.bins;
           })
           .catch(() => {
             // 轮询失败静默；下一拍重试
           });
       }, POLL_INTERVAL_MS);
     } else {
-      // 暂停后本地指数衰减到零，视觉自然收敛
-      pollTimer = window.setInterval(() => {
-        const decayed = binsRef.current.map((value) => value * 0.82);
-        binsRef.current = decayed;
-        if (decayed.every((value) => value < 0.004)) {
-          binsRef.current = new Array(BIN_COUNT).fill(0);
-          if (pollTimer !== null) {
-            window.clearInterval(pollTimer);
-            pollTimer = null;
-          }
-        }
-      }, POLL_INTERVAL_MS);
+      // 暂停后目标归零，渲染循环的 release 平滑把柱体自然收敛到零后自动停帧
+      targetRef.current = new Array(BIN_COUNT).fill(0);
     }
 
     return () => {

@@ -46,13 +46,30 @@ pub struct Track {
     pub duration_seconds: f64,
 }
 
+impl AudioFormat {
+    /// 展示用大写标签（`{:?}` 会把 `Other("tak")` 打成字面量，展示层不用它）
+    pub fn label(&self) -> String {
+        match self {
+            AudioFormat::Other(ext) => ext.to_uppercase(),
+            other => format!("{other:?}").to_uppercase(),
+        }
+    }
+}
+
 impl Track {
     pub fn bitdepth_label(&self) -> String {
+        // L-25：44100/1000 的整数除法曾把 44.1k 家族全部显示成 "44kHz"
+        // （88.2→88、176.4→176、352.8→352）；非整千采样率保留一位小数。
+        let khz = f64::from(self.sample_rate.0) / 1000.0;
+        let khz_label = if self.sample_rate.0.is_multiple_of(1000) {
+            format!("{}", self.sample_rate.0 / 1000)
+        } else {
+            format!("{khz:.1}")
+        };
         format!(
-            "{:?} {}bit / {}kHz",
-            self.format,
-            self.bit_depth.0,
-            self.sample_rate.0 / 1000
+            "{} {}bit / {khz_label}kHz",
+            self.format.label(),
+            self.bit_depth.0
         )
     }
 }

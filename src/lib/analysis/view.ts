@@ -212,6 +212,25 @@ export function stepAnalysisView(view: AnalysisView, now: number) {
       channel.vuDb += (LEVEL_DB_FLOOR - channel.vuDb) * kDecay;
     }
     view.stereo.corr *= 1 - Math.min(1, dt * 1.5);
+    // 声场散点云一并塌缩淡出（此前遗漏，暂停后散点定格高亮与“断流后所有量
+    // 优雅衰减”矛盾）。余晖 trail 按引用变化推进，这里替换新数组让定格的旧
+    // 余晖帧随之滚动挤出；收缩到不可见后置空停止分配。
+    if (view.stereo.pts.length > 0) {
+      const kPts = 1 - Math.min(1, dt * 2);
+      const shrunk = new Float32Array(view.stereo.pts.length);
+      let maxAbs = 0;
+      for (let i = 0; i < shrunk.length; i += 1) {
+        shrunk[i] = view.stereo.pts[i] * kPts;
+        const abs = Math.abs(shrunk[i]);
+        if (abs > maxAbs) maxAbs = abs;
+      }
+      if (maxAbs < 0.004) {
+        view.stereo.pts = new Float32Array(0);
+        view.stereo.count = 0;
+      } else {
+        view.stereo.pts = shrunk;
+      }
+    }
     // 示波器迹线淡出归零
     const kWave = 1 - Math.min(1, dt * 2);
     for (let i = 0; i < view.wave.points; i += 1) {

@@ -132,19 +132,22 @@ export function SettingsModal() {
     void refreshCacheStatus();
   }, [open]);
 
-  const apply = () => {
-    toggleSettings();
-    showNotification(`已保存输出配置: ${currentDriver?.label ?? driverKind}`);
-  };
+  // M-18：驱动/设备/SMTC 等设置全部即时生效，弹窗从不存在“待保存”的输出
+  // 配置——旧「保存配置/取消」双按钮语义均为假（保存只是关窗+假通知，取消
+  // 不回滚）。收敛为单个「完成」：若缓存 tab 有未提交的表单改动则先自动提交。
+  const cacheSettingsDirty =
+    cacheStatus !== null &&
+    (cacheDir !== cacheStatus.settings.cacheDir ||
+      maxSizeMb !== String(cacheStatus.settings.maxSizeMb) ||
+      autoCleanup !== cacheStatus.settings.autoCleanup);
 
-  const saveCacheSettings = async (event: FormEvent) => {
-    event.preventDefault();
-    if (cacheBusy) return;
+  const persistCacheSettings = async (): Promise<boolean> => {
+    if (cacheBusy) return false;
 
     const parsedMax = Number(maxSizeMb);
     if (!Number.isFinite(parsedMax) || parsedMax < 128) {
       showNotification("缓存上限不能低于 128 MB");
-      return;
+      return false;
     }
 
     setCacheBusy(true);
@@ -161,13 +164,29 @@ export function SettingsModal() {
       setMaxSizeMb(String(status.settings.maxSizeMb));
       setAutoCleanup(status.settings.autoCleanup);
       showNotification("缓存设置已保存");
+      return true;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: update_cache_settings", err);
       showNotification(`保存缓存设置失败：${String(err)}`);
+      return false;
     } finally {
       setCacheBusy(false);
     }
+  };
+
+  const finishAndClose = async () => {
+    if (cacheSettingsDirty) {
+      const saved = await persistCacheSettings();
+      // 保存失败留在弹窗，让用户修正或明确放弃
+      if (!saved) return;
+    }
+    toggleSettings();
+  };
+
+  const saveCacheSettings = (event: FormEvent) => {
+    event.preventDefault();
+    void persistCacheSettings();
   };
 
   const clearAppCache = async () => {
@@ -582,16 +601,10 @@ export function SettingsModal() {
 
       <div className="flex justify-end gap-3 pt-3 border-t border-line">
         <button
-          onClick={toggleSettings}
-          className="px-4 py-1.5 font-tw text-xs font-bold text-ink2 hover:text-ink transition-colors"
-        >
-          取消
-        </button>
-        <button
-          onClick={apply}
+          onClick={() => void finishAndClose()}
           className="border-[1.5px] border-ink bg-ink px-4 py-1.5 font-tw text-xs font-bold text-paper hover:bg-stamp hover:border-stamp transition-all"
         >
-          保存配置
+          {cacheSettingsDirty ? "保存并关闭" : "完成"}
         </button>
       </div>
     </Dialog>

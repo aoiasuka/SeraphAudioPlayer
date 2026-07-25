@@ -658,12 +658,24 @@ pub(crate) fn parse_lrc_time_token(token: &str) -> Option<f64> {
     let normalized = token.replace(',', ".");
     let parts = normalized.split(':').collect::<Vec<_>>();
     let (hours, minutes, seconds) = match parts.as_slice() {
-        [minutes, seconds] => (0, minutes.parse::<u64>().ok()?, seconds),
-        [hours, minutes, seconds] => (
-            hours.parse::<u64>().ok()?,
-            minutes.parse::<u64>().ok()?,
-            seconds,
-        ),
+        [minutes, seconds] => (0, minutes.parse::<u64>().ok()?, (*seconds).to_string()),
+        [first, second, third] => {
+            // M-11：`[mm:ss:cc]`（千千静听时代的冒号百分秒变体）不能按
+            // hh:mm:ss 解析——`[00:29:26]` 是 29.26s 而不是 1766s，否则歌词
+            // 导入成功但全程不滚动。第三段为 1-2 位纯数字时判定为百分秒；
+            // 含小数点或超两位才按真 hh:mm:ss 处理。
+            let is_centiseconds =
+                (1..=2).contains(&third.len()) && third.chars().all(|ch| ch.is_ascii_digit());
+            if is_centiseconds {
+                (0, first.parse::<u64>().ok()?, format!("{second}.{third}"))
+            } else {
+                (
+                    first.parse::<u64>().ok()?,
+                    second.parse::<u64>().ok()?,
+                    (*third).to_string(),
+                )
+            }
+        }
         _ => return None,
     };
 

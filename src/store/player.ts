@@ -144,6 +144,7 @@ export const usePlayerStore = create<PlayerStore>()(
         bilibiliLoginStatus: { loggedIn: false },
         bilibiliFfmpegStatus: { available: false },
         ffmpegDownload: { stage: "idle", percent: 0 },
+        bilibiliBatchProgress: null,
         loginQr: null,
         isLoginBusy: false,
 

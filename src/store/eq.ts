@@ -2,6 +2,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { DEFAULT_EQ_BANDS } from "@/lib/eqPresets";
+import {
+  sanitizeCrossfeed,
+  sanitizeEqBandPatch,
+  sanitizeEqBands,
+  sanitizeEqPreamp,
+  sanitizeUserPresets,
+} from "@/lib/eqSanitize";
 import { usePlayerStore } from "@/store/player";
 import type {
   CrossfeedSettings,
@@ -119,9 +126,13 @@ export const useEqStore = create<EqState>()(
         },
 
         updateBand: (index, patch) => {
+          // H-1：高级编辑输入框清空时 parseFloat("") 会送来 NaN，
+          // 消毒后无效字段等价于“本次不修改”，绝不让坏值进入持久化。
+          const clean = sanitizeEqBandPatch(patch);
+          if (Object.keys(clean).length === 0) return;
           set((state) => ({
             bands: state.bands.map((band, i) =>
-              i === index ? { ...band, ...patch } : band
+              i === index ? { ...band, ...clean } : band
             ),
             activePresetId: null,
           }));
@@ -152,7 +163,13 @@ export const useEqStore = create<EqState>()(
         },
 
         setBands: (bands, preamp, presetId = null) => {
-          set({ bands, preamp, activePresetId: presetId });
+          // H-1：导入路径（JSON/APO/预设）统一消毒——无效频段丢弃、数值钳制，
+          // 全部无效则回落默认，杜绝 NaN → 持久化 → 重启白屏死循环。
+          set({
+            bands: sanitizeEqBands(bands) ?? DEFAULT_EQ_BANDS,
+            preamp: sanitizeEqPreamp(preamp),
+            activePresetId: presetId,
+          });
           commit();
         },
 
@@ -167,7 +184,11 @@ export const useEqStore = create<EqState>()(
         },
 
         applyPreset: (bands, preamp, presetId) => {
-          set({ bands, preamp, activePresetId: presetId });
+          set({
+            bands: sanitizeEqBands(bands) ?? DEFAULT_EQ_BANDS,
+            preamp: sanitizeEqPreamp(preamp),
+            activePresetId: presetId,
+          });
           commit();
         },
 
@@ -214,6 +235,25 @@ export const useEqStore = create<EqState>()(
         userPresets: state.userPresets,
         activePresetId: state.activePresetId,
       }),
+      // H-1 根治层：无论坏数据从哪条路径进入 localStorage（配置备份整包
+      // 写入、历史版本残留、外部手改），水合时全部消毒——坏 preamp/band
+      // 曾在重启后让 toFixed 抛 TypeError 卸载整棵 React 树（启动白屏）。
+      merge: (persisted, current) => {
+        const raw = (
+          persisted && typeof persisted === "object" ? persisted : {}
+        ) as Record<string, unknown>;
+        return {
+          ...current,
+          enabled: raw.enabled === true,
+          preamp: sanitizeEqPreamp(raw.preamp),
+          bands: sanitizeEqBands(raw.bands) ?? DEFAULT_EQ_BANDS,
+          crossfeed: sanitizeCrossfeed(raw.crossfeed, DEFAULT_CROSSFEED),
+          applyToDsd: raw.applyToDsd === true,
+          userPresets: sanitizeUserPresets(raw.userPresets),
+          activePresetId:
+            typeof raw.activePresetId === "string" ? raw.activePresetId : null,
+        };
+      },
       onRehydrateStorage: () => (state) => {
         // 水合完成后把持久化的 DSP 配置同步到引擎，重启保持一致。
         if (state) {

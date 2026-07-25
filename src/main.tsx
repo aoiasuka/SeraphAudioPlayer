@@ -3,6 +3,7 @@ import "./boot/applyConfigImport";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 // Keep bundled fonts lean; heavier display weights fall back to system synthesis.
 import "@fontsource/courier-prime/400.css";
 import "@fontsource/noto-sans-sc/400.css";
@@ -11,6 +12,8 @@ import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </React.StrictMode>
 );

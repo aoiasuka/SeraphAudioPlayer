@@ -41,12 +41,17 @@ pub(crate) fn strip_track_number_prefix(value: &str) -> &str {
         .unwrap_or(0);
 
     if (1..=3).contains(&digit_end) {
-        let rest = trimmed[digit_end..]
-            .trim_start()
-            .trim_start_matches(['-', '.', '_', ' '])
-            .trim_start();
-        if !rest.is_empty() {
-            return rest;
+        // M-10：数字后必须紧跟分隔符（"01 - x"、"01. x"、"01_x"、"01 x"）才算
+        // 曲号；否则 "365天的思念"、"24K Magic" 这类数字开头的标题会被误剥。
+        let after = &trimmed[digit_end..];
+        if after.starts_with([' ', '-', '.', '_']) {
+            let rest = after
+                .trim_start()
+                .trim_start_matches(['-', '.', '_', ' '])
+                .trim_start();
+            if !rest.is_empty() {
+                return rest;
+            }
         }
     }
 

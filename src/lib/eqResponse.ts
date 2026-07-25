@@ -19,7 +19,9 @@ function identity(): Biquad {
 
 function designBiquad(band: EqBand, sampleRate: number): Biquad {
   const nyquist = sampleRate * 0.5;
-  const freq = Math.max(1, Math.min(band.freq, nyquist - 1));
+  // freq 兜底：NaN 会沿 Math.min/max 传播进系数，整条 SVG 曲线 path 失效
+  const safeFreq = Number.isFinite(band.freq) ? band.freq : 1000;
+  const freq = Math.max(1, Math.min(safeFreq, nyquist - 1));
   if (freq >= nyquist) return identity();
   const q = Number.isFinite(band.q) && band.q > 1e-3 ? band.q : 0.707;
   const gainDb = Number.isFinite(band.gain) ? band.gain : 0;

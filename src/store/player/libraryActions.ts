@@ -243,6 +243,7 @@ export function createLibraryActions(
         name: string;
         paths: string[];
         skipped: number;
+        truncated?: boolean;
       }>("import_playlist_m3u8", { path: selected });
 
       if (imported.paths.length === 0) {
@@ -250,8 +251,9 @@ export function createLibraryActions(
         return;
       }
 
-      // 先入库（内部有去重合并），再按物理路径映射回曲目 id 建歌单
-      await get().importLocalTracks(imported.paths);
+      // 先入库（内部有去重合并），再按物理路径映射回曲目 id 建歌单；
+      // keepView 留在歌单页，不被 importLocalTracks 甩到本地音乐页（M-7）
+      await get().importLocalTracks(imported.paths, { keepView: true });
       const idByPath = new Map(
         get().playlist.map((track) => [normalizePath(track.path), track.id])
       );
@@ -265,10 +267,11 @@ export function createLibraryActions(
       }
 
       const names = new Set(get().userPlaylists.map((item) => item.name));
-      let name = imported.name.trim() || "导入歌单";
+      const baseName = imported.name.trim() || "导入歌单";
+      let name = baseName;
       let suffix = 2;
       while (names.has(name)) {
-        name = `${imported.name} ${suffix}`;
+        name = `${baseName} ${suffix}`;
         suffix += 1;
       }
 
@@ -284,11 +287,10 @@ export function createLibraryActions(
           },
         ],
       }));
-      get().showNotification(
-        imported.skipped > 0
-          ? `已导入歌单「${name}」（${trackIds.length} 首，跳过 ${imported.skipped} 条）`
-          : `已导入歌单「${name}」（${trackIds.length} 首）`
-      );
+      const parts = [`${trackIds.length} 首`];
+      if (imported.skipped > 0) parts.push(`跳过 ${imported.skipped} 条`);
+      if (imported.truncated) parts.push("清单超长已截断");
+      get().showNotification(`已导入歌单「${name}」（${parts.join("，")}）`);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("import_playlist_m3u8 failed", err);
@@ -473,7 +475,7 @@ export function createLibraryActions(
     }
   },
 
-  importLocalTracks: async (paths) => {
+  importLocalTracks: async (paths, options) => {
     const cleanPaths = paths.filter(Boolean);
     if (cleanPaths.length === 0) return;
 
@@ -515,7 +517,9 @@ export function createLibraryActions(
           currentTrackIndex: previousLength === 0 && newTracks.length > 0
             ? 0
             : state.currentTrackIndex,
-          activeView: "local",
+          // M-7：M3U8 建歌单等调用方传 keepView 留在当前页（此前无条件跳
+          // 本地音乐页，导入歌单的瞬间用户被甩离歌单页）
+          ...(options?.keepView ? {} : { activeView: "local" as const }),
         };
       });
 

@@ -11,6 +11,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { parseApoPreset, toApoText } from "@/lib/eqApoParser";
 import { GENRE_EQ_PRESETS } from "@/lib/eqPresets";
 import { combinedResponseDb, logFreqPoints } from "@/lib/eqResponse";
+import { sanitizeEqBands, sanitizeEqPreamp } from "@/lib/eqSanitize";
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
@@ -139,9 +140,20 @@ export function EqPage() {
           preamp?: number;
           bands?: EqBand[];
         };
-        if (Array.isArray(parsed.bands) && parsed.bands.length > 0) {
-          eq.setBands(parsed.bands, parsed.preamp ?? 0, null);
-          showNotification(`已导入 JSON 预设（${parsed.bands.length} 段）`);
+        // H-1：先消毒再入库——无效频段丢弃、超上限截断、preamp 钳制，
+        // 提示段数以消毒后的实际数量为准（与 APO 分支同样导入后自动启用）
+        const bands = sanitizeEqBands(parsed.bands);
+        if (bands) {
+          const dropped = Array.isArray(parsed.bands)
+            ? parsed.bands.length - bands.length
+            : 0;
+          eq.setBands(bands, sanitizeEqPreamp(parsed.preamp), null);
+          if (!eq.enabled) eq.setEnabled(true);
+          showNotification(
+            dropped > 0
+              ? `已导入 JSON 预设（${bands.length} 段，忽略 ${dropped} 段无效数据）`
+              : `已导入 JSON 预设（${bands.length} 段）`
+          );
           return;
         }
       }

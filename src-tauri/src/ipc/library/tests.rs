@@ -33,6 +33,56 @@ fn keeps_plain_filename_as_title() {
 }
 
 #[test]
+fn strips_track_number_only_with_separator() {
+    // M-10：数字前缀必须带分隔符才当曲号剥离
+    assert_eq!(strip_track_number_prefix("01 - Song"), "Song");
+    assert_eq!(strip_track_number_prefix("01. Song"), "Song");
+    assert_eq!(strip_track_number_prefix("01_Song"), "Song");
+    assert_eq!(strip_track_number_prefix("01 Song"), "Song");
+    // 数字直接连标题：不是曲号，保持原样
+    assert_eq!(strip_track_number_prefix("365天的思念"), "365天的思念");
+    assert_eq!(strip_track_number_prefix("24K Magic"), "24K Magic");
+    // 4 位以上数字（年份等）不剥
+    assert_eq!(strip_track_number_prefix("1999 - Party"), "1999 - Party");
+}
+
+#[test]
+fn parses_colon_centisecond_lrc_variant() {
+    // M-11：千千静听时代 [mm:ss:cc] 冒号百分秒变体（[00:29:26] = 29.26s）
+    let time = parse_lrc_time_token("00:29:26").expect("colon centiseconds");
+    assert!((time - 29.26).abs() < 1e-6, "got {time}");
+    // 标准逗号/点分变体不受影响
+    let dot = parse_lrc_time_token("00:29.26").expect("dot variant");
+    assert!((dot - 29.26).abs() < 1e-6);
+    // 第三段含小数点 → 真 hh:mm:ss
+    let hms = parse_lrc_time_token("01:02:03.5").expect("hh:mm:ss");
+    assert!((hms - 3723.5).abs() < 1e-6, "got {hms}");
+}
+
+#[test]
+fn ranked_provider_items_keeps_api_order_without_duration() {
+    // M-13：本地时长未知（0）时不能按候选时长升序（30 秒试听会排第一）
+    let items = vec![
+        json!({ "duration": 240_000 }),
+        json!({ "duration": 30_000 }),
+        json!({ "duration": 180_000 }),
+    ];
+    let ranked = ranked_provider_items(&items, 0);
+    let durations: Vec<u64> = ranked
+        .iter()
+        .filter_map(|item| item.get("duration").and_then(serde_json::Value::as_u64))
+        .collect();
+    assert_eq!(durations, vec![240_000, 30_000, 180_000], "保持接口原序");
+
+    // 有时长时仍按接近度排序
+    let ranked = ranked_provider_items(&items, 179);
+    let first = ranked[0]
+        .get("duration")
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(first, Some(180_000));
+}
+
+#[test]
 fn enriches_dsd_metadata_from_decoder_probe() {
     let path = temp_audio_path("seraph-import-dsd", "dsf");
     write_test_dsf(&path);

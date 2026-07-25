@@ -116,8 +116,14 @@ export function buildTrackMenuEntries(
       disabled: index < 0 && !isCurrent,
       onSelect: () => {
         const live = usePlayerStore.getState();
-        if (isCurrent) live.togglePlayback();
-        else if (index >= 0) live.loadTrack(index);
+        if (live.currentTrack()?.id === track.id) {
+          live.togglePlayback();
+          return;
+        }
+        // L-16：菜单开着时 playlist 可能已变（批量导入/删除），打开瞬间的
+        // 快照 index 会错位播错歌——执行时按 id 现查。
+        const liveIndex = live.playlist.findIndex((item) => item.id === track.id);
+        if (liveIndex >= 0) live.loadTrack(liveIndex);
       },
     },
     {
@@ -319,8 +325,12 @@ export function buildTrackGroupMenuEntries(
       icon: Play,
       disabled: firstIndex < 0,
       onSelect: () => {
+        // L-16：同曲目行菜单——执行时按 id 现查，防打开期间列表变化错位
         const live = usePlayerStore.getState();
-        if (firstIndex >= 0) live.loadTrack(firstIndex);
+        const liveIndex = first
+          ? live.playlist.findIndex((item) => item.id === first.id)
+          : -1;
+        if (liveIndex >= 0) live.loadTrack(liveIndex);
       },
     },
     buildAddToPlaylistEntry(tracks.map((track) => track.id)),

@@ -159,7 +159,15 @@ export function resizeItem(
   h: number
 ): GridLayout | null {
   const cur = layout[id];
-  const rect = clampRect({ ...cur, w, h }, id);
+  const min = PANEL_MIN_SIZE[id];
+  // 左上角固定：宽/高上限受当前 x/y 约束。不能复用 clampRect——它会在
+  // w 触到 12 时反向回拉 x（贴右缘面板向右拖 resize 反而整体左移）。
+  const rect = {
+    x: cur.x,
+    y: cur.y,
+    w: Math.min(GRID_COLS - cur.x, Math.max(min.w, Math.round(w))),
+    h: Math.min(GRID_ROWS - cur.y, Math.max(min.h, Math.round(h))),
+  };
   if (rect.w === cur.w && rect.h === cur.h) return layout;
   return settle(layout, visible, id, rect);
 }

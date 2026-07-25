@@ -358,7 +358,11 @@ export function createPlaybackActions(
   seek: (sec) => {
     const track = get().currentTrack();
     if (!track) return;
-    const seconds = Math.max(0, Math.min(sec, track.duration));
+    // L-14：duration=0（时长探测失败）的曲目不做上限钳制——后端专门为此
+    // 保留了透传兼容路径，前端一行钳死会让任何 seek 都归 0。
+    const upperBound = track.duration > 0 ? track.duration : Number.POSITIVE_INFINITY;
+    const seconds = Math.max(0, Math.min(sec, upperBound));
+    if (!Number.isFinite(seconds)) return;
     if (get().currentTime === seconds) return;
     // 发现7：记录抑制窗口，忽略随后在途的旧位置 Progress 事件
     seekGuard.until = Date.now() + 400;

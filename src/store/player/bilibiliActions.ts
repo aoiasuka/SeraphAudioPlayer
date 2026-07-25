@@ -86,7 +86,7 @@ export function bilibiliImportErrorMessage(err: unknown) {
 export function createBilibiliActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites" | "reloadStreamingTrack"> {
+): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites" | "cancelBilibiliFavoritesImport" | "reloadStreamingTrack"> {
   return {
   importBilibiliAudio: async (input, options) => {
     // 审2-R10：返回是否导入成功，调用方（StreamingPage）据此决定是否清空输入框（L-7）
@@ -160,6 +160,9 @@ export function createBilibiliActions(
       return null;
     }
 
+    // M-15：立刻进入“导入中”态（total 未知先置 0），真实进度由
+    // seraph://bilibili-batch 事件写入；结束/异常都在 finally 清理。
+    set({ bilibiliBatchProgress: { current: 0, total: 0, title: "", ok: true } });
     try {
       const result = await invoke<BilibiliBatchImportResult>("import_bilibili_favorites", {
         input: cleanInput,
@@ -176,9 +179,14 @@ export function createBilibiliActions(
           currentTrackIndex: previousLength === 0 ? 0 : get().currentTrackIndex,
           activeView: "streaming",
         });
+        const summary = `新增 ${stats.addedCount} 首，更新 ${stats.updatedCount} 首，失败 ${failed.length} 首`;
         get().showNotification(
-          `收藏夹导入完成：新增 ${stats.addedCount} 首，更新 ${stats.updatedCount} 首，失败 ${failed.length} 首`
+          result.cancelled
+            ? `收藏夹导入已取消：${summary}`
+            : `收藏夹导入完成：${summary}`
         );
+      } else if (result.cancelled) {
+        get().showNotification("收藏夹导入已取消");
       } else {
         get().showNotification(
           failed.length > 0
@@ -187,12 +195,24 @@ export function createBilibiliActions(
         );
       }
 
-      return { tracks, failed };
+      return { tracks, failed, cancelled: result.cancelled };
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: import_bilibili_favorites", err);
       get().showNotification(bilibiliImportErrorMessage(err));
       return null;
+    } finally {
+      set({ bilibiliBatchProgress: null });
+    }
+  },
+
+  cancelBilibiliFavoritesImport: async () => {
+    try {
+      await invoke("cancel_bilibili_favorites_import");
+      get().showNotification("正在取消收藏夹导入（当前曲目完成后停止）…");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: cancel_bilibili_favorites_import", err);
     }
   },
 

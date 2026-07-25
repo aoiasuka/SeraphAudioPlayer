@@ -87,6 +87,10 @@ fn pump(
     state: &State<'_, AppState>,
 ) -> IpcResult<parking_lot::MutexGuard<'static, Option<AnalysisHub>>> {
     let tap = state.audio.spectrum_tap();
+    // drain 必须在 HUB 锁内：侧栏与分析页并发轮询时，锁外 drain 可能让两个
+    // 线程各持一段样本后以相反顺序喂给 FFT（波形乱序 → 一帧视觉毛刺）。
+    // 锁顺序恒为 HUB → tap（写侧渲染线程只 try_lock tap，不碰 HUB），无死锁。
+    let mut guard = HUB.lock();
     let mut samples = Vec::new();
     let TapMeta {
         channels,
@@ -95,7 +99,6 @@ fn pump(
     let channels = channels.max(1);
     let sample_rate = sample_rate.max(8_000);
 
-    let mut guard = HUB.lock();
     let rebuild = !matches!(
         guard.as_ref(),
         Some(hub) if hub.channels == channels && hub.sample_rate == sample_rate

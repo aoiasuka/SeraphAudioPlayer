@@ -10,8 +10,10 @@
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
-/// 环形容量：48kHz 双声道约 170ms——足够覆盖 30fps 轮询间隔的抖动。
-const TAP_CAPACITY: usize = 16 * 1024;
+/// 环形容量：384kHz 双声道约 85ms、48kHz 双声道约 680ms——独占模式高采样率
+/// （DoP/352.8k+）流下也足以覆盖前端 30fps 轮询间隔 + 调度抖动，
+/// 不至于在两次 drain 之间溢出造成样本断流（断流会让 FFT 窗口出现波形跳变毛刺）。
+const TAP_CAPACITY: usize = 64 * 1024;
 
 pub struct SpectrumTap {
     inner: Mutex<TapInner>,

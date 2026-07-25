@@ -36,7 +36,7 @@ pub(crate) use reqwest::{
 };
 pub(crate) use serde::{de::DeserializeOwned, Deserialize, Serialize};
 pub(crate) use serde_json::Value;
-pub(crate) use tauri::{AppHandle, Manager};
+pub(crate) use tauri::{AppHandle, Emitter, Manager};
 
 pub(crate) use crate::ipc::{
     cache::{cache_dir, enforce_cache_limit_preserving_many, unique_temp_path},

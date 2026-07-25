@@ -202,12 +202,19 @@ pub async fn fetch_online_lyrics(
     }
 
     let client = online_lyrics_client().map_err(IpcError::network)?;
-    let candidates = fetch_online_lyrics_from_sources(&client, &query, duration).await;
-    if candidates.is_empty() {
+    let fetch = fetch_online_lyrics_from_sources(&client, &query, duration).await;
+    if fetch.candidates.is_empty() {
+        // M-12：有源在搜索阶段就失败（断网/接口异常）时不能谎报“未找到”，
+        // 让前端拿到 network 错误码给出可行动的提示。
+        if fetch.failed_sources > 0 {
+            return Err(IpcError::network(
+                "在线歌词源访问失败，请检查网络连接后重试",
+            ));
+        }
         return Err(IpcError::not_found("online lyrics not found"));
     }
 
-    Ok(candidates)
+    Ok(fetch.candidates)
 }
 
 #[tauri::command]

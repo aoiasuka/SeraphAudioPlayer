@@ -53,6 +53,7 @@ pub fn run() {
             ipc::bilibili::import_bilibili_audio,
             ipc::bilibili::import_bilibili_audio_with_options,
             ipc::bilibili::import_bilibili_favorites,
+            ipc::bilibili::cancel_bilibili_favorites_import,
             ipc::library::apply_online_lyrics,
             ipc::library::fetch_online_lyrics,
             ipc::library::fetch_online_cover,

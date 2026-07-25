@@ -306,9 +306,12 @@ impl Decoder for DsdDecoder {
         for state in self.dc_state.iter_mut() {
             *state = (0.0, 0.0);
         }
-        // PCM 帧计数对齐到 seek 位置（按 byte_offset 反推）
-        let pcm_rate = (self.dsd_sample_rate as u64 / DSD_TO_PCM_DECIMATION as u64).max(1);
-        self.pcm_frames_emitted = (seconds.max(0.0) * pcm_rate as f64) as u64;
+        // L-26：PCM 帧计数按实际落点（对齐后的 byte_offset）反推。DSF 的读取
+        // 位置向下对齐到 block 边界（DSD64 典型 block ≈11.6ms 音频），此前按
+        // 请求秒数回设会让时间戳比实际音频恒定超前最多一个 block，进度显示、
+        // 歌词对位持续偏移到曲尾/下次 seek。
+        let bytes_per_channel = byte_offset / channels.max(1);
+        self.pcm_frames_emitted = bytes_per_channel * 8 / DSD_TO_PCM_DECIMATION as u64;
         Ok(())
     }
 }

@@ -81,6 +81,10 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     setScrollTop(element.scrollTop);
   };
   const hasTracks = tracks.length > 0;
+  // M-17：滚动容器实际挂载条件是「过滤后非空」（displayTracks）——搜索无结果
+  // 会卸载容器、清词后重挂。observer 的 effect 必须跟随该信号重跑，否则重挂的
+  // 新容器无人观察，viewportHeight 永久卡 0，所有列表页只渲染首屏十几行。
+  const hasVisibleTracks = displayTracks.length > 0;
   // 发现6：用 ResizeObserver 测量容器实际高度，修复首屏高窗口/resize 时底部曲目空白
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -91,7 +95,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     const resizeObserver = new ResizeObserver(updateViewport);
     resizeObserver.observe(element);
     return () => resizeObserver.disconnect();
-  }, [hasTracks]);
+  }, [hasTracks, hasVisibleTracks]);
 
   const resetScroll = () => {
     setScrollTop(0);

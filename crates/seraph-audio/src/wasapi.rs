@@ -348,12 +348,10 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
         let render_client = audio_client
             .get_audiorenderclient()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let buffer_frames = audio_client
-            .get_buffer_size()
-            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let sleep_period = Duration::from_millis(
-            (500 * u64::from(buffer_frames) / u64::from(sample_rate.0.max(1))).max(1),
-        );
+        // 与 engine.rs 独占渲染循环同型：按设备周期唤醒而非半缓冲，
+        // 保证频谱 tap 的数据节奏 ~10ms 一坨，可视化不退化成台阶。
+        let sleep_period = Duration::from_nanos(period.max(0) as u64 * 100)
+            .clamp(Duration::from_millis(2), Duration::from_millis(15));
         audio_client
             .start_stream()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;

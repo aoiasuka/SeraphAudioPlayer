@@ -128,6 +128,18 @@ pub(crate) struct FfmpegDownloadProgress {
 pub struct BilibiliBatchImportResult {
     pub(crate) tracks: Vec<ImportedTrack>,
     pub(crate) failed: Vec<BilibiliImportFailure>,
+    /// 用户中途取消（已导入部分照常返回）
+    pub(crate) cancelled: bool,
+}
+
+/// 收藏夹批量导入进度事件（`seraph://bilibili-batch`）payload。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BilibiliBatchProgress {
+    pub(crate) current: usize,
+    pub(crate) total: usize,
+    pub(crate) title: String,
+    pub(crate) ok: bool,
 }
 
 #[derive(Debug, Serialize)]

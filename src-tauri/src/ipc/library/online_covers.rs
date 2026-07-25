@@ -24,11 +24,30 @@ pub async fn fetch_online_cover(
     }
 
     let client = online_lyrics_client().map_err(IpcError::network)?;
-    let image = match fetch_qq_cover_bytes(&client, &query).await {
-        Some(bytes) => Some(bytes),
-        None => fetch_itunes_cover_bytes(&client, &query).await,
+    // M-12：区分“源访问失败”与“确实没有”——QQ 优先，失败或无图再走 iTunes
+    let mut source_failed = false;
+    let qq = fetch_qq_cover_bytes(&client, &query).await;
+    let image = match qq {
+        Ok(Some(bytes)) => Some(bytes),
+        outcome => {
+            if outcome.is_err() {
+                source_failed = true;
+            }
+            match fetch_itunes_cover_bytes(&client, &query).await {
+                Ok(bytes) => bytes,
+                Err(()) => {
+                    source_failed = true;
+                    None
+                }
+            }
+        }
     };
     let Some(bytes) = image else {
+        if source_failed {
+            return Err(IpcError::network(
+                "在线封面源访问失败，请检查网络连接后重试",
+            ));
+        }
         return Err(IpcError::not_found("在线封面未找到"));
     };
 
@@ -61,7 +80,8 @@ pub async fn fetch_online_cover(
 }
 
 /// QQ 音乐搜索 → 第一个带 albummid 的结果 → 500x500 专辑封面。
-async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Option<Vec<u8>> {
+/// Err(()) = 搜索请求失败（网络/解析）；Ok(None) = 接口正常但没匹配到封面。
+async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec<u8>>, ()> {
     let search = client
         .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
         .query(&[
@@ -74,16 +94,19 @@ async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Option<Vec<u8>> {
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .ok()?
+        .map_err(|_| ())?
         .json::<Value>()
         .await
-        .ok()?;
+        .map_err(|_| ())?;
 
-    let songs = search
+    let Some(songs) = search
         .get("data")
         .and_then(|value| value.get("song"))
         .and_then(|value| value.get("list"))
-        .and_then(Value::as_array)?;
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
 
     for song in songs {
         let Some(album_mid) = song
@@ -95,14 +118,15 @@ async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Option<Vec<u8>> {
         };
         let url = format!("https://y.gtimg.cn/music/photo_new/T002R500x500M000{album_mid}.jpg");
         if let Some(bytes) = download_image(client, &url).await {
-            return Some(bytes);
+            return Ok(Some(bytes));
         }
     }
-    None
+    Ok(None)
 }
 
 /// iTunes Search 兜底：artworkUrl100 放大到 600x600。
-async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Option<Vec<u8>> {
+/// Err(()) = 搜索请求失败；Ok(None) = 接口正常但没匹配到封面。
+async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec<u8>>, ()> {
     let search = client
         .get("https://itunes.apple.com/search")
         .query(&[
@@ -114,22 +138,24 @@ async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Option<Vec<u8
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .ok()?
+        .map_err(|_| ())?
         .json::<Value>()
         .await
-        .ok()?;
+        .map_err(|_| ())?;
 
-    let results = search.get("results").and_then(Value::as_array)?;
+    let Some(results) = search.get("results").and_then(Value::as_array) else {
+        return Ok(None);
+    };
     for item in results {
         let Some(artwork) = item.get("artworkUrl100").and_then(Value::as_str) else {
             continue;
         };
         let url = artwork.replace("100x100", "600x600");
         if let Some(bytes) = download_image(client, &url).await {
-            return Some(bytes);
+            return Ok(Some(bytes));
         }
     }
-    None
+    Ok(None)
 }
 
 async fn download_image(client: &Client, url: &str) -> Option<Vec<u8>> {

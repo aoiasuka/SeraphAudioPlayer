@@ -1,5 +1,18 @@
 use super::prelude::*;
 
+/// M-15：收藏夹批量导入的取消令牌。批量最多 200 首串行下载可达数小时，
+/// 必须给用户中断手段；置位后当前这首完成即停止，已导入部分照常返回。
+static FAVORITES_IMPORT_CANCELLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 批量导入进度事件通道（模式同 `seraph://ffmpeg-download`）。
+const BATCH_PROGRESS_EVENT: &str = "seraph://bilibili-batch";
+
+#[tauri::command]
+pub fn cancel_bilibili_favorites_import() {
+    FAVORITES_IMPORT_CANCELLED.store(true, std::sync::atomic::Ordering::Release);
+}
+
 #[tauri::command]
 pub async fn import_bilibili_audio(app: AppHandle, input: String) -> Result<ImportedTrack, String> {
     import_bilibili_audio_with_options(app, input, None).await
@@ -21,6 +34,8 @@ pub async fn import_bilibili_favorites(
     input: String,
     options: Option<BilibiliImportOptions>,
 ) -> Result<BilibiliBatchImportResult, String> {
+    use std::sync::atomic::Ordering;
+
     let media_id = extract_media_id(&input).ok_or_else(|| {
         "没有找到有效的 B 站收藏夹 media_id/fid，请粘贴收藏夹链接或数字 ID".to_string()
     })?;
@@ -31,24 +46,47 @@ pub async fn import_bilibili_favorites(
         return Err("收藏夹里没有可导入的视频，或当前账号没有访问权限".into());
     }
 
+    // 新一轮批量开始：清掉上一轮可能残留的取消标记
+    FAVORITES_IMPORT_CANCELLED.store(false, Ordering::Release);
+
+    let total = bvids.len();
     let mut tracks = Vec::new();
     let mut failed = Vec::new();
+    let mut cancelled = false;
     // 审2-S3：收集本批全部成功导入的音频路径（ImportedTrack.path 即 ensure_audio_file
     // 返回的最终落盘路径，含 remux fallback），批量结束后统一清理时整体 preserve。
     let mut imported_paths = Vec::new();
-    for item in bvids {
+    for (index, item) in bvids.into_iter().enumerate() {
+        if FAVORITES_IMPORT_CANCELLED.load(Ordering::Acquire) {
+            cancelled = true;
+            break;
+        }
         let bvid = item.bvid.clone().unwrap_or_default();
         let display_name = item.title.clone().unwrap_or_else(|| bvid.clone());
-        match import_bilibili_audio_inner(&app, &client, &bvid, &options, false).await {
+        let ok = match import_bilibili_audio_inner(&app, &client, &bvid, &options, false).await {
             Ok(track) => {
                 imported_paths.push(PathBuf::from(&track.path));
                 tracks.push(track);
+                true
             }
-            Err(reason) => failed.push(BilibiliImportFailure {
-                input: display_name,
-                reason,
-            }),
-        }
+            Err(reason) => {
+                failed.push(BilibiliImportFailure {
+                    input: display_name.clone(),
+                    reason,
+                });
+                false
+            }
+        };
+        // M-15：每首完成即推进度事件，前端展示 N/total 与当前曲目
+        let _ = app.emit(
+            BATCH_PROGRESS_EVENT,
+            &BilibiliBatchProgress {
+                current: index + 1,
+                total,
+                title: display_name,
+                ok,
+            },
+        );
     }
 
     // 审2-S3：整批只在结束后清理一次缓存并 preserve 本批全部成功导入的文件，
@@ -67,7 +105,11 @@ pub async fn import_bilibili_favorites(
         }
     }
 
-    Ok(BilibiliBatchImportResult { tracks, failed })
+    Ok(BilibiliBatchImportResult {
+        tracks,
+        failed,
+        cancelled,
+    })
 }
 
 #[tauri::command]
@@ -115,10 +157,17 @@ pub async fn bilibili_poll_login(
         .into_data("bilibili login poll")?;
 
     if api.code == 0 {
-        let mut session = load_session(&app)?.unwrap_or_default();
-        merge_set_cookie_headers(&headers, &mut session.cookies, &mut session.cookie_expires);
-        session.saved_at = now_secs();
-        save_session(&app, &session)?;
+        // M-16：session 落盘含 Credential Manager 写入 + icacls 同步子进程，
+        // 挪出 tokio worker（headers 已 clone，纯数据可安全移入）。
+        let app_for_save = app.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let mut session = load_session(&app_for_save)?.unwrap_or_default();
+            merge_set_cookie_headers(&headers, &mut session.cookies, &mut session.cookie_expires);
+            session.saved_at = now_secs();
+            save_session(&app_for_save, &session)
+        })
+        .await
+        .map_err(|err| format!("保存 B 站登录会话任务异常: {err}"))??;
 
         let profile = bilibili_login_status(app.clone()).await?;
         return Ok(BilibiliLoginPollResult {
@@ -141,7 +190,12 @@ pub async fn bilibili_poll_login(
 
 #[tauri::command]
 pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus, String> {
-    let Some(session) = load_session(&app)? else {
+    // M-16：session 读取（文件 + Credential Manager）是同步 IO，挪出 tokio worker
+    let app_for_load = app.clone();
+    let session = tauri::async_runtime::spawn_blocking(move || load_session(&app_for_load))
+        .await
+        .map_err(|err| format!("读取 B 站登录会话任务异常: {err}"))??;
+    let Some(session) = session else {
         return Ok(BilibiliLoginStatus {
             logged_in: false,
             username: None,
@@ -190,7 +244,13 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
             next_session.mid = data.mid;
             next_session.face = face.clone();
             next_session.saved_at = now_secs();
-            save_session(&app, &next_session)?;
+            // M-16：同上，落盘含 icacls 子进程，挪出 tokio worker
+            let app_for_save = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                save_session(&app_for_save, &next_session)
+            })
+            .await
+            .map_err(|err| format!("保存 B 站登录会话任务异常: {err}"))??;
         }
         return Ok(BilibiliLoginStatus {
             logged_in: true,

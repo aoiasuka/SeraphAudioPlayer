@@ -531,6 +531,14 @@ impl PlaybackEngine {
         let Some(session) = self.session.as_ref() else {
             return Err(BackendError::Internal("no loaded track".into()));
         };
+        // M-1：队列自然播完后 session 残留（stopped=true、线程已退出），
+        // 此时置 paused=false 是假恢复——UI/SMTC 显示播放中但无声无进度。
+        // 返回 Err 让调用方（smtc_play）落到重建会话的路径。
+        if session.shared.stopped.load(Ordering::Acquire) {
+            return Err(BackendError::Internal(
+                "playback session already stopped".into(),
+            ));
+        }
 
         session.shared.paused.store(false, Ordering::Release);
         self.event_bus.publish(PlayerEvent::PlaybackResumed);
@@ -601,6 +609,9 @@ impl PlaybackEngine {
             return Ok(());
         }
 
+        // L-2：先记住旧 id 再切换——新设备重建会话失败时回滚，
+        // 否则坏设备 id 残留，后续播放持续失败直到手动再换设备。
+        let previous_device_id = self.selected_device_id.clone();
         self.selected_device_id = Some(device_id);
         let Some(session) = self.session.as_ref() else {
             return Ok(());
@@ -611,7 +622,16 @@ impl PlaybackEngine {
         let seconds = session.shared.progress_seconds();
         let was_paused = session.shared.paused.load(Ordering::Acquire);
         self.stop_session();
-        self.play_file(path, track_id, Some(seconds))?;
+        if let Err(err) = self.play_file(path.clone(), track_id.clone(), Some(seconds)) {
+            self.selected_device_id = previous_device_id;
+            // 回滚到旧设备恢复播放；旧设备也起不来（拔掉等）时保持停止态，
+            // 原始错误仍然上抛。
+            let _ = self.play_file(path, track_id, Some(seconds));
+            if was_paused {
+                let _ = self.pause();
+            }
+            return Err(err);
+        }
         if was_paused {
             self.pause()?;
         }
@@ -1096,9 +1116,14 @@ fn run_wasapi_exclusive_render_worker(
         let buffer_frames = audio_client
             .get_buffer_size()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let sleep_period = Duration::from_millis(
-            (500 * u64::from(buffer_frames) / u64::from(config.sample_rate.0.max(1))).max(1),
-        );
+        // 按设备周期唤醒（512 帧 ≈ 10.7ms @48k）而非半个缓冲（~85ms @48k）：
+        // 半缓冲节拍下频谱 tap 每 ~85ms 才收到一大坨样本，前端 30fps 轮询大多
+        // 空手而归，独占模式的频谱/分析页动画退化成 ~12fps 台阶。按周期小口
+        // 补水后 tap 数据节奏与共享模式事件回调一致（~10ms），且缓冲水位更满、
+        // underrun 风险更低。clamp 上限兜底 fallback 分支的超大对齐周期（空转
+        // 检查 available 很便宜），下限防高采样率下过密唤醒空转。
+        let sleep_period = Duration::from_nanos(period.max(0) as u64 * 100)
+            .clamp(Duration::from_millis(2), Duration::from_millis(15));
         audio_client
             .start_stream()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;

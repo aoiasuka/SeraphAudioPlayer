@@ -36,8 +36,8 @@ const APO_TYPE_MAP: Record<string, EqBandKind | undefined> = {
 };
 
 function parsePreampLine(line: string): number | null {
-  // "Preamp: -6.5 dB"
-  const match = line.match(/Preamp:\s*(-?\d+(?:\.\d+)?)\s*dB/i);
+  // "Preamp: -6.5 dB"（兼容 "+5.5" 的显式正号前缀）
+  const match = line.match(/Preamp:\s*([+-]?\d+(?:\.\d+)?)\s*dB/i);
   return match ? Number.parseFloat(match[1]) : null;
 }
 
@@ -51,15 +51,17 @@ function parseFilterLine(line: string): EqBand | null {
   const kind = APO_TYPE_MAP[typeMatch[1].toUpperCase()];
   if (!kind) return null;
 
-  const fcMatch = line.match(/Fc\s+(-?\d+(?:\.\d+)?)\s*Hz/i);
+  const fcMatch = line.match(/Fc\s+([+-]?\d+(?:\.\d+)?)\s*Hz/i);
   if (!fcMatch) return null;
   const freq = Number.parseFloat(fcMatch[1]);
   if (!Number.isFinite(freq) || freq <= 0) return null;
 
-  const gainMatch = line.match(/Gain\s+(-?\d+(?:\.\d+)?)\s*dB/i);
+  // L-24：正则接受 "+5.5" 前缀——部分工具导出的正增益带显式加号，
+  // 旧正则匹配不到会静默当 0（导入“成功”但无效果）
+  const gainMatch = line.match(/Gain\s+([+-]?\d+(?:\.\d+)?)\s*dB/i);
   const gain = gainMatch ? Number.parseFloat(gainMatch[1]) : 0;
 
-  const qMatch = line.match(/Q\s+(-?\d+(?:\.\d+)?)/i);
+  const qMatch = line.match(/Q\s+([+-]?\d+(?:\.\d+)?)/i);
   const q = qMatch ? Number.parseFloat(qMatch[1]) : 0.707;
 
   return {
@@ -85,7 +87,13 @@ function parseGraphicEq(line: string): EqBand[] {
         gain: Number.parseFloat(gainStr),
       };
     })
-    .filter((point) => Number.isFinite(point.freq) && Number.isFinite(point.gain));
+    .filter(
+      (point) =>
+        Number.isFinite(point.freq) &&
+        // L-24：GraphicEQ 点必须为正频率（0/负值进 band 会靠上下游钳制兜底成直通）
+        point.freq > 0 &&
+        Number.isFinite(point.gain)
+    );
 
   // GraphicEQ 点数可能很多（AutoEq 常 100+ 点）；每个点转成一个 peaking，
   // Q 用相邻点的频率比估算（半个八度间隔 → Q≈2.9）。上层会做数量提示。
@@ -166,12 +174,14 @@ export function parseApoPreset(text: string): ParsedEqPreset {
  * 导出为 EqualizerAPO ParametricEQ 文本（与 AutoEq 输出兼容，可回导入 APO/其它播放器）。
  */
 export function toApoText(preamp: number, bands: EqBand[]): string {
+  // L-24：LP/HP 导出写 LPQ/HPQ——APO 的 LP/HP 是固定 Q、会忽略行尾 Q 参数，
+  // 自定义 Q 的低/高通回导入其它播放器时形状会变；LPQ/HPQ 才携带 Q。
   const apoTypeReverse: Record<EqBandKind, string> = {
     peaking: "PK",
     lowshelf: "LSC",
     highshelf: "HSC",
-    lowpass: "LP",
-    highpass: "HP",
+    lowpass: "LPQ",
+    highpass: "HPQ",
   };
   const lines = [`Preamp: ${preamp.toFixed(1)} dB`];
   bands.forEach((band, index) => {

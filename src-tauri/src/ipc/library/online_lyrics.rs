@@ -25,23 +25,45 @@ pub(crate) fn online_lyrics_client() -> Result<Client, String> {
         .map_err(|err| format!("failed to create lyrics client: {err}"))
 }
 
+/// 三源聚合结果：candidates 为空时前端需区分“网络异常”与“确实没有”（M-12）。
+pub(crate) struct OnlineLyricsFetch {
+    pub candidates: Vec<OnlineLyricsCandidate>,
+    /// 搜索请求即失败（网络/解析错误）的源数量
+    pub failed_sources: usize,
+}
+
 pub(crate) async fn fetch_online_lyrics_from_sources(
     client: &Client,
     query: &str,
     duration: u64,
-) -> Vec<OnlineLyricsCandidate> {
+) -> OnlineLyricsFetch {
+    // 三源并发：此前串行 await，半死接口的超时会逐源叠加（最坏数分钟）
+    let (netease, kugou, qq) = tokio::join!(
+        fetch_netease_lyrics(client, query, duration),
+        fetch_kugou_lyrics(client, query, duration),
+        fetch_qq_lyrics(client, query, duration),
+    );
     let mut candidates = Vec::new();
-    candidates.extend(fetch_netease_lyrics(client, query, duration).await);
-    candidates.extend(fetch_kugou_lyrics(client, query, duration).await);
-    candidates.extend(fetch_qq_lyrics(client, query, duration).await);
-    dedupe_online_lyrics_candidates(candidates)
+    let mut failed_sources = 0usize;
+    for outcome in [netease, kugou, qq] {
+        match outcome {
+            Ok(list) => candidates.extend(list),
+            Err(()) => failed_sources += 1,
+        }
+    }
+    OnlineLyricsFetch {
+        candidates: dedupe_online_lyrics_candidates(candidates),
+        failed_sources,
+    }
 }
 
+/// Err(()) = 搜索请求本身失败（网络/HTTP/解析错误）；
+/// Ok(空) = 接口正常返回但没有匹配（真·未找到）。逐候选拉词失败仍算部分成功。
 pub(crate) async fn fetch_netease_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
-) -> Vec<OnlineLyricsCandidate> {
+) -> Result<Vec<OnlineLyricsCandidate>, ()> {
     let response = client
         .get("https://music.163.com/api/search/get/web")
         .query(&[
@@ -57,11 +79,11 @@ pub(crate) async fn fetch_netease_lyrics(
         .and_then(|response| response.error_for_status().ok());
 
     let Some(response) = response else {
-        return Vec::new();
+        return Err(());
     };
 
     let Ok(response) = response.json::<Value>().await else {
-        return Vec::new();
+        return Err(());
     };
 
     let Some(songs) = response
@@ -69,7 +91,7 @@ pub(crate) async fn fetch_netease_lyrics(
         .and_then(|value| value.get("songs"))
         .and_then(Value::as_array)
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut results = Vec::new();
@@ -112,14 +134,14 @@ pub(crate) async fn fetch_netease_lyrics(
         });
     }
 
-    results
+    Ok(results)
 }
 
 pub(crate) async fn fetch_kugou_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
-) -> Vec<OnlineLyricsCandidate> {
+) -> Result<Vec<OnlineLyricsCandidate>, ()> {
     let duration_ms = duration.saturating_mul(1000).to_string();
     let Ok(response) = client
         .get("https://lyrics.kugou.com/search")
@@ -135,15 +157,15 @@ pub(crate) async fn fetch_kugou_lyrics(
         .await
         .and_then(|response| response.error_for_status())
     else {
-        return Vec::new();
+        return Err(());
     };
 
     let Ok(response) = response.json::<Value>().await else {
-        return Vec::new();
+        return Err(());
     };
 
     let Some(candidates) = response.get("candidates").and_then(Value::as_array) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut results = Vec::new();
@@ -203,14 +225,14 @@ pub(crate) async fn fetch_kugou_lyrics(
         });
     }
 
-    results
+    Ok(results)
 }
 
 pub(crate) async fn fetch_qq_lyrics(
     client: &Client,
     query: &str,
     duration: u64,
-) -> Vec<OnlineLyricsCandidate> {
+) -> Result<Vec<OnlineLyricsCandidate>, ()> {
     let Ok(search_data) = client
         .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
         .query(&[
@@ -224,11 +246,11 @@ pub(crate) async fn fetch_qq_lyrics(
         .await
         .and_then(|response| response.error_for_status())
     else {
-        return Vec::new();
+        return Err(());
     };
 
     let Ok(search_data) = search_data.json::<Value>().await else {
-        return Vec::new();
+        return Err(());
     };
 
     let Some(songs) = search_data
@@ -237,7 +259,7 @@ pub(crate) async fn fetch_qq_lyrics(
         .and_then(|value| value.get("list"))
         .and_then(Value::as_array)
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut results = Vec::new();
@@ -279,7 +301,7 @@ pub(crate) async fn fetch_qq_lyrics(
         });
     }
 
-    results
+    Ok(results)
 }
 
 pub(crate) fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
@@ -352,8 +374,13 @@ pub(crate) fn normalize_lyric_lines(mut lyrics: Vec<LyricLine>) -> Option<Vec<Ly
 }
 
 pub(crate) fn ranked_provider_items(items: &[Value], duration: u64) -> Vec<&Value> {
-    let target_ms = duration.saturating_mul(1000);
     let mut ranked = items.iter().collect::<Vec<_>>();
+    // M-13：本地时长探测失败（duration=0）时保持接口原始相关度排序——
+    // 否则 abs_diff(0) 退化成按候选时长升序，30 秒试听版会排第一并被自动选中。
+    if duration == 0 {
+        return ranked;
+    }
+    let target_ms = duration.saturating_mul(1000);
     ranked.sort_by_key(|item| {
         provider_duration_ms(item)
             .map(|item_ms| item_ms.abs_diff(target_ms))

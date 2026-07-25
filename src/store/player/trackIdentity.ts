@@ -10,7 +10,9 @@ export function streamingSourceInput(track: Track) {
 }
 
 export function normalizePath(path: string) {
-  return path.trim().toLowerCase();
+  // 分隔符归一：跨平台工具导出的 M3U8 常写正斜杠，库内 Windows 路径是反
+  // 斜杠——不归一会让路径回映射 miss，旧库文件建歌单时静默丢曲（M-8）。
+  return path.trim().replace(/\\/g, "/").toLowerCase();
 }
 
 function normalizeText(value: string | undefined | null) {

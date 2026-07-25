@@ -283,7 +283,10 @@ pub(crate) fn dolby_audio_kind(value: &Value, container_kind: Option<u32>) -> Au
 }
 
 pub(crate) fn is_dolby_atmos_stream(value: &Value, container_kind: Option<u32>) -> bool {
-    if container_kind.is_some_and(|kind| kind > 0) {
+    // L-12：dash.dolby.type 语义为 1=普通杜比（EAC3 5.1）、2=杜比全景声。
+    // 旧判定 `kind > 0` 把普通 EAC3 也当 Atmos，「优先杜比全景声」用户会
+    // 拿到有损 EAC3 压过无损 FLAC 的排序。
+    if container_kind.is_some_and(|kind| kind >= 2) {
         return true;
     }
 
@@ -464,11 +467,11 @@ pub(crate) async fn ensure_audio_file(
         return Ok(path.to_path_buf());
     }
 
-    // 审2-S8：上次 remux 失败 fallback 落的 `.m4a` 也参与缓存命中检查，
+    // 审2-S8：上次 remux 失败 fallback 落的 fMP4 也参与缓存命中检查，
     // 否则同 BV 重复导入时只查原扩展名路径，会绕过 fallback 缓存重新下载。
-    let remux_fallback_path = path.with_extension("m4a");
-    if remux_fallback_path != path && cached_audio_file_is_valid(&remux_fallback_path) {
-        return Ok(remux_fallback_path);
+    let fallback_path = remux_fallback_cache_path(path);
+    if fallback_path != path && cached_audio_file_is_valid(&fallback_path) {
+        return Ok(fallback_path);
     }
 
     let _slot = acquire_download_slot(path)?;
@@ -488,18 +491,30 @@ pub(crate) async fn ensure_audio_file(
     for audio_url in audio_urls {
         let temp_path = temp_download_path(path);
         match download_audio_to_file(client, audio_url, &temp_path).await {
-            Ok(()) => match finalize_audio_file(&temp_path, path, ffmpeg_path, must_remux) {
-                Ok(final_path) => {
-                    // 写一个零字节 sentinel 标记缓存完整可用；
-                    // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
-                    let _ = fs::write(ok_sentinel_path(&final_path), b"");
-                    return Ok(final_path);
+            Ok(()) => {
+                // M-16：finalize 含同步 ffmpeg remux（大 FLAC 1-3 秒），
+                // 不能阻塞 tokio worker，挪进 spawn_blocking。
+                let temp = temp_path.clone();
+                let target = path.to_path_buf();
+                let ffmpeg = ffmpeg_path.map(Path::to_path_buf);
+                let outcome = tauri::async_runtime::spawn_blocking(move || {
+                    finalize_audio_file(&temp, &target, ffmpeg.as_deref(), must_remux)
+                })
+                .await
+                .unwrap_or_else(|err| Err(format!("finalize task panicked: {err}")));
+                match outcome {
+                    Ok(final_path) => {
+                        // 写一个零字节 sentinel 标记缓存完整可用；
+                        // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
+                        let _ = fs::write(ok_sentinel_path(&final_path), b"");
+                        return Ok(final_path);
+                    }
+                    Err(err) => {
+                        let _ = fs::remove_file(&temp_path);
+                        last_error = Some(err);
+                    }
                 }
-                Err(err) => {
-                    let _ = fs::remove_file(&temp_path);
-                    last_error = Some(err);
-                }
-            },
+            }
             Err(err) => {
                 let _ = fs::remove_file(&temp_path);
                 last_error = Some(err);
@@ -508,6 +523,19 @@ pub(crate) async fn ensure_audio_file(
     }
 
     Err(last_error.unwrap_or_else(|| "bilibili response has no audio download url".into()))
+}
+
+/// remux 失败时的 fMP4 fallback 缓存路径：在完整文件名后追加 `.m4a`
+/// （`BV-cid.flac` → `BV-cid.flac.m4a`）。不能用 with_extension——那会得到
+/// `BV-cid.m4a`，与普通 AAC 流的正主缓存路径冲突（M-14）：先导 AAC 再开
+/// 大会员导 FLAC 时，旧 AAC 文件被当 FLAC fallback 命中，曲目以 FLAC 元数据
+/// 标注有损数据且除非清缓存永不自愈；反向场景同理。
+pub(crate) fn remux_fallback_cache_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bilibili-audio");
+    path.with_file_name(format!("{file_name}.m4a"))
 }
 
 pub(crate) fn ok_sentinel_path(path: &Path) -> PathBuf {
@@ -699,9 +727,10 @@ pub(crate) fn finalize_audio_file(
     }
 
     // P2-4：remux 失败（或无 ffmpeg）时按实际容器（fMP4）落 .m4a 扩展名，
-    // 而不是沿用 .flac 等可能与内容不符的扩展名。
+    // 而不是沿用 .flac 等可能与内容不符的扩展名。fallback 路径带原文件名
+    // 后缀（M-14），不与普通 AAC 流正主缓存路径冲突。
     let fallback_path = if ffmpeg_path.is_some() {
-        path.with_extension("m4a")
+        remux_fallback_cache_path(path)
     } else {
         path.to_path_buf()
     };

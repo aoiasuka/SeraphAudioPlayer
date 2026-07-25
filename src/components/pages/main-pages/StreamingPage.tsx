@@ -13,6 +13,12 @@ export function StreamingPage() {
   );
   const importBilibiliAudio = usePlayerStore((s) => s.importBilibiliAudio);
   const importBilibiliFavorites = usePlayerStore((s) => s.importBilibiliFavorites);
+  const cancelBilibiliFavoritesImport = usePlayerStore(
+    (s) => s.cancelBilibiliFavoritesImport
+  );
+  // M-15：批量导入进度在 store（App 级事件监听写入）；进度非 null 即导入中，
+  // 也顺带修掉“导入中切页 remount 丢 isImporting 可重复提交”的窗口。
+  const batchProgress = usePlayerStore((s) => s.bilibiliBatchProgress);
   // 审2-R5：登录/FFmpeg 状态、下载进度与扫码轮询全部提升到 store（streamingActions），
   // MainPages 的 key={activeView} 切页卸载不再丢下载进度、不再中断登录轮询。
   const loginStatus = usePlayerStore((s) => s.bilibiliLoginStatus);
@@ -28,7 +34,7 @@ export function StreamingPage() {
   const [bilibiliInput, setBilibiliInput] = useState("");
   const [favoriteInput, setFavoriteInput] = useState("");
   const [isImporting, setIsImporting] = useState(false);
-  const [isBatchImporting, setIsBatchImporting] = useState(false);
+  const isBatchImporting = batchProgress !== null;
   // B 站流媒体默认走普通音质：杜比 / FLAC / 混流三项默认全不勾选，
   // 需要时用户在工具条上手动开启。
   const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(false);
@@ -67,14 +73,10 @@ export function StreamingPage() {
     const input = favoriteInput.trim();
     if (!input || isBatchImporting) return;
 
-    setIsBatchImporting(true);
-    try {
-      const result = await importBilibiliFavorites(input, importOptions);
-      if (result && result.tracks.length > 0) {
-        setFavoriteInput("");
-      }
-    } finally {
-      setIsBatchImporting(false);
+    // “导入中”态由 store 的 bilibiliBatchProgress 承载（action 内 set/finally 清理）
+    const result = await importBilibiliFavorites(input, importOptions);
+    if (result && result.tracks.length > 0) {
+      setFavoriteInput("");
     }
   };
 
@@ -127,9 +129,19 @@ export function StreamingPage() {
                 disabled={isBatchImporting}
               />
             </label>
+            {isBatchImporting && (
+              <button
+                type="button"
+                onClick={() => void cancelBilibiliFavoritesImport()}
+                className="inline-flex items-center border-l-[1.5px] border-ink px-3 font-tw text-xs font-bold text-stamp transition-colors hover:bg-paper2 shrink-0"
+              >
+                取消
+              </button>
+            )}
             <button
               type="submit"
               disabled={!favoriteInput.trim() || isBatchImporting}
+              title={batchProgress?.title || undefined}
               className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-card px-4 font-tw text-xs font-bold text-ink transition-colors hover:bg-paper2 disabled:cursor-not-allowed disabled:text-ink3 shrink-0"
             >
               {isBatchImporting ? (
@@ -137,7 +149,13 @@ export function StreamingPage() {
               ) : (
                 <FolderHeart className="h-4 w-4" />
               )}
-              <span>{isBatchImporting ? "批量中" : "批量"}</span>
+              <span>
+                {isBatchImporting
+                  ? batchProgress && batchProgress.total > 0
+                    ? `${batchProgress.current}/${batchProgress.total}`
+                    : "批量中"
+                  : "批量"}
+              </span>
             </button>
           </form>
         </div>
