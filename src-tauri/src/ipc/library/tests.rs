@@ -97,6 +97,52 @@ fn enriches_dsd_metadata_from_decoder_probe() {
 }
 
 #[test]
+fn extracts_dsd_id3_tags_and_cover() {
+    use id3::TagLike as _;
+    use std::io::{Seek as _, SeekFrom, Write as _};
+
+    let path = temp_audio_path("seraph-dsf-id3", "dsf");
+    write_test_dsf(&path);
+
+    // v0.5.1：在文件尾部追加 ID3v2 标签（DSF 规范位置），并把头部
+    // offset 20 的 metadata 指针指向它——lofty 不支持 DSD 容器，
+    // 这条链路由 dsd_tags 手动解析。
+    let id3_offset = fs::metadata(&path).unwrap().len();
+    let mut tag = id3::Tag::new();
+    tag.set_title("鳥の詩");
+    tag.set_artist("Lia");
+    tag.set_album("AIR");
+    tag.add_frame(id3::frame::Picture {
+        mime_type: "image/png".into(),
+        picture_type: id3::frame::PictureType::CoverFront,
+        description: String::new(),
+        data: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4],
+    });
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    tag.write_to(&mut file, id3::Version::Id3v24).unwrap();
+    drop(file);
+    let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(20)).unwrap();
+    file.write_all(&id3_offset.to_le_bytes()).unwrap();
+    drop(file);
+
+    let tags = dsd_tags_from_path(&path).expect("dsd id3 tags");
+    assert_eq!(tags.title.as_deref(), Some("鳥の詩"));
+    assert_eq!(tags.artist.as_deref(), Some("Lia"));
+    assert_eq!(tags.album.as_deref(), Some("AIR"));
+    let cover = tags.cover.expect("cover art from APIC");
+    assert_eq!(cover.ext, "png", "扩展名按图片魔数推断");
+
+    // 全链路：parse_audio_metadata 的 lofty 失败分支应带出标题与封面
+    let metadata = parse_audio_metadata(&path);
+    assert_eq!(metadata.title.as_deref(), Some("鳥の詩"));
+    assert!(metadata.cover.is_some(), "DSD 曲目应提取到内嵌封面");
+    assert_eq!(metadata.sample_rate, Some(44_100), "解码探测仍然生效");
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn detects_dsd_by_magic_when_extension_differs() {
     let path = temp_audio_path("seraph-import-dsd-magic", "bin");
     write_test_dsf(&path);

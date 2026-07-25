@@ -2116,6 +2116,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
+name = "id3"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70d6d9f23a28c6feab60d7b4a339e004809019ec9d5fd964b3f4c655ff9bc141"
+dependencies = [
+ "bitflags 2.11.1",
+ "byteorder",
+ "flate2",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3985,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-audio"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cpal",
  "parking_lot",
@@ -4001,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4013,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-decoder"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "seraph-core",
  "symphonia",
@@ -4023,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-dsp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4034,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-playlist"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4045,13 +4056,14 @@ dependencies = [
 
 [[package]]
 name = "seraph-tauri"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
  "des",
  "encoding_rs",
  "flate2",
+ "id3",
  "lofty",
  "parking_lot",
  "regex",
@@ -4078,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-visualizer"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "parking_lot",
  "rtrb",

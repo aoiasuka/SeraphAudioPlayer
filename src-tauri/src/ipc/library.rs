@@ -4,6 +4,7 @@
 //! 索引且可见性没有边界；现改为真模块树，跨模块共享项收敛到 [`prelude`]。
 
 mod commands;
+mod dsd_tags;
 mod lyrics;
 mod media_library;
 mod metadata;

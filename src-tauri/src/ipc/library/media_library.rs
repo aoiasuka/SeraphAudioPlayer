@@ -696,6 +696,16 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
 ) -> ParsedAudioMetadata {
     let Ok(tagged_file) = lofty::read_from_path(path) else {
         let mut parsed = ParsedAudioMetadata::default();
+        // v0.5.1：lofty 不支持 DSD 容器（.dsf/.dff 直接读取失败）——标题/
+        // 艺术家/专辑/封面改由 dsd_tags 手动定位内嵌 ID3v2 解析，DSD 曲目
+        // 不再落到「文件名当标题 + 无封面」。
+        if let Some(tags) = dsd_tags_from_path(path) {
+            parsed.title = tags.title;
+            parsed.artist = tags.artist;
+            parsed.album = tags.album;
+            parsed.album_year = tags.year;
+            parsed.cover = tags.cover;
+        }
         enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
         return parsed;
     };
@@ -824,8 +834,11 @@ pub(crate) fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// 只读标签提取封面并落盘（启动补扫用，跳过 ffprobe 等重探测）。
 pub(crate) fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
-    let tagged_file = lofty::read_from_path(path).ok()?;
-    let art = cover_art_from_tags(tagged_file.tags())?;
+    let art = match lofty::read_from_path(path) {
+        Ok(tagged_file) => cover_art_from_tags(tagged_file.tags()),
+        // v0.5.1：lofty 不支持 DSD 容器，改走内嵌 ID3v2 手动提取
+        Err(_) => dsd_tags_from_path(path).and_then(|tags| tags.cover),
+    }?;
     save_cover_art(covers_dir, &art)
 }
 
@@ -836,7 +849,9 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     let Ok(covers_dir) = covers_dir_path(app) else {
         return;
     };
-    let marker = covers_dir.join(".cover-backfill-v1");
+    // v0.5.1 标记升级 v1 → v2：新增 DSD（.dsf/.dff）内嵌封面提取能力，
+    // 已按 v1 扫过的存量 DSD 曲目需要再补扫一次才能拿到封面。
+    let marker = covers_dir.join(".cover-backfill-v2");
     if marker.is_file() {
         return;
     }
@@ -860,7 +875,7 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
 
     if candidates.is_empty() {
         if fs::create_dir_all(&covers_dir).is_ok() {
-            let _ = fs::write(&marker, b"v1");
+            let _ = fs::write(&marker, b"v2");
         }
         return;
     }
@@ -900,7 +915,7 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     }
 
     if fs::create_dir_all(&covers_dir).is_ok() {
-        let _ = fs::write(&marker, b"v1");
+        let _ = fs::write(&marker, b"v2");
     }
 }
 
@@ -1013,77 +1028,9 @@ pub(crate) fn enrich_with_decoder_probe_dsd(
 
 #[cfg(test)]
 pub(crate) fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
-    let Ok(tagged_file) = lofty::read_from_path(path) else {
-        let mut parsed = ParsedAudioMetadata::default();
-        enrich_with_decoder_probe(path, &mut parsed);
-        return parsed;
-    };
-
-    let tag = tagged_file
-        .primary_tag()
-        .or_else(|| tagged_file.first_tag());
-    let properties = tagged_file.properties();
-    let duration = properties.duration().as_secs();
-
-    let mut parsed = ParsedAudioMetadata {
-        duration: (duration > 0).then_some(duration),
-        bitrate: properties
-            .audio_bitrate()
-            .or_else(|| properties.overall_bitrate()),
-        sample_rate: properties.sample_rate(),
-        bit_depth: properties.bit_depth(),
-        channels: properties.channels(),
-        ..ParsedAudioMetadata::default()
-    };
-
-    if let Some(tag) = tag {
-        parsed.title = tag
-            .title()
-            .and_then(|value| clean_metadata_text(value.as_ref()));
-        parsed.artist = tag
-            .artist()
-            .and_then(|value| clean_metadata_text(value.as_ref()));
-        parsed.album = tag
-            .album()
-            .and_then(|value| clean_metadata_text(value.as_ref()));
-        parsed.album_year = tag
-            .date()
-            .and_then(|value| (value.year > 0).then(|| value.year.to_string()));
-    }
-
-    parsed.lyrics = lyrics_from_tags(tagged_file.tags());
-    enrich_with_decoder_probe(path, &mut parsed);
-
-    parsed
-}
-
-#[cfg(test)]
-pub(crate) fn enrich_with_decoder_probe(path: &Path, parsed: &mut ParsedAudioMetadata) {
-    if parsed.duration.is_some()
-        && parsed.bit_depth.is_some()
-        && parsed.sample_rate.is_some()
-        && parsed.channels.is_some()
-        && !is_dsd_file(path)
-    {
-        return;
-    }
-
-    let Ok(info) = probe_stream_info(path) else {
-        return;
-    };
-
-    if parsed.duration.is_none() && info.duration_seconds > 0.0 {
-        parsed.duration = Some(info.duration_seconds.round() as u64);
-    }
-    if parsed.bit_depth.is_none() && info.bit_depth.0 <= u8::MAX as u16 {
-        parsed.bit_depth = Some(info.bit_depth.0 as u8);
-    }
-    if parsed.sample_rate.is_none() && info.sample_rate.0 > 0 {
-        parsed.sample_rate = Some(info.sample_rate.0);
-    }
-    if parsed.channels.is_none() && info.channels.0 <= u8::MAX as u16 {
-        parsed.channels = Some(info.channels.0 as u8);
-    }
+    // v0.5.1：曾是与正式路径重复的旧副本（漏掉 cover 与 DSD ID3 提取，测试
+    // 测不到真实链路）——改为直接委托 parse_audio_metadata_with_dsd_hint。
+    parse_audio_metadata_with_dsd_hint(path, is_dsd_file(path))
 }
 
 #[cfg(test)]

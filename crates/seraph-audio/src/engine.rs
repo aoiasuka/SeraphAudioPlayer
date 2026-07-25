@@ -28,6 +28,9 @@ const TARGET_BUFFER_SECONDS: usize = 3;
 const QUEUE_SLEEP: Duration = Duration::from_millis(5);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
+/// v0.5.1：独占模式设备缓冲深度下限（100ms，100ns 单位）。16×period 在高采样率
+/// 下只有 ~23ms（512 帧 @352.8k），睡眠抖动即可击穿产生 underrun。
+pub(crate) const MIN_EXCLUSIVE_BUFFER_HNS: i64 = 1_000_000;
 /// F-1：增益斜坡时长，暂停/恢复/seek/音量变化在 ~5ms 内平滑过渡，消除爆音。
 const GAIN_RAMP_SECONDS: f32 = 0.005;
 /// F-2：can_resume 路径中，请求位置与内部精确位置之差小于该阈值时跳过 seek。
@@ -1028,6 +1031,7 @@ fn run_wasapi_exclusive_render_worker(
         wasapi::AudioClient,
         wasapi::AudioRenderClient,
         u32,
+        u32,
         Duration,
     )> = (|| {
         wasapi::initialize_mta()
@@ -1086,11 +1090,16 @@ fn run_wasapi_exclusive_render_worker(
         let period = audio_client
             .calculate_aligned_period_near(desired_period, Some(128), &desired_format)
             .unwrap_or(desired_period);
+        // v0.5.1：缓冲深度加 100ms 下限——16×period 在高采样率下只有 ~23ms
+        // （512 帧 @352.8k），睡眠抖动即可击穿；时长下限让水位与采样率无关。
         let mode = StreamMode::PollingExclusive {
             period_hns: period,
-            buffer_duration_hns: 16 * period,
+            buffer_duration_hns: (16 * period).max(MIN_EXCLUSIVE_BUFFER_HNS),
         };
 
+        // fallback 分支会换用更大的对齐周期，写入对齐与睡眠节奏必须跟实际
+        // 生效的周期走，否则对齐粒度失真。
+        let mut effective_period = period;
         audio_client
             .initialize_client(&desired_format, &Direction::Render, &mode)
             .or_else(|err| {
@@ -1102,8 +1111,9 @@ fn run_wasapi_exclusive_render_worker(
                 audio_client = device.get_iaudioclient()?;
                 let mode = StreamMode::PollingExclusive {
                     period_hns: aligned_period,
-                    buffer_duration_hns: 16 * aligned_period,
+                    buffer_duration_hns: (16 * aligned_period).max(MIN_EXCLUSIVE_BUFFER_HNS),
                 };
+                effective_period = aligned_period;
                 audio_client
                     .initialize_client(&desired_format, &Direction::Render, &mode)
                     .map_err(|_| err)
@@ -1116,32 +1126,44 @@ fn run_wasapi_exclusive_render_worker(
         let buffer_frames = audio_client
             .get_buffer_size()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        // 按设备周期唤醒（512 帧 ≈ 10.7ms @48k）而非半个缓冲（~85ms @48k）：
-        // 半缓冲节拍下频谱 tap 每 ~85ms 才收到一大坨样本，前端 30fps 轮询大多
-        // 空手而归，独占模式的频谱/分析页动画退化成 ~12fps 台阶。按周期小口
-        // 补水后 tap 数据节奏与共享模式事件回调一致（~10ms），且缓冲水位更满、
-        // underrun 风险更低。clamp 上限兜底 fallback 分支的超大对齐周期（空转
-        // 检查 available 很便宜），下限防高采样率下过密唤醒空转。
-        let sleep_period = Duration::from_nanos(period.max(0) as u64 * 100)
-            .clamp(Duration::from_millis(2), Duration::from_millis(15));
+        // 设备周期对应的帧数（写入对齐粒度）。
+        let period_frames = ((effective_period.max(1) as u64)
+            .saturating_mul(u64::from(config.sample_rate.0.max(1)))
+            / 10_000_000)
+            .clamp(1, u64::from(buffer_frames.max(1))) as u32;
+        // v0.5.1：睡半个设备周期（≈5ms @48k，clamp 2–10ms）。v0.5.0 按整周期
+        // 唤醒 + 每拍全量填满曾在部分 USB DAC 上产生周期性电流声——USB Audio
+        // 驱动按 1ms USB 帧粒度报告 padding，瞬时可用空间可能虚大，写到全满
+        // 会覆盖设备正在读取的区域。半周期唤醒 + 下方按周期对齐/留边界的写入
+        // 共同消除该问题，同时保住可视化 tap ~10-20ms 一坨的数据节奏
+        // （v0.4.x 的半缓冲唤醒会让独占模式频谱动画退化成 ~12fps 台阶）。
+        let sleep_period = Duration::from_nanos(effective_period.max(0) as u64 * 50)
+            .clamp(Duration::from_millis(2), Duration::from_millis(10));
         audio_client
             .start_stream()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
 
-        Ok((audio_client, render_client, buffer_frames, sleep_period))
+        Ok((
+            audio_client,
+            render_client,
+            buffer_frames,
+            period_frames,
+            sleep_period,
+        ))
     })();
 
-    let (audio_client, render_client, buffer_frames, sleep_period) = match init_result {
-        Ok(parts) => {
-            // 启动成功才通知主线程：避免 H-2 描述的「先 Started 后 Error」乱序
-            let _ = ready_tx.send(Ok(()));
-            parts
-        }
-        Err(err) => {
-            signal_err(&ready_tx, &err);
-            return Err(err);
-        }
-    };
+    let (audio_client, render_client, buffer_frames, period_frames, sleep_period) =
+        match init_result {
+            Ok(parts) => {
+                // 启动成功才通知主线程：避免 H-2 描述的「先 Started 后 Error」乱序
+                let _ = ready_tx.send(Ok(()));
+                parts
+            }
+            Err(err) => {
+                signal_err(&ready_tx, &err);
+                return Err(err);
+            }
+        };
 
     let mut state = RenderState::new(shared.buffer_generation());
     let mut dither = TpdfDither::default();
@@ -1159,21 +1181,32 @@ fn run_wasapi_exclusive_render_worker(
                 return Err(err);
             }
         };
-        if frames > 0 {
-            render_wasapi_output_bytes(
-                frames as usize,
-                sample_format,
-                &shared,
-                &mut consumer,
-                &mut state,
-                &mut dither,
-                &mut samples_scratch,
-                &mut bytes_scratch,
-            );
-            if let Err(err) = render_client.write_to_device(frames as usize, &bytes_scratch, None) {
-                let err = BackendError::DeviceLost(err.to_string());
-                report_render_failure(&event_bus, &shared, &err);
-                return Err(err);
+        // v0.5.1：写入量按设备周期整数倍向下对齐，并恒为缓冲保留一个周期的
+        // 安全边界（绝不写到全满）。USB Audio 驱动的 padding 报告粒度是 1ms
+        // USB 帧、瞬时值可能虚大，全满写入会覆盖设备正在读取的区域，表现为
+        // 独占模式周期性「嘀嘀」电流声；对齐 + 边界后虚报量小于一个周期即被
+        // 完全吸收。available 需 ≥ 2 个周期才写，稳态水位保持在缓冲深度减
+        // 1~2 周期。
+        if frames > period_frames {
+            let writable = (frames - period_frames) / period_frames * period_frames;
+            if writable > 0 {
+                render_wasapi_output_bytes(
+                    writable as usize,
+                    sample_format,
+                    &shared,
+                    &mut consumer,
+                    &mut state,
+                    &mut dither,
+                    &mut samples_scratch,
+                    &mut bytes_scratch,
+                );
+                if let Err(err) =
+                    render_client.write_to_device(writable as usize, &bytes_scratch, None)
+                {
+                    let err = BackendError::DeviceLost(err.to_string());
+                    report_render_failure(&event_bus, &shared, &err);
+                    return Err(err);
+                }
             }
         }
         thread::sleep(sleep_period);

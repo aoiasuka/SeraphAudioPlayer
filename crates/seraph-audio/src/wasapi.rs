@@ -7,7 +7,9 @@
 use crate::backend::{AudioBackend, BackendError, Result};
 use crate::device::{resolve_output_device_id, AudioDevice, ShareMode};
 #[cfg(windows)]
-use crate::engine::{quantize_i16_tpdf, quantize_i24, quantize_i32, TpdfDither};
+use crate::engine::{
+    quantize_i16_tpdf, quantize_i24, quantize_i32, TpdfDither, MIN_EXCLUSIVE_BUFFER_HNS,
+};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 #[cfg(windows)]
 use std::collections::VecDeque;
@@ -305,7 +307,12 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
         ready_tx,
     } = config;
 
-    let init_result: Result<(wasapi::AudioClient, wasapi::AudioRenderClient, Duration)> = (|| {
+    let init_result: Result<(
+        wasapi::AudioClient,
+        wasapi::AudioRenderClient,
+        u32,
+        Duration,
+    )> = (|| {
         wasapi::initialize_mta()
             .ok()
             .map_err(|err| BackendError::Internal(err.to_string()))?;
@@ -337,9 +344,11 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
         let period = audio_client
             .calculate_aligned_period_near(desired_period, Some(128), &wave_format)
             .unwrap_or(desired_period);
+        // 与 engine.rs 独占渲染循环同型（v0.5.1）：缓冲深度 100ms 下限，
+        // 防高采样率下 16×period 过浅被睡眠抖动击穿。
         let mode = StreamMode::PollingExclusive {
             period_hns: period,
-            buffer_duration_hns: 16 * period,
+            buffer_duration_hns: (16 * period).max(MIN_EXCLUSIVE_BUFFER_HNS),
         };
 
         audio_client
@@ -348,18 +357,25 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
         let render_client = audio_client
             .get_audiorenderclient()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        // 与 engine.rs 独占渲染循环同型：按设备周期唤醒而非半缓冲，
-        // 保证频谱 tap 的数据节奏 ~10ms 一坨，可视化不退化成台阶。
-        let sleep_period = Duration::from_nanos(period.max(0) as u64 * 100)
-            .clamp(Duration::from_millis(2), Duration::from_millis(15));
+        let buffer_frames = audio_client
+            .get_buffer_size()
+            .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
+        let period_frames = ((period.max(1) as u64).saturating_mul(u64::from(sample_rate.0.max(1)))
+            / 10_000_000)
+            .clamp(1, u64::from(buffer_frames.max(1))) as u32;
+        // 与 engine.rs 同型（v0.5.1）：睡半个设备周期，写入按周期对齐并留
+        // 一个周期的安全边界——USB Audio 驱动 padding 报告瞬时虚大时全满
+        // 写入会覆盖设备读取区，产生周期性电流声。
+        let sleep_period = Duration::from_nanos(period.max(0) as u64 * 50)
+            .clamp(Duration::from_millis(2), Duration::from_millis(10));
         audio_client
             .start_stream()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
 
-        Ok((audio_client, render_client, sleep_period))
+        Ok((audio_client, render_client, period_frames, sleep_period))
     })();
 
-    let (audio_client, render_client, sleep_period) = match init_result {
+    let (audio_client, render_client, period_frames, sleep_period) = match init_result {
         Ok(parts) => {
             let _ = ready_tx.send(Ok(()));
             parts
@@ -382,24 +398,27 @@ fn run_wasapi_submit_worker(config: WasapiSubmitWorkerConfig) -> Result<()> {
         let frames = audio_client
             .get_available_space_in_frames()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        if frames > 0 {
-            while let Ok(chunk) = rx.try_recv() {
-                pending.extend(chunk);
+        if frames > period_frames {
+            let writable = (frames - period_frames) / period_frames * period_frames;
+            if writable > 0 {
+                while let Ok(chunk) = rx.try_recv() {
+                    pending.extend(chunk);
+                }
+                render_submit_buffer(
+                    writable as usize,
+                    format,
+                    &shared,
+                    &mut pending,
+                    &mut gain,
+                    gain_step,
+                    &mut dither,
+                    &mut samples_scratch,
+                    &mut bytes_scratch,
+                );
+                render_client
+                    .write_to_device(writable as usize, &bytes_scratch, None)
+                    .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
             }
-            render_submit_buffer(
-                frames as usize,
-                format,
-                &shared,
-                &mut pending,
-                &mut gain,
-                gain_step,
-                &mut dither,
-                &mut samples_scratch,
-                &mut bytes_scratch,
-            );
-            render_client
-                .write_to_device(frames as usize, &bytes_scratch, None)
-                .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
         }
         thread::sleep(sleep_period);
     }

@@ -38,4 +38,6 @@ pub(crate) use tauri::{AppHandle, Manager};
 
 // 兄弟模块共享项（glob 汇聚，供子模块一站式引入）
 #[allow(unused_imports)]
-pub(crate) use super::{lyrics::*, media_library::*, metadata::*, online_lyrics::*, types::*};
+pub(crate) use super::{
+    dsd_tags::*, lyrics::*, media_library::*, metadata::*, online_lyrics::*, types::*,
+};
