@@ -171,6 +171,142 @@ fn trusts_riff_magic_over_dsf_extension() {
     let _ = fs::remove_file(path);
 }
 
+/// 手工拼一个尾部带 ID3v2.4 APIC 封面的最小 WAV。
+/// `u32_frame_size` 复刻违反规范的打标签工具：帧大小写普通 u32
+/// （v2.4 规范要求 syncsafe），封面超过 127 字节时两种解读不同，
+/// 按规范解析会把图片拦腰截断——用户库中 WAV 封面显示不全的病灶。
+/// 布局按真实病例：RIFF 声明大小止于 data，`id3 ` chunk 追加在其后。
+fn write_test_wav_with_apic(path: &Path, image: &[u8], u32_frame_size: bool) {
+    // APIC 内容：encoding=0(latin1) + MIME + pic_type=3(CoverFront) + 空描述 + 图片
+    let mut apic = vec![0u8];
+    apic.extend_from_slice(b"image/jpeg\0");
+    apic.push(3);
+    apic.push(0);
+    apic.extend_from_slice(image);
+
+    let frame_size = apic.len() as u32;
+    let size_bytes = if u32_frame_size {
+        frame_size.to_be_bytes()
+    } else {
+        test_syncsafe_bytes(frame_size)
+    };
+    let mut id3 = Vec::new();
+    id3.extend_from_slice(b"ID3\x04\x00\x00");
+    // header 里的 tag size 真实病例中仍是正确的 syncsafe
+    id3.extend_from_slice(&test_syncsafe_bytes(10 + frame_size));
+    id3.extend_from_slice(b"APIC");
+    id3.extend_from_slice(&size_bytes);
+    id3.extend_from_slice(&[0, 0]);
+    id3.extend_from_slice(&apic);
+
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    // "WAVE"(4) + fmt(8+16) + data(8+32) = 68，不含尾部 id3
+    wav.extend_from_slice(&68u32.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&44_100u32.to_le_bytes());
+    wav.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&32u32.to_le_bytes());
+    wav.extend_from_slice(&[0u8; 32]);
+    wav.extend_from_slice(b"id3 ");
+    wav.extend_from_slice(&(id3.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&id3);
+
+    fs::write(path, wav).expect("write test wav");
+}
+
+fn test_syncsafe_bytes(value: u32) -> [u8; 4] {
+    [
+        ((value >> 21) & 0x7f) as u8,
+        ((value >> 14) & 0x7f) as u8,
+        ((value >> 7) & 0x7f) as u8,
+        (value & 0x7f) as u8,
+    ]
+}
+
+fn test_jpeg_bytes(len: usize, fill: u8) -> Vec<u8> {
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0];
+    jpeg.resize(len - 2, fill);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    jpeg
+}
+
+#[test]
+fn extracts_full_cover_from_wav_with_nonstandard_u32_apic_size() {
+    let path = temp_audio_path("seraph-wav-u32-apic", "wav");
+    let jpeg = test_jpeg_bytes(300, 0xaa);
+    write_test_wav_with_apic(&path, &jpeg, true);
+
+    let metadata = parse_audio_metadata_with_dsd_hint(&path, false);
+    let _ = fs::remove_file(&path);
+    let cover = metadata
+        .cover
+        .expect("非规范 u32 帧大小的 WAV 封面应被完整提取");
+    assert_eq!(cover.ext, "jpg");
+    assert_eq!(cover.data, jpeg, "封面不应被 syncsafe 误读截断");
+}
+
+#[test]
+fn extracts_cover_from_spec_compliant_wav_id3() {
+    let path = temp_audio_path("seraph-wav-syncsafe-apic", "wav");
+    let jpeg = test_jpeg_bytes(300, 0xbb);
+    write_test_wav_with_apic(&path, &jpeg, false);
+
+    let metadata = parse_audio_metadata_with_dsd_hint(&path, false);
+    let _ = fs::remove_file(&path);
+    let cover = metadata.cover.expect("规范 syncsafe WAV 封面应正常提取");
+    assert_eq!(cover.data, jpeg);
+}
+
+#[test]
+fn detects_truncated_saved_cover_files() {
+    let dir = std::env::temp_dir();
+    let truncated = dir.join("seraph-test-truncated-cover.jpg");
+    let complete = dir.join("seraph-test-complete-cover.jpg");
+    fs::write(&truncated, [0xff, 0xd8, 0xff, 0xe0, 0xaa]).unwrap();
+    fs::write(&complete, [0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]).unwrap();
+
+    assert!(cover_file_looks_truncated(&truncated.to_string_lossy()));
+    assert!(!cover_file_looks_truncated(&complete.to_string_lossy()));
+    assert!(!cover_file_looks_truncated(""), "空 cover 交给缺失补扫分支");
+    assert!(
+        !cover_file_looks_truncated("https://example.com/x.jpg"),
+        "在线封面不参与"
+    );
+    assert!(
+        !cover_file_looks_truncated(r"C:\seraph-nonexistent\cover.jpg"),
+        "文件读不到不触发重提取"
+    );
+
+    let _ = fs::remove_file(truncated);
+    let _ = fs::remove_file(complete);
+}
+
+#[test]
+fn backfill_reextracts_full_cover_from_u32_wav() {
+    // 存量用户升级路径：backfill 用 extract_embedded_cover 重提取
+    // 截断封面，该函数必须与导入路径同样挂 WAV 兜底。
+    let path = temp_audio_path("seraph-wav-backfill", "wav");
+    let jpeg = test_jpeg_bytes(300, 0xcc);
+    write_test_wav_with_apic(&path, &jpeg, true);
+    let covers_dir = std::env::temp_dir().join("seraph-test-covers-backfill");
+    let _ = fs::remove_dir_all(&covers_dir);
+
+    let cover = extract_embedded_cover(&path, &covers_dir).expect("cover saved");
+    let saved = fs::read(&cover).expect("read saved cover");
+    assert_eq!(saved, jpeg, "backfill 重提取应得到完整封面");
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_dir_all(&covers_dir);
+}
+
 #[test]
 fn formats_quality_with_sample_rate() {
     assert_eq!(
@@ -573,3 +709,4 @@ fn cover_key_normalizes_case_and_separators() {
         normalize_cover_key("c:/users/x/COVERS/abc.JPG")
     );
 }
+

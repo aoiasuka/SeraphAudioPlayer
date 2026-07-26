@@ -20,7 +20,7 @@ pub(crate) use des::{
 pub(crate) use encoding_rs::GBK;
 pub(crate) use flate2::read::ZlibDecoder;
 pub(crate) use lofty::{
-    file::{AudioFile, TaggedFileExt},
+    file::{AudioFile, FileType, TaggedFileExt},
     picture::{MimeType, PictureType},
     prelude::Accessor,
     tag::{ItemKey, Tag},
@@ -39,5 +39,5 @@ pub(crate) use tauri::{AppHandle, Manager};
 // 兄弟模块共享项（glob 汇聚，供子模块一站式引入）
 #[allow(unused_imports)]
 pub(crate) use super::{
-    dsd_tags::*, lyrics::*, media_library::*, metadata::*, online_lyrics::*, types::*,
+    dsd_tags::*, lyrics::*, media_library::*, metadata::*, online_lyrics::*, types::*, wav_id3::*,
 };

@@ -14,6 +14,7 @@ mod prelude;
 #[cfg(test)]
 mod tests;
 mod types;
+mod wav_id3;
 
 // 兄弟 ipc 模块（cache/bilibili）沿用 `super::library::xxx` 路径
 pub use commands::*;

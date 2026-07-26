@@ -744,6 +744,13 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
 
     parsed.lyrics = lyrics_from_tags(tagged_file.tags());
     parsed.cover = cover_art_from_tags(tagged_file.tags());
+    // v0.5.2：部分 WAV 的 ID3v2.4 帧大小错写成普通 u32（规范要求 syncsafe），
+    // lofty 按规范解读导致 APIC 封面截断（显示半张图/空白）；封面缺失或
+    // 疑似截断时从 id3 chunk 手动重提取。
+    if tagged_file.file_type() == FileType::Wav {
+        let current = parsed.cover.take();
+        parsed.cover = wav_cover_fallback(path, current);
+    }
     enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
 
     parsed
@@ -835,7 +842,15 @@ pub(crate) fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// 只读标签提取封面并落盘（启动补扫用，跳过 ffprobe 等重探测）。
 pub(crate) fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<String> {
     let art = match lofty::read_from_path(path) {
-        Ok(tagged_file) => cover_art_from_tags(tagged_file.tags()),
+        Ok(tagged_file) => {
+            let cover = cover_art_from_tags(tagged_file.tags());
+            // v0.5.2：WAV 封面截断兜底（u32 帧大小病灶），与导入路径同语义
+            if tagged_file.file_type() == FileType::Wav {
+                wav_cover_fallback(path, cover)
+            } else {
+                cover
+            }
+        }
         // v0.5.1：lofty 不支持 DSD 容器，改走内嵌 ID3v2 手动提取
         Err(_) => dsd_tags_from_path(path).and_then(|tags| tags.cover),
     }?;
@@ -843,24 +858,24 @@ pub(crate) fn extract_embedded_cover(path: &Path, covers_dir: &Path) -> Option<S
 }
 
 /// 旧版曲库缓存里的本地曲目没有封面（当时不提取）。启动时一次性补扫
-/// cover 为空且文件仍存在的本地曲目，完成后写标记文件，后续启动零成本；
-/// 新导入的曲目在导入时即提取封面，不依赖本流程。
+/// cover 为空或落盘封面为截断图的本地曲目，完成后写标记文件，后续启动
+/// 零成本；新导入的曲目在导入时即提取封面，不依赖本流程。
 pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     let Ok(covers_dir) = covers_dir_path(app) else {
         return;
     };
-    // v0.5.1 标记升级 v1 → v2：新增 DSD（.dsf/.dff）内嵌封面提取能力，
-    // 已按 v1 扫过的存量 DSD 曲目需要再补扫一次才能拿到封面。
-    let marker = covers_dir.join(".cover-backfill-v2");
+    // v0.5.2 标记升级 v2 → v3：WAV 的 ID3v2.4 u32 帧大小病灶修复前，
+    // 截断的半张封面已落盘且 cover 非空，需要再补扫一次重新提取。
+    let marker = covers_dir.join(".cover-backfill-v3");
     if marker.is_file() {
         return;
     }
 
     // H-1：封面提取含 lofty 全标签解析（每首数十毫秒，大曲库累计到分钟级），
-    // 绝不能持 LIBRARY_LOCK 期间做。这里先短暂持锁取一份快照识别候选，随即释放锁，
-    // 在锁外完成所有重 IO；最后再短暂持锁读改写落盘。
-    // 期间若有并发导入改动了曲库，以并发写为准：只回填“候选仍存在且封面仍为空”的曲目。
-    let candidates: Vec<String> = {
+    // 绝不能持 LIBRARY_LOCK 期间做。这里先短暂持锁取一份快照，随即释放锁，
+    // 在锁外完成候选过滤（含截断检测的文件读取）与所有重 IO；最后再短暂持锁读改写落盘。
+    // 期间若有并发导入改动了曲库，以并发写为准：只回填「候选仍存在且封面未被并发更新」的曲目。
+    let snapshot: Vec<(String, String)> = {
         let _guard = LIBRARY_LOCK.lock();
         let Ok(tracks) = read_cached_tracks_for_update(app) else {
             // 缓存损坏时不写标记，等缓存恢复后下次启动重试
@@ -868,21 +883,27 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
         };
         tracks
             .iter()
-            .filter(|track| track.cover.is_empty() && track.source_url.is_none())
-            .map(|track| track.path.clone())
+            .filter(|track| track.source_url.is_none())
+            .map(|track| (track.path.clone(), track.cover.clone()))
             .collect()
     };
 
+    // 锁外过滤候选：缺封面，或落盘封面是修复前留下的截断图
+    let candidates: Vec<(String, String)> = snapshot
+        .into_iter()
+        .filter(|(_, cover)| cover.is_empty() || cover_file_looks_truncated(cover))
+        .collect();
+
     if candidates.is_empty() {
         if fs::create_dir_all(&covers_dir).is_ok() {
-            let _ = fs::write(&marker, b"v2");
+            let _ = fs::write(&marker, b"v3");
         }
         return;
     }
 
     // 锁外做重 IO：逐候选提取封面，得到 path -> cover 映射。
     let mut extracted: HashMap<String, String> = HashMap::new();
-    for path_string in &candidates {
+    for (path_string, _) in &candidates {
         let path = Path::new(path_string);
         if !path.is_file() {
             continue;
@@ -893,20 +914,29 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     }
 
     if !extracted.is_empty() {
-        // 重新持锁读改写：只回填仍然缺封面的本地曲目，尊重期间的并发导入结果。
+        let snapshot_cover: HashMap<&String, &String> =
+            candidates.iter().map(|(path, cover)| (path, cover)).collect();
+        // 重新持锁读改写：封面与快照一致（未被并发导入更新）才回填。
         let _guard = LIBRARY_LOCK.lock();
         let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
             return;
         };
         let mut changed = false;
         for track in &mut tracks {
-            if !track.cover.is_empty() || track.source_url.is_some() {
+            if track.source_url.is_some() {
                 continue;
             }
-            if let Some(cover) = extracted.get(&track.path) {
-                track.cover = cover.clone();
-                changed = true;
+            let Some(cover) = extracted.get(&track.path) else {
+                continue;
+            };
+            let Some(old_cover) = snapshot_cover.get(&track.path) else {
+                continue;
+            };
+            if track.cover != **old_cover || track.cover == *cover {
+                continue;
             }
+            track.cover = cover.clone();
+            changed = true;
         }
         if changed && write_cached_tracks(app, &tracks).is_err() {
             // 写失败不落标记，下次启动重试
@@ -915,7 +945,7 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     }
 
     if fs::create_dir_all(&covers_dir).is_ok() {
-        let _ = fs::write(&marker, b"v2");
+        let _ = fs::write(&marker, b"v3");
     }
 }
 
