@@ -709,4 +709,3 @@ fn cover_key_normalizes_case_and_separators() {
         normalize_cover_key("c:/users/x/COVERS/abc.JPG")
     );
 }
-

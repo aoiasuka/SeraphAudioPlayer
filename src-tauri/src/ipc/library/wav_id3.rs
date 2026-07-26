@@ -263,10 +263,7 @@ mod unit_tests {
         // 是非零垃圾字节 → 改判 u32（复刻 weiyi 病例：字节全部低位但仍是 u32）。
         let mut body = vec![0_u8; 310];
         body[10 + 172] = 0xac; // syncsafe 落点：垃圾（非 padding、非帧 ID）
-        assert_eq!(
-            resolve_v24_frame_size([0, 0, 1, 0x2c], &body, 0),
-            Some(300)
-        );
+        assert_eq!(resolve_v24_frame_size([0, 0, 1, 0x2c], &body, 0), Some(300));
     }
 
     #[test]
@@ -274,10 +271,7 @@ mod unit_tests {
         // syncsafe 落点正好是下一个合法帧 ID → 守规范
         let mut body = vec![0xff_u8; 200];
         body[10 + 172..10 + 176].copy_from_slice(b"TIT2");
-        assert_eq!(
-            resolve_v24_frame_size([0, 0, 1, 0x2c], &body, 0),
-            Some(172)
-        );
+        assert_eq!(resolve_v24_frame_size([0, 0, 1, 0x2c], &body, 0), Some(172));
     }
 
     #[test]

@@ -914,8 +914,10 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) {
     }
 
     if !extracted.is_empty() {
-        let snapshot_cover: HashMap<&String, &String> =
-            candidates.iter().map(|(path, cover)| (path, cover)).collect();
+        let snapshot_cover: HashMap<&String, &String> = candidates
+            .iter()
+            .map(|(path, cover)| (path, cover))
+            .collect();
         // 重新持锁读改写：封面与快照一致（未被并发导入更新）才回填。
         let _guard = LIBRARY_LOCK.lock();
         let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
