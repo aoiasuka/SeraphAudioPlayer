@@ -101,8 +101,10 @@ impl Decoder for SymphoniaDecoder {
                         .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
                 })
                 .ok_or_else(|| DecoderError::UnsupportedFormat("no audio track".into()))?;
-            let params = track.codec_params.clone();
+            let mut params = track.codec_params.clone();
             self.track_id = Some(track.id);
+            // F-18：ALAC 高解析度文件的 stsd 采样率溢出截断，按 magic cookie 纠偏
+            apply_alac_cookie_overrides(&mut params);
             params
         };
         let sample_rate = codec_params.sample_rate.unwrap_or(44_100);
@@ -301,6 +303,48 @@ fn ts_to_frames(time_base: Option<TimeBase>, ts: u64, sample_rate: u32) -> u64 {
     (timestamp_seconds(time_base, ts, sample_rate) * f64::from(sample_rate.max(1))).round() as u64
 }
 
+/// F-18：ALAC 高解析度采样率纠偏。
+///
+/// MP4 stsd 音频条目的采样率是 16.16 定点数，高位只有 16 bit——88.2k 以上
+/// 的采样率会溢出截断（96000 → 30464，192000 → 61568）。symphonia 的 isomp4
+/// demuxer 把该截断值填进 `codec_params.sample_rate`，而 ALAC 解码器实际按
+/// magic cookie（extra_data 末 4 字节，big endian）的权威采样率输出，导致
+/// 输出流按错误采样率打开、播放变慢降调。这里以 cookie 为准覆盖采样率、
+/// 位深与声道数。
+fn apply_alac_cookie_overrides(params: &mut symphonia::core::codecs::CodecParameters) {
+    use symphonia::core::codecs::CODEC_TYPE_ALAC;
+
+    if params.codec != CODEC_TYPE_ALAC {
+        return;
+    }
+    let Some(cookie) = params.extra_data.as_deref() else {
+        return;
+    };
+    // magic cookie 只有 24 或 48 字节两种合法长度（48 字节在尾部追加
+    // channel layout 段，前 24 字节布局一致）
+    if cookie.len() != 24 && cookie.len() != 48 {
+        return;
+    }
+    let sample_rate = u32::from_be_bytes([cookie[20], cookie[21], cookie[22], cookie[23]]);
+    let bit_depth = cookie[5];
+    let channel_count = cookie[9];
+    if sample_rate > 0 {
+        params.with_sample_rate(sample_rate);
+    }
+    if (1..=32).contains(&bit_depth) {
+        params.with_bits_per_sample(u32::from(bit_depth));
+    }
+    if (1..=8).contains(&channel_count) {
+        // stsd 不给 ALAC 填声道，StreamInfo 会退到默认 2——这里按 cookie 的
+        // 声道数补上（仅用于声道计数，具体 layout 由解码器按 cookie 解析）
+        if let Some(channels) =
+            symphonia::core::audio::Channels::from_bits((1_u32 << channel_count) - 1)
+        {
+            params.with_channels(channels);
+        }
+    }
+}
+
 fn stream_info_from_codec(params: &symphonia::core::codecs::CodecParameters) -> StreamInfo {
     let sample_rate = params.sample_rate.unwrap_or(44_100);
     let duration_seconds = params
@@ -355,6 +399,7 @@ mod tests {
         io::Write,
         time::{SystemTime, UNIX_EPOCH},
     };
+    use symphonia::core::codecs::{CodecParameters, CODEC_TYPE_ALAC};
 
     #[test]
     fn decodes_pcm_wav_packets() {
@@ -376,6 +421,74 @@ mod tests {
         assert!(packet.timestamp_seconds >= 0.0);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn alac_cookie_overrides_truncated_stsd_sample_rate() {
+        // stsd 采样率是 16.16 定点数，96000 溢出截断成 30464；
+        // magic cookie 的权威值必须胜出（位深同理）。
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(CODEC_TYPE_ALAC)
+            .with_sample_rate(30_464)
+            .with_extra_data(test_alac_cookie(96_000, 24, 2).into_boxed_slice());
+        apply_alac_cookie_overrides(&mut params);
+        assert_eq!(params.sample_rate, Some(96_000));
+        assert_eq!(params.bits_per_sample, Some(24));
+        assert_eq!(params.channels.map(|channels| channels.count()), Some(2));
+
+        // 48 字节 cookie（带显式 channel layout 附加段）偏移相同
+        let mut cookie = test_alac_cookie(192_000, 24, 2);
+        cookie.extend_from_slice(&[0_u8; 24]);
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(CODEC_TYPE_ALAC)
+            .with_sample_rate(61_568)
+            .with_extra_data(cookie.into_boxed_slice());
+        apply_alac_cookie_overrides(&mut params);
+        assert_eq!(params.sample_rate, Some(192_000));
+    }
+
+    #[test]
+    fn alac_cookie_ignored_for_other_codecs_and_bad_cookies() {
+        // 非 ALAC：不动
+        let mut params = CodecParameters::new();
+        params.with_sample_rate(44_100);
+        apply_alac_cookie_overrides(&mut params);
+        assert_eq!(params.sample_rate, Some(44_100));
+
+        // ALAC 但 cookie 长度非法：不动
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(CODEC_TYPE_ALAC)
+            .with_sample_rate(44_100)
+            .with_extra_data(vec![0_u8; 10].into_boxed_slice());
+        apply_alac_cookie_overrides(&mut params);
+        assert_eq!(params.sample_rate, Some(44_100));
+
+        // cookie 采样率为 0（畸形）：不覆盖
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(CODEC_TYPE_ALAC)
+            .with_sample_rate(44_100)
+            .with_extra_data(test_alac_cookie(0, 16, 2).into_boxed_slice());
+        apply_alac_cookie_overrides(&mut params);
+        assert_eq!(params.sample_rate, Some(44_100));
+    }
+
+    /// 24 字节 ALAC magic cookie（sample_rate 在偏移 20..24，big endian）。
+    fn test_alac_cookie(sample_rate: u32, bit_depth: u8, channels: u8) -> Vec<u8> {
+        let mut cookie = Vec::with_capacity(24);
+        cookie.extend_from_slice(&4096_u32.to_be_bytes()); // frame_length
+        cookie.push(0); // compatible_version
+        cookie.push(bit_depth);
+        cookie.extend_from_slice(&[40, 10, 14]); // pb / mb / kb
+        cookie.push(channels);
+        cookie.extend_from_slice(&255_u16.to_be_bytes()); // max_run
+        cookie.extend_from_slice(&0_u32.to_be_bytes()); // max_frame_bytes
+        cookie.extend_from_slice(&0_u32.to_be_bytes()); // avg_bit_rate
+        cookie.extend_from_slice(&sample_rate.to_be_bytes());
+        cookie
     }
 
     #[test]
