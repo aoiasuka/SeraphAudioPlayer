@@ -238,13 +238,7 @@ fn handle_media_event(app: &AppHandle, event: MediaControlEvent) {
     let result: Result<(), String> = match event {
         MediaControlEvent::Play => smtc_play(&state),
         MediaControlEvent::Pause => smtc_pause(&state),
-        MediaControlEvent::Toggle => {
-            if *state.player_state.read() == PlayerState::Playing {
-                smtc_pause(&state)
-            } else {
-                smtc_play(&state)
-            }
-        }
+        MediaControlEvent::Toggle => toggle_playback(&state),
         MediaControlEvent::Next => state.advance_track(TrackAdvance::Next),
         MediaControlEvent::Previous => state.advance_track(TrackAdvance::Previous),
         MediaControlEvent::Stop => {
@@ -263,6 +257,15 @@ fn handle_media_event(app: &AppHandle, event: MediaControlEvent) {
 
     if let Err(err) = result {
         warn!("SMTC media key action failed: {err}");
+    }
+}
+
+/// 播放/暂停切换:SMTC Toggle 与任务栏缩略图播放按钮共用同一语义。
+pub fn toggle_playback(state: &AppState) -> Result<(), String> {
+    if *state.player_state.read() == PlayerState::Playing {
+        smtc_pause(state)
+    } else {
+        smtc_play(state)
     }
 }
 

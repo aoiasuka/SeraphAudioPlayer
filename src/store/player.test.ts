@@ -98,11 +98,23 @@ describe("player store startup and persistence", () => {
     expect(migrated.activeView).toBe("local");
     // v3：旧状态无 rememberPlayback 字段时默认开启（保持既有恢复行为）
     expect(migrated.rememberPlayback).toBe(true);
+    // v0.5.4：旧状态无任务栏集成字段时默认开启（与后端默认一致）
+    expect(migrated.taskbarButtonsEnabled).toBe(true);
+    expect(migrated.taskbarProgressEnabled).toBe(true);
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {
     const migrated = migratePersistedPlayerState({ rememberPlayback: false });
     expect(migrated.rememberPlayback).toBe(false);
+  });
+
+  it("honors explicit taskbar toggles=false in persisted state", () => {
+    const migrated = migratePersistedPlayerState({
+      taskbarButtonsEnabled: false,
+      taskbarProgressEnabled: false,
+    });
+    expect(migrated.taskbarButtonsEnabled).toBe(false);
+    expect(migrated.taskbarProgressEnabled).toBe(false);
   });
 
   it("clears persisted playback position when memory playback is turned off", () => {

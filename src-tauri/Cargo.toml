@@ -50,3 +50,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 # SMTC 系统媒体控件（媒体键 / 系统媒体浮窗）
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+# 任务栏缩略图播控按钮 + 图标进度条（ITaskbarList3 / 窗口子类化 / 运行时绘制图标）
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

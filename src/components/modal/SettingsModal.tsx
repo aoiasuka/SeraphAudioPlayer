@@ -97,6 +97,16 @@ export function SettingsModal() {
   const showNotification = usePlayerStore((s) => s.showNotification);
   const smtcEnabled = usePlayerStore((s) => s.smtcEnabled);
   const setSmtcEnabled = usePlayerStore((s) => s.setSmtcEnabled);
+  const taskbarButtonsEnabled = usePlayerStore((s) => s.taskbarButtonsEnabled);
+  const setTaskbarButtonsEnabled = usePlayerStore(
+    (s) => s.setTaskbarButtonsEnabled
+  );
+  const taskbarProgressEnabled = usePlayerStore(
+    (s) => s.taskbarProgressEnabled
+  );
+  const setTaskbarProgressEnabled = usePlayerStore(
+    (s) => s.setTaskbarProgressEnabled
+  );
   const rememberPlayback = usePlayerStore((s) => s.rememberPlayback);
   const setRememberPlayback = usePlayerStore((s) => s.setRememberPlayback);
   const markTracksCacheMissingByPaths = usePlayerStore(
@@ -541,6 +551,51 @@ export function SettingsModal() {
             aria-pressed={smtcEnabled}
           >
             {smtcEnabled ? "已启用" : "已停用"}
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+          <div className="min-w-0">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              任务栏播控按钮
+            </h4>
+            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+              鼠标悬停任务栏图标时，缩略图下方显示上一首 / 播放暂停 / 下一首按钮，
+              不切换窗口即可控制播放。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTaskbarButtonsEnabled(!taskbarButtonsEnabled)}
+            className={
+              taskbarButtonsEnabled
+                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+            aria-pressed={taskbarButtonsEnabled}
+          >
+            {taskbarButtonsEnabled ? "已启用" : "已停用"}
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+          <div className="min-w-0">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              任务栏播放进度
+            </h4>
+            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+              在任务栏图标上以进度条形式显示当前曲目的播放进度，暂停时变为黄色。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTaskbarProgressEnabled(!taskbarProgressEnabled)}
+            className={
+              taskbarProgressEnabled
+                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+            aria-pressed={taskbarProgressEnabled}
+          >
+            {taskbarProgressEnabled ? "已启用" : "已停用"}
           </button>
         </div>
         <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">

@@ -105,6 +105,9 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     smtcEnabled: state.smtcEnabled !== false,
     // v3：旧版本无此字段时默认启用记忆播放（保持既有“恢复上次播放”的行为）
     rememberPlayback: state.rememberPlayback !== false,
+    // v0.5.4：任务栏集成，旧版本无此字段时默认启用（与后端默认一致）
+    taskbarButtonsEnabled: state.taskbarButtonsEnabled !== false,
+    taskbarProgressEnabled: state.taskbarProgressEnabled !== false,
   };
 }
 
@@ -137,6 +140,8 @@ export const usePlayerStore = create<PlayerStore>()(
         activeView: "local",
         smtcEnabled: true,
         rememberPlayback: true,
+        taskbarButtonsEnabled: true,
+        taskbarProgressEnabled: true,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -190,6 +195,8 @@ export const usePlayerStore = create<PlayerStore>()(
         activeView: state.activeView,
         smtcEnabled: state.smtcEnabled,
         rememberPlayback: state.rememberPlayback,
+        taskbarButtonsEnabled: state.taskbarButtonsEnabled,
+        taskbarProgressEnabled: state.taskbarProgressEnabled,
       }),
     }
   )

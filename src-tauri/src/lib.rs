@@ -11,6 +11,8 @@ mod ipc;
 #[cfg(windows)]
 mod smtc;
 mod state;
+#[cfg(windows)]
+mod taskbar;
 
 use state::AppState;
 use tauri::Manager;
@@ -37,6 +39,7 @@ pub fn run() {
             ipc::playback::select_output_device,
             ipc::playback::set_output_driver,
             ipc::playback::set_smtc_enabled,
+            ipc::playback::set_taskbar_features,
             ipc::cache::clear_cache,
             ipc::cache::get_cache_status,
             ipc::cache::update_cache_settings,
@@ -86,6 +89,9 @@ pub fn run() {
             // Windows 系统媒体控件：媒体键 + 锁屏/音量浮窗曲目展示
             #[cfg(windows)]
             smtc::init(app.handle());
+            // Windows 任务栏：缩略图播控按钮 + 图标播放进度条
+            #[cfg(windows)]
+            taskbar::init(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

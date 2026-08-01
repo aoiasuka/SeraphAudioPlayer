@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -188,6 +188,30 @@ export function createOutputActions(
     sendCommand("set_smtc_enabled", { enabled });
     get().showNotification(
       enabled ? "已启用系统媒体控件" : "已停用系统媒体控件"
+    );
+  },
+
+  setTaskbarButtonsEnabled: (enabled) => {
+    if (get().taskbarButtonsEnabled === enabled) return;
+    set({ taskbarButtonsEnabled: enabled });
+    sendCommand("set_taskbar_features", {
+      buttons: enabled,
+      progress: get().taskbarProgressEnabled,
+    });
+    get().showNotification(
+      enabled ? "已启用任务栏播控按钮" : "已停用任务栏播控按钮"
+    );
+  },
+
+  setTaskbarProgressEnabled: (enabled) => {
+    if (get().taskbarProgressEnabled === enabled) return;
+    set({ taskbarProgressEnabled: enabled });
+    sendCommand("set_taskbar_features", {
+      buttons: get().taskbarButtonsEnabled,
+      progress: enabled,
+    });
+    get().showNotification(
+      enabled ? "已启用任务栏播放进度" : "已停用任务栏播放进度"
     );
   },
 

@@ -27,6 +27,18 @@ export function useHydratePlayerStore() {
             // 非 Windows 或 SMTC 未初始化时静默
           });
         }
+        // 任务栏集成同理：后端默认全开，仅用户关过任一项时同步
+        if (
+          isTauriRuntime() &&
+          (!state.taskbarButtonsEnabled || !state.taskbarProgressEnabled)
+        ) {
+          void invoke("set_taskbar_features", {
+            buttons: state.taskbarButtonsEnabled,
+            progress: state.taskbarProgressEnabled,
+          }).catch(() => {
+            // 非 Windows 或任务栏集成未初始化时静默
+          });
+        }
       });
       // v0.4.4：EQ/DSP 配置独立持久化，水合后经 onRehydrateStorage 同步到引擎。
       void Promise.resolve(useEqStore.persist.rehydrate());

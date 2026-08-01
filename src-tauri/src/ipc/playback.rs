@@ -190,3 +190,15 @@ pub fn set_smtc_enabled(enabled: bool) -> Result<(), String> {
     let _ = enabled;
     Ok(())
 }
+
+/// 任务栏集成开关（缩略图播控按钮 / 图标进度条）。设置由前端持久化，
+/// 启动水合后同步；后端默认两者均启用。
+#[tauri::command]
+pub fn set_taskbar_features(buttons: bool, progress: bool) -> Result<(), String> {
+    debug!("ipc::set_taskbar_features -> buttons={buttons}, progress={progress}");
+    #[cfg(windows)]
+    crate::taskbar::set_features(buttons, progress);
+    #[cfg(not(windows))]
+    let _ = (buttons, progress);
+    Ok(())
+}
