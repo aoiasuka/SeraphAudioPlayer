@@ -1,0 +1,14 @@
+/* 任务栏歌词条窗口专属覆盖:index.css 的 body 纸底/纹路会填满透明窗口,
+   必须清掉;纸签卡片的底色由组件自己绘制。 */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: transparent !important;
+  background-image: none !important;
+  overflow: hidden;
+}

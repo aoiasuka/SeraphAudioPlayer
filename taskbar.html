@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN" class="select-none">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      /* 透明窗口:任何默认底色都会显示为不透明矩形 */
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+        background: transparent;
+        color-scheme: light;
+        overflow: hidden;
+      }
+    </style>
+    <title>Seraph 任务栏歌词</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/taskbar/main.tsx"></script>
+  </body>
+</html>

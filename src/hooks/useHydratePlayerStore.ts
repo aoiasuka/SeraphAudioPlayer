@@ -39,6 +39,14 @@ export function useHydratePlayerStore() {
             // 非 Windows 或任务栏集成未初始化时静默
           });
         }
+        // 歌词条默认关闭（后端不创建窗口），仅用户开过时创建
+        if (isTauriRuntime() && state.taskbarLyricsEnabled) {
+          void invoke("set_taskbar_lyrics_enabled", { enabled: true }).catch(
+            () => {
+              // 非 Windows 时静默
+            }
+          );
+        }
       });
       // v0.4.4：EQ/DSP 配置独立持久化，水合后经 onRehydrateStorage 同步到引擎。
       void Promise.resolve(useEqStore.persist.rehydrate());

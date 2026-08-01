@@ -58,6 +58,12 @@ export function useStreamingEvents() {
       usePlayerStore.setState({ bilibiliBatchProgress: progress });
     });
 
+    // 任务栏歌词条 ✕ 按钮：设置的单一事实来源在主窗口 store（歌词条窗口
+    // 不允许 import persist store），经事件回传由这里落开关并销毁窗口。
+    register<null>("seraph://taskbar-lyrics-close", () => {
+      usePlayerStore.getState().setTaskbarLyricsEnabled(false);
+    });
+
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();

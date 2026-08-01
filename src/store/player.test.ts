@@ -101,6 +101,8 @@ describe("player store startup and persistence", () => {
     // v0.5.4：旧状态无任务栏集成字段时默认开启（与后端默认一致）
     expect(migrated.taskbarButtonsEnabled).toBe(true);
     expect(migrated.taskbarProgressEnabled).toBe(true);
+    // v0.5.4：歌词条第二窗口有内存成本，默认关闭
+    expect(migrated.taskbarLyricsEnabled).toBe(false);
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {
@@ -115,6 +117,13 @@ describe("player store startup and persistence", () => {
     });
     expect(migrated.taskbarButtonsEnabled).toBe(false);
     expect(migrated.taskbarProgressEnabled).toBe(false);
+  });
+
+  it("honors explicit taskbarLyricsEnabled=true in persisted state", () => {
+    const migrated = migratePersistedPlayerState({
+      taskbarLyricsEnabled: true,
+    });
+    expect(migrated.taskbarLyricsEnabled).toBe(true);
   });
 
   it("clears persisted playback position when memory playback is turned off", () => {

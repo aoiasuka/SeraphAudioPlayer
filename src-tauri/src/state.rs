@@ -137,6 +137,11 @@ impl AppState {
             .cloned()
     }
 
+    /// 队列当前曲目（任务栏歌词条播放快照用）。
+    pub fn current_queue_track(&self) -> Option<PlaybackQueueTrack> {
+        self.playback_queue.read().current_track().cloned()
+    }
+
     pub fn handle_playback_ended(&self, track_id: &str) -> Result<(), String> {
         let next = {
             let mut queue = self.playback_queue.write();

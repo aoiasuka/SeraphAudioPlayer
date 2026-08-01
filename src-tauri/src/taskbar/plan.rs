@@ -117,6 +117,21 @@ impl PlanState {
             _ => {}
         }
     }
+
+    /// 当前是否处于播放中(缓冲视为播放,与切换按钮口径一致)。
+    pub fn is_playing(&self) -> bool {
+        matches!(self.phase, PlayPhase::Playing | PlayPhase::Buffering)
+    }
+
+    /// 最近一次 Progress 的整秒进度(暂停后保留,供歌词条快照)。
+    pub fn seconds(&self) -> u64 {
+        self.seconds
+    }
+
+    /// 最近一次 Progress 的整秒总时长(未知为 0)。
+    pub fn total(&self) -> u64 {
+        self.total
+    }
 }
 
 /// (状态, 开关) → 渲染计划。

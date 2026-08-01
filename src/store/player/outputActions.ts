@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -212,6 +212,15 @@ export function createOutputActions(
     });
     get().showNotification(
       enabled ? "已启用任务栏播放进度" : "已停用任务栏播放进度"
+    );
+  },
+
+  setTaskbarLyricsEnabled: (enabled) => {
+    if (get().taskbarLyricsEnabled === enabled) return;
+    set({ taskbarLyricsEnabled: enabled });
+    sendCommand("set_taskbar_lyrics_enabled", { enabled });
+    get().showNotification(
+      enabled ? "已开启任务栏歌词条" : "已关闭任务栏歌词条"
     );
   },
 

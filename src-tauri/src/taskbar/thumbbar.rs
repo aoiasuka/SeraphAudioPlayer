@@ -91,6 +91,15 @@ pub fn set_features(buttons: bool, progress: bool) {
     }
 }
 
+/// 播放快照(是否播放中, 整秒进度, 整秒总时长),供歌词条窗口初始化。
+/// 事件线程持续折叠 Progress,暂停期间仍保留最后位置——引擎没有位置查询
+/// 接口,这里是唯一的"当前进度"来源。未初始化时返回 None。
+pub fn playback_snapshot() -> Option<(bool, u64, u64)> {
+    let shared = SHARED.get()?;
+    let state = shared.state.lock();
+    Some((state.is_playing(), state.seconds(), state.total()))
+}
+
 /// 在 Tauri setup 阶段调用。初始化失败只记日志,绝不阻断应用启动。
 pub fn init(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {

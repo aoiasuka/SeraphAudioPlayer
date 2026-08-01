@@ -107,6 +107,10 @@ export function SettingsModal() {
   const setTaskbarProgressEnabled = usePlayerStore(
     (s) => s.setTaskbarProgressEnabled
   );
+  const taskbarLyricsEnabled = usePlayerStore((s) => s.taskbarLyricsEnabled);
+  const setTaskbarLyricsEnabled = usePlayerStore(
+    (s) => s.setTaskbarLyricsEnabled
+  );
   const rememberPlayback = usePlayerStore((s) => s.rememberPlayback);
   const setRememberPlayback = usePlayerStore((s) => s.setRememberPlayback);
   const markTracksCacheMissingByPaths = usePlayerStore(
@@ -596,6 +600,29 @@ export function SettingsModal() {
             aria-pressed={taskbarProgressEnabled}
           >
             {taskbarProgressEnabled ? "已启用" : "已停用"}
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+          <div className="min-w-0">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              任务栏歌词条
+            </h4>
+            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+              在任务栏上贴一张档案纸签，实时显示当前曲目与歌词，悬停可控制播放，
+              可拖拽调整位置。独立小窗口有少量内存开销，默认关闭。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTaskbarLyricsEnabled(!taskbarLyricsEnabled)}
+            className={
+              taskbarLyricsEnabled
+                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+            }
+            aria-pressed={taskbarLyricsEnabled}
+          >
+            {taskbarLyricsEnabled ? "已开启" : "已关闭"}
           </button>
         </div>
         <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "taskbar-lyrics",
+  "description": "任务栏歌词条窗口:事件监听 + 拖拽,不授予主窗口的对话框等能力",
+  "windows": ["taskbar-lyrics"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:window:allow-start-dragging"
+  ]
+}

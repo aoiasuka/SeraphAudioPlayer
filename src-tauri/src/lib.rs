@@ -40,6 +40,10 @@ pub fn run() {
             ipc::playback::set_output_driver,
             ipc::playback::set_smtc_enabled,
             ipc::playback::set_taskbar_features,
+            ipc::playback::set_taskbar_lyrics_enabled,
+            ipc::playback::position_taskbar_bar,
+            ipc::playback::get_playback_snapshot,
+            ipc::playback::toggle_play,
             ipc::cache::clear_cache,
             ipc::cache::get_cache_status,
             ipc::cache::update_cache_settings,
@@ -67,6 +71,7 @@ pub fn run() {
             ipc::playlist_io::import_playlist_m3u8,
             ipc::playlist_io::export_playlist_m3u8,
             ipc::system::reveal_in_explorer,
+            ipc::system::focus_main_window,
             ipc::dsp::set_dsp_settings,
             ipc::dsp::import_eq_preset,
             ipc::dsp::export_eq_preset,
@@ -93,6 +98,17 @@ pub fn run() {
             #[cfg(windows)]
             taskbar::init(app.handle());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 主窗口关闭 = 退出应用：任务栏歌词条窗口必须联动销毁，否则
+            // Tauri 因残留窗口不退出——播放继续、歌词条还在、主界面却回不来。
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                if let Some(bar) = window.app_handle().get_webview_window("taskbar-lyrics") {
+                    let _ = bar.destroy();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running Seraph Audio Player");

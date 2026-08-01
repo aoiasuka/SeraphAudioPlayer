@@ -103,6 +103,13 @@ export async function listen<T = unknown>(
   return listen<T>(event, cb);
 }
 
+/** 广播一个应用内事件(所有窗口可 listen)。非 Tauri 环境为空操作。 */
+export async function emitEvent(event: string, payload?: unknown): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const evt = await import("@tauri-apps/api/event");
+  await evt.emit(event, payload);
+}
+
 export async function isTauri(): Promise<boolean> {
   return isTauriRuntime();
 }

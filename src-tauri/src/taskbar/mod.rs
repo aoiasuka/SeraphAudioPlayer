@@ -12,7 +12,9 @@
 #![cfg(windows)]
 
 mod icons;
+mod lyric_bar;
 mod plan;
 mod thumbbar;
 
-pub use thumbbar::{init, set_features};
+pub use lyric_bar::{position as position_lyric_bar, set_enabled as set_lyrics_enabled};
+pub use thumbbar::{init, playback_snapshot, set_features};

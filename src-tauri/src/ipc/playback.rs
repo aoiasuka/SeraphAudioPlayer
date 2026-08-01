@@ -202,3 +202,95 @@ pub fn set_taskbar_features(buttons: bool, progress: bool) -> Result<(), String>
     let _ = (buttons, progress);
     Ok(())
 }
+
+/// 启用/停用任务栏歌词条窗口。默认关闭；启用即创建、停用即销毁
+/// （不保留隐藏窗口的 WebView2 内存开销）。
+///
+/// 必须是 async 命令：同步命令在主线程执行，而 WebviewWindowBuilder::build
+/// 需要主线程事件循环配合派发，同步调用会互相等待死锁冻结整个应用
+/// （Tauri 文档明确禁止在主线程同步命令中创建窗口）。set_lyrics_enabled
+/// 内部有等待旧窗口销毁的短阻塞循环，移到阻塞线程池执行。
+#[tauri::command]
+pub async fn set_taskbar_lyrics_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    debug!("ipc::set_taskbar_lyrics_enabled -> {enabled}");
+    #[cfg(windows)]
+    {
+        let result = run_blocking(move || crate::taskbar::set_lyrics_enabled(&app, enabled)).await;
+        if let Err(err) = &result {
+            tracing::warn!("set_taskbar_lyrics_enabled failed: {err}");
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// 歌词条定位：x=None 用默认位置，Some 为拖拽记忆的横向物理坐标。
+/// 返回钳制回任务栏范围后的实际横向位置，供前端持久化。
+/// async 同 set_taskbar_lyrics_enabled：避免占用主线程等待窗口操作。
+#[tauri::command]
+pub async fn position_taskbar_bar(app: tauri::AppHandle, x: Option<f64>) -> Result<f64, String> {
+    let x = x.filter(|value| value.is_finite());
+    #[cfg(windows)]
+    return crate::taskbar::position_lyric_bar(&app, x);
+    #[cfg(not(windows))]
+    {
+        let _ = (app, x);
+        Ok(0.0)
+    }
+}
+
+/// 播放快照（任务栏歌词条启动初始化用）。进度取自任务栏事件折叠状态——
+/// 引擎无位置查询接口，暂停期间该状态仍保留最后一次 Progress 的位置。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackSnapshot {
+    pub track_id: Option<String>,
+    pub playing: bool,
+    pub seconds: f64,
+    pub total: f64,
+}
+
+#[tauri::command]
+pub fn get_playback_snapshot(state: State<'_, AppState>) -> Result<PlaybackSnapshot, String> {
+    let track_id = state.current_queue_track().map(|track| track.id);
+    let fallback_playing = *state.player_state.read() == PlayerState::Playing;
+    #[cfg(windows)]
+    let (playing, seconds, total) = crate::taskbar::playback_snapshot()
+        .map(|(playing, seconds, total)| (playing, seconds as f64, total as f64))
+        .unwrap_or((fallback_playing, 0.0, 0.0));
+    #[cfg(not(windows))]
+    let (playing, seconds, total) = (fallback_playing, 0.0, 0.0);
+    Ok(PlaybackSnapshot {
+        track_id,
+        playing,
+        seconds,
+        total,
+    })
+}
+
+/// 播放/暂停切换（任务栏歌词条按钮）。与 SMTC Toggle 同一语义：
+/// 无已加载会话时从队列当前曲目从头播放。
+#[tauri::command]
+pub async fn toggle_play(state: State<'_, AppState>) -> Result<(), String> {
+    debug!("ipc::toggle_play");
+    let state = (*state).clone();
+    run_blocking(move || {
+        #[cfg(windows)]
+        {
+            crate::smtc::toggle_playback(&state)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = state;
+            Ok(())
+        }
+    })
+    .await
+}

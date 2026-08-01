@@ -34,5 +34,12 @@ export default defineConfig(async () => ({
     target: "esnext",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      // 多入口:主窗口 + 任务栏歌词条窗口
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        taskbar: path.resolve(__dirname, "taskbar.html"),
+      },
+    },
   },
 }));

@@ -9,18 +9,16 @@ import {
 } from "react";
 import { CloudDownload, Copy, Loader2, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
+import { TypewriterText } from "@/components/ui/TypewriterText";
 import { copyText } from "@/lib/clipboard";
+import {
+  activeGroupIndex,
+  groupLyricsByTime,
+} from "@/lib/lyrics/activeLine";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { LyricLine, OnlineLyricsCandidate } from "@/types/track";
-
-interface LyricGroup {
-  time: number;
-  lines: LyricLine[];
-}
-
-const SAME_TIMESTAMP_EPSILON = 0.01;
 
 function formatCandidateDuration(duration?: number | null) {
   // 审2-R12：与 formatSeconds 同修——Infinity 会绕过 <=0 判断产生 "Infinity:NaN"
@@ -37,50 +35,6 @@ function lyricPreview(lyrics: LyricLine[]) {
     .slice(0, 3)
     .map((line) => line.text)
     .join(" / ");
-}
-
-function TypewriterText({ text }: { text: string }) {
-  const [displayedLength, setDisplayedLength] = useState(0);
-
-  useEffect(() => {
-    setDisplayedLength(0);
-    if (!text) return;
-    
-    const speed = Math.max(30, Math.min(80, 800 / text.length));
-    
-    const interval = setInterval(() => {
-      setDisplayedLength((prev) => {
-        if (prev >= text.length) {
-          clearInterval(interval);
-          return text.length;
-        }
-        return prev + 1;
-      });
-    }, speed);
-
-    return () => clearInterval(interval);
-  }, [text]);
-
-  return <span className="type-caret">{text.slice(0, displayedLength)}</span>;
-}
-
-function groupLyricsByTime(lyrics: LyricLine[]) {
-  const groups: LyricGroup[] = [];
-
-  for (const line of lyrics) {
-    const previous = groups[groups.length - 1];
-    if (
-      previous &&
-      Math.abs(previous.time - line.time) <= SAME_TIMESTAMP_EPSILON
-    ) {
-      previous.lines.push(line);
-      continue;
-    }
-
-    groups.push({ time: line.time, lines: [line] });
-  }
-
-  return groups;
 }
 
 export function LyricsPanel() {
@@ -122,23 +76,10 @@ export function LyricsPanel() {
     onlineCandidates[0] ??
     null;
 
-  const activeIdx = useMemo(() => {
-    let low = 0;
-    let high = lyricGroups.length - 1;
-    let match = -1;
-
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      if (currentTime + SAME_TIMESTAMP_EPSILON >= lyricGroups[mid].time) {
-        match = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-
-    return match;
-  }, [lyricGroups, currentTime]);
+  const activeIdx = useMemo(
+    () => activeGroupIndex(lyricGroups, currentTime),
+    [lyricGroups, currentTime]
+  );
 
   useLayoutEffect(() => {
     const container = containerRef.current;

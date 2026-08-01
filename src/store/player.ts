@@ -108,6 +108,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     // v0.5.4：任务栏集成，旧版本无此字段时默认启用（与后端默认一致）
     taskbarButtonsEnabled: state.taskbarButtonsEnabled !== false,
     taskbarProgressEnabled: state.taskbarProgressEnabled !== false,
+    // v0.5.4：任务栏歌词条默认关闭（第二窗口有内存成本，按需开启）
+    taskbarLyricsEnabled: state.taskbarLyricsEnabled === true,
   };
 }
 
@@ -142,6 +144,7 @@ export const usePlayerStore = create<PlayerStore>()(
         rememberPlayback: true,
         taskbarButtonsEnabled: true,
         taskbarProgressEnabled: true,
+        taskbarLyricsEnabled: false,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -197,6 +200,7 @@ export const usePlayerStore = create<PlayerStore>()(
         rememberPlayback: state.rememberPlayback,
         taskbarButtonsEnabled: state.taskbarButtonsEnabled,
         taskbarProgressEnabled: state.taskbarProgressEnabled,
+        taskbarLyricsEnabled: state.taskbarLyricsEnabled,
       }),
     }
   )

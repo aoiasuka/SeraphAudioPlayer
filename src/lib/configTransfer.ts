@@ -41,6 +41,7 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   rememberPlayback: "boolean",
   taskbarButtonsEnabled: "boolean",
   taskbarProgressEnabled: "boolean",
+  taskbarLyricsEnabled: "boolean",
 };
 
 interface PersistedEnvelope {
