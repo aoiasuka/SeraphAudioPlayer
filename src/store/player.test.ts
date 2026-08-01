@@ -103,6 +103,8 @@ describe("player store startup and persistence", () => {
     expect(migrated.taskbarProgressEnabled).toBe(true);
     // v0.5.4：歌词条第二窗口有内存成本，默认关闭
     expect(migrated.taskbarLyricsEnabled).toBe(false);
+    // v0.5.4：仅歌词模式（鼠标穿透）默认关闭
+    expect(migrated.taskbarLyricsClickThrough).toBe(false);
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {
@@ -124,6 +126,13 @@ describe("player store startup and persistence", () => {
       taskbarLyricsEnabled: true,
     });
     expect(migrated.taskbarLyricsEnabled).toBe(true);
+  });
+
+  it("honors explicit taskbarLyricsClickThrough=true in persisted state", () => {
+    const migrated = migratePersistedPlayerState({
+      taskbarLyricsClickThrough: true,
+    });
+    expect(migrated.taskbarLyricsClickThrough).toBe(true);
   });
 
   it("clears persisted playback position when memory playback is turned off", () => {

@@ -25,6 +25,8 @@ interface PlaybackSnapshot {
   playing: boolean;
   seconds: number;
   total: number;
+  /** 任务栏是否深色主题（据此选墨签/纸签配色） */
+  darkTaskbar: boolean;
 }
 
 /** get_track_info 返回的字段子集(后端 ImportedTrack,camelCase)。 */
@@ -58,6 +60,8 @@ export function TaskbarLyricsBar() {
   const [seconds, setSeconds] = useState(0);
   const [total, setTotal] = useState(0);
   const [hovered, setHovered] = useState(false);
+  // 墨签配色：深色任务栏 → 墨底纸字（快照初始化 + 主题切换事件热更新）
+  const [dark, setDark] = useState(false);
   const trackIdRef = useRef<string | null>(null);
   trackIdRef.current = trackId;
   const lastAppliedXRef = useRef<number | null>(null);
@@ -84,6 +88,7 @@ export function TaskbarLyricsBar() {
         setPlaying(snapshot.playing);
         setSeconds(snapshot.seconds);
         setTotal(snapshot.total);
+        setDark(snapshot.darkTaskbar === true);
       })
       .catch(() => undefined);
 
@@ -132,6 +137,29 @@ export function TaskbarLyricsBar() {
         default:
           break;
       }
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 任务栏主题切换事件（thumbbar 的 WM_SETTINGCHANGE 侦测后广播）
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<boolean>("seraph://taskbar-theme", (isDark) => {
+      if (!disposed) setDark(isDark === true);
     })
       .then((fn) => {
         if (disposed) {
@@ -240,8 +268,12 @@ export function TaskbarLyricsBar() {
     [effectiveTotal]
   );
 
-  const controlButton =
-    "flex h-[22px] w-[22px] shrink-0 items-center justify-center border-[1.5px] border-ink bg-card text-ink transition-colors hover:bg-ink hover:text-paper";
+  const controlButton = cn(
+    "flex h-[22px] w-[22px] shrink-0 items-center justify-center border-[1.5px] transition-colors",
+    dark
+      ? "border-paper2 bg-ink text-paper hover:bg-paper hover:text-ink"
+      : "border-ink bg-card text-ink hover:bg-ink hover:text-paper"
+  );
 
   return (
     <div
@@ -253,7 +285,10 @@ export function TaskbarLyricsBar() {
           ? `${track.title}${track.artist ? ` · ${track.artist}` : ""}`
           : undefined
       }
-      className="relative flex h-full w-full items-stretch overflow-hidden border-[1.5px] border-ink bg-card"
+      className={cn(
+        "relative flex h-full w-full items-stretch overflow-hidden border-[1.5px]",
+        dark ? "border-paper2/70 bg-ink" : "border-ink bg-card"
+      )}
     >
       {/* 左缘印章红竖条:纸签的"档案标签"识别符 */}
       <div className="w-[3px] shrink-0 bg-stamp" />
@@ -265,7 +300,8 @@ export function TaskbarLyricsBar() {
       >
         <div
           className={cn(
-            "h-[24px] w-[24px] overflow-hidden rounded-full border-[1.5px] border-ink bg-paper2",
+            "h-[24px] w-[24px] overflow-hidden rounded-full border-[1.5px] bg-paper2",
+            dark ? "border-paper2/70" : "border-ink",
             playing && "animate-spin-slow"
           )}
         >
@@ -291,7 +327,10 @@ export function TaskbarLyricsBar() {
       >
         <div
           data-tauri-drag-region
-          className="w-full truncate font-serif text-[15px] font-semibold leading-tight text-ink"
+          className={cn(
+            "w-full truncate font-serif text-[15px] font-semibold leading-tight",
+            dark ? "text-paper" : "text-ink"
+          )}
         >
           {activeLine ? (
             <TypewriterText text={activeLine} />
@@ -305,7 +344,12 @@ export function TaskbarLyricsBar() {
 
       {/* 悬停控制排:覆盖右侧,不改变窗口尺寸 */}
       {hovered && (
-        <div className="absolute inset-y-0 right-0 flex items-center gap-1 border-l-[1.5px] border-line bg-card pl-1.5 pr-1">
+        <div
+          className={cn(
+            "absolute inset-y-0 right-0 flex items-center gap-1 border-l-[1.5px] pl-1.5 pr-1",
+            dark ? "border-paper2/40 bg-ink" : "border-line bg-card"
+          )}
+        >
           <button
             type="button"
             className={controlButton}
@@ -350,7 +394,10 @@ export function TaskbarLyricsBar() {
           </button>
           <button
             type="button"
-            className={cn(controlButton, "hover:bg-stamp hover:border-stamp")}
+            className={cn(
+              controlButton,
+              "hover:border-stamp hover:bg-stamp hover:text-paper"
+            )}
             title="关闭歌词条"
             aria-label="关闭歌词条"
             onClick={() => void emitEvent(CLOSE_EVENT).catch(() => undefined)}
@@ -363,7 +410,8 @@ export function TaskbarLyricsBar() {
       {/* 底边进度线:悬停可点击定位 */}
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 h-[2px] bg-line/70",
+          "absolute inset-x-0 bottom-0 h-[2px]",
+          dark ? "bg-paper2/25" : "bg-line/70",
           effectiveTotal > 0 && "cursor-pointer"
         )}
         onClick={handleSeek}

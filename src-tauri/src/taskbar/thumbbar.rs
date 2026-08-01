@@ -16,7 +16,7 @@ use core::ffi::c_void;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{debug, warn};
 use windows::core::w;
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, LRESULT, WPARAM};
@@ -293,6 +293,10 @@ unsafe fn retheme_if_needed(hwnd: HWND, ui: &mut UiSide) {
     // 置空缓存强制 refresh 用新图标重发按钮
     ui.last = None;
     refresh(hwnd, ui);
+    // 歌词条窗口据此切换墨签/纸签配色(payload: 是否深色任务栏)
+    if let Some(shared) = SHARED.get() {
+        let _ = shared.app.emit("seraph://taskbar-theme", !light_theme);
+    }
 }
 
 fn build_icons(light_theme: bool) -> Option<IconSet> {
@@ -358,7 +362,7 @@ unsafe fn apply_progress(taskbar: &ITaskbarList3, hwnd: HWND, progress: Progress
 }
 
 /// 任务栏是否为浅色主题(SystemUsesLightTheme;缺省视为深色,与系统默认一致)。
-fn taskbar_uses_light_theme() -> bool {
+pub fn taskbar_uses_light_theme() -> bool {
     let mut value: u32 = 0;
     let mut size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {

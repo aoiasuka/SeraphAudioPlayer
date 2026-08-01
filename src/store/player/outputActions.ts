@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -221,6 +221,17 @@ export function createOutputActions(
     sendCommand("set_taskbar_lyrics_enabled", { enabled });
     get().showNotification(
       enabled ? "已开启任务栏歌词条" : "已关闭任务栏歌词条"
+    );
+  },
+
+  setTaskbarLyricsClickThrough: (enabled) => {
+    if (get().taskbarLyricsClickThrough === enabled) return;
+    set({ taskbarLyricsClickThrough: enabled });
+    sendCommand("set_taskbar_lyrics_click_through", { enabled });
+    get().showNotification(
+      enabled
+        ? "歌词条已切换为仅显示（鼠标穿透）"
+        : "歌词条已恢复鼠标交互"
     );
   },
 

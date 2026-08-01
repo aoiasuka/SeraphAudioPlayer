@@ -19,11 +19,16 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tracing::{debug, warn};
-use windows::Win32::Foundation::HWND;
+use windows::core::w;
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, WS_EX_NOACTIVATE,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
 };
 
 /// 歌词条窗口 label(capabilities/taskbar-lyrics.json 按此授权)。
@@ -37,6 +42,10 @@ static FOLLOW_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
 static TOGGLE_LOCK: Mutex<()> = Mutex::new(());
 /// 歌词条 HWND(创建时记录,供跟随线程免派发直接重申 Z 序)。
 static BAR_HWND: Mutex<Option<isize>> = Mutex::new(None);
+/// 仅歌词模式(鼠标穿透)。标志常驻:开关销毁重建窗口时沿用。
+static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
+/// 避让状态:任务栏收起 / 全屏应用占据显示器时临时隐藏(非用户关闭)。
+static AVOID_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 /// 任务栏停靠边(APPBARDATA::uEdge)。
 const ABE_LEFT: u32 = 0;
@@ -86,6 +95,77 @@ pub(crate) fn compute_bar_rect(
     (x, y, width, height)
 }
 
+/// 两矩形交集在较薄一维上的厚度(不相交为 0)。用于判断自动隐藏任务栏是否
+/// 已收起:收起时任务栏窗口几乎整体滑出屏幕,与显示器交集只剩约 2px。
+pub(crate) fn intersection_thickness(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> i32 {
+    let width = a.2.min(b.2) - a.0.max(b.0);
+    let height = a.3.min(b.3) - a.1.max(b.1);
+    if width <= 0 || height <= 0 {
+        0
+    } else {
+        width.min(height)
+    }
+}
+
+/// window 矩形是否完全覆盖 monitor 矩形(全屏应用判定;无边框全屏窗口
+/// 可能比显示器略大,故用「覆盖」而非「相等」)。
+pub(crate) fn rect_covers(window: (i32, i32, i32, i32), monitor: (i32, i32, i32, i32)) -> bool {
+    window.0 <= monitor.0 && window.1 <= monitor.1 && window.2 >= monitor.2 && window.3 >= monitor.3
+}
+
+fn rect_tuple(rect: RECT) -> (i32, i32, i32, i32) {
+    (rect.left, rect.top, rect.right, rect.bottom)
+}
+
+/// 是否应临时避让(隐藏)歌词条:
+/// - 自动隐藏任务栏已收起——条孤零零悬在屏幕边缘反而遮内容;
+/// - 前台窗口全屏铺满任务栏所在显示器(视频/游戏)——置顶条会浮在其上。
+///
+/// 排除桌面/Shell 自身(Progman、WorkerW 常年铺满整屏)与歌词条自己。
+fn should_avoid(bar: HWND) -> bool {
+    unsafe {
+        let Ok(tray) = FindWindowW(w!("Shell_TrayWnd"), None) else {
+            return false;
+        };
+        let mut tray_rect = RECT::default();
+        if GetWindowRect(tray, &mut tray_rect).is_err() {
+            return false;
+        }
+        let monitor = MonitorFromWindow(tray, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
+        let monitor_rect = rect_tuple(info.rcMonitor);
+
+        if intersection_thickness(rect_tuple(tray_rect), monitor_rect) < 8 {
+            return true;
+        }
+
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || fg == bar || fg == tray {
+            return false;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(fg, &mut class).max(0) as usize;
+        let class = String::from_utf16_lossy(&class[..len.min(class.len())]);
+        if matches!(
+            class.as_str(),
+            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        ) {
+            return false;
+        }
+        if MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) != monitor {
+            return false;
+        }
+        let mut fg_rect = RECT::default();
+        GetWindowRect(fg, &mut fg_rect).is_ok() && rect_covers(rect_tuple(fg_rect), monitor_rect)
+    }
+}
+
 fn query_taskbar() -> Option<TaskbarInfo> {
     let mut data = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
@@ -108,6 +188,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
 
     if !enabled {
         *BAR_HWND.lock() = None;
+        AVOID_HIDDEN.store(false, Ordering::SeqCst);
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
             window.destroy().map_err(|err| err.to_string())?;
             debug!("taskbar lyrics window closed");
@@ -148,12 +229,32 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
             .map_err(|err| format!("创建歌词条窗口失败: {err}"))?;
 
     apply_noactivate(&window);
+    AVOID_HIDDEN.store(false, Ordering::SeqCst);
+    if CLICK_THROUGH.load(Ordering::SeqCst) {
+        if let Err(err) = window.set_ignore_cursor_events(true) {
+            warn!("taskbar lyrics click-through apply failed: {err}");
+        }
+    }
     if let Err(err) = reposition_window(&window, *STORED_X.lock()) {
         warn!("taskbar lyrics initial position failed: {err}");
     }
     window.show().map_err(|err| err.to_string())?;
     ensure_follow_thread(app.clone());
     debug!("taskbar lyrics window created");
+    Ok(())
+}
+
+/// 仅歌词模式(鼠标穿透):窗口不再响应任何鼠标事件,点击落到任务栏。
+/// 恢复交互只能走设置页开关(条本身收不到鼠标)。标志常驻,开关销毁重建
+/// 窗口时沿用;窗口已存在时立即生效。
+pub fn set_click_through(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    CLICK_THROUGH.store(enabled, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+        window
+            .set_ignore_cursor_events(enabled)
+            .map_err(|err| err.to_string())?;
+        debug!("taskbar lyrics click-through -> {enabled}");
+    }
     Ok(())
 }
 
@@ -196,10 +297,11 @@ fn apply_noactivate(window: &WebviewWindow) {
 }
 
 /// 跟随线程,500ms 心跳:
-/// - 每拍重申 TOPMOST——任务栏自身也是置顶窗口,应用切换时 Shell 会重排
-///   置顶带 Z 序把任务栏抬到歌词条之上,条在任务栏矩形内即被盖住"消失"
-///   (实测症状:切走后条不见,重开开关才恢复)。SWP_NOACTIVATE 不抢焦点,
-///   已在顶端时是无副作用的幂等调用;
+/// - 每拍先做避让检查(任务栏收起 / 全屏应用),状态翻转时隐藏或恢复条;
+/// - 未避让时重申 TOPMOST——任务栏自身也是置顶窗口,应用切换时 Shell 会
+///   重排置顶带 Z 序把任务栏抬到歌词条之上,条在任务栏矩形内即被盖住
+///   "消失"(实测症状:切走后条不见,重开开关才恢复)。SWP_NOACTIVATE
+///   不抢焦点,已在顶端时是无副作用的幂等调用;
 /// - 每 4 拍(2s)查一次任务栏 rect,分辨率/DPI/任务栏位置变化时重新吸附。
 ///
 /// 全程只起一次;窗口不存在时空转。
@@ -221,16 +323,30 @@ fn ensure_follow_thread(app: AppHandle) {
                 }
 
                 if let Some(hwnd_addr) = *BAR_HWND.lock() {
-                    unsafe {
-                        let _ = SetWindowPos(
-                            HWND(hwnd_addr as *mut core::ffi::c_void),
-                            Some(HWND_TOPMOST),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    let bar = HWND(hwnd_addr as *mut core::ffi::c_void);
+                    let avoid = should_avoid(bar);
+                    if AVOID_HIDDEN.swap(avoid, Ordering::SeqCst) != avoid {
+                        unsafe {
+                            let _ =
+                                ShowWindow(bar, if avoid { SW_HIDE } else { SW_SHOWNOACTIVATE });
+                        }
+                        debug!(
+                            "taskbar lyrics {} (fullscreen / taskbar-hidden avoidance)",
+                            if avoid { "avoiding" } else { "restored" }
                         );
+                    }
+                    if !avoid {
+                        unsafe {
+                            let _ = SetWindowPos(
+                                bar,
+                                Some(HWND_TOPMOST),
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                            );
+                        }
                     }
                 }
 
@@ -340,5 +456,32 @@ mod tests {
         };
         let (x, _, w, _) = compute_bar_rect(&right, None);
         assert_eq!(x, 1858 - w - 8);
+    }
+
+    const MONITOR: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+
+    #[test]
+    fn expanded_taskbar_has_full_thickness() {
+        // 正常展开的底部任务栏:交集厚度 = 任务栏高 40
+        assert_eq!(intersection_thickness((0, 1040, 1920, 1080), MONITOR), 40);
+    }
+
+    #[test]
+    fn collapsed_autohide_taskbar_thickness_below_threshold() {
+        // 自动隐藏收起:窗口滑出屏幕,只露 2px 边缘
+        assert_eq!(intersection_thickness((0, 1078, 1920, 1120), MONITOR), 2);
+        // 完全滑出(副屏方向)→ 0
+        assert_eq!(intersection_thickness((0, 1080, 1920, 1120), MONITOR), 0);
+    }
+
+    #[test]
+    fn fullscreen_window_covers_monitor_but_maximized_does_not() {
+        // 无边框全屏(可能比显示器略大)→ 覆盖
+        assert!(rect_covers(MONITOR, MONITOR));
+        assert!(rect_covers((-8, -8, 1928, 1088), MONITOR));
+        // 最大化窗口止步于工作区(任务栏之上)→ 不算全屏
+        assert!(!rect_covers((0, 0, 1920, 1040), MONITOR));
+        // 副屏上的全屏窗口不覆盖本显示器
+        assert!(!rect_covers((1920, 0, 3840, 1080), MONITOR));
     }
 }

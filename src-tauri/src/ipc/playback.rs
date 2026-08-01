@@ -231,6 +231,31 @@ pub async fn set_taskbar_lyrics_enabled(
     }
 }
 
+/// 歌词条仅歌词模式(鼠标穿透):开启后条不响应鼠标,点击落到任务栏,
+/// 恢复交互只能走设置页(条本身收不到鼠标)。async 同上:窗口操作不在
+/// 主线程同步执行。
+#[tauri::command]
+pub async fn set_taskbar_lyrics_click_through(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    debug!("ipc::set_taskbar_lyrics_click_through -> {enabled}");
+    #[cfg(windows)]
+    {
+        let result =
+            run_blocking(move || crate::taskbar::set_lyrics_click_through(&app, enabled)).await;
+        if let Err(err) = &result {
+            tracing::warn!("set_taskbar_lyrics_click_through failed: {err}");
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
 /// 歌词条定位：x=None 用默认位置，Some 为拖拽记忆的横向物理坐标。
 /// 返回钳制回任务栏范围后的实际横向位置，供前端持久化。
 /// async 同 set_taskbar_lyrics_enabled：避免占用主线程等待窗口操作。
@@ -255,6 +280,8 @@ pub struct PlaybackSnapshot {
     pub playing: bool,
     pub seconds: f64,
     pub total: f64,
+    /// 任务栏是否深色主题(歌词条据此选墨签/纸签配色;非 Windows 恒 false)
+    pub dark_taskbar: bool,
 }
 
 #[tauri::command]
@@ -267,11 +294,16 @@ pub fn get_playback_snapshot(state: State<'_, AppState>) -> Result<PlaybackSnaps
         .unwrap_or((fallback_playing, 0.0, 0.0));
     #[cfg(not(windows))]
     let (playing, seconds, total) = (fallback_playing, 0.0, 0.0);
+    #[cfg(windows)]
+    let dark_taskbar = !crate::taskbar::taskbar_uses_light_theme();
+    #[cfg(not(windows))]
+    let dark_taskbar = false;
     Ok(PlaybackSnapshot {
         track_id,
         playing,
         seconds,
         total,
+        dark_taskbar,
     })
 }
 

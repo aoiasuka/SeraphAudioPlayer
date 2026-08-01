@@ -110,6 +110,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     taskbarProgressEnabled: state.taskbarProgressEnabled !== false,
     // v0.5.4：任务栏歌词条默认关闭（第二窗口有内存成本，按需开启）
     taskbarLyricsEnabled: state.taskbarLyricsEnabled === true,
+    // v0.5.4：仅歌词模式（鼠标穿透）默认关闭
+    taskbarLyricsClickThrough: state.taskbarLyricsClickThrough === true,
   };
 }
 
@@ -145,6 +147,7 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarButtonsEnabled: true,
         taskbarProgressEnabled: true,
         taskbarLyricsEnabled: false,
+        taskbarLyricsClickThrough: false,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -201,6 +204,7 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarButtonsEnabled: state.taskbarButtonsEnabled,
         taskbarProgressEnabled: state.taskbarProgressEnabled,
         taskbarLyricsEnabled: state.taskbarLyricsEnabled,
+        taskbarLyricsClickThrough: state.taskbarLyricsClickThrough,
       }),
     }
   )

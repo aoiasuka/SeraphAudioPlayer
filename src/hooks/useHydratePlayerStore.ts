@@ -39,7 +39,16 @@ export function useHydratePlayerStore() {
             // 非 Windows 或任务栏集成未初始化时静默
           });
         }
-        // 歌词条默认关闭（后端不创建窗口），仅用户开过时创建
+        // 歌词条默认关闭（后端不创建窗口），仅用户开过时创建。
+        // 仅歌词模式（鼠标穿透）标志默认关，仅开过时同步——后端标志常驻，
+        // 建窗时沿用；两个 invoke 并发也收敛（穿透命令会对已存在窗口直接生效）
+        if (isTauriRuntime() && state.taskbarLyricsClickThrough) {
+          void invoke("set_taskbar_lyrics_click_through", {
+            enabled: true,
+          }).catch(() => {
+            // 非 Windows 时静默
+          });
+        }
         if (isTauriRuntime() && state.taskbarLyricsEnabled) {
           void invoke("set_taskbar_lyrics_enabled", { enabled: true }).catch(
             () => {

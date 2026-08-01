@@ -207,8 +207,13 @@ fn update_track_metadata(
     })
 }
 
-/// 封面地址转系统可加载的 URI：https 直接用；本地绝对路径转 file:/// 并
-/// 对非 ASCII 与空格做最小百分号编码（WinRT Uri 解析要求）。
+/// 封面地址转 souvlaki 可加载的形式：https 直接透传；本地路径按 souvlaki
+/// Windows 实现的私有约定传 `file://` + **原生路径**——souvlaki 对 file://
+/// 前缀做 trim_start_matches 后把剩余部分直接丢给
+/// StorageFile::GetFileFromPathAsync（要求裸 Windows 路径）。若传规范的
+/// file:///C:/… URI（百分号编码），剥前缀后剩 `/C:/…%E9%9F%B3…` 这样的
+/// 坏路径名，SetThumbnail 报 0x800700A1（ERROR_BAD_PATHNAME），封面推不
+/// 上系统浮窗。
 fn cover_to_uri(cover: &str) -> Option<String> {
     let cover = cover.trim();
     if cover.is_empty() {
@@ -217,18 +222,7 @@ fn cover_to_uri(cover: &str) -> Option<String> {
     if cover.starts_with("http://") || cover.starts_with("https://") {
         return Some(cover.to_string());
     }
-
-    let forward = cover.replace('\\', "/");
-    let mut encoded = String::with_capacity(forward.len() + 8);
-    for byte in forward.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
-                encoded.push(*byte as char)
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    Some(format!("file:///{encoded}"))
+    Some(format!("file://{cover}"))
 }
 
 /// 媒体键事件 → 播放控制。走与 IPC 命令相同的 AppState 路径，
@@ -303,12 +297,13 @@ mod tests {
         assert_eq!(cover_to_uri("  "), None);
     }
 
+    /// souvlaki 契约：file:// 前缀之后必须是 GetFileFromPathAsync 能直接
+    /// 打开的裸 Windows 路径——不做百分号编码、不换正斜杠、无第三个斜杠。
     #[test]
-    fn local_path_becomes_percent_encoded_file_uri() {
-        let uri = cover_to_uri(r"C:\Users\音乐 库\covers\abc.jpg").unwrap();
-        assert!(uri.starts_with("file:///C:/Users/"));
-        assert!(!uri.contains(' '), "空格必须被编码: {uri}");
-        assert!(!uri.contains('\\'));
-        assert!(uri.ends_with("/covers/abc.jpg"));
+    fn local_path_keeps_raw_windows_path_after_prefix() {
+        let path = r"C:\Users\音乐 库\covers\abc.jpg";
+        let uri = cover_to_uri(path).unwrap();
+        assert!(uri.starts_with("file://"));
+        assert_eq!(uri.trim_start_matches("file://"), path);
     }
 }

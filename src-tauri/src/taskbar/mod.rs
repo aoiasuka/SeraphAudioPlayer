@@ -16,5 +16,8 @@ mod lyric_bar;
 mod plan;
 mod thumbbar;
 
-pub use lyric_bar::{position as position_lyric_bar, set_enabled as set_lyrics_enabled};
-pub use thumbbar::{init, playback_snapshot, set_features};
+pub use lyric_bar::{
+    position as position_lyric_bar, set_click_through as set_lyrics_click_through,
+    set_enabled as set_lyrics_enabled,
+};
+pub use thumbbar::{init, playback_snapshot, set_features, taskbar_uses_light_theme};

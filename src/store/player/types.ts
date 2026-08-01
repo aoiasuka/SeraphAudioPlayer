@@ -122,6 +122,8 @@ export interface PersistedPlayerState {
   taskbarProgressEnabled: boolean;
   // v0.5.4：任务栏歌词条（第二窗口，默认关闭）
   taskbarLyricsEnabled: boolean;
+  // v0.5.4：歌词条仅歌词模式（鼠标穿透，默认关闭）
+  taskbarLyricsClickThrough: boolean;
 }
 
 export interface PlayerStore {
@@ -148,6 +150,7 @@ export interface PlayerStore {
   taskbarButtonsEnabled: boolean;
   taskbarProgressEnabled: boolean;
   taskbarLyricsEnabled: boolean;
+  taskbarLyricsClickThrough: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -229,6 +232,7 @@ export interface PlayerStore {
   setTaskbarButtonsEnabled: (enabled: boolean) => void;
   setTaskbarProgressEnabled: (enabled: boolean) => void;
   setTaskbarLyricsEnabled: (enabled: boolean) => void;
+  setTaskbarLyricsClickThrough: (enabled: boolean) => void;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;
