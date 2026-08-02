@@ -6,12 +6,14 @@
 //! 前台焦点。窗口内容是独立前端入口 taskbar.html(不 import 任何主窗口
 //! store,见项目 persist 门闩约束)。
 //!
-//! - 用户拖拽后经 `position` 命令记忆横向偏移(持久化在歌词条窗口自己的
-//!   localStorage key,由前端负责),纵向始终吸附回任务栏;
-//! - 跟随线程低频轮询任务栏 rect(分辨率/任务栏位置变化时重新吸附),
+//! - 位置以「沿任务栏长边的比例」(0..=1)表达:设置页滑块直接给比例,
+//!   用户拖拽则由 `position` 反解成比例;单一事实来源是主窗口 store,
+//!   水合与拖拽后都同步到这里,纵向(水平任务栏时)始终吸附回任务栏;
+//! - 跟随线程 100ms 心跳 + `EVENT_SYSTEM_FOREGROUND` 钩子(切换应用时
+//!   Shell 会重排置顶带把任务栏抬到条之上,须即时重申 TOPMOST),
 //!   窗口不存在时空转,开销可忽略。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 use tauri::{
@@ -24,18 +26,22 @@ use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
+    DispatchMessageW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, KillTimer, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, HWND_TOPMOST, MSG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT,
+    WM_TIMER, WS_EX_NOACTIVATE,
 };
 
 /// 歌词条窗口 label(capabilities/taskbar-lyrics.json 按此授权)。
 const WINDOW_LABEL: &str = "taskbar-lyrics";
 
-/// 拖拽记忆的横向位置(物理像素;None = 默认位置)。前端持久化,启动时回传。
-static STORED_X: Mutex<Option<i32>> = Mutex::new(None);
+/// 歌词条沿任务栏长边的位置比例(0.0 = 最靠起点,1.0 = 最靠终点;
+/// None = 默认位置)。设置页滑块与用户拖拽都收敛到这一个量。
+static STORED_RATIO: Mutex<Option<f64>> = Mutex::new(None);
 static FOLLOW_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
 /// 开关串行锁:async 命令并发执行,快速 关→开 时旧窗口的异步销毁与新窗口
 /// 创建交错会"丢窗口"(开关显示开、窗口已被旧销毁带走)。
@@ -46,6 +52,17 @@ static BAR_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 /// 避让状态:任务栏收起 / 全屏应用占据显示器时临时隐藏(非用户关闭)。
 static AVOID_HIDDEN: AtomicBool = AtomicBool::new(false);
+/// 前台切换后待补的 TOPMOST 重申拍数(WinEvent 钩子置位,心跳递减)。
+static RESETTLE_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// 跟随线程心跳周期(毫秒)。取 100ms 是为了「切换应用后条被任务栏盖住」
+/// 的可见时长压到一帧级别;每拍只做原子读与幂等 SetWindowPos,重活按
+/// 下面两个倍数分摊。
+const HEARTBEAT_MS: u32 = 100;
+/// 避让检查(全屏/任务栏收起)节拍:每 5 拍 = 500ms。
+const AVOID_EVERY: u32 = 5;
+/// 任务栏 rect 复查节拍:每 20 拍 = 2s。
+const REPOSITION_EVERY: u32 = 20;
 
 /// 任务栏停靠边(APPBARDATA::uEdge)。
 const ABE_LEFT: u32 = 0;
@@ -59,40 +76,96 @@ pub(crate) struct TaskbarInfo {
     pub edge: u32,
 }
 
-/// (任务栏几何, 记忆横向位置) → 歌词条窗口 (x, y, w, h),物理像素。
-///
-/// - 水平任务栏(常态):条高 = clamp(任务栏高 - 8, 28..=40) 垂直居中,
-///   宽 = 9×高(随 DPI 缩放的任务栏高度等比放大);默认横向位置靠右
-///   (右缘留 6×高 ≈ 托盘区),拖拽记忆值钳制在任务栏范围内。
-/// - 垂直任务栏(Win10 左/右停靠,罕见):条贴任务栏底部、横向出挑到
-///   任务栏内侧,尺寸取上限档。
-pub(crate) fn compute_bar_rect(
-    taskbar: &TaskbarInfo,
-    stored_x: Option<i32>,
-) -> (i32, i32, i32, i32) {
+/// 歌词条尺寸与它沿任务栏长边的可移动区间(纯几何,便于单测)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BarMetrics {
+    pub width: i32,
+    pub height: i32,
+    /// 可移动区间起点(水平任务栏是 x,垂直任务栏是 y)
+    pub span_start: i32,
+    /// 可移动区间终点(含);span_end < span_start 不会出现,已 max 兜底
+    pub span_end: i32,
+    /// 未指定比例时的落点
+    pub default_pos: i32,
+}
+
+/// 条尺寸与可移动区间:
+/// - 水平任务栏(常态):条高 = clamp(任务栏高 - 8, 28..=40),宽 = 9×高
+///   (随 DPI 缩放的任务栏高度等比放大);默认落点靠右(右缘留 6×高 ≈ 托盘区);
+/// - 垂直任务栏(Win10 左/右停靠,罕见):尺寸取上限档,沿纵向移动,默认贴底。
+pub(crate) fn bar_metrics(taskbar: &TaskbarInfo) -> BarMetrics {
     let (left, top, right, bottom) = taskbar.rect;
 
     if taskbar.edge == ABE_LEFT || taskbar.edge == ABE_RIGHT {
         let height = 40;
         let width = 9 * height;
-        let y = bottom - height - 8;
-        let x = if taskbar.edge == ABE_LEFT {
-            right + 8
-        } else {
-            left - width - 8
+        let span_start = top + 8;
+        let span_end = (bottom - height - 8).max(span_start);
+        return BarMetrics {
+            width,
+            height,
+            span_start,
+            span_end,
+            default_pos: span_end,
         };
-        return (x, y, width, height);
     }
 
     let taskbar_height = bottom - top;
     let height = (taskbar_height - 8).clamp(28, 40);
     let width = 9 * height;
-    let y = top + (taskbar_height - height) / 2;
-    let default_x = right - width - 6 * height;
-    let x = stored_x
-        .unwrap_or(default_x)
-        .clamp(left + 4, (right - width - 4).max(left + 4));
-    (x, y, width, height)
+    let span_start = left + 4;
+    let span_end = (right - width - 4).max(span_start);
+    BarMetrics {
+        width,
+        height,
+        span_start,
+        span_end,
+        default_pos: (right - width - 6 * height).clamp(span_start, span_end),
+    }
+}
+
+/// 比例(0..=1)→ 沿任务栏长边的物理坐标;None 用默认落点。
+fn position_from_ratio(metrics: &BarMetrics, ratio: Option<f64>) -> i32 {
+    let pos = match ratio {
+        Some(ratio) => {
+            let span = (metrics.span_end - metrics.span_start) as f64;
+            metrics.span_start + (span * ratio.clamp(0.0, 1.0)).round() as i32
+        }
+        None => metrics.default_pos,
+    };
+    pos.clamp(metrics.span_start, metrics.span_end)
+}
+
+/// 沿任务栏长边的物理坐标 → 比例(拖拽后反解,越界自动钳回 0..=1)。
+pub(crate) fn ratio_from_position(taskbar: &TaskbarInfo, pos: i32) -> f64 {
+    let metrics = bar_metrics(taskbar);
+    let span = metrics.span_end - metrics.span_start;
+    if span <= 0 {
+        return 0.0;
+    }
+    (((pos - metrics.span_start) as f64) / span as f64).clamp(0.0, 1.0)
+}
+
+/// (任务栏几何, 位置比例) → 歌词条窗口 (x, y, w, h),物理像素。
+///
+/// 水平任务栏时条垂直居中于任务栏、沿横向按比例落位;垂直任务栏时条横向
+/// 出挑到任务栏内侧、沿纵向按比例落位。
+pub(crate) fn compute_bar_rect(taskbar: &TaskbarInfo, ratio: Option<f64>) -> (i32, i32, i32, i32) {
+    let (left, top, right, bottom) = taskbar.rect;
+    let metrics = bar_metrics(taskbar);
+    let pos = position_from_ratio(&metrics, ratio);
+
+    if taskbar.edge == ABE_LEFT || taskbar.edge == ABE_RIGHT {
+        let x = if taskbar.edge == ABE_LEFT {
+            right + 8
+        } else {
+            left - metrics.width - 8
+        };
+        return (x, pos, metrics.width, metrics.height);
+    }
+
+    let y = top + (bottom - top - metrics.height) / 2;
+    (pos, y, metrics.width, metrics.height)
 }
 
 /// 两矩形交集在较薄一维上的厚度(不相交为 0)。用于判断自动隐藏任务栏是否
@@ -235,7 +308,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
             warn!("taskbar lyrics click-through apply failed: {err}");
         }
     }
-    if let Err(err) = reposition_window(&window, *STORED_X.lock()) {
+    if let Err(err) = reposition_window(&window, *STORED_RATIO.lock()) {
         warn!("taskbar lyrics initial position failed: {err}");
     }
     window.show().map_err(|err| err.to_string())?;
@@ -258,20 +331,40 @@ pub fn set_click_through(app: &AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 定位命令:前端拖拽结束(或启动时回传持久化位置)调用。
-/// 返回钳制后的实际横向位置,供前端持久化。
-pub fn position(app: &AppHandle, x: Option<f64>) -> Result<f64, String> {
-    let stored = x.map(|value| value.round() as i32);
-    *STORED_X.lock() = stored;
+/// 设置页滑块:直接指定条沿任务栏长边的位置比例(0..=1)。
+/// 设置的单一事实来源是主窗口 store,水合后与滑块调整时同步到这里;
+/// 歌词条关着也接受(记住比例,下次开启即用),故窗口不存在不算失败。
+pub fn set_position(app: &AppHandle, ratio: f64) -> Result<(), String> {
+    let ratio = ratio.clamp(0.0, 1.0);
+    *STORED_RATIO.lock() = Some(ratio);
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Ok(());
+    };
+    reposition_window(&window, Some(ratio)).map(|_| ())
+}
+
+/// 定位命令:前端拖拽结束后调用,(x, y) 是窗口左上角的物理坐标——沿任务栏
+/// 长边的那一维才有意义(水平任务栏取 x,垂直任务栏取 y),另一维由吸附决定。
+/// 返回反解并钳制后的位置比例,由歌词条回传主窗口落进设置(滑块随之同步)。
+pub fn position(app: &AppHandle, x: Option<f64>, y: Option<f64>) -> Result<f64, String> {
+    let info = query_taskbar().ok_or_else(|| "未找到任务栏".to_string())?;
+    let along = if info.edge == ABE_LEFT || info.edge == ABE_RIGHT {
+        y
+    } else {
+        x
+    };
+    let ratio = along.map(|value| ratio_from_position(&info, value.round() as i32));
+    *STORED_RATIO.lock() = ratio;
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return Err("歌词条窗口不存在".into());
     };
-    reposition_window(&window, stored).map(|applied| applied as f64)
+    reposition_window(&window, ratio)?;
+    Ok(ratio.unwrap_or_else(|| ratio_from_position(&info, bar_metrics(&info).default_pos)))
 }
 
-fn reposition_window(window: &WebviewWindow, stored_x: Option<i32>) -> Result<i32, String> {
+fn reposition_window(window: &WebviewWindow, ratio: Option<f64>) -> Result<i32, String> {
     let info = query_taskbar().ok_or_else(|| "未找到任务栏".to_string())?;
-    let (x, y, width, height) = compute_bar_rect(&info, stored_x);
+    let (x, y, width, height) = compute_bar_rect(&info, ratio);
     window
         .set_size(PhysicalSize::new(width.max(1) as u32, height.max(1) as u32))
         .map_err(|err| err.to_string())?;
@@ -296,76 +389,156 @@ fn apply_noactivate(window: &WebviewWindow) {
     }
 }
 
-/// 跟随线程,500ms 心跳:
-/// - 每拍先做避让检查(任务栏收起 / 全屏应用),状态翻转时隐藏或恢复条;
-/// - 未避让时重申 TOPMOST——任务栏自身也是置顶窗口,应用切换时 Shell 会
-///   重排置顶带 Z 序把任务栏抬到歌词条之上,条在任务栏矩形内即被盖住
-///   "消失"(实测症状:切走后条不见,重开开关才恢复)。SWP_NOACTIVATE
-///   不抢焦点,已在顶端时是无副作用的幂等调用;
-/// - 每 4 拍(2s)查一次任务栏 rect,分辨率/DPI/任务栏位置变化时重新吸附。
+/// 把条重新抬到置顶带顶端。任务栏自身也是置顶窗口,应用切换时 Shell 会重排
+/// 置顶带 Z 序把任务栏抬到歌词条之上,条在任务栏矩形内即被盖住"消失"。
+/// SWP_NOACTIVATE 不抢焦点,已在顶端时是无副作用的幂等调用。
+fn reassert_topmost() {
+    // 同 follow_tick:先释放锁再动窗口,避免与后续路径上的取锁纠缠
+    let bar_hwnd = *BAR_HWND.lock();
+    let Some(hwnd_addr) = bar_hwnd else {
+        return;
+    };
+    if AVOID_HIDDEN.load(Ordering::SeqCst) {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd_addr as *mut core::ffi::c_void),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// `EVENT_SYSTEM_FOREGROUND` 钩子回调(在跟随线程的消息泵中派发)。
 ///
-/// 全程只起一次;窗口不存在时空转。
+/// 只等 500ms 心跳纠正 Z 序时,用户切换应用会明显看到条"闪一下、消失又
+/// 出现"。这里在前台切换的同一刻先重申一次,再让随后几拍各补一次——
+/// Shell 的置顶带重排未必与前台事件同拍到达。
+unsafe extern "system" fn on_foreground_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    reassert_topmost();
+    RESETTLE_TICKS.store(3, Ordering::SeqCst);
+}
+
+#[derive(Default)]
+struct FollowState {
+    last: Option<TaskbarInfo>,
+    tick: u32,
+}
+
+/// 跟随线程,[`HEARTBEAT_MS`] 一拍:
+/// - 前台刚切换过的几拍补重申 TOPMOST(钩子已经即时重申过一次);
+/// - 每 [`AVOID_EVERY`] 拍做避让检查(任务栏收起 / 全屏应用),状态翻转时
+///   隐藏或恢复条,未避让时重申 TOPMOST;
+/// - 每 [`REPOSITION_EVERY`] 拍查一次任务栏 rect,分辨率/DPI/任务栏位置
+///   变化时重新吸附。
+fn follow_tick(app: &AppHandle, state: &mut FollowState) {
+    state.tick = state.tick.wrapping_add(1);
+    if app.get_webview_window(WINDOW_LABEL).is_none() {
+        state.last = None;
+        return;
+    }
+
+    if RESETTLE_TICKS.load(Ordering::SeqCst) > 0 {
+        RESETTLE_TICKS.fetch_sub(1, Ordering::SeqCst);
+        reassert_topmost();
+    }
+
+    if state.tick.is_multiple_of(AVOID_EVERY) {
+        // 先把 HWND 取出再进分支:Rust 2021 下 `if let ... = *M.lock()` 的守卫
+        // 活到整个 if let 体结束,而体内 reassert_topmost 会再锁同一个
+        // 非重入 Mutex——写成 `if let` 会当场自锁。
+        let bar_hwnd = *BAR_HWND.lock();
+        if let Some(hwnd_addr) = bar_hwnd {
+            let bar = HWND(hwnd_addr as *mut core::ffi::c_void);
+            let avoid = should_avoid(bar);
+            if AVOID_HIDDEN.swap(avoid, Ordering::SeqCst) != avoid {
+                unsafe {
+                    let _ = ShowWindow(bar, if avoid { SW_HIDE } else { SW_SHOWNOACTIVATE });
+                }
+                debug!(
+                    "taskbar lyrics {} (fullscreen / taskbar-hidden avoidance)",
+                    if avoid { "avoiding" } else { "restored" }
+                );
+            }
+            reassert_topmost();
+        }
+    }
+
+    if !state.tick.is_multiple_of(REPOSITION_EVERY) {
+        return;
+    }
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let Some(info) = query_taskbar() else {
+        return;
+    };
+    if state.last == Some(info) {
+        return;
+    }
+    state.last = Some(info);
+    if let Err(err) = reposition_window(&window, *STORED_RATIO.lock()) {
+        debug!("taskbar lyrics follow reposition failed: {err}");
+    }
+}
+
+/// 起跟随线程。线程跑 Win32 消息泵:WINEVENT_OUTOFCONTEXT 钩子回调只在安装
+/// 线程的消息泵中派发,心跳也就顺势改用线程计时器(SetTimer hwnd=None)。
+/// 全程只起一次,永不退出;窗口不存在时空转。
 fn ensure_follow_thread(app: AppHandle) {
     if FOLLOW_THREAD_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::Builder::new()
         .name("taskbar-lyrics-follow".into())
-        .spawn(move || {
-            let mut last: Option<TaskbarInfo> = None;
-            let mut tick: u32 = 0;
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                tick = tick.wrapping_add(1);
-                if app.get_webview_window(WINDOW_LABEL).is_none() {
-                    last = None;
-                    continue;
-                }
+        .spawn(move || unsafe {
+            let hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(on_foreground_changed),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+            if hook.is_invalid() {
+                // 降级:仍有心跳兜底,只是切换应用时可能看到条闪一下
+                warn!("taskbar lyrics: foreground hook unavailable, heartbeat only");
+            }
+            let timer = SetTimer(None, 0, HEARTBEAT_MS, None);
+            if timer == 0 {
+                warn!("taskbar lyrics: heartbeat timer creation failed");
+                return;
+            }
 
-                if let Some(hwnd_addr) = *BAR_HWND.lock() {
-                    let bar = HWND(hwnd_addr as *mut core::ffi::c_void);
-                    let avoid = should_avoid(bar);
-                    if AVOID_HIDDEN.swap(avoid, Ordering::SeqCst) != avoid {
-                        unsafe {
-                            let _ =
-                                ShowWindow(bar, if avoid { SW_HIDE } else { SW_SHOWNOACTIVATE });
-                        }
-                        debug!(
-                            "taskbar lyrics {} (fullscreen / taskbar-hidden avoidance)",
-                            if avoid { "avoiding" } else { "restored" }
-                        );
-                    }
-                    if !avoid {
-                        unsafe {
-                            let _ = SetWindowPos(
-                                bar,
-                                Some(HWND_TOPMOST),
-                                0,
-                                0,
-                                0,
-                                0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                            );
-                        }
-                    }
+            let mut state = FollowState::default();
+            let mut msg = MSG::default();
+            // GetMessageW 出错返回 -1,`> 0` 同时挡掉出错与 WM_QUIT
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                if msg.message == WM_TIMER && msg.wParam.0 == timer {
+                    follow_tick(&app, &mut state);
+                    continue;
                 }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
 
-                if !tick.is_multiple_of(4) {
-                    continue;
-                }
-                let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
-                    continue;
-                };
-                let Some(info) = query_taskbar() else {
-                    continue;
-                };
-                if last == Some(info) {
-                    continue;
-                }
-                last = Some(info);
-                if let Err(err) = reposition_window(&window, *STORED_X.lock()) {
-                    debug!("taskbar lyrics follow reposition failed: {err}");
-                }
+            let _ = KillTimer(None, timer);
+            if !hook.is_invalid() {
+                let _ = UnhookWinEvent(hook);
             }
         })
         .map(|_| ())
@@ -416,16 +589,51 @@ mod tests {
     }
 
     #[test]
-    fn stored_x_is_honored_and_clamped() {
+    fn ratio_maps_across_the_full_travel_range() {
         let taskbar = bottom_taskbar();
-        let (x, _, w, _) = compute_bar_rect(&taskbar, Some(100));
-        assert_eq!(x, 100);
-        // 超出右界 → 钳回
-        let (x, _, _, _) = compute_bar_rect(&taskbar, Some(99999));
-        assert_eq!(x, 1920 - w - 4);
-        // 超出左界 → 钳回
-        let (x, _, _, _) = compute_bar_rect(&taskbar, Some(-500));
-        assert_eq!(x, 4);
+        let metrics = bar_metrics(&taskbar);
+        assert_eq!(metrics.span_start, 4);
+        assert_eq!(metrics.span_end, 1920 - 9 * 32 - 4);
+
+        // 0 / 1 打到区间两端，0.5 在正中
+        assert_eq!(compute_bar_rect(&taskbar, Some(0.0)).0, metrics.span_start);
+        assert_eq!(compute_bar_rect(&taskbar, Some(1.0)).0, metrics.span_end);
+        assert_eq!(
+            compute_bar_rect(&taskbar, Some(0.5)).0,
+            metrics.span_start + (metrics.span_end - metrics.span_start) / 2
+        );
+        // 越界比例钳回端点
+        assert_eq!(compute_bar_rect(&taskbar, Some(-3.0)).0, metrics.span_start);
+        assert_eq!(compute_bar_rect(&taskbar, Some(9.0)).0, metrics.span_end);
+    }
+
+    #[test]
+    fn ratio_from_position_inverts_compute_bar_rect() {
+        let taskbar = bottom_taskbar();
+        for ratio in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (x, _, _, _) = compute_bar_rect(&taskbar, Some(ratio));
+            let recovered = ratio_from_position(&taskbar, x);
+            assert!(
+                (recovered - ratio).abs() < 0.001,
+                "比例 {ratio} 反解得到 {recovered}"
+            );
+        }
+        // 拖出任务栏范围时反解钳回 0..=1
+        assert_eq!(ratio_from_position(&taskbar, -9999), 0.0);
+        assert_eq!(ratio_from_position(&taskbar, 99999), 1.0);
+    }
+
+    #[test]
+    fn vertical_taskbar_ratio_travels_along_the_long_edge() {
+        let left = TaskbarInfo {
+            rect: (0, 0, 62, 1080),
+            edge: 0,
+        };
+        // 垂直任务栏时比例控制纵向:0 贴顶、1 贴底
+        assert_eq!(compute_bar_rect(&left, Some(0.0)).1, 8);
+        assert_eq!(compute_bar_rect(&left, Some(1.0)).1, 1080 - 40 - 8);
+        // 横向出挑到任务栏内侧,与比例无关
+        assert_eq!(compute_bar_rect(&left, Some(0.3)).0, 62 + 8);
     }
 
     #[test]

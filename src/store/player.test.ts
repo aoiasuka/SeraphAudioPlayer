@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { invoke } from "@/lib/tauri";
-import { migratePersistedPlayerState, usePlayerStore } from "@/store/player";
+import {
+  DEFAULT_TASKBAR_LYRICS_POSITION,
+  migratePersistedPlayerState,
+  usePlayerStore,
+} from "@/store/player";
 import type { Track } from "@/types/track";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -105,6 +109,10 @@ describe("player store startup and persistence", () => {
     expect(migrated.taskbarLyricsEnabled).toBe(false);
     // v0.5.4：仅歌词模式（鼠标穿透）默认关闭
     expect(migrated.taskbarLyricsClickThrough).toBe(false);
+    // v0.5.5：旧状态无位置字段时落到默认落点比例
+    expect(migrated.taskbarLyricsPosition).toBe(
+      DEFAULT_TASKBAR_LYRICS_POSITION
+    );
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {
@@ -133,6 +141,30 @@ describe("player store startup and persistence", () => {
       taskbarLyricsClickThrough: true,
     });
     expect(migrated.taskbarLyricsClickThrough).toBe(true);
+  });
+
+  it("clamps taskbarLyricsPosition into 0..1 and rejects non-numbers", () => {
+    expect(
+      migratePersistedPlayerState({ taskbarLyricsPosition: 0.42 })
+        .taskbarLyricsPosition
+    ).toBe(0.42);
+    // 越界比例钳回端点，坏值回默认——否则会把歌词条推出任务栏
+    expect(
+      migratePersistedPlayerState({ taskbarLyricsPosition: 5 })
+        .taskbarLyricsPosition
+    ).toBe(1);
+    expect(
+      migratePersistedPlayerState({ taskbarLyricsPosition: -2 })
+        .taskbarLyricsPosition
+    ).toBe(0);
+    expect(
+      migratePersistedPlayerState({ taskbarLyricsPosition: Number.NaN })
+        .taskbarLyricsPosition
+    ).toBe(DEFAULT_TASKBAR_LYRICS_POSITION);
+    expect(
+      migratePersistedPlayerState({ taskbarLyricsPosition: "0.5" })
+        .taskbarLyricsPosition
+    ).toBe(DEFAULT_TASKBAR_LYRICS_POSITION);
   });
 
   it("clears persisted playback position when memory playback is turned off", () => {

@@ -12,7 +12,9 @@ type InvokeFn = <T = unknown>(
 
 type ListenFn = <T = unknown>(
   event: string,
-  cb: (payload: T) => void
+  cb: (payload: T) => void,
+  /** 只接收该 label 窗口发出的事件；省略则接收任意来源 */
+  windowLabel?: string
 ) => Promise<() => void>;
 
 interface TauriBridge {
@@ -27,9 +29,9 @@ function createBrowserStub(): TauriBridge {
       console.debug(`[stub] invoke(${cmd})`, args);
       return undefined as never;
     },
-    listen: async (event) => {
+    listen: async (event, _cb, windowLabel) => {
       // eslint-disable-next-line no-console
-      console.debug(`[stub] listen(${event})`);
+      console.debug(`[stub] listen(${event})`, windowLabel);
       return () => undefined;
     },
   };
@@ -74,8 +76,16 @@ async function getListen(): Promise<ListenFn> {
 
   try {
     const evt = await import("@tauri-apps/api/event");
-    listenFn = async <T,>(event: string, cb: (payload: T) => void) => {
-      const unlisten = await evt.listen<T>(event, (e) => cb(e.payload));
+    listenFn = async <T,>(
+      event: string,
+      cb: (payload: T) => void,
+      windowLabel?: string
+    ) => {
+      const unlisten = await evt.listen<T>(
+        event,
+        (e) => cb(e.payload),
+        windowLabel ? { target: { kind: "AnyLabel", label: windowLabel } } : undefined
+      );
       return unlisten;
     };
     return listenFn;
@@ -95,12 +105,21 @@ export async function invoke<T = unknown>(
   return invoke<T>(cmd, args);
 }
 
+/**
+ * 监听应用内事件。
+ *
+ * ⚠️ 默认 target 是 `Any`——Tauri v2 的 `Any` 监听器无视 emit 目标全收，
+ * 连 `tauri://move` 这类**其他窗口**的窗口事件也会收到（多窗口下曾导致
+ * 歌词条把主窗口的坐标当成自己的）。只关心本窗口的窗口事件时，必须传
+ * `windowLabel` 收窄。
+ */
 export async function listen<T = unknown>(
   event: string,
-  cb: (payload: T) => void
+  cb: (payload: T) => void,
+  windowLabel?: string
 ): Promise<() => void> {
   const listen = await getListen();
-  return listen<T>(event, cb);
+  return listen<T>(event, cb, windowLabel);
 }
 
 /** 广播一个应用内事件(所有窗口可 listen)。非 Tauri 环境为空操作。 */

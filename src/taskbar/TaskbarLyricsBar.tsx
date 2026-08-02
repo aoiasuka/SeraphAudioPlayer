@@ -15,10 +15,16 @@ import {
 import { cn } from "@/lib/utils";
 import type { LyricLine } from "@/types/track";
 
-/** 拖拽记忆的横向位置(物理像素),歌词条窗口专属 key,与主窗口 persist 无关。 */
-const POSITION_KEY = "seraph-taskbar-bar-x";
+/** 本窗口 label,窗口事件(tauri://move)据此收窄,免收主窗口的同名事件。 */
+const WINDOW_LABEL = "taskbar-lyrics";
+/** v0.5.4 遗留:曾把拖拽位置以物理像素存在这里,现已迁到主窗口 store。 */
+const LEGACY_POSITION_KEY = "seraph-taskbar-bar-x";
 /** ✕ 按钮 → 主窗口关闭开关(设置持久化在主窗口 store,单一事实来源)。 */
 const CLOSE_EVENT = "seraph://taskbar-lyrics-close";
+/** 拖拽结束 → 把反解出的位置比例回传主窗口落进设置(设置页滑块随之同步)。 */
+const POSITION_EVENT = "seraph://taskbar-lyrics-position";
+/** 后端写完歌词缓存的广播,payload 为 trackId。 */
+const LYRICS_UPDATED_EVENT = "seraph://track-lyrics-updated";
 
 interface PlaybackSnapshot {
   trackId: string | null;
@@ -46,9 +52,14 @@ interface PlayerEventPayload {
   total?: number;
 }
 
-function readStoredX(): number | null {
-  const raw = window.localStorage.getItem(POSITION_KEY);
+/**
+ * 一次性迁移 v0.5.4 的像素位置:把旧值喂给后端反解成比例回传主窗口,
+ * 随即删掉 key。此后位置的单一事实来源只有主窗口 store。
+ */
+function takeLegacyStoredX(): number | null {
+  const raw = window.localStorage.getItem(LEGACY_POSITION_KEY);
   if (raw === null) return null;
+  window.localStorage.removeItem(LEGACY_POSITION_KEY);
   const value = Number(raw);
   return Number.isFinite(value) ? value : null;
 }
@@ -64,20 +75,22 @@ export function TaskbarLyricsBar() {
   const [dark, setDark] = useState(false);
   const trackIdRef = useRef<string | null>(null);
   trackIdRef.current = trackId;
-  const lastAppliedXRef = useRef<number | null>(null);
+  /** 曲目元数据重拉的触发计数:歌词导入后 trackId 不变也要重拉 */
+  const [trackRevision, setTrackRevision] = useState(0);
   const moveDebounceRef = useRef<number | null>(null);
+  /** 最近一次上报的窗口左上角,用来吃掉后端吸附回写触发的 move 回声 */
+  const lastReportedRef = useRef<string | null>(null);
 
-  // 启动:恢复拖拽位置 → 拉取播放快照
+  // 启动:迁移遗留位置 → 拉取播放快照(位置本身由主窗口在建窗前同步给后端)
   useEffect(() => {
     let cancelled = false;
 
-    const storedX = readStoredX();
-    if (storedX !== null) {
-      lastAppliedXRef.current = storedX;
-      void invoke<number>("position_taskbar_bar", { x: storedX })
-        .then((applied) => {
-          lastAppliedXRef.current = applied;
-        })
+    // 只传 x:旧值本就只有横向语义,竖排任务栏下后端取不到纵向坐标会退回
+    // 默认落点,正是想要的结果。
+    const legacyX = takeLegacyStoredX();
+    if (legacyX !== null) {
+      void invoke<number>("position_taskbar_bar", { x: legacyX })
+        .then((ratio) => void emitEvent(POSITION_EVENT, ratio))
         .catch(() => undefined);
     }
 
@@ -176,7 +189,8 @@ export function TaskbarLyricsBar() {
     };
   }, []);
 
-  // 曲目元数据(标题/封面/歌词)按 trackId 拉取
+  // 曲目元数据(标题/封面/歌词)按 trackId 拉取;trackRevision 让「同一首歌
+  // 刚导入歌词」也能重拉——否则原本没歌词的曲目要切歌回来才看得到新歌词。
   useEffect(() => {
     if (!trackId) {
       setTrack(null);
@@ -193,30 +207,64 @@ export function TaskbarLyricsBar() {
     return () => {
       cancelled = true;
     };
-  }, [trackId]);
+  }, [trackId, trackRevision]);
 
-  // 拖拽结束(移动事件去抖)→ 后端钳制吸附 → 持久化实际位置
+  // 歌词写盘广播(本地导入 / 在线歌词都会发):命中当前曲目就重拉元数据
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void listen<{ x: number; y: number }>("tauri://move", (position) => {
+    void listen<string>(LYRICS_UPDATED_EVENT, (updatedTrackId) => {
       if (disposed) return;
-      if (moveDebounceRef.current !== null) {
-        window.clearTimeout(moveDebounceRef.current);
-      }
-      moveDebounceRef.current = window.setTimeout(() => {
-        moveDebounceRef.current = null;
-        const x = Math.round(position.x);
-        if (x === lastAppliedXRef.current) return;
-        void invoke<number>("position_taskbar_bar", { x })
-          .then((applied) => {
-            lastAppliedXRef.current = applied;
-            window.localStorage.setItem(POSITION_KEY, String(applied));
-          })
-          .catch(() => undefined);
-      }, 400);
+      if (updatedTrackId && updatedTrackId !== trackIdRef.current) return;
+      setTrackRevision((value) => value + 1);
     })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 拖拽结束(移动事件去抖)→ 后端钳制吸附并反解成比例 → 回传主窗口落设置。
+  //
+  // ⚠️ 必须把监听收窄到本窗口:Tauri v2 的全局 listen 目标是 Any,会连
+  // **主窗口**的 tauri://move 一起收(主窗口显示/移动给出屏幕中部坐标、
+  // 最小化给出 -32000),歌词条会把那当成自己的位置跳过去。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<{ x: number; y: number }>(
+      "tauri://move",
+      (position) => {
+        if (disposed) return;
+        if (moveDebounceRef.current !== null) {
+          window.clearTimeout(moveDebounceRef.current);
+        }
+        moveDebounceRef.current = window.setTimeout(() => {
+          moveDebounceRef.current = null;
+          const x = Math.round(position.x);
+          const y = Math.round(position.y);
+          // 后端吸附回写会再发一次 move,坐标没变就别绕第二圈
+          const key = `${x},${y}`;
+          if (key === lastReportedRef.current) return;
+          lastReportedRef.current = key;
+          void invoke<number>("position_taskbar_bar", { x, y })
+            .then((ratio) => emitEvent(POSITION_EVENT, ratio))
+            .catch(() => undefined);
+        }, 400);
+      },
+      WINDOW_LABEL
+    )
       .then((fn) => {
         if (disposed) {
           fn();

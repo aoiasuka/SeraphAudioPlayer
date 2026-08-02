@@ -49,6 +49,16 @@ export function useHydratePlayerStore() {
             // 非 Windows 时静默
           });
         }
+        // 位置比例先于建窗命令同步：后端建窗时就按它落位，条不会先出现在
+        // 默认位置再跳过去。命令在歌词条关着时也接受（只记比例），且若真
+        // 晚到一步也只是对已建好的窗口再定位一次，自愈。
+        if (isTauriRuntime()) {
+          void invoke("set_taskbar_lyrics_position", {
+            ratio: state.taskbarLyricsPosition,
+          }).catch(() => {
+            // 非 Windows 时静默
+          });
+        }
         if (isTauriRuntime() && state.taskbarLyricsEnabled) {
           void invoke("set_taskbar_lyrics_enabled", { enabled: true }).catch(
             () => {

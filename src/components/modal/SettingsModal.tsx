@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
+import { Slider } from "@/components/ui/slider";
 import {
   buildConfigExport,
   parseConfigImport,
@@ -116,6 +117,10 @@ export function SettingsModal() {
   );
   const setTaskbarLyricsClickThrough = usePlayerStore(
     (s) => s.setTaskbarLyricsClickThrough
+  );
+  const taskbarLyricsPosition = usePlayerStore((s) => s.taskbarLyricsPosition);
+  const setTaskbarLyricsPosition = usePlayerStore(
+    (s) => s.setTaskbarLyricsPosition
   );
   const rememberPlayback = usePlayerStore((s) => s.rememberPlayback);
   const setRememberPlayback = usePlayerStore((s) => s.setRememberPlayback);
@@ -630,6 +635,31 @@ export function SettingsModal() {
           >
             {taskbarLyricsEnabled ? "已开启" : "已关闭"}
           </button>
+        </div>
+        <div className="border-[1.5px] border-line bg-card p-3 space-y-2">
+          <div className="flex items-baseline justify-between gap-3">
+            <h4 className="font-serif text-xs font-semibold text-ink">
+              歌词条位置
+            </h4>
+            <span className="font-tw text-[10px] font-bold tabular-nums text-ink2">
+              {Math.round(taskbarLyricsPosition * 100)}%
+            </span>
+          </div>
+          <p className="font-tw text-[10px] leading-relaxed text-ink2">
+            歌词条沿任务栏的落位：0% 最靠左端、100% 最靠右端（任务栏竖排时
+            对应上端与下端）。直接拖动歌词条也会同步更新这里。
+          </p>
+          <Slider
+            value={taskbarLyricsPosition}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(event) =>
+              setTaskbarLyricsPosition(Number(event.target.value))
+            }
+            aria-label="任务栏歌词条位置"
+            className="w-full"
+          />
         </div>
         <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
           <div className="min-w-0">

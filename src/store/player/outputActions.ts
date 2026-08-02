@@ -81,7 +81,7 @@ function legacyIndexDeviceSlug(deviceId: string) {
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "setTaskbarLyricsPosition" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   return {
   loadDevices: () => {
     void invoke<BackendDevice[]>("list_devices")
@@ -233,6 +233,16 @@ export function createOutputActions(
         ? "歌词条已切换为仅显示（鼠标穿透）"
         : "歌词条已恢复鼠标交互"
     );
+  },
+
+  setTaskbarLyricsPosition: (ratio) => {
+    const clamped = Math.min(1, Math.max(0, ratio));
+    if (!Number.isFinite(clamped)) return;
+    if (get().taskbarLyricsPosition === clamped) return;
+    set({ taskbarLyricsPosition: clamped });
+    // 滑块拖动是连续事件，但后端只是一次幂等 SetWindowPos，直接透传即可；
+    // 不发通知——每帧弹一条会刷屏。
+    sendCommand("set_taskbar_lyrics_position", { ratio: clamped });
   },
 
   setRememberPlayback: (enabled) => {

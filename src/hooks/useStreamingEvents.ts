@@ -64,6 +64,13 @@ export function useStreamingEvents() {
       usePlayerStore.getState().setTaskbarLyricsEnabled(false);
     });
 
+    // 歌词条被拖拽后回传的位置比例：设置页滑块与它是同一个字段，拖完
+    // 滑块就跟着走。setter 自身按值去重，回传与滑块不会互相打架。
+    register<number>("seraph://taskbar-lyrics-position", (ratio) => {
+      if (typeof ratio !== "number" || !Number.isFinite(ratio)) return;
+      usePlayerStore.getState().setTaskbarLyricsPosition(ratio);
+    });
+
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();

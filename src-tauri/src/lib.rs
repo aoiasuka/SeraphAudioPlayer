@@ -43,6 +43,7 @@ pub fn run() {
             ipc::playback::set_taskbar_lyrics_enabled,
             ipc::playback::set_taskbar_lyrics_click_through,
             ipc::playback::position_taskbar_bar,
+            ipc::playback::set_taskbar_lyrics_position,
             ipc::playback::get_playback_snapshot,
             ipc::playback::toggle_play,
             ipc::cache::clear_cache,

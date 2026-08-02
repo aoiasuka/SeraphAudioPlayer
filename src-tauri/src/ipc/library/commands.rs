@@ -1,5 +1,17 @@
 use super::prelude::*;
 use crate::ipc::error::{IpcError, IpcResult};
+use tauri::Emitter;
+
+/// 曲目歌词写盘后广播:任务栏歌词条按 trackId 缓存曲目元数据,只在切歌时
+/// 重拉,原本没歌词的曲目导入歌词后条会一直显示「暂无歌词稿」。所有写歌词
+/// 的入口(本地导入 / 在线歌词)都在写完缓存后发这个事件,条收到即重拉。
+pub(crate) const LYRICS_UPDATED_EVENT: &str = "seraph://track-lyrics-updated";
+
+fn emit_lyrics_updated(app: &AppHandle, track_id: &str) {
+    if let Err(err) = app.emit(LYRICS_UPDATED_EVENT, track_id) {
+        tracing::warn!("emit {LYRICS_UPDATED_EVENT} failed: {err}");
+    }
+}
 
 #[tauri::command]
 pub async fn get_playlist(app: AppHandle) -> IpcResult<Vec<ImportedTrack>> {
@@ -185,6 +197,7 @@ fn save_track_lyrics_inner(
         covers_dir_path(app).ok().as_deref(),
     )?;
     write_cached_tracks(app, &tracks)?;
+    emit_lyrics_updated(app, track_id);
 
     Ok(lyrics)
 }
@@ -261,6 +274,7 @@ fn apply_online_lyrics_inner(
         covers_dir_path(app).ok().as_deref(),
     )?;
     write_cached_tracks(app, &tracks)?;
+    emit_lyrics_updated(app, track_id);
 
     Ok(lyrics)
 }

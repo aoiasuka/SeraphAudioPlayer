@@ -43,6 +43,7 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   taskbarProgressEnabled: "boolean",
   taskbarLyricsEnabled: "boolean",
   taskbarLyricsClickThrough: "boolean",
+  taskbarLyricsPosition: "number",
 };
 
 interface PersistedEnvelope {

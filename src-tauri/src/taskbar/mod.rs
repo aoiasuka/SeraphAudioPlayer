@@ -18,6 +18,6 @@ mod thumbbar;
 
 pub use lyric_bar::{
     position as position_lyric_bar, set_click_through as set_lyrics_click_through,
-    set_enabled as set_lyrics_enabled,
+    set_enabled as set_lyrics_enabled, set_position as set_lyrics_position,
 };
 pub use thumbbar::{init, playback_snapshot, set_features, taskbar_uses_light_theme};

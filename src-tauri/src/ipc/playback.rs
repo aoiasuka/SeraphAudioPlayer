@@ -256,18 +256,42 @@ pub async fn set_taskbar_lyrics_click_through(
     }
 }
 
-/// 歌词条定位：x=None 用默认位置，Some 为拖拽记忆的横向物理坐标。
-/// 返回钳制回任务栏范围后的实际横向位置，供前端持久化。
+/// 歌词条定位：(x, y) 是拖拽结束时窗口左上角的物理坐标，后端按任务栏停靠边
+/// 取其中沿长边的一维。返回反解并钳制后的「沿任务栏长边的位置比例」(0..=1)，
+/// 由歌词条回传主窗口落进设置，设置页滑块随之同步。
 /// async 同 set_taskbar_lyrics_enabled：避免占用主线程等待窗口操作。
 #[tauri::command]
-pub async fn position_taskbar_bar(app: tauri::AppHandle, x: Option<f64>) -> Result<f64, String> {
+pub async fn position_taskbar_bar(
+    app: tauri::AppHandle,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<f64, String> {
     let x = x.filter(|value| value.is_finite());
+    let y = y.filter(|value| value.is_finite());
     #[cfg(windows)]
-    return crate::taskbar::position_lyric_bar(&app, x);
+    return crate::taskbar::position_lyric_bar(&app, x, y);
     #[cfg(not(windows))]
     {
-        let _ = (app, x);
+        let _ = (app, x, y);
         Ok(0.0)
+    }
+}
+
+/// 歌词条位置设置：ratio 是条沿任务栏长边的位置比例（0 = 最靠起点，
+/// 1 = 最靠终点）。设置的单一事实来源是主窗口 store，水合后与设置页滑块
+/// 调整时同步过来；歌词条未开启时只记住比例，下次开启即用。
+#[tauri::command]
+pub async fn set_taskbar_lyrics_position(app: tauri::AppHandle, ratio: f64) -> Result<(), String> {
+    if !ratio.is_finite() {
+        return Err("位置比例无效".into());
+    }
+    debug!("ipc::set_taskbar_lyrics_position -> {ratio}");
+    #[cfg(windows)]
+    return crate::taskbar::set_lyrics_position(&app, ratio);
+    #[cfg(not(windows))]
+    {
+        let _ = (app, ratio);
+        Ok(())
     }
 }
 

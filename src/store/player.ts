@@ -77,6 +77,18 @@ function migrateView(value: unknown): LibraryView {
     : "local";
 }
 
+/**
+ * 歌词条默认位置比例。对应后端 `bar_metrics` 的默认落点（右缘留 6×条高
+ * 的托盘区）：1920×40 任务栏上约在可移动区间的 88% 处。
+ */
+export const DEFAULT_TASKBAR_LYRICS_POSITION = 0.88;
+
+function normalizeLyricsPosition(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
+    : DEFAULT_TASKBAR_LYRICS_POSITION;
+}
+
 export function migratePersistedPlayerState(persistedState: unknown) {
   const state = asRecord(persistedState);
   const volume = clampVolume(state.volume, 0.7);
@@ -112,6 +124,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     taskbarLyricsEnabled: state.taskbarLyricsEnabled === true,
     // v0.5.4：仅歌词模式（鼠标穿透）默认关闭
     taskbarLyricsClickThrough: state.taskbarLyricsClickThrough === true,
+    // v0.5.5：歌词条位置比例，旧版本无此字段时用默认落点对应的比例
+    taskbarLyricsPosition: normalizeLyricsPosition(state.taskbarLyricsPosition),
   };
 }
 
@@ -148,6 +162,7 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarProgressEnabled: true,
         taskbarLyricsEnabled: false,
         taskbarLyricsClickThrough: false,
+        taskbarLyricsPosition: DEFAULT_TASKBAR_LYRICS_POSITION,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -205,6 +220,7 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarProgressEnabled: state.taskbarProgressEnabled,
         taskbarLyricsEnabled: state.taskbarLyricsEnabled,
         taskbarLyricsClickThrough: state.taskbarLyricsClickThrough,
+        taskbarLyricsPosition: state.taskbarLyricsPosition,
       }),
     }
   )
