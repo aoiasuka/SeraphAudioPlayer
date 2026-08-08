@@ -94,8 +94,9 @@ async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .map_err(|_| ())?
-        .json::<Value>()
+        .map_err(|_| ())?;
+    // S-03：外部 JSON 一律 capped 读取
+    let search = read_json_capped::<Value>(search, MAX_EXTERNAL_JSON_BYTES)
         .await
         .map_err(|_| ())?;
 
@@ -138,8 +139,9 @@ async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .map_err(|_| ())?
-        .json::<Value>()
+        .map_err(|_| ())?;
+    // S-03：外部 JSON 一律 capped 读取
+    let search = read_json_capped::<Value>(search, MAX_EXTERNAL_JSON_BYTES)
         .await
         .map_err(|_| ())?;
 
@@ -159,17 +161,18 @@ async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option
 }
 
 async fn download_image(client: &Client, url: &str) -> Option<Vec<u8>> {
-    let bytes = client
+    let response = client
         .get(url)
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .ok()?
-        .bytes()
+        .ok()?;
+    // S-03：边读边限（原先 `.bytes()` 全量读入后才比对大小，超大响应仍会先吃满内存）
+    let bytes = read_bytes_capped(response, MAX_ONLINE_COVER_BYTES as u64)
         .await
         .ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_ONLINE_COVER_BYTES {
+    if bytes.is_empty() {
         return None;
     }
-    Some(bytes.to_vec())
+    Some(bytes)
 }

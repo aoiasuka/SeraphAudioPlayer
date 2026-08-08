@@ -8,11 +8,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::error::{IpcError, IpcResult};
+use super::http_util::{read_json_capped, MAX_EXTERNAL_JSON_BYTES};
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/aoiasuka/SeraphAudioPlayer/releases/latest";
 /// open_release_page 只允许打开本仓库 Release 页，防止外部数据注入任意 URL。
-const RELEASE_URL_PREFIX: &str = "https://github.com/aoiasuka/SeraphAudioPlayer/releases";
+const RELEASE_PATH_PREFIX: &str = "/aoiasuka/SeraphAudioPlayer/releases";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +41,7 @@ pub async fn check_for_update() -> IpcResult<UpdateCheckResult> {
         .build()
         .map_err(|err| IpcError::network(format!("创建网络客户端失败: {err}")))?;
 
-    let release: LatestRelease = client
+    let response = client
         .get(RELEASES_API)
         .header("User-Agent", "SeraphAudioPlayer-UpdateCheck")
         .header("Accept", "application/vnd.github+json")
@@ -48,8 +49,9 @@ pub async fn check_for_update() -> IpcResult<UpdateCheckResult> {
         .await
         .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?
         .error_for_status()
-        .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?
-        .json()
+        .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?;
+    // S-03：外部 JSON capped 读取，防异常超大响应
+    let release: LatestRelease = read_json_capped(response, MAX_EXTERNAL_JSON_BYTES)
         .await
         .map_err(|err| IpcError::network(format!("解析更新信息失败: {err}")))?;
 
@@ -65,10 +67,38 @@ pub async fn check_for_update() -> IpcResult<UpdateCheckResult> {
     })
 }
 
-/// 用系统默认浏览器打开 Release 页。URL 必须是本仓库 Release 页（前缀白名单）。
+/// S-04：Release 页 URL 精确校验。此前的 `starts_with` 前缀匹配有两类绕过：
+/// path 拼接（`…/releases.evil.com/…`）与点段穿越（`…/releases/../../其他仓库`，
+/// WHATWG 解析器连 `%2e%2e` 变体也会规范化成上级路径）。改为 URL 解析后逐要素
+/// 校验：scheme/host/端口/userinfo 全部固定，path 在规范化后按段边界匹配。
+fn is_allowed_release_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    let path = url.path();
+    // rust-url 解析时已消解 `.`/`..`（含 %2e 编码变体）；再显式拒绝残余点段，
+    // 防不同 URL 实现（此处校验 vs 系统浏览器）规范化差异。
+    if path.split('/').any(|seg| {
+        let lower = seg.to_ascii_lowercase();
+        lower == ".." || lower == "." || lower.contains("%2e")
+    }) {
+        return false;
+    }
+    path == RELEASE_PATH_PREFIX || path.starts_with(&format!("{RELEASE_PATH_PREFIX}/"))
+}
+
+/// 用系统默认浏览器打开 Release 页。URL 必须是本仓库 Release 页（精确校验）。
 #[tauri::command]
 pub fn open_release_page(url: String) -> IpcResult<()> {
-    if !url.starts_with(RELEASE_URL_PREFIX) {
+    if !is_allowed_release_url(&url) {
         return Err(IpcError::invalid_input(format!(
             "拒绝打开非发布页地址: {url}"
         )));
@@ -133,5 +163,36 @@ mod tests {
         // Vec 比较语义：前缀相同长度短的更小
         assert!(is_newer_version("0.4", "0.3.8"));
         assert!(is_newer_version("0.3.8.1", "0.3.8"));
+    }
+
+    #[test]
+    fn release_url_allowlist_accepts_repo_release_pages() {
+        for url in [
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases",
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.5.6",
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases/latest",
+        ] {
+            assert!(is_allowed_release_url(url), "should accept {url}");
+        }
+    }
+
+    #[test]
+    fn release_url_allowlist_rejects_bypass_attempts() {
+        for url in [
+            // 前缀拼接绕过（S-04 报告原始场景）
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases.evil.com/x",
+            // 点段穿越到 github.com 上任意仓库（含 %2e 编码变体）
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases/../../evil/repo",
+            "https://github.com/aoiasuka/SeraphAudioPlayer/releases/%2e%2e/%2e%2e/evil/repo",
+            // userinfo / 明文 / 异 host / 非常规端口
+            "https://github.com@evil.example/aoiasuka/SeraphAudioPlayer/releases",
+            "http://github.com/aoiasuka/SeraphAudioPlayer/releases",
+            "https://evil.example/aoiasuka/SeraphAudioPlayer/releases",
+            "https://github.com:8443/aoiasuka/SeraphAudioPlayer/releases",
+            "",
+            "not a url",
+        ] {
+            assert!(!is_allowed_release_url(url), "should reject {url:?}");
+        }
     }
 }

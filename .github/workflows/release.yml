@@ -5,6 +5,7 @@ on:
     tags:
       - "v*"
 
+# 发布需要向 Releases 上传产物；仅授予 contents 写权限
 permissions:
   contents: write
 
@@ -14,22 +15,26 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # S-13：第三方 Action 一律按 commit SHA 锁定，防 tag 被移动指向恶意提交
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
 
+      # 锁 SHA 后 action 无法从 ref 名推断 toolchain，必须显式传 toolchain
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install frontend dependencies
         run: npm ci
@@ -43,6 +48,13 @@ jobs:
       - name: Audit frontend dependencies
         run: npm audit --audit-level=low
 
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      # S-13：发布门禁与 CI 同强度。ignore 说明见 ci.yml 同名步骤注释。
+      - name: Audit Rust dependencies
+        run: cargo audit --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0221
+
       - name: Test Rust workspace
         run: cargo test --workspace
 
@@ -50,7 +62,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

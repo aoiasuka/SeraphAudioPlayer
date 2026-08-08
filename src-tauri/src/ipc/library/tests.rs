@@ -709,3 +709,56 @@ fn cover_key_normalizes_case_and_separators() {
         normalize_cover_key("c:/users/x/COVERS/abc.JPG")
     );
 }
+
+#[test]
+fn cover_art_from_tags_skips_oversized_pictures() {
+    use lofty::picture::Picture;
+    use lofty::tag::TagType;
+
+    // S-07：恶意音频可内嵌超大「封面」，超过上限必须按无封面处理
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.push_picture(
+        Picture::unchecked(vec![0u8; MAX_EMBEDDED_COVER_BYTES + 1])
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Jpeg)
+            .build(),
+    );
+    assert!(
+        cover_art_from_tags(std::slice::from_ref(&tag)).is_none(),
+        "超限内嵌图必须被跳过"
+    );
+
+    // 合规大小的图片不受影响
+    let mut ok_tag = Tag::new(TagType::Id3v2);
+    ok_tag.push_picture(
+        Picture::unchecked(vec![0xff, 0xd8, 0xff, 0x00])
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Jpeg)
+            .build(),
+    );
+    assert!(cover_art_from_tags(std::slice::from_ref(&ok_tag)).is_some());
+}
+
+#[test]
+fn save_cover_art_rejects_oversized_data() {
+    // S-07：落盘入口的兜底体积校验
+    let dir = std::env::temp_dir().join(format!("seraph-cover-limit-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+
+    let oversized = CoverArt {
+        data: vec![0u8; MAX_EMBEDDED_COVER_BYTES + 1],
+        ext: "jpg",
+    };
+    assert!(
+        save_cover_art(&dir, &oversized).is_none(),
+        "超限封面不得落盘"
+    );
+
+    let within = CoverArt {
+        data: vec![0xff, 0xd8, 0xff, 0x00],
+        ext: "jpg",
+    };
+    assert!(save_cover_art(&dir, &within).is_some());
+
+    let _ = fs::remove_dir_all(&dir);
+}

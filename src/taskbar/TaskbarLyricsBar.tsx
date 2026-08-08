@@ -7,7 +7,7 @@ import {
 } from "@/lib/lyrics/activeLine";
 import {
   coverSrc,
-  emitEvent,
+  emitToMain,
   FRONTEND_EVENT,
   invoke,
   listen,
@@ -90,7 +90,7 @@ export function TaskbarLyricsBar() {
     const legacyX = takeLegacyStoredX();
     if (legacyX !== null) {
       void invoke<number>("position_taskbar_bar", { x: legacyX })
-        .then((ratio) => void emitEvent(POSITION_EVENT, ratio))
+        .then((ratio) => void emitToMain(POSITION_EVENT, ratio))
         .catch(() => undefined);
     }
 
@@ -259,7 +259,7 @@ export function TaskbarLyricsBar() {
           if (key === lastReportedRef.current) return;
           lastReportedRef.current = key;
           void invoke<number>("position_taskbar_bar", { x, y })
-            .then((ratio) => emitEvent(POSITION_EVENT, ratio))
+            .then((ratio) => emitToMain(POSITION_EVENT, ratio))
             .catch(() => undefined);
         }, 400);
       },
@@ -448,7 +448,7 @@ export function TaskbarLyricsBar() {
             )}
             title="关闭歌词条"
             aria-label="关闭歌词条"
-            onClick={() => void emitEvent(CLOSE_EVENT).catch(() => undefined)}
+            onClick={() => void emitToMain(CLOSE_EVENT).catch(() => undefined)}
           >
             <X className="h-3 w-3" />
           </button>

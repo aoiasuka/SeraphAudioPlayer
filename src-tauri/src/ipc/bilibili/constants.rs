@@ -23,12 +23,27 @@ pub(crate) const MAX_HTML_BYTES: u64 = 1024 * 1024;
 pub const FFMPEG_DOWNLOAD_EVENT: &str = "seraph://ffmpeg-download";
 /// ffmpeg 压缩包下载上限（防御性裁剪，正常 essentials 包 ~40-80 MB）。
 pub(crate) const MAX_FFMPEG_DOWNLOAD_BYTES: u64 = 400 * 1024 * 1024;
-/// Windows x64 ffmpeg 静态构建候选下载地址，按顺序尝试直到某个成功。
-/// P1-4：只保留官方/第一方来源，第三方代理镜像可任意替换 zip 内容，
-/// 属于供应链任意代码执行风险，已移除。
+/// S-01：ffmpeg 下载候选（URL + 官方 SHA-256），按顺序尝试直到某个成功。
+/// P1-4：只保留官方/第一方来源；S-01 进一步固定版本并校验哈希——
+/// 此前的 latest 滚动链接内容会随上游更新漂移，无法锚定完整性，
+/// 上游账号被盗/TLS 异常时恶意二进制会被直接执行。
+/// 两个候选是同一构建（gyan.dev 官网 + 其官方 GitHub 镜像 GyanD/codexffmpeg），
+/// 哈希取自 gyan.dev 发布的 .sha256 文件，并经双源实际下载交叉核验一致。
 #[cfg(windows)]
-pub(crate) const FFMPEG_DOWNLOAD_URLS: &[&str] = &[
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip",
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+pub(crate) const FFMPEG_DOWNLOADS: &[FfmpegDownloadSource] = &[
+    FfmpegDownloadSource {
+        url: "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0-essentials_build.zip",
+        sha256: "e6b54767a6065919048f1a098eb27211ca4e12b4348a05d88777a5855d0b6e71",
+    },
+    FfmpegDownloadSource {
+        url: "https://github.com/GyanD/codexffmpeg/releases/download/9.0/ffmpeg-9.0-essentials_build.zip",
+        sha256: "e6b54767a6065919048f1a098eb27211ca4e12b4348a05d88777a5855d0b6e71",
+    },
 ];
+
+/// ffmpeg 下载源描述：升级版本时同时更新 url 与官方公布的 SHA-256。
+#[cfg(windows)]
+pub(crate) struct FfmpegDownloadSource {
+    pub(crate) url: &'static str,
+    pub(crate) sha256: &'static str,
+}

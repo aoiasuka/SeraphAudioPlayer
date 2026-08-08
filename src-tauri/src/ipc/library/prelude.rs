@@ -36,6 +36,10 @@ pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use serde_json::Value;
 pub(crate) use tauri::{AppHandle, Manager};
 
+pub(crate) use crate::ipc::http_util::{
+    read_bytes_capped, read_json_capped, MAX_EXTERNAL_JSON_BYTES,
+};
+
 // 兄弟模块共享项（glob 汇聚，供子模块一站式引入）
 #[allow(unused_imports)]
 pub(crate) use super::{

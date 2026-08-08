@@ -227,11 +227,17 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
 
     if data.is_login {
         let face = match data.face.as_deref() {
-            Some(face) => resolve_avatar_data_url(&client, face)
-                .await
-                .or_else(|_| Ok::<_, String>(Some(normalize_url(face))))
-                .ok()
-                .flatten(),
+            Some(face) => {
+                // S-02：头像不需要登录态——用不带 Cookie 的裸 client 下载，
+                // 防止 face（外部 API 返回的 URL）把 SESSDATA 带向非预期主机；
+                // resolve_avatar_data_url 内部还有 https + 官方图床域白名单兜底。
+                let avatar_client = bilibili_client_with_cookie(None)?;
+                resolve_avatar_data_url(&avatar_client, face)
+                    .await
+                    .or_else(|_| Ok::<_, String>(Some(normalize_url(face))))
+                    .ok()
+                    .flatten()
+            }
             None => None,
         };
         // P2-8：仅当资料实际变化时才重写 Credential Manager + session 文件，

@@ -135,8 +135,19 @@ pub(crate) fn write_session_file(
         .map_err(|err| format!("failed to serialize bilibili session: {err}"))?;
     // 审2-S1b：唯一临时名 + rename 原子写（参考 media_library.rs 的
     // write_json_atomic 模式，但临时名唯一化，防并发写交错截断）。
+    // S-11：先建空临时文件并收窄 ACL，再写入内容——原先「默认 ACL 写完再收窄」
+    // 在写入与收窄之间留有其他本地用户可读的窗口。同卷 rename 保留 DACL，
+    // rename 后再收窄一次作幂等兜底。
     let tmp = unique_temp_path(&path);
+    fs::File::create(&tmp).map_err(|err| {
+        format!(
+            "failed to create bilibili session temp {}: {err}",
+            tmp.display()
+        )
+    })?;
+    restrict_session_file_permissions(&tmp)?;
     fs::write(&tmp, bytes).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
         format!(
             "failed to write bilibili session temp {}: {err}",
             tmp.display()
@@ -198,14 +209,24 @@ pub(crate) fn windows_read_credential(target: &str) -> Result<Option<Vec<u8>>, S
 
     let bytes = unsafe {
         let credential_ref = &*credential;
-        let blob = slice::from_raw_parts(
-            credential_ref.CredentialBlob,
-            credential_ref.CredentialBlobSize as usize,
-        );
-        let bytes = blob.to_vec();
+        // S-10：CredentialBlob 可能为 null / 零长（凭据存在但无 blob），
+        // `from_raw_parts` 要求指针非空，此处判空后按「无凭据」处理。
+        let bytes =
+            if credential_ref.CredentialBlob.is_null() || credential_ref.CredentialBlobSize == 0 {
+                Vec::new()
+            } else {
+                slice::from_raw_parts(
+                    credential_ref.CredentialBlob,
+                    credential_ref.CredentialBlobSize as usize,
+                )
+                .to_vec()
+            };
         CredFree(credential.cast());
         bytes
     };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(bytes))
 }
 
@@ -339,6 +360,21 @@ pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), Strin
     Ok(())
 }
 
+/// S-05：允许持久化的 B 站 Cookie 名称白名单。
+/// 登录态五件套 + buvid 系风控标识；名单外的 Set-Cookie 一律不落盘，
+/// 防止任意响应头把无关/恶意 Cookie 注入 Credential Manager 并随后续请求外发。
+pub(crate) const BILIBILI_COOKIE_ALLOWLIST: &[&str] = &[
+    "SESSDATA",
+    "bili_jct",
+    "DedeUserID",
+    "DedeUserID__ckMd5",
+    "sid",
+    "buvid3",
+    "buvid4",
+    "b_nut",
+    "b_lsid",
+];
+
 pub(crate) fn merge_set_cookie_headers(
     headers: &HeaderMap,
     cookies: &mut BTreeMap<String, String>,
@@ -357,6 +393,10 @@ pub(crate) fn merge_set_cookie_headers(
         let name = name.trim();
         let cookie_value = cookie_value.trim();
         if name.is_empty() || cookie_value.is_empty() {
+            continue;
+        }
+        // S-05：名称白名单（Cookie 名大小写敏感，精确匹配）。
+        if !BILIBILI_COOKIE_ALLOWLIST.contains(&name) {
             continue;
         }
 

@@ -4,6 +4,7 @@ pub mod config;
 pub mod dsp;
 pub mod error;
 pub mod events;
+pub(crate) mod http_util;
 pub mod library;
 pub mod playback;
 pub mod playlist_io;

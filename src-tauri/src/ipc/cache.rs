@@ -402,10 +402,12 @@ fn default_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
 
 fn default_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app_data_cache_dir(app)?;
+    // S-14：用户级 app_data 优先于 ProgramData——ProgramData 对所有本地用户可写，
+    // 其他用户可预置文件/marker 干扰缓存清理；仅保留其为最后候选（历史安装兼容）。
     let candidates = [
         install_dir_cache_dir(),
-        program_data_cache_dir(),
         Some(app_data_dir.clone()),
+        program_data_cache_dir(),
     ];
 
     for candidate in candidates.into_iter().flatten() {

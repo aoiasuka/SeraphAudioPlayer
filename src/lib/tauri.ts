@@ -122,11 +122,17 @@ export async function listen<T = unknown>(
   return listen<T>(event, cb, windowLabel);
 }
 
-/** 广播一个应用内事件(所有窗口可 listen)。非 Tauri 环境为空操作。 */
-export async function emitEvent(event: string, payload?: unknown): Promise<void> {
+/**
+ * 定向发送应用内事件给主窗口。非 Tauri 环境为空操作。
+ *
+ * S-12：歌词条等第二窗口回传事件一律走 `emitTo("main")` 而非全局 `emit`——
+ * 配合 capability 只授予 `core:event:allow-emit-to`，第二窗口无法向任意窗口
+ * 广播/伪造事件。主窗口的 `listen`（target 为 Any）能正常收到定向事件。
+ */
+export async function emitToMain(event: string, payload?: unknown): Promise<void> {
   if (!isTauriRuntime()) return;
   const evt = await import("@tauri-apps/api/event");
-  await evt.emit(event, payload);
+  await evt.emitTo("main", event, payload);
 }
 
 export async function isTauri(): Promise<boolean> {

@@ -329,4 +329,112 @@ mod tests {
             );
         }
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn verifies_download_sha256_case_insensitively() {
+        use super::verify_file_sha256;
+
+        let dir = std::env::temp_dir().join(format!("seraph-sha-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        assert!(verify_file_sha256(&path, expected).is_ok());
+        assert!(
+            verify_file_sha256(&path, &expected.to_uppercase()).is_ok(),
+            "官方 .sha256 文件可能大写，比对须大小写不敏感"
+        );
+        assert!(
+            verify_file_sha256(&path, "deadbeef").is_err(),
+            "哈希不匹配必须拒绝"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_zip_entry_exceeding_decompressed_limit() {
+        use super::extract_ffmpeg_tools_with_limit;
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let dir = std::env::temp_dir().join(format!("seraph-zipbomb-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("bomb.zip");
+
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            // 高压缩比条目：4 KB 零字节，压缩后极小；限 1 KB 时必须被硬截断拒绝。
+            writer.start_file("bin/ffmpeg.exe", opts).unwrap();
+            writer.write_all(&vec![0u8; 4096]).unwrap();
+            writer.start_file("bin/ffprobe.exe", opts).unwrap();
+            writer.write_all(b"FFPROBEBIN").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let err = extract_ffmpeg_tools_with_limit(&zip_path, &dir, 1024)
+            .expect_err("超限条目必须导致解压失败");
+        assert!(err.contains("上限"), "错误信息应指明超限: {err}");
+        assert!(
+            !dir.join("ffmpeg.exe").exists(),
+            "超限的半截输出文件必须被清理"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn avatar_url_whitelist_only_allows_official_https_hosts() {
+        for url in [
+            "https://i0.hdslb.com/bfs/face/abc.jpg",
+            "https://i2.hdslb.com/bfs/face/x.webp",
+            "https://www.bilibili.com/face.png",
+            "https://hdslb.com/face.png",
+        ] {
+            assert!(is_safe_avatar_url(url), "should accept {url}");
+        }
+        for url in [
+            // 明文 http 拒绝（防被动监听）
+            "http://i0.hdslb.com/bfs/face/abc.jpg",
+            // 第三方 / 仿冒 host
+            "https://evil.example/face.jpg",
+            "https://hdslb.com.evil.example/face.jpg",
+            "https://xhdslb.com/face.jpg",
+            "",
+            "not a url",
+        ] {
+            assert!(!is_safe_avatar_url(url), "should reject {url:?}");
+        }
+    }
+
+    #[test]
+    fn cookie_merge_only_persists_allowlisted_names() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            "SESSDATA=abc; Path=/; Secure; HttpOnly".parse().unwrap(),
+        );
+        headers.append(SET_COOKIE, "bili_jct=tok".parse().unwrap());
+        headers.append(SET_COOKIE, "evil_tracker=x; Max-Age=99999".parse().unwrap());
+
+        let mut cookies = BTreeMap::new();
+        let mut expires = BTreeMap::new();
+        merge_set_cookie_headers(&headers, &mut cookies, &mut expires);
+
+        assert_eq!(cookies.get("SESSDATA").map(String::as_str), Some("abc"));
+        assert_eq!(cookies.get("bili_jct").map(String::as_str), Some("tok"));
+        assert!(
+            !cookies.contains_key("evil_tracker"),
+            "白名单外的 Set-Cookie 不得落盘"
+        );
+        assert!(!expires.contains_key("evil_tracker"));
+    }
 }

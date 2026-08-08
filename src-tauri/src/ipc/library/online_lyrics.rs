@@ -82,7 +82,7 @@ pub(crate) async fn fetch_netease_lyrics(
         return Err(());
     };
 
-    let Ok(response) = response.json::<Value>().await else {
+    let Ok(response) = read_json_capped::<Value>(response, MAX_EXTERNAL_JSON_BYTES).await else {
         return Err(());
     };
 
@@ -114,7 +114,8 @@ pub(crate) async fn fetch_netease_lyrics(
         else {
             continue;
         };
-        let Ok(lyric_data) = lyric_data.json::<Value>().await else {
+        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
+        else {
             continue;
         };
         let Some(lyrics) = parse_netease_lyric_payload(&lyric_data) else {
@@ -160,7 +161,7 @@ pub(crate) async fn fetch_kugou_lyrics(
         return Err(());
     };
 
-    let Ok(response) = response.json::<Value>().await else {
+    let Ok(response) = read_json_capped::<Value>(response, MAX_EXTERNAL_JSON_BYTES).await else {
         return Err(());
     };
 
@@ -196,7 +197,8 @@ pub(crate) async fn fetch_kugou_lyrics(
         else {
             continue;
         };
-        let Ok(lyric_data) = lyric_data.json::<Value>().await else {
+        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
+        else {
             continue;
         };
 
@@ -249,7 +251,8 @@ pub(crate) async fn fetch_qq_lyrics(
         return Err(());
     };
 
-    let Ok(search_data) = search_data.json::<Value>().await else {
+    let Ok(search_data) = read_json_capped::<Value>(search_data, MAX_EXTERNAL_JSON_BYTES).await
+    else {
         return Err(());
     };
 
@@ -281,7 +284,8 @@ pub(crate) async fn fetch_qq_lyrics(
         else {
             continue;
         };
-        let Ok(lyric_data) = lyric_data.json::<Value>().await else {
+        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
+        else {
             continue;
         };
         let Some(lyrics) = parse_qq_lyric_payload(&lyric_data) else {

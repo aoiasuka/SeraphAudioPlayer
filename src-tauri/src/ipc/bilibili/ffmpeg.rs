@@ -52,7 +52,7 @@ pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfm
     let archive_path = ffmpeg_dir.join("ffmpeg-download.zip");
 
     let mut last_error = String::from("没有可用的下载地址");
-    for (index, url) in FFMPEG_DOWNLOAD_URLS.iter().enumerate() {
+    for (index, source) in FFMPEG_DOWNLOADS.iter().enumerate() {
         emit_ffmpeg_progress(
             app,
             FfmpegDownloadProgress {
@@ -63,13 +63,17 @@ pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfm
                 message: Some(format!(
                     "正在连接下载源 {}/{}…",
                     index + 1,
-                    FFMPEG_DOWNLOAD_URLS.len()
+                    FFMPEG_DOWNLOADS.len()
                 )),
             },
         );
 
-        match download_to_file(&client, url, &archive_path, app).await {
-            Ok(()) => match extract_ffmpeg_tools(&archive_path, &ffmpeg_dir) {
+        match download_to_file(&client, source.url, &archive_path, app).await {
+            // S-01：解压前先校验 SHA-256——下载物与官方公布哈希不符
+            // （上游被篡改 / TLS 中间人 / 传输损坏）一律拒绝执行。
+            Ok(()) => match verify_file_sha256(&archive_path, source.sha256)
+                .and_then(|()| extract_ffmpeg_tools(&archive_path, &ffmpeg_dir))
+            {
                 Ok(()) => {
                     let _ = fs::remove_file(&archive_path);
                     // find_ffmpeg 会重新搜索工具目录并刷新解码器缓存。
@@ -83,7 +87,7 @@ pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfm
                 }
                 Err(reason) => {
                     let _ = fs::remove_file(&archive_path);
-                    last_error = format!("解压失败: {reason}");
+                    last_error = reason;
                 }
             },
             Err(reason) => {
@@ -195,9 +199,50 @@ pub(crate) async fn download_to_temp_file(
     Ok(())
 }
 
+/// S-01：流式计算文件 SHA-256 并与官方公布值比对（大小写不敏感）。
+/// 不匹配即拒绝，调用方负责删除下载物。
+#[cfg(windows)]
+pub(crate) fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = fs::File::open(path).map_err(|err| format!("无法读取下载文件校验: {err}"))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|err| format!("计算下载文件哈希失败: {err}"))?;
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual.eq_ignore_ascii_case(expected_hex.trim()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "下载文件完整性校验失败（SHA-256 不匹配，预期 {expected_hex}，实际 {actual}），已拒绝解压"
+        ))
+    }
+}
+
+/// S-06：单个条目解压后体积上限。ffmpeg.exe 本体 ~100 MB 量级，512 MB 已远超
+/// 正常范围；恶意 zip 可构造「压缩后极小、解压后数十 GB」的条目写满磁盘。
+#[cfg(windows)]
+pub(crate) const MAX_FFMPEG_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// 从 zip 包中提取 ffmpeg.exe 与 ffprobe.exe 到目标目录（忽略包内层级）。
 #[cfg(windows)]
 pub(crate) fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    extract_ffmpeg_tools_with_limit(archive_path, dest_dir, MAX_FFMPEG_ENTRY_BYTES)
+}
+
+/// S-06：`entry_limit` 为单条目解压后字节上限。用 `Read::take` 在真实解压流上
+/// 硬截断——zip 头部声明的 size 可被伪造，不作为依据。
+#[cfg(windows)]
+pub(crate) fn extract_ffmpeg_tools_with_limit(
+    archive_path: &Path,
+    dest_dir: &Path,
+    entry_limit: u64,
+) -> Result<(), String> {
+    use std::io::Read as _;
+
     let file = fs::File::open(archive_path).map_err(|err| format!("无法打开压缩包: {err}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
 
@@ -223,8 +268,16 @@ pub(crate) fn extract_ffmpeg_tools(archive_path: &Path, dest_dir: &Path) -> Resu
         let out_path = dest_dir.join(target);
         let mut out_file =
             fs::File::create(&out_path).map_err(|err| format!("无法写入 {target}: {err}"))?;
-        std::io::copy(&mut entry, &mut out_file)
+        // 多读 1 字节以区分「恰好等于上限」与「超限被截断」。
+        let copied = std::io::copy(&mut (&mut entry).take(entry_limit + 1), &mut out_file)
             .map_err(|err| format!("解压 {target} 失败: {err}"))?;
+        if copied > entry_limit {
+            drop(out_file);
+            let _ = fs::remove_file(&out_path);
+            return Err(format!(
+                "压缩条目 {target} 解压后超过 {entry_limit} 字节上限，疑似恶意压缩包，已中止"
+            ));
+        }
         extracted.push((*target).to_string());
     }
 

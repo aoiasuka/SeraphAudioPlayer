@@ -144,8 +144,13 @@ pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String
         .error_for_status()
         .map_err(|err| format!("B 站链接不可访问: {err}"))?;
 
-    let final_url = response.url().to_string();
-    if let Some(bvid) = extract_bvid(&final_url) {
+    let final_url = response.url().clone();
+    // S-15：跟随重定向后复验最终主机——初始校验只覆盖用户输入的 URL，
+    // 短链可重定向到任意主机（含 localhost 内网服务），不复验就成了盲 SSRF 探针。
+    if !is_bilibili_host(&final_url) {
+        return Err("B 站短链重定向到了非 B 站域名，已拒绝解析".into());
+    }
+    if let Some(bvid) = extract_bvid(final_url.as_str()) {
         return Ok(bvid);
     }
 
@@ -420,8 +425,8 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
     label: &str,
 ) -> Result<T, String> {
-    let bytes = response
-        .bytes()
+    // S-03：外部 JSON 一律 capped 读取，防上游异常/被攻破时的无界响应撑爆内存。
+    let bytes = read_bytes_capped(response, MAX_EXTERNAL_JSON_BYTES)
         .await
         .map_err(|err| format!("failed to read {label} response body: {err}"))?;
     serde_json::from_slice(&bytes).map_err(|err| {
@@ -620,22 +625,25 @@ pub(crate) async fn download_audio_to_file(
 
 /// 增量读取响应体，超出上限即截断并报错；
 /// 避免恶意服务器或异常重定向把进程内存撑爆。
-pub(crate) async fn read_bytes_capped(
-    mut response: reqwest::Response,
-    cap: u64,
-) -> std::result::Result<Vec<u8>, String> {
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| format!("network read error: {err}"))?
-    {
-        if (buf.len() as u64).saturating_add(chunk.len() as u64) > cap {
-            return Err(format!("response body exceeded {cap} bytes; aborted"));
-        }
-        buf.extend_from_slice(&chunk);
+/// S-03：实现挪到 `crate::ipc::http_util`（library/update 模块共用），此处经 prelude 复用。
+/// S-02：头像 URL 白名单——头像必须是 B 站官方图床/主站域名的 https 地址。
+/// `face` 字段来自外部 API 响应，未校验就用携带 Cookie 的 client 请求，
+/// 一旦上游被攻破返回恶意 URL，登录 Cookie 会被发往任意主机。
+pub(crate) fn is_safe_avatar_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
     }
-    Ok(buf)
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "hdslb.com"
+        || host == "bilibili.com"
+        || host.ends_with(".hdslb.com")
+        || host.ends_with(".bilibili.com")
 }
 
 /// P2-8：头像 data URL 按源 URL 内存缓存，避免前端周期性查询登录状态时
@@ -655,6 +663,11 @@ pub(crate) async fn resolve_avatar_data_url(
 
     if let Some(cached) = AVATAR_DATA_URL_CACHE.lock().get(&url).cloned() {
         return Ok(Some(cached));
+    }
+
+    // S-02：非官方图床域名不发起请求（调用方即便传入带 Cookie 的 client 也不外泄）。
+    if !is_safe_avatar_url(&url) {
+        return Ok(None);
     }
 
     let response = client

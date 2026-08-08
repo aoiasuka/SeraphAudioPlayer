@@ -148,6 +148,20 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.5.6
+
+安全加固专版——逐项落地 2026-08-05 安全审查（`docs/SECURITY-REVIEW-2026-08-05.md`）全部 15 项发现（1 高危 + 7 中危 + 7 低危）：
+
+- **FFmpeg 下载完整性校验（高危 S-01）**：自动下载的 ffmpeg 压缩包此前解压后直接执行、无任何校验，上游被攻破即任意代码执行。现固定版本（9.0 essentials）双官方源（gyan.dev + 其官方 GitHub 镜像），硬编码官方 SHA-256（经双源实际下载交叉核验），下载后先验哈希再解压；解压单条目加 512 MB 硬上限——用 `Read::take` 在真实解压流上截断、不信任 zip 头声明的大小，防高压缩比条目写满磁盘（S-06）。
+- **B 站登录态外泄面收窄（S-02/S-05）**：头像下载改用不带 Cookie 的裸 client，且 URL 必须是 https + 官方图床域名（hdslb.com/bilibili.com 系）白名单才发起请求——此前 API 返回的 `face` 字段未经校验就用携带 SESSDATA 的 client 直接请求；Set-Cookie 持久化加名称白名单（登录五件套 + buvid 系风控标识），名单外的响应 Cookie 不再进 Credential Manager。
+- **外部响应一律限量读取（S-03）**：新增 `ipc/http_util` 公共防线，B 站 API、三源在线歌词、在线封面、更新检查的全部 JSON 响应改为 8 MB capped 增量读取（不信任 Content-Length），在线封面图片下载同步改为边读边限；此前任一上游异常返回超大响应都会被无界读进内存。
+- **Release 页 URL 精确校验（S-04）**：检查更新的「前往下载」此前用 `starts_with` 前缀匹配，存在 path 拼接（`…/releases.evil.com/…`）与 `..` 点段穿越（含 `%2e` 编码变体，可跳到 github.com 任意仓库页）两类绕过；改为 URL 解析后 scheme/host/端口/userinfo 逐要素校验 + path 规范化后按段边界匹配。
+- **本地边界加固（S-07/S-10/S-11/S-14/S-15）**：内嵌封面 32 MB 上限（选图与落盘双入口，防恶意音频撑爆内存/磁盘）；`CredReadW` 空 blob 判空（消除理论 UB）；session 临时文件先建空收 ACL 再写内容（消除默认权限暴露窗口）；默认缓存目录候选用户级 app_data 优先于多用户可写的 ProgramData；B 站短链跟随重定向后复验最终域名（防盲 SSRF 探测）。
+- **配置与发布链收紧（S-09/S-12/S-13）**：生产 CSP 移除 `localhost`/`127.0.0.1` 通配（挪入 `devCsp` 仅开发期生效，渲染进程即使被 XSS 也无法探测本机端口）；歌词条窗口事件权限 `allow-emit` → `allow-emit-to` 定向主窗口，第二窗口不可再向任意窗口广播/伪造事件；GitHub Actions 全部按 commit SHA 锁定防 tag 漂移，CI 与发布门禁新增 `cargo audit`（Rust 依赖漏洞审计，unsound 类无修复版公告显式 ignore 并注明），CI 令牌显式只读。
+- **依赖漏洞清零（S-08）**：`npm audit fix` 修复 undici（jsdom 测试链路）与 nanoid（审查报告之后新披露、位于生产依赖树 tailwindcss→postcss 下）两项高危公告，全量 `npm audit` 归零。
+
+工程化：后端测试 206 → 214（SHA-256 校验大小写不敏感与拒绝路径、zip 超限条目拒绝且半截输出清理、头像域名白名单正反矩阵、Cookie 名称白名单、Release URL 绕过用例矩阵、超限内嵌封面跳过与落盘拒绝）。前端测试 147 不变（S-12 为等价 API 收窄，typecheck 铆钉）。
+
 ### v0.5.5
 
 任务栏歌词条打磨——三项针对性修复 + 一项设置增强：

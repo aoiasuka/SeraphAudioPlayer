@@ -756,11 +756,16 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
     parsed
 }
 
+/// S-07：内嵌封面体积上限（与 WAV/DSD 兜底解析的 32 MB 口径一致）。
+/// lofty 解析出的 APIC 数据直接进内存并落盘，恶意音频可内嵌超大「封面」
+/// 撑爆内存/磁盘，超限一律按无封面处理。
+pub(crate) const MAX_EMBEDDED_COVER_BYTES: usize = 32 * 1024 * 1024;
+
 /// 从标签中选内嵌封面：优先 CoverFront，否则取第一张非空图片。
 pub(crate) fn cover_art_from_tags(tags: &[Tag]) -> Option<CoverArt> {
     let mut chosen = None;
     for picture in tags.iter().flat_map(|tag| tag.pictures()) {
-        if picture.data().is_empty() {
+        if picture.data().is_empty() || picture.data().len() > MAX_EMBEDDED_COVER_BYTES {
             continue;
         }
         if picture.pic_type() == PictureType::CoverFront {
@@ -809,6 +814,10 @@ pub(crate) static COVER_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 封面按内容哈希写入 covers 目录并返回绝对路径；已存在同内容文件直接复用。
 pub(crate) fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String> {
+    // S-07：落盘入口统一体积校验（在线封面 4 MB 上限之外的兜底防线）。
+    if art.data.is_empty() || art.data.len() > MAX_EMBEDDED_COVER_BYTES {
+        return None;
+    }
     let mut hasher = DefaultHasher::new();
     art.data.hash(&mut hasher);
     let content_hash = hasher.finish();
