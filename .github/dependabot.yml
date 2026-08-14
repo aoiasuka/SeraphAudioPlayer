@@ -1,28 +1,49 @@
-# S-10:依赖更新自动化。两条 audit 门禁(npm audit / cargo audit)是被动的——
-# 公告一出 CI 就红,但没人主动提 PR 升级。dependabot 补上主动侧。
+# S-10:依赖更新自动化。两条 audit 门禁(npm audit / cargo audit,均为 low 阈值)
+# 是被动的——公告一出 CI 就红,但没人主动提 PR 升级。dependabot 补上主动侧。
 #
-# Actions 的更新尤其重要:S-13 把所有 action 按 commit SHA 锁定(防 tag 被移动),
-# 代价是拿不到上游修复;dependabot 认得 `uses: owner/repo@<sha> # vN` 这种写法,
-# 会连 SHA 带注释一起更新。
+# 【为什么 cargo/npm 忽略 major】
+# 首次启用时 dependabot 一次性开了 13 个 PR,其中 symphonia 0.5→0.6、des 0.8→0.9、
+# react-dom 等 major 升级**直接把 CI 打红**——本项目对若干库的内部行为有强耦合:
+#   - symphonia:`symphonia.rs` 的 ALAC magic cookie 纠偏依赖其 codec_params 内部约定
+#   - lofty:`Picture::unchecked(..).build()` 这类 builder API 每个 0.x 都在变
+#   - des:QRC 歌词解密的 TdesEde3 分组密码接口
+#   - zip:ffmpeg 解压链(`Read::take` 硬截断那套写法)
+# 这些跨大版本一律需要人工评估 + 回归验证,自动 PR 只会制造噪声和误合风险。
+#
+# 安全性由 CI/release 的 `cargo audit` + `npm audit`(low 阈值,先于构建执行)兜底:
+# 依赖一旦有公告,门禁直接变红,按 CLAUDE.md 发布流程手动升级修掉(v0.5.6 的
+# plist/quick-xml/quinn-proto 就是这么处理的)。**放宽 audit 阈值前不要放开这里。**
+#
+# 【为什么 github-actions 保留 major】
+# S-13 把所有 action 按 commit SHA 锁定(防 tag 被移动),代价是完全拿不到上游更新,
+# 只能靠 dependabot 推。action 数量少(5 个)、更新稀疏,major 也值得看一眼。
+# 注意 tauri-apps/tauri-action 直接产出发布安装包,升 major 必须实跑一次发布验证。
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(actions)"
+    groups:
+      actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(npm)"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
-      # 补丁/次版本合成一个 PR,避免每周十几条噪声
       minor-and-patch:
         update-types:
           - minor
@@ -32,9 +53,13 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(cargo)"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
       minor-and-patch:
         update-types:
