@@ -1,6 +1,6 @@
 //! FFmpeg CLI fallback decoder for formats Symphonia cannot handle.
 
-use crate::decoder::{Decoder, DecoderError, Packet, StreamInfo};
+use crate::decoder::{validate_stream_info, Decoder, DecoderError, Packet, StreamInfo};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::{
     env,
@@ -337,10 +337,15 @@ fn ffmpeg_input_arg(path: &Path) -> std::ffi::OsString {
     }
 }
 
+/// R-03：ffprobe 探测超时。畸形文件能让 ffprobe 在解析阶段挂死，
+/// 断连的网络盘也可能长期无响应；`.output()` 是无限等待，扫库时会把
+/// 调用线程永久钉住。20 s 对慢速网络盘足够宽松，同时保证有界。
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
     let mut command = Command::new(ffprobe_command_path());
     hide_console_window(&mut command);
-    let output = command
+    let mut child = command
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
@@ -352,16 +357,64 @@ fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
         .arg("-of")
         .arg("default=noprint_wrappers=1")
         .arg(ffmpeg_input_arg(path))
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(map_tool_spawn_error)?;
 
-    if !output.status.success() {
+    // 管道必须在等待退出的同时排空——ffprobe 写满 pipe 缓冲会阻塞在 write 上，
+    // 而我们又在等它退出，形成互等死锁。
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let stdout_thread = stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_thread = stderr.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let deadline = Instant::now() + FFPROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(DecoderError::UnsupportedFormat(format!(
+                        "ffprobe timed out after {} s",
+                        FFPROBE_TIMEOUT.as_secs()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => return Err(DecoderError::Io(err)),
+        }
+    };
+
+    let stdout_bytes = stdout_thread
+        .and_then(|t| t.join().ok())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_thread
+        .and_then(|t| t.join().ok())
+        .unwrap_or_default();
+
+    if !status.success() {
         return Err(DecoderError::UnsupportedFormat(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
         ));
     }
 
-    parse_ffprobe_output(&String::from_utf8_lossy(&output.stdout))
+    parse_ffprobe_output(&String::from_utf8_lossy(&stdout_bytes))
 }
 
 fn parse_ffprobe_output(output: &str) -> Result<StreamInfo, DecoderError> {
@@ -398,12 +451,15 @@ fn parse_ffprobe_output(output: &str) -> Result<StreamInfo, DecoderError> {
         .filter(|value| *value > 0)
         .ok_or_else(|| DecoderError::UnsupportedFormat("ffprobe missing channels".into()))?;
 
-    Ok(StreamInfo {
+    let info = StreamInfo {
         sample_rate: SampleRate(sample_rate),
         bit_depth: BitDepth(bit_depth.unwrap_or(16)),
         channels: Channels(channels),
         duration_seconds: duration.unwrap_or(0.0),
-    })
+    };
+    // R-01：ffprobe 的输出同样来自不可信文件头，与 symphonia 路径共用同一道闸。
+    validate_stream_info(&info)?;
+    Ok(info)
 }
 
 fn parse_duration(value: &str) -> Option<f64> {

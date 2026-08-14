@@ -106,7 +106,8 @@ pub fn open_release_page(url: String) -> IpcResult<()> {
 
     #[cfg(windows)]
     {
-        Command::new("explorer")
+        // F-05：走 System32 绝对路径，避免裸名被同目录同名 EXE 劫持
+        Command::new(crate::ipc::path_guard::system32_tool("explorer.exe"))
             .arg(&url)
             .spawn()
             .map_err(|err| IpcError::from(format!("打开浏览器失败: {err}")))?;

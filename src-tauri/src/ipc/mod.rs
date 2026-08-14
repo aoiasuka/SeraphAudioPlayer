@@ -6,6 +6,7 @@ pub mod error;
 pub mod events;
 pub(crate) mod http_util;
 pub mod library;
+pub(crate) mod path_guard;
 pub mod playback;
 pub mod playlist_io;
 pub mod system;

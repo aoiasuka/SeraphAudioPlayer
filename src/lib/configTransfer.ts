@@ -13,6 +13,9 @@ export const CONFIG_EXPORT_KIND = "seraph-config";
 export const CONFIG_EXPORT_VERSION = 1;
 const PENDING_IMPORT_KEY = "seraph-config-import-pending";
 
+/** W-07:配置导入文本长度上限,与后端 `MAX_CONFIG_FILE_BYTES` 同为 2 MB 口径。 */
+const MAX_CONFIG_IMPORT_CHARS = 2 * 1024 * 1024;
+
 const PLAYER_STATE_KEY = "seraph-player-state";
 const EQ_STATE_KEY = "seraph-eq-state";
 const ANALYSIS_STATE_KEY = "seraph-analysis-settings";
@@ -118,6 +121,12 @@ export function buildConfigExport(now = new Date()): string | null {
  * 抛出的 Error message 面向用户（中文），调用方直接展示。
  */
 export function parseConfigImport(text: string): Record<string, PersistedEnvelope> {
+  // W-07:后端 import_app_config 有 2 MB 上限,但 parseConfigImport 也被
+  // 剪贴板/拖拽等路径调用。JSON.parse + 后续复制会产生数倍于原文的驻留,
+  // 这里独立设一道上限,不依赖调用方是否走过后端。
+  if (text.length > MAX_CONFIG_IMPORT_CHARS) {
+    throw new Error("配置文件过大（超过 2 MB）");
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -175,22 +184,29 @@ export function applyPendingConfigImport(): boolean {
   for (const key of CONFIG_STORE_KEYS) {
     const imported = pending[key];
     if (!imported) continue;
-    if (key === PLAYER_STATE_KEY) {
-      const existing = parseEnvelope(window.localStorage.getItem(key));
-      const mergedState = {
-        ...(existing?.state ?? {}),
-        ...pickPlayerSettings(imported.state),
-      };
-      const version = existing?.version ?? imported.version;
-      window.localStorage.setItem(
-        key,
-        JSON.stringify({ state: mergedState, version })
-      );
-    } else {
-      window.localStorage.setItem(
-        key,
-        JSON.stringify({ state: imported.state, version: imported.version })
-      );
+    // W-02:这段跑在 boot 首个 import 的模块顶层——localStorage.setItem 在配额
+    // 超限时会抛 QuotaExceededError,异常冒出模块求值即整个应用白屏启动。
+    // 单个 store 写失败不该拖垮启动,吞掉继续处理下一个。
+    try {
+      if (key === PLAYER_STATE_KEY) {
+        const existing = parseEnvelope(window.localStorage.getItem(key));
+        const mergedState = {
+          ...(existing?.state ?? {}),
+          ...pickPlayerSettings(imported.state),
+        };
+        const version = existing?.version ?? imported.version;
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({ state: mergedState, version })
+        );
+      } else {
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({ state: imported.state, version: imported.version })
+        );
+      }
+    } catch {
+      // 配额超限 / 隐私模式禁写：跳过该 store，保证应用仍能启动
     }
   }
   return true;

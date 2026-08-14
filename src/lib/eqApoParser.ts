@@ -140,7 +140,10 @@ export function parseApoPreset(text: string): ParsedEqPreset {
     if (/^GraphicEQ:/i.test(line)) {
       const graphicBands = parseGraphicEq(line);
       if (graphicBands.length > 0) {
-        bands.push(...graphicBands);
+        // W-06:不能用 `bands.push(...graphicBands)`——展开是按实参传参,
+        // 512 KB 预设可解出约 5.5 万个点,接近 V8 的实参上限,超了直接 RangeError。
+        // 逐个 push 没有这个上限。
+        for (const band of graphicBands) bands.push(band);
       } else {
         warnings.push("GraphicEQ 行解析为空");
       }

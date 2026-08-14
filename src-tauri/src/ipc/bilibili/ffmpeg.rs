@@ -246,10 +246,25 @@ pub(crate) fn extract_ffmpeg_tools_with_limit(
     let file = fs::File::open(archive_path).map_err(|err| format!("无法打开压缩包: {err}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|err| format!("压缩包格式无效: {err}"))?;
 
+    // F-08：条目数上限。官方 ffmpeg release zip 只有几十个条目；百万级条目的
+    // 压缩包（zip 炸弹的另一种形态）会让下面的循环空转很久。
+    // 注：zip 内容已被二进制内固化的 SHA-256 锚定，此项属纯防御性加固。
+    const MAX_ARCHIVE_ENTRIES: usize = 4096;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "压缩包条目过多（{} > {MAX_ARCHIVE_ENTRIES}），疑似恶意压缩包，已中止",
+            archive.len()
+        ));
+    }
+
     let wanted = ["ffmpeg.exe", "ffprobe.exe"];
     let mut extracted: Vec<String> = Vec::new();
 
     for index in 0..archive.len() {
+        // 两个目标都拿到就没必要继续遍历
+        if extracted.len() == wanted.len() {
+            break;
+        }
         let mut entry = archive
             .by_index(index)
             .map_err(|err| format!("读取压缩条目失败: {err}"))?;

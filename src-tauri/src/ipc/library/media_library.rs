@@ -1136,8 +1136,19 @@ pub(crate) fn is_dsd_file(path: &Path) -> bool {
         .is_some_and(is_dsd_format)
 }
 
+/// F-06：外部歌词文件大小上限。与 `save_track_lyrics` 的 IPC 口径（4 MB）一致——
+/// 原先这里是裸 `fs::read`，共享目录里放个 GB 级 `.lrc` 就能在导入时把内存吃满。
+const MAX_EXTERNAL_LYRICS_BYTES: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
     let lyrics_path = find_lyrics_file(path)?;
+    // 先看 metadata 再读，避免为了判大小把整个文件读进来
+    if fs::metadata(&lyrics_path)
+        .map(|meta| meta.len() > MAX_EXTERNAL_LYRICS_BYTES)
+        .unwrap_or(true)
+    {
+        return None;
+    }
     let bytes = fs::read(lyrics_path).ok()?;
     let lyrics = parse_lyrics_bytes(&bytes);
     (!lyrics.is_empty()).then_some(lyrics)

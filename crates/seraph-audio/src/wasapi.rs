@@ -23,6 +23,8 @@ use std::time::Duration;
 
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
 const BUFFER_SECONDS: usize = 2;
+/// R-07：队列槽位数硬上限(768 kHz / 512 帧 × 2 s = 3000),防越界采样率算出天文容量。
+const MAX_QUEUE_CHUNKS: usize = 768_000 / DEFAULT_EXCLUSIVE_PERIOD_FRAMES as usize * BUFFER_SECONDS;
 /// F-1（同型）：暂停/恢复增益斜坡时长。
 #[cfg(windows)]
 const GAIN_RAMP_SECONDS: f32 = 0.005;
@@ -100,9 +102,11 @@ impl AudioBackend for WasapiExclusive {
             stopped: AtomicBool::new(false),
             channels: usize::from(channels.0),
         });
+        // R-07：容量按采样率推算，越界采样率会算出天文数字的队列长度
+        // （sync_channel 会按容量预分配槽位）。与 engine 同口径封顶。
         let queue_chunks = (sample_rate.0 as usize / DEFAULT_EXCLUSIVE_PERIOD_FRAMES as usize)
             .saturating_mul(BUFFER_SECONDS)
-            .max(4);
+            .clamp(4, MAX_QUEUE_CHUNKS);
         let (tx, rx) = mpsc::sync_channel(queue_chunks);
         let device_id = resolve_output_device_id(&device.id)?;
         let worker = spawn_wasapi_submit_worker(

@@ -5,6 +5,7 @@
 //! （写回 localStorage 后重载水合）。文件 IO 走 spawn_blocking 不占主线程。
 
 use super::error::{IpcError, IpcErrorCode, IpcResult};
+use super::path_guard::{validate_export_path, validate_import_path};
 
 /// 配置文件大小上限：全部 store 序列化通常 <100KB，2MB 足够宽裕，
 /// 同时挡住误选巨型文件。
@@ -18,21 +19,11 @@ pub async fn export_app_config(path: String, content: String) -> IpcResult<()> {
 }
 
 fn export_app_config_inner(path: &str, content: &str) -> IpcResult<()> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(IpcError::invalid_input("导出路径为空"));
-    }
     if content.is_empty() {
         return Err(IpcError::invalid_input("没有可导出的配置内容"));
     }
-    let mut target = std::path::PathBuf::from(trimmed);
-    let has_ext = target
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
-    if !has_ext {
-        target.set_extension("json");
-    }
+    // F-02：命令边界不能相信渲染进程传来的路径（正常来自 dialog，但 IPC 可被绕过）
+    let target = validate_export_path(path, &["json"])?;
     std::fs::write(&target, content.as_bytes())
         .map_err(|err| IpcError::new(IpcErrorCode::Io, format!("写入配置失败: {err}")))?;
     Ok(())
@@ -46,23 +37,18 @@ pub async fn import_app_config(path: String) -> IpcResult<String> {
 }
 
 fn import_app_config_inner(path: &str) -> IpcResult<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(IpcError::invalid_input("配置文件路径为空"));
-    }
-    let path = std::path::Path::new(trimmed);
-    let metadata = std::fs::metadata(path)
-        .map_err(|_| IpcError::not_found(format!("配置文件不存在: {trimmed}")))?;
-    if !metadata.is_file() {
-        return Err(IpcError::invalid_input("目标不是文件"));
-    }
+    // F-02：只接受 .json 且必须是已存在的普通文件——
+    // 原先任意 ≤2MB 文件都能被读出来回传给渲染进程。
+    let path = validate_import_path(path, &["json"])?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| IpcError::not_found(format!("配置文件不存在: {}", path.display())))?;
     if metadata.len() > MAX_CONFIG_FILE_BYTES {
         return Err(IpcError::invalid_input(format!(
             "配置文件过大（{} KB），上限 2 MB",
             metadata.len() / 1024
         )));
     }
-    let bytes = std::fs::read(path)
+    let bytes = std::fs::read(&path)
         .map_err(|err| IpcError::new(IpcErrorCode::Io, format!("读取配置失败: {err}")))?;
     let text = String::from_utf8_lossy(&bytes);
     Ok(text.trim_start_matches('\u{feff}').to_string())

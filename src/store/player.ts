@@ -10,7 +10,7 @@ import { createPlayerPersistStorage } from "./player/persistStorage";
 import { createStreamingActions } from "./player/streamingActions";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
 import { createUiActions } from "./player/uiActions";
-import type { DriverKind, LibraryView } from "@/types/track";
+import type { DriverKind, LibraryView, UserPlaylist } from "@/types/track";
 
 export type {
   BilibiliBatchImportResult,
@@ -63,6 +63,29 @@ function clampVolume(value: unknown, fallback: number) {
   return Math.max(0, Math.min(1, finiteNumber(value, fallback)));
 }
 
+/**
+ * W-03:歌单元素级消毒。原先只做数组级校验(`Array.isArray ? value : []`),
+ * localStorage 被改坏(或导入了畸形配置)时,元素可能是 null / 缺 trackIds,
+ * 渲染期 `item.trackIds.includes(...)` 直接 TypeError 白屏。
+ * 逐字段校验并丢弃不合规元素——歌单少一条,好过整个页面崩掉。
+ */
+function sanitizeUserPlaylists(value: unknown): UserPlaylist[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): UserPlaylist[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    if (typeof raw.id !== "string" || !raw.id) return [];
+    return [
+      {
+        id: raw.id,
+        name: typeof raw.name === "string" ? raw.name : "未命名歌单",
+        trackIds: stringArray(raw.trackIds),
+        createdAt: finiteNumber(raw.createdAt, 0),
+      },
+    ];
+  });
+}
+
 function migrateDriver(value: unknown): DriverKind {
   if (value === "usb") return "wasapi";
   if (value === "asio") return "direct";
@@ -106,7 +129,7 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     shuffleMode: state.shuffleMode === true,
     loopMode: state.loopMode === true,
     liked: booleanRecord(state.liked),
-    userPlaylists: Array.isArray(state.userPlaylists) ? state.userPlaylists : [],
+    userPlaylists: sanitizeUserPlaylists(state.userPlaylists),
     currentDeviceId:
       typeof state.currentDeviceId === "string" && state.currentDeviceId.trim()
         ? state.currentDeviceId

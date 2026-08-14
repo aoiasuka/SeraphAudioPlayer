@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use super::error::{IpcError, IpcErrorCode, IpcResult};
 use super::library::decode_lyric_bytes;
+use super::path_guard::{validate_export_path, validate_import_path};
 
 /// 防呆上限：超长清单截断（按有效条目数计），避免异常文件拖垮导入。
 const MAX_M3U8_ENTRIES: usize = 10_000;
@@ -48,10 +49,8 @@ pub async fn import_playlist_m3u8(path: String) -> IpcResult<M3u8Import> {
 }
 
 fn import_playlist_m3u8_inner(path: &str) -> IpcResult<M3u8Import> {
-    let source = PathBuf::from(path.trim());
-    if !source.is_file() {
-        return Err(IpcError::not_found("清单文件不存在"));
-    }
+    // F-02：只接受 .m3u8/.m3u 且必须是已存在的普通文件
+    let source = validate_import_path(path, &["m3u8", "m3u"])?;
     if let Ok(meta) = fs::metadata(&source) {
         if meta.len() > MAX_M3U8_BYTES {
             return Err(IpcError::invalid_input(
@@ -203,22 +202,11 @@ pub async fn export_playlist_m3u8(path: String, entries: Vec<M3u8ExportEntry>) -
 }
 
 fn export_playlist_m3u8_inner(path: &str, entries: &[M3u8ExportEntry]) -> IpcResult<()> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(IpcError::invalid_input("missing export path"));
-    }
     if entries.is_empty() {
         return Err(IpcError::invalid_input("歌单没有可导出的曲目"));
     }
-
-    let mut target = PathBuf::from(trimmed);
-    let has_m3u_ext = target
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("m3u8") || ext.eq_ignore_ascii_case("m3u"));
-    if !has_m3u_ext {
-        target.set_extension("m3u8");
-    }
+    // F-02：命令边界校验路径（绝对路径 + 扩展名白名单 + 父目录必须存在）
+    let target = validate_export_path(path, &["m3u8", "m3u"])?;
 
     let mut content = String::from("#EXTM3U\n");
     for entry in entries {

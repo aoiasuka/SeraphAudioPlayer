@@ -6,7 +6,9 @@
 //! 旁瓣从 -13 dB 抑制到 ≈ -30 dB，
 //! 同时去掉 DSD 调制器引入的低频偏置。
 
-use crate::decoder::{Decoder, DecoderError, Packet, StreamInfo};
+use crate::decoder::{
+    validate_stream_info, Decoder, DecoderError, Packet, StreamInfo, MAX_SUPPORTED_SAMPLE_RATE,
+};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::{
     fs::File,
@@ -166,6 +168,9 @@ impl Decoder for DsdDecoder {
         };
 
         file.seek(SeekFrom::Start(parsed.data_start))?;
+        // R-01：与 symphonia/ffmpeg 路径共用同一道边界闸（DSD 头已过
+        // validate_dsd_header，这里复验抽取后的 PCM 口径）。
+        validate_stream_info(&parsed.info)?;
         self.info = Some(parsed.info);
         self.file = Some(file);
         self.layout = Some(parsed.layout);
@@ -281,6 +286,8 @@ impl Decoder for DsdDecoder {
 
         let target_dsd_frames = (seconds.max(0.0) * self.dsd_sample_rate as f64) as u64;
         let byte_frame = target_dsd_frames / 8;
+        // R-02：seek 偏移的乘法一律 saturating——release 下回绕后虽被下方
+        // min(data_len) 钳住行为无害，但 debug 构建会直接 panic。
         let mut byte_offset = match layout {
             DsdLayout::Dsf {
                 block_size_per_channel,
@@ -288,11 +295,13 @@ impl Decoder for DsdDecoder {
                 let block_size = block_size_per_channel as u64;
                 let pcm_aligned_byte = byte_frame - (byte_frame % DSD_BYTES_PER_PCM_SAMPLE as u64);
                 let block_index = pcm_aligned_byte / block_size;
-                block_index * block_size * channels
+                block_index
+                    .saturating_mul(block_size)
+                    .saturating_mul(channels)
             }
             DsdLayout::Dff => {
                 let aligned = byte_frame - (byte_frame % DSD_BYTES_PER_PCM_SAMPLE as u64);
-                aligned * channels
+                aligned.saturating_mul(channels)
             }
         };
 
@@ -328,13 +337,19 @@ struct ParsedDsd {
 }
 
 /// F-4：容器头字段合理性校验，防止损坏/恶意文件触发巨型分配（OOM abort）。
+///
+/// R-01：DSD 率上界原为 100 MHz，抽取 64:1 后 PCM 率仍高达 1.56 MHz——超过引擎
+/// 支持的 768 kHz，会一路流到环形缓冲容量计算。改为按 PCM 上界反推：
+/// 768 kHz × 64 = 49.152 MHz，正好覆盖到 DSD1024（22.5792 MHz 的 2 倍）。
+const MAX_DSD_SAMPLE_RATE: u32 = MAX_SUPPORTED_SAMPLE_RATE * DSD_TO_PCM_DECIMATION as u32;
+
 fn validate_dsd_header(
     channels: usize,
     dsd_sample_rate: u32,
     block_size_per_channel: Option<usize>,
 ) -> Result<(), DecoderError> {
     if !(1..=32).contains(&channels)
-        || !(64_000..=100_000_000).contains(&dsd_sample_rate)
+        || !(64_000..=MAX_DSD_SAMPLE_RATE).contains(&dsd_sample_rate)
         || block_size_per_channel.is_some_and(|size| !(8..=(1 << 20)).contains(&size))
     {
         return Err(DecoderError::UnsupportedFormat(

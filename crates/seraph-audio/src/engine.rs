@@ -25,6 +25,8 @@ use std::{
 use tracing::{debug, warn};
 
 const TARGET_BUFFER_SECONDS: usize = 3;
+/// 环形缓冲样本数硬上限,见 `PlaybackShared::new` 注释(R-01 纵深防线)。
+const MAX_RING_BUFFER_SAMPLES: usize = 768_000 * 32 * TARGET_BUFFER_SECONDS;
 const QUEUE_SLEEP: Duration = Duration::from_millis(5);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
@@ -670,7 +672,12 @@ impl PlaybackEngine {
 
         session.shared.stopped.store(true, Ordering::Release);
         if let Some(worker) = session.decode_worker.take() {
-            let _ = worker.join();
+            // R-03：解码 worker 可能卡在 ffmpeg 管道的阻塞 read 上（子进程挂死、
+            // 网络盘断连）。裸 join 会把**引擎命令线程**一起钉死——之后所有播放
+            // 命令永久返回 "audio thread is not available"，只能重启应用。
+            // 改为有界等待：超时就 detach，让僵尸 worker 自生自灭（它写的是自己
+            // 那份 RingBuffer，不会污染新 session），引擎线程照常继续。
+            join_worker_bounded(worker, "decode");
         }
         if let Some(worker) = session.render_worker.take() {
             if let Ok(Err(err)) = worker.join() {
@@ -678,6 +685,26 @@ impl PlaybackEngine {
             }
         }
     }
+}
+
+/// R-03：带时限的 join。超时返回 false 并 detach 线程。
+///
+/// 时限取 5 s：正常 worker 在置 `stopped` 后一个解码循环内即退出（毫秒级），
+/// 拖到秒级只可能是卡在子进程 I/O 上，此时保住引擎线程比回收该线程重要得多。
+fn join_worker_bounded<T>(worker: thread::JoinHandle<T>, label: &str) -> bool {
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+    const JOIN_POLL: Duration = Duration::from_millis(10);
+
+    let deadline = Instant::now() + JOIN_TIMEOUT;
+    while !worker.is_finished() {
+        if Instant::now() >= deadline {
+            warn!("{label} worker did not stop within {JOIN_TIMEOUT:?}; detaching it");
+            return false;
+        }
+        thread::sleep(JOIN_POLL);
+    }
+    let _ = worker.join();
+    true
 }
 
 impl Drop for PlaybackEngine {
@@ -693,7 +720,15 @@ impl PlaybackShared {
         volume: f32,
         spectrum: Arc<SpectrumTap>,
     ) -> Self {
-        let max_buffer_samples = output_rate as usize * output_channels * TARGET_BUFFER_SECONDS;
+        // R-01 纵深防线：解码层（decoder::validate_stream_info）已把采样率钳在
+        // 768 kHz 内，但 output_rate 也可能来自设备配置。环形缓冲是在建流**之前**
+        // 分配的，rtrb 的 RingBuffer::new 内部就是裸 Vec::with_capacity，无任何断言——
+        // 容量失控时 handle_alloc_error 直接 abort 进程，catch_unwind 兜不住。
+        // 上限按最坏合法情形取：768 kHz × 32ch × 3s = 73.7M 样本（×8 字节 ≈ 590 MB）。
+        let max_buffer_samples = (output_rate as usize)
+            .saturating_mul(output_channels)
+            .saturating_mul(TARGET_BUFFER_SECONDS)
+            .min(MAX_RING_BUFFER_SAMPLES);
         Self {
             seek_request: Mutex::new(None),
             paused: AtomicBool::new(false),
@@ -2199,6 +2234,23 @@ mod tests {
         adapt_samples_into(input, in_ch, out_ch, &mut resampler, &mut remap, &mut out)
             .expect("adapt");
         out
+    }
+
+    #[test]
+    fn ring_buffer_capacity_is_capped_for_hostile_rates() {
+        // R-01 纵深防线：即使越界采样率绕过解码层闸门流到这里，
+        // 环形缓冲容量也不得随之爆炸（rtrb 的 Vec::with_capacity 分配失败 = 进程 abort）。
+        let hostile = PlaybackShared::new(u32::MAX, 2, 0.7, SpectrumTap::new());
+        assert_eq!(hostile.max_buffer_samples, MAX_RING_BUFFER_SAMPLES);
+        // 上限本身必须是可分配的量级（×8 字节 ≈ 590 MB，远低于 rtrb 无上限时的 192 GiB）
+        assert!(hostile.max_buffer_samples * std::mem::size_of::<QueuedSample>() < 1 << 30);
+
+        // 常规配置不受影响
+        let normal = PlaybackShared::new(48_000, 2, 0.7, SpectrumTap::new());
+        assert_eq!(
+            normal.max_buffer_samples,
+            48_000 * 2 * TARGET_BUFFER_SECONDS
+        );
     }
 
     #[test]

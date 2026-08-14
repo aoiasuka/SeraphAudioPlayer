@@ -23,10 +23,10 @@ pub fn run() {
     #[cfg(debug_assertions)]
     init_tracing();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![
+    // F-03：先把生成的 handler 绑成具名值，好在外面套一层窗口白名单拦截。
+    // 需要显式标注 Runtime（generate_handler! 本身是泛型的，单独绑定推不出来）。
+    let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+        Box::new(tauri::generate_handler![
             ipc::playback::play,
             ipc::playback::sync_playback_queue,
             ipc::playback::set_playback_modes,
@@ -82,7 +82,26 @@ pub fn run() {
             ipc::visualizer::get_spectrum_frame,
             ipc::visualizer::get_analysis_frame,
             ipc::visualizer::reset_analysis_meters,
-        ])
+        ]);
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::new())
+        // F-03：Tauri v2 的 capabilities 只约束 core/插件命令，`generate_handler!`
+        // 注册的自定义命令对**所有**窗口一律开放。歌词条窗口渲染的是外部歌词与
+        // 元数据，一旦其渲染面被攻破就能调用任意文件读写 / 子进程命令。
+        // 这里做中央拦截：非主窗口只放行它实际需要的只读命令。
+        .invoke_handler(move |invoke| {
+            let label = invoke.message.webview().label().to_string();
+            let command = invoke.message.command().to_string();
+            if !command_allowed_for_window(&label, &command) {
+                invoke.resolver.reject(format!(
+                    "command `{command}` is not available to window `{label}`"
+                ));
+                return true;
+            }
+            handler(invoke)
+        })
         .setup(|app| {
             if let Ok(app_dir) = app.path().app_data_dir() {
                 seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
@@ -116,6 +135,30 @@ pub fn run() {
         .expect("error while running Seraph Audio Player");
 }
 
+/// F-03：任务栏歌词条窗口允许调用的自定义命令白名单。
+///
+/// 歌词条走 IPC 拉数据（见 CLAUDE.md「第二窗口」约定）：切歌时拉一次曲目元数据、
+/// 轮询播放快照、✕ 与拖拽回传主窗口，另有 ⌂ 唤起主窗口。**只需要这四个**，
+/// 其余一律拒绝——尤其是文件读写（config/eq/m3u8 导入导出）、子进程
+/// （reveal/download_ffmpeg）与登录凭据相关命令。
+///
+/// 新增给歌词条用的命令必须显式加进这里；给主窗口用的不要动这个名单。
+const TASKBAR_LYRICS_ALLOWED_COMMANDS: &[&str] = &[
+    "get_playback_snapshot",
+    "get_track_info",
+    "focus_main_window",
+    "set_taskbar_lyrics_position",
+];
+
+fn command_allowed_for_window(label: &str, command: &str) -> bool {
+    match label {
+        "main" => true,
+        "taskbar-lyrics" => TASKBAR_LYRICS_ALLOWED_COMMANDS.contains(&command),
+        // 未知 label：应用只建这两个窗口，出现第三个即视为异常，一律拒绝
+        _ => false,
+    }
+}
+
 #[cfg(debug_assertions)]
 fn init_tracing() {
     let filter =
@@ -124,4 +167,54 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taskbar_lyrics_window_cannot_reach_sensitive_commands() {
+        // F-03：歌词条被攻破也不得触到文件读写 / 子进程 / 凭据命令
+        for command in [
+            "export_app_config",
+            "import_app_config",
+            "import_eq_preset",
+            "export_eq_preset",
+            "import_playlist_m3u8",
+            "export_playlist_m3u8",
+            "reveal_in_explorer",
+            "download_ffmpeg",
+            "import_tracks",
+            "delete_track",
+            "save_track_lyrics",
+            "bilibili_login_qrcode",
+            "clear_cache",
+        ] {
+            assert!(
+                !command_allowed_for_window("taskbar-lyrics", command),
+                "taskbar-lyrics must not be allowed to call {command}"
+            );
+            assert!(
+                command_allowed_for_window("main", command),
+                "main window must still be allowed to call {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn taskbar_lyrics_window_keeps_the_commands_it_actually_needs() {
+        for command in TASKBAR_LYRICS_ALLOWED_COMMANDS {
+            assert!(command_allowed_for_window("taskbar-lyrics", command));
+        }
+    }
+
+    #[test]
+    fn unknown_windows_are_denied_everything() {
+        assert!(!command_allowed_for_window(
+            "popup",
+            "get_playback_snapshot"
+        ));
+        assert!(!command_allowed_for_window("", "play"));
+    }
 }

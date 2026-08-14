@@ -1,6 +1,8 @@
 //! Symphonia-backed decoder for mainstream PCM-oriented formats.
 
-use crate::decoder::{Decoder, DecoderError, Packet, StreamInfo};
+use crate::decoder::{
+    is_supported_sample_rate, validate_stream_info, Decoder, DecoderError, Packet, StreamInfo,
+};
 use seraph_core::types::{BitDepth, Channels, SampleRate};
 use std::{fs::File, path::Path};
 use symphonia::{
@@ -108,11 +110,15 @@ impl Decoder for SymphoniaDecoder {
             params
         };
         let sample_rate = codec_params.sample_rate.unwrap_or(44_100);
+        // R-01：先验边界再造解码器——越界的采样率/声道数一律拒绝，
+        // 别让它流到 engine 去算环形缓冲容量（见 decoder::validate_stream_info）。
+        let info = stream_info_from_codec(&codec_params);
+        validate_stream_info(&info)?;
         let decoder = get_codecs()
             .make(&codec_params, &DecoderOptions::default())
             .map_err(map_symphonia_error)?;
 
-        self.info = Some(stream_info_from_codec(&codec_params));
+        self.info = Some(info);
         self.format = Some(format);
         self.decoder = Some(decoder);
         self.time_base = codec_params.time_base;
@@ -328,7 +334,9 @@ fn apply_alac_cookie_overrides(params: &mut symphonia::core::codecs::CodecParame
     let sample_rate = u32::from_be_bytes([cookie[20], cookie[21], cookie[22], cookie[23]]);
     let bit_depth = cookie[5];
     let channel_count = cookie[9];
-    if sample_rate > 0 {
+    // R-05：cookie 同样是不可信外部数据。越界就忽略这次纠偏、保留容器值，
+    // 而不是把 0xFFFFFFFF 覆盖进 codec_params（R-01 同源）。
+    if is_supported_sample_rate(sample_rate) {
         params.with_sample_rate(sample_rate);
     }
     if (1..=32).contains(&bit_depth) {

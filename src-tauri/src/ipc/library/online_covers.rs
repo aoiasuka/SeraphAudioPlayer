@@ -4,6 +4,55 @@ use crate::ipc::error::{IpcError, IpcResult};
 /// 封面下载大小上限：正常专辑图几百 KB，超限视为异常响应。
 const MAX_ONLINE_COVER_BYTES: usize = 4 * 1024 * 1024;
 
+/// F-04：允许下载封面图的官方图床 host 后缀。
+/// iTunes 的 `artworkUrl100` 与 QQ 的 albummid 拼接地址都来自外部 API 响应,
+/// 上游被攻破/被劫持时会变成任意 URL——不加白名单就是 SSRF 探针,
+/// 且下载结果会按内容哈希落盘进 covers 目录。
+const COVER_HOST_SUFFIXES: &[&str] = &[
+    ".mzstatic.com",
+    ".apple.com",
+    ".gtimg.cn",
+    ".qpic.cn",
+    ".qq.com",
+];
+
+/// F-04：封面**图片**下载专用 client——逐跳复验重定向目标必须仍在图床白名单内。
+/// 与搜索接口共用一个 client 不行：搜索打的是 itunes.apple.com / c.y.qq.com,
+/// 与图床是两套 host 白名单。
+fn cover_image_client() -> Result<Client, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        ),
+    );
+    Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(12))
+        .redirect(guarded_redirect_policy(is_safe_cover_url))
+        .build()
+        .map_err(|err| format!("failed to create cover image client: {err}"))
+}
+
+/// F-04：封面图 URL 必须是 https + 官方图床域。逐要素比对,不做前缀匹配。
+fn is_safe_cover_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    COVER_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+}
+
 /// 为无内嵌封面的曲目在线匹配专辑封面。
 /// 源：QQ 音乐搜索（albummid → y.gtimg.cn 封面，大陆连通性好）优先，
 /// iTunes Search 兜底。下载字节经图片魔数校验后按内容哈希落盘 covers 目录，
@@ -24,16 +73,18 @@ pub async fn fetch_online_cover(
     }
 
     let client = online_lyrics_client().map_err(IpcError::network)?;
+    // F-04：搜索接口与图床是两套 host 白名单，图片下载走单独的受限 client
+    let image_client = cover_image_client().map_err(IpcError::network)?;
     // M-12：区分“源访问失败”与“确实没有”——QQ 优先，失败或无图再走 iTunes
     let mut source_failed = false;
-    let qq = fetch_qq_cover_bytes(&client, &query).await;
+    let qq = fetch_qq_cover_bytes(&client, &image_client, &query).await;
     let image = match qq {
         Ok(Some(bytes)) => Some(bytes),
         outcome => {
             if outcome.is_err() {
                 source_failed = true;
             }
-            match fetch_itunes_cover_bytes(&client, &query).await {
+            match fetch_itunes_cover_bytes(&client, &image_client, &query).await {
                 Ok(bytes) => bytes,
                 Err(()) => {
                     source_failed = true;
@@ -81,7 +132,11 @@ pub async fn fetch_online_cover(
 
 /// QQ 音乐搜索 → 第一个带 albummid 的结果 → 500x500 专辑封面。
 /// Err(()) = 搜索请求失败（网络/解析）；Ok(None) = 接口正常但没匹配到封面。
-async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec<u8>>, ()> {
+async fn fetch_qq_cover_bytes(
+    client: &Client,
+    image_client: &Client,
+    query: &str,
+) -> Result<Option<Vec<u8>>, ()> {
     let search = client
         .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
         .query(&[
@@ -118,7 +173,7 @@ async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec
             continue;
         };
         let url = format!("https://y.gtimg.cn/music/photo_new/T002R500x500M000{album_mid}.jpg");
-        if let Some(bytes) = download_image(client, &url).await {
+        if let Some(bytes) = download_image(image_client, &url).await {
             return Ok(Some(bytes));
         }
     }
@@ -127,7 +182,11 @@ async fn fetch_qq_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec
 
 /// iTunes Search 兜底：artworkUrl100 放大到 600x600。
 /// Err(()) = 搜索请求失败；Ok(None) = 接口正常但没匹配到封面。
-async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option<Vec<u8>>, ()> {
+async fn fetch_itunes_cover_bytes(
+    client: &Client,
+    image_client: &Client,
+    query: &str,
+) -> Result<Option<Vec<u8>>, ()> {
     let search = client
         .get("https://itunes.apple.com/search")
         .query(&[
@@ -153,7 +212,7 @@ async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option
             continue;
         };
         let url = artwork.replace("100x100", "600x600");
-        if let Some(bytes) = download_image(client, &url).await {
+        if let Some(bytes) = download_image(image_client, &url).await {
             return Ok(Some(bytes));
         }
     }
@@ -161,6 +220,12 @@ async fn fetch_itunes_cover_bytes(client: &Client, query: &str) -> Result<Option
 }
 
 async fn download_image(client: &Client, url: &str) -> Option<Vec<u8>> {
+    // F-04：外部 API 返回的图片地址必须先过 https + 官方图床域白名单。
+    // 注意这里用的是 online_lyrics_client（跟随重定向），所以下面还依赖
+    // 该 client 的逐跳复验策略挡住 302 到任意主机。
+    if !is_safe_cover_url(url) {
+        return None;
+    }
     let response = client
         .get(url)
         .send()
@@ -175,4 +240,41 @@ async fn download_image(client: &Client, url: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_cover_url;
+
+    #[test]
+    fn cover_url_whitelist_only_allows_official_https_image_hosts() {
+        for url in [
+            "https://is1-ssl.mzstatic.com/image/thumb/a/600x600bb.jpg",
+            "https://y.gtimg.cn/music/photo_new/T002R500x500M000abc.jpg",
+            "https://p.qpic.cn/music_cover/abc/300.jpg",
+        ] {
+            assert!(is_safe_cover_url(url), "should accept {url}");
+        }
+
+        for url in [
+            // http 明文
+            "http://is1-ssl.mzstatic.com/image/a.jpg",
+            // 后缀伪装：mzstatic.com.evil.com
+            "https://is1-ssl.mzstatic.com.evil.com/a.jpg",
+            // 裸后缀本身不算（host.len() > suffix.len() 要求）
+            "https://mzstatic.com/a.jpg",
+            // 完全无关的域
+            "https://evil.example.com/a.jpg",
+            // 内网探测
+            "https://127.0.0.1:8080/a.jpg",
+            "http://localhost/a.jpg",
+            // userinfo 混淆
+            "https://is1-ssl.mzstatic.com@evil.com/a.jpg",
+            // 非 URL
+            "",
+            "not a url",
+        ] {
+            assert!(!is_safe_cover_url(url), "should reject {url:?}");
+        }
+    }
 }

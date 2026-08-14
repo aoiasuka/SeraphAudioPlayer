@@ -19,11 +19,16 @@ pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client
 
 /// P1-1：音频下载专用 client。不设总超时（`Client::timeout` 是连接到 body
 /// 读完的整体上限，大文件必然超时），只用连接超时 + 两次读之间的空闲超时。
+///
+/// F-01：**逐跳**复验重定向目标。首个 URL 过了 `is_safe_bilibili_download_url`
+/// 不代表后续跳也安全——CDN 返回的 302 可指向任意主机，不拦的话既是盲 SSRF 探针，
+/// 下载物还会被写进缓存直接交给解码器。
 pub(crate) fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
     let cookie = load_session(app)?.and_then(|session| session.cookie_header());
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
+        .redirect(guarded_redirect_policy(is_safe_bilibili_download_url))
         .no_gzip()
         .no_brotli()
         .no_zstd()
@@ -31,6 +36,20 @@ pub(crate) fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client
         .default_headers(bilibili_headers(cookie.as_deref())?)
         .build()
         .map_err(|err| format!("failed to create download http client: {err}"))
+}
+
+/// F-07：头像下载专用 client。裸 client（无 Cookie），同样逐跳复验重定向目标。
+pub(crate) fn bilibili_avatar_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(guarded_redirect_policy(is_safe_avatar_url))
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+        .default_headers(bilibili_headers(None)?)
+        .build()
+        .map_err(|err| format!("failed to create avatar http client: {err}"))
 }
 
 pub(crate) fn bilibili_headers(cookie: Option<&str>) -> Result<HeaderMap, String> {
@@ -330,7 +349,9 @@ pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), Strin
             None => "*S-1-5-32-545:F".to_string(),
         };
         let status = {
-            let mut command = Command::new("icacls");
+            // F-05：走 System32 绝对路径。裸名 `icacls` 会经 CreateProcess 搜索顺序，
+            // 其中包含应用自身所在目录——从下载目录/共享盘运行时存在同名 EXE 种植面。
+            let mut command = Command::new(crate::ipc::path_guard::system32_tool("icacls.exe"));
             hide_console_window(&mut command);
             command
                 .arg(path)

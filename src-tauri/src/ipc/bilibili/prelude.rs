@@ -40,7 +40,7 @@ pub(crate) use tauri::{AppHandle, Emitter, Manager};
 
 pub(crate) use crate::ipc::{
     cache::{cache_dir, enforce_cache_limit_preserving_many, unique_temp_path},
-    http_util::{read_bytes_capped, MAX_EXTERNAL_JSON_BYTES},
+    http_util::{guarded_redirect_policy, read_bytes_capped, MAX_EXTERNAL_JSON_BYTES},
     library::{merge_tracks_into_cache, ImportedTrack},
 };
 

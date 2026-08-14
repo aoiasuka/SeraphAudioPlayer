@@ -30,6 +30,53 @@ pub struct StreamInfo {
     pub duration_seconds: f64,
 }
 
+/// R-01：容器头里的采样率是最不可信的外部输入。WAV 的 fmt 块把它写成裸 u32，
+/// symphonia 的 riff demuxer 原样读取、不做任何上界校验（PCM codec 只查位深），
+/// 该值随后一路走到 WASAPI 独占的输出配置，再乘声道数与缓冲秒数算出环形缓冲容量：
+/// `0xFFFFFFFF × 2ch × 3s × 8 字节 ≈ 192 GiB`，`Vec::with_capacity` 分配失败会走
+/// `handle_alloc_error` → **整个进程 abort**（engine 的 catch_unwind 只兜 panic，
+/// 兜不住 abort）。即一个 4 KB 的畸形文件就能带走主窗口和歌词条。
+///
+/// 因此在解码边界统一设闸：越界一律拒绝，让上层收到普通的 `UnsupportedFormat`
+/// 走既有的「这个文件放不了」路径。**新增解码路径必须接上这道闸**。
+pub const MIN_SUPPORTED_SAMPLE_RATE: u32 = 8_000;
+/// 上界 768 kHz：覆盖 DSD1024 抽取到 PCM 后的 705.6 kHz，高于任何现实音频格式。
+pub const MAX_SUPPORTED_SAMPLE_RATE: u32 = 768_000;
+/// 声道数上界，与 `validate_dsd_header` 同口径。
+pub const MAX_SUPPORTED_CHANNELS: u16 = 32;
+/// 位深上界。注意 **0 是合法值**——表示「未知」，engine 的 `select_output_config`
+/// 靠它选 I32（24-in-32）而不是硬量化到 I16，不能一并拒掉。
+pub const MAX_SUPPORTED_BIT_DEPTH: u16 = 64;
+
+/// 采样率是否落在可播放区间。元数据纠偏路径（如 ALAC magic cookie）用它决定
+/// 「要不要拿这个值去覆盖容器值」——越界就该忽略纠偏、保留原值。
+pub fn is_supported_sample_rate(sample_rate: u32) -> bool {
+    (MIN_SUPPORTED_SAMPLE_RATE..=MAX_SUPPORTED_SAMPLE_RATE).contains(&sample_rate)
+}
+
+/// 解码器 `open()` 返回成功前的最后一道闸。
+pub fn validate_stream_info(info: &StreamInfo) -> Result<(), DecoderError> {
+    if !is_supported_sample_rate(info.sample_rate.0) {
+        return Err(DecoderError::UnsupportedFormat(format!(
+            "implausible sample rate: {} Hz (supported {MIN_SUPPORTED_SAMPLE_RATE}..={MAX_SUPPORTED_SAMPLE_RATE})",
+            info.sample_rate.0
+        )));
+    }
+    if !(1..=MAX_SUPPORTED_CHANNELS).contains(&info.channels.0) {
+        return Err(DecoderError::UnsupportedFormat(format!(
+            "implausible channel count: {} (supported 1..={MAX_SUPPORTED_CHANNELS})",
+            info.channels.0
+        )));
+    }
+    if info.bit_depth.0 > MAX_SUPPORTED_BIT_DEPTH {
+        return Err(DecoderError::UnsupportedFormat(format!(
+            "implausible bit depth: {} (supported 0..={MAX_SUPPORTED_BIT_DEPTH})",
+            info.bit_depth.0
+        )));
+    }
+    Ok(())
+}
+
 /// 解码器 trait。
 ///
 /// 调用方期望：
@@ -245,6 +292,123 @@ mod tests {
             decoded_count > 0,
             "ffmpeg was found but no compressed fixtures could be generated"
         );
+    }
+
+    #[test]
+    fn rejects_implausible_sample_rate_from_wav_header() {
+        // R-01：fmt 块采样率是裸 u32，symphonia 不校验上界。放行的话
+        // engine 会按它预分配 ~192 GiB 环形缓冲 → handle_alloc_error → 进程 abort。
+        let path = temp_audio_path("seraph-hostile-rate", "wav");
+        write_test_wav_16(&path, 0xFFFF_FFFF, 2);
+
+        let err = match probe_stream_info(&path) {
+            Err(err) => err,
+            Ok(info) => panic!("hostile sample rate must be rejected, got {info:?}"),
+        };
+        assert!(
+            matches!(err, DecoderError::UnsupportedFormat(_)),
+            "expected UnsupportedFormat, got {err}"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn accepts_ordinary_sample_rate_from_wav_header() {
+        // 边界闸不得误伤正常文件
+        let path = temp_audio_path("seraph-ordinary-rate", "wav");
+        write_test_wav_16(&path, 44_100, 2);
+
+        let info = probe_stream_info(&path).expect("ordinary wav must still open");
+        assert_eq!(info.sample_rate, SampleRate(44_100));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn validate_stream_info_bounds() {
+        let ok = StreamInfo {
+            sample_rate: SampleRate(48_000),
+            bit_depth: BitDepth(24),
+            channels: Channels(2),
+            duration_seconds: 1.0,
+        };
+        assert!(validate_stream_info(&ok).is_ok());
+
+        // 位深 0 = 未知，是 select_output_config 依赖的合法值，不得拒绝
+        assert!(validate_stream_info(&StreamInfo {
+            bit_depth: BitDepth(0),
+            ..ok.clone()
+        })
+        .is_ok());
+
+        // 区间端点放行
+        for rate in [MIN_SUPPORTED_SAMPLE_RATE, MAX_SUPPORTED_SAMPLE_RATE] {
+            assert!(validate_stream_info(&StreamInfo {
+                sample_rate: SampleRate(rate),
+                ..ok.clone()
+            })
+            .is_ok());
+        }
+
+        // 越界一律拒绝
+        for rate in [
+            0,
+            1,
+            MIN_SUPPORTED_SAMPLE_RATE - 1,
+            MAX_SUPPORTED_SAMPLE_RATE + 1,
+            u32::MAX,
+        ] {
+            assert!(
+                validate_stream_info(&StreamInfo {
+                    sample_rate: SampleRate(rate),
+                    ..ok.clone()
+                })
+                .is_err(),
+                "sample rate {rate} must be rejected"
+            );
+        }
+        for channels in [0, MAX_SUPPORTED_CHANNELS + 1, u16::MAX] {
+            assert!(
+                validate_stream_info(&StreamInfo {
+                    channels: Channels(channels),
+                    ..ok.clone()
+                })
+                .is_err(),
+                "channel count {channels} must be rejected"
+            );
+        }
+        assert!(validate_stream_info(&StreamInfo {
+            bit_depth: BitDepth(MAX_SUPPORTED_BIT_DEPTH + 1),
+            ..ok.clone()
+        })
+        .is_err());
+    }
+
+    fn write_test_wav_16(path: &Path, sample_rate: u32, channels: u16) {
+        let bits_per_sample = 16_u16;
+        let block_align = channels * bits_per_sample / 8;
+        let data_len = 4096_u32;
+
+        let mut file = File::create(path).expect("create wav");
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&channels.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(
+            &sample_rate
+                .wrapping_mul(u32::from(block_align))
+                .to_le_bytes(),
+        )
+        .unwrap();
+        file.write_all(&block_align.to_le_bytes()).unwrap();
+        file.write_all(&bits_per_sample.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+        file.write_all(&vec![0_u8; data_len as usize]).unwrap();
     }
 
     fn write_test_dsf(path: &Path) {

@@ -1,0 +1,42 @@
+# S-10:依赖更新自动化。两条 audit 门禁(npm audit / cargo audit)是被动的——
+# 公告一出 CI 就红,但没人主动提 PR 升级。dependabot 补上主动侧。
+#
+# Actions 的更新尤其重要:S-13 把所有 action 按 commit SHA 锁定(防 tag 被移动),
+# 代价是拿不到上游修复;dependabot 认得 `uses: owner/repo@<sha> # vN` 这种写法,
+# 会连 SHA 带注释一起更新。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(actions)"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(npm)"
+    groups:
+      # 补丁/次版本合成一个 PR,避免每周十几条噪声
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(cargo)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch

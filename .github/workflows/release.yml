@@ -36,8 +36,24 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      # S-08：tag 与 package.json 版本必须一致。漏跑 bump 就打 tag 会发出一个
+      # 版本号对不上的安装包（内部显示旧版本），且事后只能删 tag 重发。
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "tag=$tag package.json=$pkg tauri.conf.json=$conf"
+          if [ "$tag" != "$pkg" ] || [ "$tag" != "$conf" ]; then
+            echo "::error::版本号不一致——先跑 npm run bump $tag 再打 tag"
+            exit 1
+          fi
+
+      # S-01：安装脚本不参与构建，显式禁用
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Typecheck frontend
         run: npm run typecheck

@@ -39,3 +39,30 @@ pub(crate) async fn read_json_capped<T: DeserializeOwned>(
     let bytes = read_bytes_capped(response, cap).await?;
     serde_json::from_slice(&bytes).map_err(|err| format!("failed to parse json: {err}"))
 }
+
+/// 跟随重定向的最大跳数。B 站 CDN 正常只有 1~2 跳。
+const MAX_REDIRECT_HOPS: usize = 5;
+
+/// F-01/F-04/F-07:**逐跳**复验重定向目标的 URL 白名单策略。
+///
+/// 只在首个 URL 上做白名单不够——reqwest 默认会跟随最多 10 跳,首跳之后的每一跳
+/// 都是一次真实出站请求,不拦就是盲 SSRF 探针(可探内网/localhost 端口),
+/// 且最终响应体会被当作可信内容落盘(音频缓存直接交给解码器执行链)。
+/// 只复验**最终** host(`resolve_bvid` 的 S-15 口径)也只挡住结果、挡不住探测本身,
+/// 所以这里逐跳拦截,并且不合规直接 `error` 而非 `stop`——
+/// `stop` 会把 3xx 响应原样交回调用方,反而被误当成正常响应处理。
+///
+/// 新增「跟随重定向 + 白名单」的出站请求一律走这里,别只校验首个 URL。
+pub(crate) fn guarded_redirect_policy(allow: fn(&str) -> bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_REDIRECT_HOPS {
+            return attempt.error("too many redirects");
+        }
+        if allow(attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            let rejected = format!("redirect target is not on the allowlist: {}", attempt.url());
+            attempt.error(rejected)
+        }
+    })
+}

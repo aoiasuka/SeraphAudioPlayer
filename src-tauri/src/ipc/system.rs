@@ -56,7 +56,8 @@ fn reveal_in_explorer_inner(path: &str) -> IpcResult<()> {
         // explorer 的定位参数格式是 `/select,<path>`，含空格路径需整体加引号。
         // Windows 文件名不允许出现引号字符，直接包裹安全；用 raw_arg 绕过
         // std 的自动引号规则，确保 explorer 收到的就是这串原始参数。
-        std::process::Command::new("explorer.exe")
+        // F-05：走 System32 绝对路径，避免裸名被同目录同名 EXE 劫持
+        std::process::Command::new(super::path_guard::system32_tool("explorer.exe"))
             .raw_arg(format!("/select,\"{}\"", target.display()))
             .spawn()
             .map_err(|err| IpcError::from(format!("打开资源管理器失败: {err}")))?;

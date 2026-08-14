@@ -148,6 +148,24 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.5.7
+
+独立安全复审专版——一次不参考既有报告、从零重审全仓的结果（`docs/SECURITY-REVIEW-INDEPENDENT.md`），逐项落地 1 严重 + 8 中危 + 低危加固：
+
+- **修复单个音频文件可让整个进程 abort（严重 R-01）**：WAV 的 fmt 块把采样率写成裸 u32，symphonia 原样读取不做上界校验，该值一路流到 WASAPI 独占的输出配置，再乘声道数与缓冲秒数算出环形缓冲容量——一个 4 KB 的畸形文件即可让 `RingBuffer::new` 预分配约 192 GiB，分配失败走 `handle_alloc_error` 直接 abort 进程（`catch_unwind` 只兜 panic、兜不住 abort），主窗口与歌词条一起没。现在解码边界统一设闸：采样率钳在 8 kHz–768 kHz、声道 1–32、位深 ≤64，symphonia / ffprobe / DSD 三条路径共用同一道校验；ALAC magic cookie 的越界采样率改为忽略纠偏而非覆盖容器值（R-05）；DSD 头的采样率上界由 100 MHz 收到 49.152 MHz（按 PCM 768 kHz × 64 反推，仍覆盖 DSD1024）；环形缓冲与 WASAPI 队列各加一道容量硬上限作纵深防线（R-07）。
+- **重定向逐跳复验域名（F-01/F-04/F-07）**：B 站音频下载、头像下载、在线封面此前只校验首个 URL，之后 reqwest 会跟随最多 10 跳——每一跳都是真实出站请求，等于盲 SSRF 探针（可探内网/localhost），且最终响应体会被当作可信内容落盘、音频还会直接交给解码器。现三条链路各自挂 `redirect::Policy::custom` 逐跳复验目标必须仍在白名单内，不合规直接判错（而非 `stop` 把 3xx 原样交回被误当正常响应）；iTunes 的 `artworkUrl100` 新增 https + 官方图床域白名单，封面图片下载与搜索接口分离为两个受限 client。
+- **子进程与解码线程不再无限期挂死（R-03）**：`probe_with_ffprobe` 原为 `.output()` 无限等待，畸形文件或断连网络盘能把扫库线程永久钉住；现改为 spawn + 双管道并行排空 + 20 秒超时 kill。切歌/停止时 `worker.join()` 也是裸阻塞，解码线程卡在 ffmpeg 管道 read 上会把**引擎命令线程**一起拖死，此后所有播放命令永久返回 "audio thread is not available"、只能重启应用；现改为 5 秒有界 join，超时即 detach 保住引擎线程。
+- **自定义 IPC 命令按窗口隔离（F-03）**：Tauri v2 的 capabilities 只约束 core/插件命令，`generate_handler!` 注册的 55 个自定义命令对主窗口和歌词条窗口一律开放——歌词条渲染的是外部歌词与元数据，其渲染面一旦被攻破即可调用任意文件读写与子进程命令。现在 `invoke_handler` 外层加中央白名单拦截：歌词条只放行它实际需要的四个只读命令（播放快照、曲目元数据、唤起主窗口、位置回传），未知 label 一律拒绝。
+- **文件读写 IPC 加路径约束（F-02）**：`export_app_config` / `export_eq_preset` / `export_playlist_m3u8` 可写任意路径，`import_app_config` / `import_eq_preset` 连扩展名都不校验、任意 ≤2 MB 文件都能读出来回传渲染进程。现统一走 `path_guard`：写入要求绝对路径 + 扩展名白名单 + 父目录必须已存在 + 拒绝 `..` 点段；读取额外要求目标是已存在的普通文件。
+- **歌词解析加行数与行长上限（W-01）**：后端此前只有 4 MB 总字节上限。数万行的 LRC 会让 LyricsPanel 一次性渲染同样多的 `<p>`（无虚拟化）；单行近 2 MB 时 TypewriterText 按 30 ms/字符逐字 `slice`（每次 O(n) 重建整串），跑完要 16 小时以上、期间每 30 ms 重建一次巨串，UI 永久冻结。现所有歌词来源在 `parse_lyrics_bytes` 一处收口：总行数 ≤5000、单行 ≤512 字符（按字符截断，不切碎中文），前端 TypewriterText 另有超长退化为静态显示的独立兜底。
+- **子进程走系统绝对路径（F-05）**：`icacls` / `explorer` 此前按裸名启动，CreateProcess 搜索顺序包含应用自身所在目录——从下载目录或共享盘直接运行时存在同名 EXE 种植面；现统一解析到 `%SystemRoot%\System32\`。
+- **其余加固**：同目录外部 `.lrc` 读取补 4 MB 上限，与 IPC 口径对齐（F-06）；ffmpeg zip 解压加 4096 条目数上限并在取齐目标后提前跳出（F-08）；DSD seek 的偏移乘法改 `saturating_mul`，消除 debug 构建下的溢出 panic（R-02）；歌单持久化状态改为元素级消毒，坏元素不再水合进 store 导致渲染期 `trackIds.includes` 抛 TypeError 白屏（W-03）；配置导入的 boot 写入包 try/catch，配额超限不再白屏启动（W-02）；GraphicEQ 解析改逐个 push，避免 5 万点预设触发展开实参上限 RangeError（W-06）；配置导入文本加 2 MB 上限（W-07）。
+- **CI 与供应链（S-01/S-08/S-09/S-10）**：`npm ci` 全部加 `--ignore-scripts`（当前依赖树零安装脚本，零成本消除 PR 在 runner 上执行安装脚本的面）；CI 的 `npm audit` 阈值由 moderate 提到 low，与发布门禁同强度，消除「CI 绿、发布红」；发布流程新增 tag 与 `package.json`/`tauri.conf.json` 版本一致性校验，漏跑 bump 直接在门禁失败而不是发出版本号对不上的安装包；新增 dependabot 配置（actions / npm / cargo 每周），补上 SHA 锁定后拿不到上游修复的主动更新侧。
+
+复审同时确认既有安全基线成立：FFmpeg 下载链的 SHA-256 双源锚定、URL 逐要素白名单、响应体全局上限、Cookie 只进 Credential Manager、生产 CSP 无 localhost 通配、asset scope 仅 covers 目录、`crates/` 全 workspace 零 `unsafe`、前端零 HTML sink，均经逐行复核；5 个按 commit SHA 锁定的 GitHub Action 已联网核验为对应仓库的真实提交。安装包代码签名（S-03）与仓库 tag protection（S-02）需要证书与仓库设置，不在代码变更范围内，留待后续。
+
+工程化：后端测试 214 → 225（越界采样率的探测拒绝与正常文件不误伤、`validate_stream_info` 区间端点矩阵、环形缓冲容量封顶、歌词行数/行长上限与中文按字符截断、封面图床白名单正反矩阵、导出导入路径校验与 `..` 点段拒绝、歌词条命令白名单正反矩阵）。前端测试 147 → 149（歌单元素级消毒）。
+
 ### v0.5.6
 
 安全加固专版——逐项落地 2026-08-05 安全审查（`docs/SECURITY-REVIEW-2026-08-05.md`）全部 15 项发现（1 高危 + 7 中危 + 7 低危）：
@@ -159,6 +177,7 @@ target/release/bundle/msi/
 - **本地边界加固（S-07/S-10/S-11/S-14/S-15）**：内嵌封面 32 MB 上限（选图与落盘双入口，防恶意音频撑爆内存/磁盘）；`CredReadW` 空 blob 判空（消除理论 UB）；session 临时文件先建空收 ACL 再写内容（消除默认权限暴露窗口）；默认缓存目录候选用户级 app_data 优先于多用户可写的 ProgramData；B 站短链跟随重定向后复验最终域名（防盲 SSRF 探测）。
 - **配置与发布链收紧（S-09/S-12/S-13）**：生产 CSP 移除 `localhost`/`127.0.0.1` 通配（挪入 `devCsp` 仅开发期生效，渲染进程即使被 XSS 也无法探测本机端口）；歌词条窗口事件权限 `allow-emit` → `allow-emit-to` 定向主窗口，第二窗口不可再向任意窗口广播/伪造事件；GitHub Actions 全部按 commit SHA 锁定防 tag 漂移，CI 与发布门禁新增 `cargo audit`（Rust 依赖漏洞审计，unsound 类无修复版公告显式 ignore 并注明），CI 令牌显式只读。
 - **依赖漏洞清零（S-08）**：`npm audit fix` 修复 undici（jsdom 测试链路）与 nanoid（审查报告之后新披露、位于生产依赖树 tailwindcss→postcss 下）两项高危公告，全量 `npm audit` 归零。
+- **Rust 依赖漏洞清零（发布门禁补充）**：v0.5.6 打 tag 当天 `cargo audit` 在 CI 报出 quick-xml（RUSTSEC-2026-0194/0195）与 quinn-proto（RUSTSEC-2026-0185）三项新增高危公告，升级 plist 1.10.0（连带 quick-xml 0.41.0）与 quinn-proto 0.11.16 后归零，`cargo audit` 全绿。
 
 工程化：后端测试 206 → 214（SHA-256 校验大小写不敏感与拒绝路径、zip 超限条目拒绝且半截输出清理、头像域名白名单正反矩阵、Cookie 名称白名单、Release URL 绕过用例矩阵、超限内嵌封面跳过与落盘拒绝）。前端测试 147 不变（S-12 为等价 API 收窄，typecheck 铆钉）。
 
@@ -211,7 +230,7 @@ target/release/bundle/msi/
 
 ### v0.5.0
 
-本版本是一轮全代码库深度 BUG 审计（约 3.2 万行，报告见 `docs/BUG-AUDIT-2026-07-25.md`）后的集中修复与性能优化版：修复 1 项高危、19 项中危、10 余项低危问题，并重点优化了 WASAPI 独占模式下的可视化流畅度。
+本版本是一轮全代码库深度 BUG 审计（约 3.2 万行）后的集中修复与性能优化版：修复 1 项高危、19 项中危、10 余项低危问题，并重点优化了 WASAPI 独占模式下的可视化流畅度。
 
 **独占模式可视化流畅度**（性能优化重点）：
 
@@ -257,7 +276,7 @@ target/release/bundle/msi/
 工程化：
 
 - 前端测试 114 → 131（EQ 消毒模块 17 测）；后端测试 158 → 163（曲号分隔符判定、冒号百分秒变体、无时长排序保持、GBK 清单解码、file URI 与去重）。
-- 完整审计报告（每条发现均含文件:行号、触发场景与修复建议，另附已验证干净的区域清单）：`docs/BUG-AUDIT-2026-07-25.md`；上一轮（v0.3.6 时期）的 `docs/audit/` 旧报告与 `design/visualizer-demo/` 设计稿存档已从仓库移除。
+- 完整审计报告（每条发现均含文件:行号、触发场景与修复建议，另附已验证干净的区域清单）已随 v0.5.6 从仓库移除（`docs/` 现以 `SECURITY-REVIEW-2026-08-05.md` 为现行审查档案）；上一轮（v0.3.6 时期）的 `docs/audit/` 旧报告与 `design/visualizer-demo/` 设计稿存档亦已从仓库移除。
 
 ### v0.4.9
 

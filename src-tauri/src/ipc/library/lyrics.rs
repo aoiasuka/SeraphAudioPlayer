@@ -15,7 +15,32 @@ pub(crate) const QMC1_PRIVKEY: [u8; 128] = [
     0xc3, 0x00, 0x09, 0x5b, 0x9f, 0x62, 0x66, 0xa1, 0xd8, 0x52, 0xf7, 0x67, 0x90, 0xca, 0xd6, 0x4a,
 ];
 
+/// W-01：歌词总行数上限。原先只有 4 MB 总字节上限，几万行的 LRC 会让
+/// LyricsPanel 一次性渲染同样多的 `<p>`（无虚拟化），主窗口直接卡死。
+/// 正常整首歌不超过几百行，5000 行已是极宽裕的余量。
+pub(crate) const MAX_LYRIC_LINES: usize = 5_000;
+/// W-01：单行字符数上限。TypewriterText 按 30 ms/字符逐字 `slice`（每次 O(n) 重建），
+/// 单行接近 2 MB 时既跑不完（>16 小时）又每 30 ms 重建一次巨串 → UI 永久冻结。
+pub(crate) const MAX_LYRIC_LINE_CHARS: usize = 512;
+
 pub(crate) fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
+    clamp_lyrics(parse_lyrics_bytes_inner(bytes))
+}
+
+/// W-01：所有歌词来源（本地导入 / 在线抓取 / 外部 .lrc）都经 `parse_lyrics_bytes`
+/// 收口，所以上限只需在这一处施加。**新增歌词解析路径务必也走这里**。
+pub(crate) fn clamp_lyrics(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine> {
+    lyrics.truncate(MAX_LYRIC_LINES);
+    for line in &mut lyrics {
+        // 按字符截断而不是字节，避免把多字节字符切成半个（中文歌词必踩）
+        if line.text.chars().count() > MAX_LYRIC_LINE_CHARS {
+            line.text = line.text.chars().take(MAX_LYRIC_LINE_CHARS).collect();
+        }
+    }
+    lyrics
+}
+
+fn parse_lyrics_bytes_inner(bytes: &[u8]) -> Vec<LyricLine> {
     if bytes.starts_with(QRC_MAGIC_HEADER) {
         if let Some(lyrics) = parse_encrypted_qrc_lyrics(bytes) {
             return lyrics;
@@ -773,5 +798,55 @@ pub(crate) fn find_next_time_tag_open(value: &str) -> Option<(usize, char, char)
         (Some(square), None) => Some((square, '[', ']')),
         (None, Some(angle)) => Some((angle, '<', '>')),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod lyrics_limit_tests {
+    use super::*;
+
+    #[test]
+    fn clamps_line_count_and_line_length() {
+        // W-01：恶意 LRC —— 单行近 2 MB + 几万行
+        let long_line = "字".repeat(600_000);
+        let mut text = String::new();
+        for index in 0..6_000 {
+            text.push_str(&format!("[00:{:02}.00]line {index}\n", index % 60));
+        }
+        text.push_str(&format!("[01:00.00]{long_line}\n"));
+
+        let lyrics = parse_lyrics_bytes(text.as_bytes());
+        assert!(
+            lyrics.len() <= MAX_LYRIC_LINES,
+            "line count must be capped, got {}",
+            lyrics.len()
+        );
+        for line in &lyrics {
+            assert!(
+                line.text.chars().count() <= MAX_LYRIC_LINE_CHARS,
+                "single line must be capped, got {} chars",
+                line.text.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_truncates_on_char_boundary() {
+        // 中文歌词按字节截断会切出半个字符 → 必须按 char 截
+        let lyrics = clamp_lyrics(vec![LyricLine {
+            time: 0.0,
+            text: "中".repeat(MAX_LYRIC_LINE_CHARS + 10),
+        }]);
+        assert_eq!(lyrics[0].text.chars().count(), MAX_LYRIC_LINE_CHARS);
+        assert!(lyrics[0].text.chars().all(|ch| ch == '中'));
+    }
+
+    #[test]
+    fn ordinary_lyrics_are_untouched() {
+        let text = "[00:01.00]第一行\n[00:05.00]第二行\n";
+        let lyrics = parse_lyrics_bytes(text.as_bytes());
+        assert_eq!(lyrics.len(), 2);
+        assert_eq!(lyrics[0].text, "第一行");
+        assert_eq!(lyrics[1].text, "第二行");
     }
 }
