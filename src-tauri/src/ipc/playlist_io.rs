@@ -201,6 +201,25 @@ pub async fn export_playlist_m3u8(path: String, entries: Vec<M3u8ExportEntry>) -
         .map_err(|err| IpcError::new(IpcErrorCode::Internal, format!("导出任务异常: {err}")))?
 }
 
+/// N-04：M3U8 是**行敏感**格式——一行一条记录、`#` 开头为指令行。曲目元数据
+/// （来自文件标签，属外部输入）里的 CR/LF 会把一条记录劈成多条，攻击者可借此
+/// 往导出的清单里注入伪造条目或 `#EXT` 指令；导出的清单常被分享给别的播放器读。
+/// 这里把所有换行类字符归一为空格。
+fn sanitize_m3u8_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch == '\r' || ch == '\n' || ch == '\u{2028}' || ch == '\u{2029}' {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 fn export_playlist_m3u8_inner(path: &str, entries: &[M3u8ExportEntry]) -> IpcResult<()> {
     if entries.is_empty() {
         return Err(IpcError::invalid_input("歌单没有可导出的曲目"));
@@ -210,9 +229,24 @@ fn export_playlist_m3u8_inner(path: &str, entries: &[M3u8ExportEntry]) -> IpcRes
 
     let mut content = String::from("#EXTM3U\n");
     for entry in entries {
+        // N-04：路径含换行的条目直接跳过——路径本身不可能合法含换行，
+        // 归一成空格反而会写出一条指向错误文件的记录。
+        let entry_path = sanitize_m3u8_field(&entry.path);
+        if entry_path.is_empty() || entry_path != entry.path.trim() {
+            continue;
+        }
+        // N-04：`#` 开头的路径会被解析成指令行，加 `./` 前缀消歧
+        let entry_path = if entry_path.starts_with('#') {
+            format!("./{entry_path}")
+        } else {
+            entry_path
+        };
         content.push_str(&format!(
             "#EXTINF:{},{} - {}\n{}\n",
-            entry.duration, entry.artist, entry.title, entry.path
+            entry.duration,
+            sanitize_m3u8_field(&entry.artist),
+            sanitize_m3u8_field(&entry.title),
+            entry_path
         ));
     }
 
@@ -332,5 +366,90 @@ mod tests {
     fn rejects_missing_list_and_empty_export() {
         assert!(import_playlist_m3u8_inner("Z:/definitely/missing.m3u8").is_err());
         assert!(export_playlist_m3u8_inner("out.m3u8", &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod m3u8_injection_tests {
+    use super::*;
+
+    fn temp_target(case: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("seraph-m3u8-inj-{case}-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        dir.join("out.m3u8")
+    }
+
+    #[test]
+    fn export_neutralizes_crlf_in_metadata() {
+        // N-04：标签里的 CR/LF 会把一条记录劈成多条，可伪造条目或注入 #EXT 指令
+        let target = temp_target("crlf");
+        let entries = vec![M3u8ExportEntry {
+            duration: 100,
+            artist: "恶意\r\n#EXTINF:1,注入 - 伪造".into(),
+            title: "标题\n../../evil.mp3".into(),
+            path: r"C:\music\real.flac".into(),
+        }];
+        export_playlist_m3u8_inner(target.to_str().unwrap(), &entries).expect("export");
+
+        let text = fs::read_to_string(&target).expect("read back");
+        // 头部 1 行 + 该条目的 EXTINF 1 行 + 路径 1 行 = 3 行，多一行就是被注入了
+        let lines: Vec<_> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 3, "注入产生了额外行: {lines:?}");
+        assert_eq!(lines[0], "#EXTM3U");
+        assert!(lines[1].starts_with("#EXTINF:100,"));
+        // M3U8 按行解析，只有**行首**的 # 才是指令。注入文本被压进同一行后无害，
+        // 但绝不能出现第二条行首指令，也不能多出可被当作条目的裸行。
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with('#')).count(),
+            2,
+            "出现了注入的指令行: {lines:?}"
+        );
+        assert_eq!(lines[2], r"C:\music\real.flac");
+
+        let _ = fs::remove_dir_all(target.parent().unwrap());
+    }
+
+    #[test]
+    fn export_skips_entries_whose_path_contains_newlines() {
+        let target = temp_target("path");
+        let entries = vec![
+            M3u8ExportEntry {
+                duration: 1,
+                artist: "a".into(),
+                title: "t".into(),
+                path: "C:\\music\\a.flac\nC:\\evil.exe".into(),
+            },
+            M3u8ExportEntry {
+                duration: 2,
+                artist: "b".into(),
+                title: "u".into(),
+                path: r"C:\music\ok.flac".into(),
+            },
+        ];
+        export_playlist_m3u8_inner(target.to_str().unwrap(), &entries).expect("export");
+        let text = fs::read_to_string(&target).expect("read back");
+        assert!(!text.contains("evil.exe"), "含换行的路径条目必须被跳过");
+        assert!(text.contains(r"C:\music\ok.flac"));
+        assert_eq!(text.matches("#EXTINF").count(), 1);
+
+        let _ = fs::remove_dir_all(target.parent().unwrap());
+    }
+
+    #[test]
+    fn export_disambiguates_hash_prefixed_paths() {
+        // `#` 开头的路径会被解析器当指令行吞掉
+        let target = temp_target("hash");
+        let entries = vec![M3u8ExportEntry {
+            duration: 3,
+            artist: "a".into(),
+            title: "t".into(),
+            path: "#weird.flac".into(),
+        }];
+        export_playlist_m3u8_inner(target.to_str().unwrap(), &entries).expect("export");
+        let text = fs::read_to_string(&target).expect("read back");
+        assert!(text.contains("./#weird.flac"), "实际内容: {text}");
+
+        let _ = fs::remove_dir_all(target.parent().unwrap());
     }
 }

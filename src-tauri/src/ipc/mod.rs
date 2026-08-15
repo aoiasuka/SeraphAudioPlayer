@@ -11,4 +11,5 @@ pub mod playback;
 pub mod playlist_io;
 pub mod system;
 pub mod update;
+pub(crate) mod url_guard;
 pub mod visualizer;

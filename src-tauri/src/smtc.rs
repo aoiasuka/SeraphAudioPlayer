@@ -214,13 +214,18 @@ fn update_track_metadata(
 /// file:///C:/… URI（百分号编码），剥前缀后剩 `/C:/…%E9%9F%B3…` 这样的
 /// 坏路径名，SetThumbnail 报 0x800700A1（ERROR_BAD_PATHNAME），封面推不
 /// 上系统浮窗。
+///
+/// N-02：网络地址必须过 https + B 站图床白名单。缩略图是交给 **Windows Shell
+/// 进程**去取的，此前 `http://` 与任意 host 一律透传——曲库缓存是磁盘文件、
+/// 可被离线篡改，等于借系统组件做任意出站请求。不合规的网络地址直接不推封面
+/// （返回 None），不影响曲目信息本身的显示。
 fn cover_to_uri(cover: &str) -> Option<String> {
     let cover = cover.trim();
     if cover.is_empty() {
         return None;
     }
     if cover.starts_with("http://") || cover.starts_with("https://") {
-        return Some(cover.to_string());
+        return crate::ipc::url_guard::is_safe_system_image_url(cover).then(|| cover.to_string());
     }
     Some(format!("file://{cover}"))
 }
@@ -282,6 +287,21 @@ fn smtc_pause(state: &AppState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::cover_to_uri;
+
+    #[test]
+    fn n02_rejects_untrusted_network_cover_urls() {
+        // N-02：缩略图是交给 Windows Shell 进程去取的，曲库缓存可被离线篡改，
+        // 非官方图床的网络地址一律不推封面（返回 None，不影响曲目信息显示）。
+        for cover in [
+            "http://i0.hdslb.com/x.jpg",
+            "https://evil.example.com/x.jpg",
+            "https://hdslb.com.evil.com/x.jpg",
+            "https://i0.hdslb.com@evil.com/x.jpg",
+            "http://127.0.0.1:8080/probe.jpg",
+        ] {
+            assert_eq!(cover_to_uri(cover), None, "should reject {cover}");
+        }
+    }
 
     #[test]
     fn https_cover_passes_through() {

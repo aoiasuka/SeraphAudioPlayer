@@ -51,12 +51,13 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
 
-      # S-13：Rust 依赖漏洞审计。ignore 三项均为 unsound 类公告（非可利用漏洞）：
-      # RUSTSEC-2024-0429 glib——Linux-only gtk 栈，tauri 2 上游锁 0.18，Windows 产物不含；
-      # RUSTSEC-2026-0190 anyhow / RUSTSEC-2026-0221 event-listener——暂无 semver 兼容修复版，
-      # 出现修复版后应升级并移除对应 ignore。
+      # S-13/N-01：Rust 依赖漏洞审计。仅剩一条 ignore：
+      # RUSTSEC-2024-0429 glib——unsound 类，修复版要 0.20 而 tauri 2 上游锁 0.18，
+      # 且属 Linux-only gtk 栈、Windows 产物不含。
+      # anyhow(RUSTSEC-2026-0190) 与 event-listener(RUSTSEC-2026-0221) 的补丁版
+      # 已在 v0.5.8 升级到位，对应 ignore 已移除——**有修复版就升级，别加 ignore**。
       - name: Audit Rust dependencies
-        run: cargo audit --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0221
+        run: cargo audit --ignore RUSTSEC-2024-0429
 
       - name: Check Rust formatting
         run: cargo fmt --all --check

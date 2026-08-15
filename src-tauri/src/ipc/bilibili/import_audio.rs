@@ -630,20 +630,12 @@ pub(crate) async fn download_audio_to_file(
 /// `face` 字段来自外部 API 响应，未校验就用携带 Cookie 的 client 请求，
 /// 一旦上游被攻破返回恶意 URL，登录 Cookie 会被发往任意主机。
 pub(crate) fn is_safe_avatar_url(raw: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
-        return false;
-    };
-    if url.scheme() != "https" {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    host == "hdslb.com"
-        || host == "bilibili.com"
-        || host.ends_with(".hdslb.com")
-        || host.ends_with(".bilibili.com")
+    // N-03：host 白名单收敛到 `ipc::url_guard` 单一事实来源，
+    // 避免新增图片源时各写一份判断再漏一处（N-02 就是这么漏的）。
+    crate::ipc::url_guard::is_https_url_with_host_suffix(
+        raw,
+        crate::ipc::url_guard::BILIBILI_IMAGE_HOST_SUFFIXES,
+    )
 }
 
 /// P2-8：头像 data URL 按源 URL 内存缓存，避免前端周期性查询登录状态时

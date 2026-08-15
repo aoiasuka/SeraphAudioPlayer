@@ -69,7 +69,7 @@ jobs:
 
       # S-13：发布门禁与 CI 同强度。ignore 说明见 ci.yml 同名步骤注释。
       - name: Audit Rust dependencies
-        run: cargo audit --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0221
+        run: cargo audit --ignore RUSTSEC-2024-0429
 
       - name: Test Rust workspace
         run: cargo test --workspace

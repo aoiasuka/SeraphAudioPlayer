@@ -65,9 +65,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arbitrary"
@@ -185,7 +185,7 @@ version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
 dependencies = [
- "event-listener 5.4.1",
+ "event-listener 5.4.2",
  "event-listener-strategy",
  "pin-project-lite",
 ]
@@ -1281,11 +1281,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -1296,7 +1295,7 @@ version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
- "event-listener 5.4.1",
+ "event-listener 5.4.2",
  "pin-project-lite",
 ]
 
@@ -4015,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-audio"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "cpal",
  "parking_lot",
@@ -4031,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-core"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4043,7 +4042,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-decoder"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "seraph-core",
  "symphonia",
@@ -4053,7 +4052,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-dsp"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4064,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-playlist"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4075,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-tauri"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4111,7 +4110,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-visualizer"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "parking_lot",
  "rtrb",

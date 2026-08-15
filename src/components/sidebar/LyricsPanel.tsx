@@ -431,6 +431,10 @@ export function LyricsPanel() {
                     ? `已抓取到 ${onlineCandidates.length} 份结果，选择一份预览后应用。`
                     : "未找到匹配歌词，可以关闭弹窗后再试。"}
               </p>
+              {/* N-09:向第三方外发曲目元数据属用户数据外发,即便是主动触发也应明示去向。 */}
+              <p className="mt-1.5 font-tw text-[10px] leading-relaxed text-ink3">
+                匹配时会将曲名与艺术家发送至网易云音乐、酷狗、QQ 音乐进行搜索；不发送音频文件本身。
+              </p>
             </div>
             <form onSubmit={handleManualLyricsSearch} className="mb-3">
               <label

@@ -137,17 +137,29 @@ pub fn run() {
 
 /// F-03：任务栏歌词条窗口允许调用的自定义命令白名单。
 ///
-/// 歌词条走 IPC 拉数据（见 CLAUDE.md「第二窗口」约定）：切歌时拉一次曲目元数据、
-/// 轮询播放快照、✕ 与拖拽回传主窗口，另有 ⌂ 唤起主窗口。**只需要这四个**，
-/// 其余一律拒绝——尤其是文件读写（config/eq/m3u8 导入导出）、子进程
-/// （reveal/download_ffmpeg）与登录凭据相关命令。
+/// **这份名单必须与 `src/taskbar/` 里实际 `invoke(...)` 的命令逐一对应**——
+/// 下面的 `taskbar_allowlist_covers_every_command_the_bar_invokes` 测试会去读
+/// 前端源码做交叉核对。v0.5.7 的教训：名单是照着文档描述写的（"拉数据 + 唤起主窗口
+/// 四个命令"），没核对真实代码，结果把播放/上一首/下一首/进度拖动/拖拽移动
+/// 五个命令全拦掉了，歌词条控件整排失效。
 ///
-/// 新增给歌词条用的命令必须显式加进这里；给主窗口用的不要动这个名单。
+/// 放行标准是「歌词条实际需要且无副作用面」：播放控制与窗口定位没有文件 IO、
+/// 子进程或凭据接触面。仍然严禁的是文件读写（config/eq/m3u8 导入导出）、
+/// 子进程（reveal/download_ffmpeg）、登录凭据与曲库写入命令。
+///
+/// 给歌词条新增命令时：先加进这里，测试才会过；给主窗口用的不要动这个名单。
 const TASKBAR_LYRICS_ALLOWED_COMMANDS: &[&str] = &[
+    // 数据拉取（只读）
     "get_playback_snapshot",
     "get_track_info",
+    // 播控按钮：播放/暂停、上一首、下一首、进度条拖动
+    "toggle_play",
+    "next_track",
+    "prev_track",
+    "seek",
+    // 窗口：拖拽移动自身、⌂ 唤起主窗口
+    "position_taskbar_bar",
     "focus_main_window",
-    "set_taskbar_lyrics_position",
 ];
 
 fn command_allowed_for_window(label: &str, command: &str) -> bool {
@@ -207,6 +219,94 @@ mod tests {
         for command in TASKBAR_LYRICS_ALLOWED_COMMANDS {
             assert!(command_allowed_for_window("taskbar-lyrics", command));
         }
+    }
+
+    /// F-03 回归闸：白名单必须覆盖歌词条前端真实 `invoke` 的每一个命令。
+    ///
+    /// v0.5.7 的名单是照文档描述写的，漏了 toggle_play / next_track / prev_track /
+    /// seek / position_taskbar_bar 五个，歌词条播控整排失效。人工比对靠不住，
+    /// 这里直接扫 `src/taskbar/` 的源码做交叉核对。
+    #[test]
+    fn taskbar_allowlist_covers_every_command_the_bar_invokes() {
+        let taskbar_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("src")
+            .join("taskbar");
+        assert!(
+            taskbar_dir.is_dir(),
+            "找不到歌词条前端源码目录: {}",
+            taskbar_dir.display()
+        );
+
+        let mut invoked = std::collections::BTreeSet::new();
+        let mut scanned = 0_usize;
+        for entry in std::fs::read_dir(&taskbar_dir).expect("read taskbar dir") {
+            let path = entry.expect("dir entry").path();
+            if !path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "ts" || ext == "tsx")
+            {
+                continue;
+            }
+            scanned += 1;
+            let source = std::fs::read_to_string(&path).expect("read taskbar source");
+            // 匹配 `invoke("cmd")` 与 `invoke<T>("cmd")`；命令名是 snake_case 字面量。
+            for (index, _) in source.match_indices("invoke") {
+                let rest = &source[index + "invoke".len()..];
+                // 跳过可能的泛型参数
+                let rest = match rest.strip_prefix('<') {
+                    Some(after) => match after.find('>') {
+                        Some(end) => &after[end + 1..],
+                        None => continue,
+                    },
+                    None => rest,
+                };
+                let Some(rest) = rest.strip_prefix('(') else {
+                    continue;
+                };
+                let rest = rest.trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else { continue };
+                let name = &rest[..end];
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch == '_' || ch.is_ascii_digit())
+                {
+                    invoked.insert(name.to_string());
+                }
+            }
+        }
+
+        assert!(scanned > 0, "没扫到任何歌词条源码文件");
+        assert!(
+            !invoked.is_empty(),
+            "没从歌词条源码里解析出任何 invoke 命令，解析逻辑可能失效了"
+        );
+
+        let missing: Vec<_> = invoked
+            .iter()
+            .filter(|name| !TASKBAR_LYRICS_ALLOWED_COMMANDS.contains(&name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "歌词条会调用但白名单没放行的命令（运行期会被拒绝、控件失效）: {missing:?}\n\
+             实际调用: {invoked:?}\n白名单: {TASKBAR_LYRICS_ALLOWED_COMMANDS:?}"
+        );
+
+        // 反向：名单里有前端根本不用的条目 = 白给的攻击面，也要清掉
+        let unused: Vec<_> = TASKBAR_LYRICS_ALLOWED_COMMANDS
+            .iter()
+            .filter(|name| !invoked.contains(**name))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "白名单里有歌词条并不调用的命令，应删除以保持最小权限: {unused:?}"
+        );
     }
 
     #[test]

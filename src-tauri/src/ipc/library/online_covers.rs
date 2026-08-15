@@ -4,18 +4,6 @@ use crate::ipc::error::{IpcError, IpcResult};
 /// 封面下载大小上限：正常专辑图几百 KB，超限视为异常响应。
 const MAX_ONLINE_COVER_BYTES: usize = 4 * 1024 * 1024;
 
-/// F-04：允许下载封面图的官方图床 host 后缀。
-/// iTunes 的 `artworkUrl100` 与 QQ 的 albummid 拼接地址都来自外部 API 响应,
-/// 上游被攻破/被劫持时会变成任意 URL——不加白名单就是 SSRF 探针,
-/// 且下载结果会按内容哈希落盘进 covers 目录。
-const COVER_HOST_SUFFIXES: &[&str] = &[
-    ".mzstatic.com",
-    ".apple.com",
-    ".gtimg.cn",
-    ".qpic.cn",
-    ".qq.com",
-];
-
 /// F-04：封面**图片**下载专用 client——逐跳复验重定向目标必须仍在图床白名单内。
 /// 与搜索接口共用一个 client 不行：搜索打的是 itunes.apple.com / c.y.qq.com,
 /// 与图床是两套 host 白名单。
@@ -36,21 +24,13 @@ fn cover_image_client() -> Result<Client, String> {
         .map_err(|err| format!("failed to create cover image client: {err}"))
 }
 
-/// F-04：封面图 URL 必须是 https + 官方图床域。逐要素比对,不做前缀匹配。
+/// F-04：封面图 URL 必须是 https + 官方图床域。
+/// N-03：host 白名单收敛到 `ipc::url_guard` 单一事实来源。
 fn is_safe_cover_url(raw: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
-        return false;
-    };
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    COVER_HOST_SUFFIXES
-        .iter()
-        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+    crate::ipc::url_guard::is_https_url_with_host_suffix(
+        raw,
+        crate::ipc::url_guard::ONLINE_COVER_HOST_SUFFIXES,
+    )
 }
 
 /// 为无内嵌封面的曲目在线匹配专辑封面。
