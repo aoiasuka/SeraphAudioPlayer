@@ -145,13 +145,21 @@ type TauriInternals = {
 
 /**
  * 曲目封面地址归一化：
- * - http(s)/data/blob/asset 等浏览器可直接加载的地址原样返回（B 站封面是 https URL）
+ * - http(s)/blob/asset 等浏览器可直接加载的地址原样返回（B 站封面是 https URL）
+ * - data: 只放行位图 MIME（2026-08-16 审查纵深）：封面合法值域本不含 data:，
+ *   `data:image/svg+xml`、`data:text/html` 在 <img> 里虽不执行脚本，
+ *   也没有理由放进渲染面，一律失败关闭
  * - 本地绝对路径（本地曲目提取出的封面文件）转成 asset 协议 URL
  * - 纯浏览器开发模式无法加载本地文件，返回空串让 UI 走无封面默认样式
  */
 export function coverSrc(cover: string | undefined | null): string {
   if (!cover) return "";
-  if (/^(https?:|data:|blob:|asset:)/i.test(cover)) return cover;
+  if (/^(https?:|blob:|asset:)/i.test(cover)) return cover;
+  if (/^data:/i.test(cover)) {
+    return /^data:image\/(png|jpe?g|gif|webp|bmp|avif)[;,]/i.test(cover)
+      ? cover
+      : "";
+  }
   const internals = (
     window as unknown as { __TAURI_INTERNALS__?: TauriInternals }
   ).__TAURI_INTERNALS__;

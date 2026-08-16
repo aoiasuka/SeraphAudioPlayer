@@ -21,6 +21,11 @@ pub(crate) fn online_lyrics_client() -> Result<Client, String> {
     Client::builder()
         .default_headers(headers)
         .timeout(Duration::from_secs(12))
+        // L-3（2026-08-16 审查）：逐跳复验重定向——歌词源虽是固定 URL，
+        // 上游被攻破/中间层 302 指向内网地址时不拦就是盲 SSRF 探针（F-01 同型）
+        .redirect(guarded_redirect_policy(
+            crate::ipc::url_guard::is_safe_lyrics_url,
+        ))
         .build()
         .map_err(|err| format!("failed to create lyrics client: {err}"))
 }

@@ -116,6 +116,12 @@ pub(crate) fn ffmpeg_download_client() -> Result<Client, String> {
         // 永不返回，download_ffmpeg 命令永久挂起且 in-flight 槽位不释放，后续重试全被拒。
         // 加两次读之间的空闲超时（与 bilibili_download_client_for_app 一致）打破挂死。
         .read_timeout(Duration::from_secs(30))
+        // L-3（2026-08-16 审查）：逐跳复验重定向。下载物完整性另有 SHA-256 锚定，
+        // 这里拦的是中间跳的盲 SSRF 探测面；GitHub release 资产 302 到
+        // release-assets.githubusercontent.com（实测），白名单已覆盖。
+        .redirect(guarded_redirect_policy(
+            crate::ipc::url_guard::is_safe_ffmpeg_download_url,
+        ))
         .user_agent(USER_AGENT_VALUE)
         .build()
         .map_err(|err| format!("无法创建下载客户端: {err}"))

@@ -1,6 +1,14 @@
 import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 
+/** 曲目氛围色只可能是后端 color_pair 色板的 hex 值；非法值回落默认，
+ *  不让曲库缓存中的异常字符串进入 CSSOM（2026-08-16 审查纵深）。 */
+const HEX_COLOR = /^#[0-9a-f]{3,8}$/i;
+
+function safeGlow(value: string | undefined, fallback: string): string {
+  return value && HEX_COLOR.test(value) ? value : fallback;
+}
+
 export function AlbumArt() {
   const track = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -8,8 +16,8 @@ export function AlbumArt() {
   const cover = coverSrc(track?.cover);
   if (!cover) return null;
 
-  const glow1 = track?.glow1 ?? "#06b6d4";
-  const glow2 = track?.glow2 ?? "#8b5cf6";
+  const glow1 = safeGlow(track?.glow1, "#06b6d4");
+  const glow2 = safeGlow(track?.glow2, "#8b5cf6");
 
   return (
     <div

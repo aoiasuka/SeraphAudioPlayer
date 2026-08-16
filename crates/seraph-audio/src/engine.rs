@@ -25,8 +25,25 @@ use std::{
 use tracing::{debug, warn};
 
 const TARGET_BUFFER_SECONDS: usize = 3;
+/// L-4（2026-08-16 审查）：极端合法参数（>192 kHz 或 >2ch）时预读秒数折减到 1s。
+/// 768 kHz × 32ch × 3s ≈ 590 MB 的一次性分配，对「头部几 KB 的合法区间恶意文件」
+/// 是内存压力型 DoS（分配发生在建流之前，设备不支持也已经付出代价）；
+/// 常规立体声 ≤192 kHz 完全不受影响，1s @ 极端参数仍有充足预读余量。
+const EXTREME_FORMAT_BUFFER_SECONDS: usize = 1;
+const EXTREME_FORMAT_RATE_LIMIT: u32 = 192_000;
+const EXTREME_FORMAT_CHANNEL_LIMIT: usize = 2;
 /// 环形缓冲样本数硬上限,见 `PlaybackShared::new` 注释(R-01 纵深防线)。
-const MAX_RING_BUFFER_SAMPLES: usize = 768_000 * 32 * TARGET_BUFFER_SECONDS;
+/// 与上面的折减规则联动：极端参数只允许 1s ⇒ 24.58M 样本 × 8 字节 ≈ 196 MB。
+const MAX_RING_BUFFER_SAMPLES: usize = 768_000 * 32 * EXTREME_FORMAT_BUFFER_SECONDS;
+
+/// 输出流对应的环形缓冲预读秒数（L-4 折减规则的单一实现）。
+fn ring_buffer_seconds(output_rate: u32, output_channels: usize) -> usize {
+    if output_rate > EXTREME_FORMAT_RATE_LIMIT || output_channels > EXTREME_FORMAT_CHANNEL_LIMIT {
+        EXTREME_FORMAT_BUFFER_SECONDS
+    } else {
+        TARGET_BUFFER_SECONDS
+    }
+}
 const QUEUE_SLEEP: Duration = Duration::from_millis(5);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_EXCLUSIVE_PERIOD_FRAMES: u32 = 512;
@@ -724,10 +741,12 @@ impl PlaybackShared {
         // 768 kHz 内，但 output_rate 也可能来自设备配置。环形缓冲是在建流**之前**
         // 分配的，rtrb 的 RingBuffer::new 内部就是裸 Vec::with_capacity，无任何断言——
         // 容量失控时 handle_alloc_error 直接 abort 进程，catch_unwind 兜不住。
-        // 上限按最坏合法情形取：768 kHz × 32ch × 3s = 73.7M 样本（×8 字节 ≈ 590 MB）。
+        // L-4：秒数按 ring_buffer_seconds 折减，最坏合法情形从 590 MB 压到
+        // 768 kHz × 32ch × 1s = 24.58M 样本（×8 字节 ≈ 196 MB）。
+        let seconds = ring_buffer_seconds(output_rate, output_channels);
         let max_buffer_samples = (output_rate as usize)
             .saturating_mul(output_channels)
-            .saturating_mul(TARGET_BUFFER_SECONDS)
+            .saturating_mul(seconds)
             .min(MAX_RING_BUFFER_SAMPLES);
         Self {
             seek_request: Mutex::new(None),
@@ -2242,8 +2261,8 @@ mod tests {
         // 环形缓冲容量也不得随之爆炸（rtrb 的 Vec::with_capacity 分配失败 = 进程 abort）。
         let hostile = PlaybackShared::new(u32::MAX, 2, 0.7, SpectrumTap::new());
         assert_eq!(hostile.max_buffer_samples, MAX_RING_BUFFER_SAMPLES);
-        // 上限本身必须是可分配的量级（×8 字节 ≈ 590 MB，远低于 rtrb 无上限时的 192 GiB）
-        assert!(hostile.max_buffer_samples * std::mem::size_of::<QueuedSample>() < 1 << 30);
+        // L-4 后上限收紧到 ≈196 MB（远低于旧 590 MB 与 rtrb 无上限时的 192 GiB）
+        assert!(hostile.max_buffer_samples * std::mem::size_of::<QueuedSample>() < 256 << 20);
 
         // 常规配置不受影响
         let normal = PlaybackShared::new(48_000, 2, 0.7, SpectrumTap::new());
@@ -2251,6 +2270,27 @@ mod tests {
             normal.max_buffer_samples,
             48_000 * 2 * TARGET_BUFFER_SECONDS
         );
+    }
+
+    /// L-4：>192 kHz 或 >2ch 的极端合法格式折减到 1s 预读；
+    /// 常规立体声（含 192 kHz 顶格）仍 3s 不变。
+    #[test]
+    fn ring_buffer_shrinks_for_extreme_but_legal_formats() {
+        assert_eq!(ring_buffer_seconds(192_000, 2), TARGET_BUFFER_SECONDS);
+        assert_eq!(ring_buffer_seconds(44_100, 2), TARGET_BUFFER_SECONDS);
+        assert_eq!(
+            ring_buffer_seconds(384_000, 2),
+            EXTREME_FORMAT_BUFFER_SECONDS
+        );
+        assert_eq!(
+            ring_buffer_seconds(48_000, 6),
+            EXTREME_FORMAT_BUFFER_SECONDS
+        );
+
+        // 最坏合法参数（768 kHz × 32ch）：24.58M 样本 ≈ 196 MB，且恰为硬上限
+        let worst = PlaybackShared::new(768_000, 32, 0.7, SpectrumTap::new());
+        assert_eq!(worst.max_buffer_samples, 768_000 * 32);
+        assert_eq!(worst.max_buffer_samples, MAX_RING_BUFFER_SAMPLES);
     }
 
     #[test]

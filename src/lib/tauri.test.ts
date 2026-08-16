@@ -21,6 +21,15 @@ describe("coverSrc", () => {
     );
   });
 
+  it("data: 只放行位图 MIME，SVG/HTML 变体拒绝（2026-08-16 审查纵深）", () => {
+    expect(coverSrc("data:image/webp;base64,AAA")).toBe(
+      "data:image/webp;base64,AAA"
+    );
+    expect(coverSrc("data:image/svg+xml;base64,AAA")).toBe("");
+    expect(coverSrc("data:text/html,<script>alert(1)</script>")).toBe("");
+    expect(coverSrc("data:application/octet-stream;base64,AAA")).toBe("");
+  });
+
   it("纯浏览器环境（无 Tauri internals）下本地路径降级为空串", () => {
     expect(coverSrc("C:\\Users\\x\\covers\\a.jpg")).toBe("");
   });

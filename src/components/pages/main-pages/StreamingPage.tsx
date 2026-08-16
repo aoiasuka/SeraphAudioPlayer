@@ -1,6 +1,7 @@
 import { BadgeCheck, DownloadCloud, FolderHeart, Headphones, Link2, Loader2, LogIn, LogOut, QrCode, RefreshCw, Settings2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { cn } from "@/lib/utils";
+import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
 import { TrackRows } from "./TrackRows";
 import { isStreamingTrack } from "./trackFilters";
@@ -173,7 +174,7 @@ export function StreamingPage() {
           >
             {loginStatus.face ? (
               <img
-                src={loginStatus.face}
+                src={coverSrc(loginStatus.face)}
                 alt=""
                 className="h-5 w-5 rounded-full object-cover border border-ink/10"
               />

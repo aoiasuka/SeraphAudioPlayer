@@ -12,6 +12,13 @@ pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client
         .no_brotli()
         .no_zstd()
         .no_deflate()
+        // L-3（2026-08-16 审查）：API/短链 client 也逐跳复验重定向。b23.tv 短链的
+        // 合法跳转目标只有 B 站主站；带 Cookie 变体（bilibili_client_for_app）走
+        // 同一构造，凭据只发往 B 站域的基线对重定向同样成立。resolve_bvid 的
+        // S-15 最终复验保留为纵深，但中间跳从此不再出站到白名单外。
+        .redirect(guarded_redirect_policy(
+            crate::ipc::url_guard::is_safe_bilibili_site_url,
+        ))
         .default_headers(bilibili_headers(cookie)?)
         .build()
         .map_err(|err| format!("failed to create http client: {err}"))

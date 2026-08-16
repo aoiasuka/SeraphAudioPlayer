@@ -148,6 +148,22 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.5.9
+
+第三轮独立安全复审专版（`docs/SECURITY-REVIEW-2026-08-16.md`，1 中危 + 9 低危 + 信息级，含 55 个 IPC 命令逐一审计与 666 个 crate 的 OSV 全量核验），单项针对性修复：
+
+- **ffmpeg/ffprobe 找不到时不再回退裸名（中危 M-1）**：此前搜索目录全部落空会退化成 `Command::new("ffmpeg.exe")`，CreateProcessW 的搜索顺序含**当前工作目录**——应用经文件关联从「歌曲文件夹」启动时，同目录植入的 ffmpeg.exe 会被直接执行（CWE-427，与 v0.5.7 修复的 icacls/explorer 裸名同型）。现在找不到就明确报错，不给隐式搜索留缝。
+- **SMTC 本地封面路径收口（L-1）**：系统浮窗封面的 `file://` 分支此前任意透传，曲库缓存被离线篡改成 `\\attacker.com\share\a.jpg` 时，Windows Shell 会向攻击者的 SMB 服务器发起出站连接（域环境下伴随 NTLM 质询，认证材料可被离线破解）。现在拒 UNC/相对路径，且必须真实存在于应用 covers 目录内。
+- **出站重定向白名单补全到全部七个 client（L-3 并扩展）**：歌词三源、GitHub 更新检查、B 站 API/短链三处此前未挂逐跳复验（上游 302 指向内网即是盲 SSRF 探针）；落地时核出报告未点名的**第四处**——ffmpeg 下载 client 同样裸奔，一并挂齐。白名单表统一收口 `ipc/url_guard`，GitHub release 资产的真实 302 目标（`release-assets.githubusercontent.com`）经实测确认后入表。
+- **极端合法格式的内存折减（L-4）**：768 kHz × 32 声道的「合法区间恶意文件」此前能让环形缓冲在建流前一次分配约 590 MB；现对 >192 kHz 或 >2 声道折减预读到 1s，上限压到约 196 MB，常规立体声（≤192 kHz）完全不受影响。
+- **DSP pub API 自卫（L-5/L-6）**：EQ 与 crossfeed 在退化采样率下 `f32::clamp` 因 min>max 直接 panic（上界现兜底）；EQ 增益/preamp 仅查 `is_finite` 挡不住 1e30 dB 这类有限极端值（10^(g/40) 溢出 Inf 后 NaN 直达 DAC），现后端也限幅 ±24 dB 与前端同口径，系数设计完成后全量有限性校验、失败回退直通。
+- **serde_with 升 3.21.0（L-8）**：KeyValueMap 序列化 panic 漏洞 GHSA-7gcf-g7xr-8hxj——该公告**无 RUSTSEC 别名，`cargo audit` 完全查不到**，是 OSV 全量核验抓出来的盲区案例。
+- **纵深与卫生项**：导出路径「不限目标目录」的权衡在 `path_guard` 明示威胁模型（L-2）；带第三方 CDN 的设计稿移入 `design/` 并声明禁止分发（L-7）；`.gitignore` 补 `.claude/settings.local.json`（L-9）；前端 `coverSrc` 的 `data:` 只放行位图 MIME、拒 SVG/HTML 变体；B 站头像改走 `coverSrc` 统一归一；专辑氛围色进 CSSOM 前做 hex 校验；可视化排序 `partial_cmp().expect` 改 `total_cmp` 消 IPC 线程 panic 面；CI 注释修正（依赖树并非「零安装脚本」，esbuild/fsevents 均有声明、只是跳过无害）。
+
+决策记录（有意不做）：DSF 单包 32 MB 封顶——硬截断会切碎 DSF 交错块结构导致解码错位，且该分配已被文件实际大小封顶、无放大效应；symphonia features 收敛——常用格式本就几乎全开，收窄可能改变既有文件的解码路径，违背「加固必须实测」基线。
+
+工程化：后端测试 238 → 247（ffmpeg 裸名回退拒绝、SMTC UNC/目录外拒绝矩阵、四组重定向白名单真实目标与探针矩阵、极端格式缓冲折减、DSP 退化采样率与极端增益）。前端测试 149 → 150（coverSrc data: MIME 收紧）。
+
 ### v0.5.8
 
 **修复 v0.5.7 的任务栏歌词条回归 —— 使用 v0.5.7 的请务必升级。**

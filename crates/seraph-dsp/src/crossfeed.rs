@@ -65,11 +65,23 @@ pub struct Crossfeed {
 impl Crossfeed {
     pub fn configure(&mut self, settings: &CrossfeedSettings, sample_rate: f32) {
         self.enabled = settings.enabled;
-        let amount = settings.amount.clamp(0.0, 1.0);
+        // NaN 兜底：NaN.clamp 传播 NaN，会经 cross_gain / alpha 污染整条输出
+        let amount = if settings.amount.is_finite() {
+            settings.amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         self.amount = amount;
-        let cutoff = settings
-            .cutoff_hz
-            .clamp(100.0, sample_rate.max(2.0) * 0.5 - 1.0);
+        // L-5（2026-08-16 审查）：上界先兜底到不小于下界——f32::clamp 在
+        // min > max 时 panic（sample_rate < 202 触发）。这是 pub API，
+        // 退化采样率不该炸掉调用方。
+        let cutoff_hi = (sample_rate.max(2.0) * 0.5 - 1.0).max(100.0);
+        let cutoff_raw = if settings.cutoff_hz.is_finite() {
+            settings.cutoff_hz
+        } else {
+            CrossfeedSettings::default().cutoff_hz
+        };
+        let cutoff = cutoff_raw.clamp(100.0, cutoff_hi);
         // 一阶低通系数：alpha = 1 - exp(-2π fc / fs)
         let x = (-2.0 * std::f32::consts::PI * cutoff / sample_rate.max(1.0)).exp();
         self.alpha = (1.0 - x).clamp(0.0, 1.0);
@@ -121,6 +133,42 @@ mod tests {
         let original = samples.clone();
         cf.process_interleaved(&mut samples, 2);
         assert_eq!(samples, original);
+    }
+
+    /// L-5：sample_rate < 202 时 clamp 上界会低于下界，修复前直接 panic。
+    #[test]
+    fn degenerate_sample_rate_does_not_panic() {
+        for rate in [0.0, 1.0, 100.0, 201.0] {
+            let mut cf = Crossfeed::default();
+            cf.configure(
+                &CrossfeedSettings {
+                    enabled: true,
+                    amount: 0.5,
+                    cutoff_hz: 700.0,
+                },
+                rate,
+            );
+            let mut samples = vec![0.5, -0.5];
+            cf.process_interleaved(&mut samples, 2);
+            assert!(samples.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    /// NaN 参数不得把 NaN 灌进增益/滤波系数。
+    #[test]
+    fn non_finite_settings_fall_back_to_safe_values() {
+        let mut cf = Crossfeed::default();
+        cf.configure(
+            &CrossfeedSettings {
+                enabled: true,
+                amount: f32::NAN,
+                cutoff_hz: f32::INFINITY,
+            },
+            48_000.0,
+        );
+        let mut samples = vec![1.0, 0.0, 1.0, 0.0];
+        cf.process_interleaved(&mut samples, 2);
+        assert!(samples.iter().all(|s| s.is_finite()), "输出必须有限");
     }
 
     #[test]

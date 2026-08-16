@@ -41,3 +41,6 @@ pnpm-debug.log*
 # Misc
 *.tsbuildinfo
 coverage
+
+# AI 工具本机配置（含本机用户名/绝对路径，换机克隆勿提交；L-9 2026-08-16 审查）
+.claude/settings.local.json

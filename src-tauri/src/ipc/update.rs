@@ -8,7 +8,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::error::{IpcError, IpcResult};
-use super::http_util::{read_json_capped, MAX_EXTERNAL_JSON_BYTES};
+use super::http_util::{guarded_redirect_policy, read_json_capped, MAX_EXTERNAL_JSON_BYTES};
+use super::url_guard::is_safe_github_api_url;
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/aoiasuka/SeraphAudioPlayer/releases/latest";
@@ -38,6 +39,9 @@ pub async fn check_for_update() -> IpcResult<UpdateCheckResult> {
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        // L-3（2026-08-16 审查）：逐跳复验重定向，GitHub API 正常零跳，
+        // 出现 302 也只许留在 api.github.com（F-01 同型防线）
+        .redirect(guarded_redirect_policy(is_safe_github_api_url))
         .build()
         .map_err(|err| IpcError::network(format!("创建网络客户端失败: {err}")))?;
 

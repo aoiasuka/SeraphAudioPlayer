@@ -30,6 +30,14 @@ pub(crate) fn system32_tool(name: &str) -> PathBuf {
 /// 任意文件写入(可覆盖 library-cache.json / cache-settings.json 或用户文档)。
 /// 要求:非空、绝对路径、扩展名在白名单内、父目录已存在且确实是目录。
 ///
+/// L-2(2026-08-16 审查,威胁模型明示):此防线**不限制目标目录**——主窗口
+/// 渲染进程被攻破时,仍可以任意内容覆盖用户可写的任何白名单扩展名文件
+/// (如别的项目的 `.json` 配置)。这是有意的权衡:导出目标本就允许在任意
+/// 用户目录(外接盘/文档/桌面),IPC 层无法区分「dialog 确认过的路径」与
+/// 「渲染进程直构的路径」,而主窗口在本应用威胁模型中即全信任(见 lib.rs
+/// F-03 注释——真正暴露的歌词条窗口摸不到任何文件命令)。若未来引入
+/// dialog 结果 token 机制可进一步收窄,当前接受该残余风险。
+///
 /// 返回补齐扩展名后的目标路径。
 pub(crate) fn validate_export_path(raw: &str, allowed_extensions: &[&str]) -> IpcResult<PathBuf> {
     let trimmed = raw.trim();

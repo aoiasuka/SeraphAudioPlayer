@@ -9,6 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// L-6（2026-08-16 审查）：单频段增益与 preamp 的幅度上限（dB），与前端
+/// `eqSanitize.ts` 的 EQ_GAIN_LIMIT / EQ_PREAMP_LIMIT 同口径。这是 pub API 的
+/// 自卫线——`is_finite` 挡不住 1e30 dB 这类有限极端值。
+pub const MAX_EQ_GAIN_DB: f32 = 24.0;
+
 /// 频段滤波类型。命名与 EqualizerAPO / AutoEq 的 `PK/LSC/HSC/LP/HP` 对齐。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,7 +63,7 @@ impl Default for EqBand {
 }
 
 /// TDF-II biquad 系数（a0 已归一化为 1）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct BiquadCoeffs {
     b0: f32,
     b1: f32,
@@ -84,7 +89,10 @@ impl BiquadCoeffs {
     fn design(band: &EqBand, sample_rate: f32) -> Self {
         let nyquist = sample_rate * 0.5;
         // 坑 3：频率必须严格小于 nyquist，否则 tan/cos 在边界发散产生 NaN。
-        let freq = band.freq.clamp(1.0, nyquist - 1.0).max(1.0);
+        // L-5（2026-08-16 审查）：clamp 上界先兜底到不小于下界——f32::clamp 在
+        // min > max 时 panic，这是 pub API，退化采样率不该炸掉调用方。
+        let freq_hi = (nyquist - 1.0).max(1.0);
+        let freq = band.freq.clamp(1.0, freq_hi).max(1.0);
         if freq >= nyquist {
             return Self::identity();
         }
@@ -93,8 +101,11 @@ impl BiquadCoeffs {
         } else {
             0.707
         };
+        // L-6（2026-08-16 审查）：增益限幅 ±24 dB，与前端 eqSanitize 同口径。
+        // 只查 is_finite 挡不住 1e30 dB 这类有限极端值——10^(g/40) 溢出为 Inf
+        // 后系数进入滤波器，输出 NaN/Inf 直达 DAC（F32 渲染路径 clamp 传播 NaN）。
         let gain_db = if band.gain.is_finite() {
-            band.gain
+            band.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB)
         } else {
             0.0
         };
@@ -163,12 +174,28 @@ impl BiquadCoeffs {
         if a0.abs() < f32::EPSILON {
             return Self::identity();
         }
-        Self {
+        let designed = Self {
             b0: b0 / a0,
             b1: b1 / a0,
             b2: b2 / a0,
             a1: a1 / a0,
             a2: a2 / a0,
+        };
+        // L-6 纵深：任何非有限系数一律回退直通，不让 Inf/NaN 进入滤波状态
+        //（状态被 NaN 污染后即使换回正常系数也会持续输出 NaN）。
+        let finite = [
+            designed.b0,
+            designed.b1,
+            designed.b2,
+            designed.a1,
+            designed.a2,
+        ]
+        .iter()
+        .all(|c| c.is_finite());
+        if finite {
+            designed
+        } else {
+            Self::identity()
         }
     }
 
@@ -259,8 +286,9 @@ impl Equalizer {
         sample_rate: f32,
         channels: usize,
     ) {
+        // L-6：preamp 与频段增益同口径限幅（±24 dB），再算线性增益
         let preamp_db = if preamp_db.is_finite() {
-            preamp_db
+            preamp_db.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB)
         } else {
             0.0
         };
@@ -373,6 +401,46 @@ mod tests {
         eq.process_interleaved(&mut samples, 1);
         let expected = 10.0_f32.powf(-6.0 / 20.0);
         assert!((samples[0] - expected).abs() < 1e-6);
+    }
+
+    /// L-5：退化采样率（nyquist - 1 < 1）不得触发 f32::clamp 的 min>max panic。
+    #[test]
+    fn degenerate_sample_rate_does_not_panic() {
+        for rate in [0.0, 1.0, 2.0, 3.9] {
+            let _ = BiquadCoeffs::design(&peaking(1_000.0, 6.0, 1.0), rate);
+            let mut eq = Equalizer::default();
+            eq.configure(0.0, &[peaking(1_000.0, 6.0, 1.0)], rate, 2);
+            let mut samples = vec![0.5, -0.5];
+            eq.process_interleaved(&mut samples, 2);
+            assert!(samples.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    /// L-6：极端有限增益必须被限幅到 ±24 dB，系数恒为有限值。
+    #[test]
+    fn extreme_gain_is_clamped_to_finite_coeffs() {
+        let coeffs = BiquadCoeffs::design(&peaking(1_000.0, 1.0e30, 1.0), 48_000.0);
+        for c in [coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2] {
+            assert!(c.is_finite(), "系数必须有限，实际 {c}");
+        }
+        // 限幅后与显式 +24 dB 完全一致
+        let reference = BiquadCoeffs::design(&peaking(1_000.0, MAX_EQ_GAIN_DB, 1.0), 48_000.0);
+        assert_eq!(coeffs, reference);
+    }
+
+    /// L-6：preamp 与频段增益同口径限幅。
+    #[test]
+    fn extreme_preamp_is_clamped() {
+        let mut eq = Equalizer::default();
+        eq.configure(1.0e30, &[], 48_000.0, 1);
+        let mut samples = vec![1.0];
+        eq.process_interleaved(&mut samples, 1);
+        let expected = 10.0_f32.powf(MAX_EQ_GAIN_DB / 20.0);
+        assert!(
+            (samples[0] - expected).abs() < 1e-2,
+            "preamp 应被钳到 +24dB（≈{expected}），实际输出 {}",
+            samples[0]
+        );
     }
 
     #[test]

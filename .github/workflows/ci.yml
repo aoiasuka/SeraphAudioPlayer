@@ -39,8 +39,11 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # S-01：pull_request 会执行 PR 内的 workflow 与 lockfile。令牌只读、无
-      # secrets，但 npm 安装脚本仍会在 runner 上执行任意代码——当前依赖树零安装
-      # 脚本，--ignore-scripts 是零成本的加固。
+      # secrets，但 npm 安装脚本仍会在 runner 上执行任意代码，--ignore-scripts
+      # 是零成本的加固。注意（2026-08-16 审查修正）：依赖树并非"零安装脚本"——
+      # esbuild/fsevents 均声明了 install script，只是 esbuild ≥0.17 实际改走
+      # 平台 optionalDependencies 分发、fsevents 是 macOS-only，跳过后构建不受
+      # 影响。未来引入真依赖 install script 的包（如 sharp）时须显式评估。
       - name: Install frontend dependencies
         run: npm ci --ignore-scripts
 

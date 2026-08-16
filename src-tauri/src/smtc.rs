@@ -18,6 +18,7 @@ use seraph_core::{PlayerEvent, PlayerState};
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
@@ -190,7 +191,9 @@ fn update_track_metadata(
         return Ok(());
     };
 
-    let cover_url = cover_to_uri(&track.cover);
+    // L-1：本地封面只信应用自己的 covers 目录（合法值域见 cover_to_uri 注释）
+    let covers_dir = app.path().app_data_dir().ok().map(|dir| dir.join("covers"));
+    let cover_url = cover_to_uri(&track.cover, covers_dir.as_deref());
     controls.set_metadata(MediaMetadata {
         title: Some(&track.title),
         artist: Some(&track.artist),
@@ -219,13 +222,32 @@ fn update_track_metadata(
 /// 进程**去取的，此前 `http://` 与任意 host 一律透传——曲库缓存是磁盘文件、
 /// 可被离线篡改，等于借系统组件做任意出站请求。不合规的网络地址直接不推封面
 /// （返回 None），不影响曲目信息本身的显示。
-fn cover_to_uri(cover: &str) -> Option<String> {
+fn cover_to_uri(cover: &str, covers_dir: Option<&Path>) -> Option<String> {
     let cover = cover.trim();
     if cover.is_empty() {
         return None;
     }
     if cover.starts_with("http://") || cover.starts_with("https://") {
         return crate::ipc::url_guard::is_safe_system_image_url(cover).then(|| cover.to_string());
+    }
+    // L-1（2026-08-16 审查）：本地分支同样要收口。此前任意非 http 字符串都被拼上
+    // file:// 交给 Shell——`\\attacker.com\share\a.jpg` 会让系统组件向攻击者的
+    // SMB 服务器发起出站连接（域环境下伴随 NTLM 质询，认证材料可被离线破解）。
+    // 合法本地取值只有应用 covers 目录内的封面文件（见 is_safe_system_image_url
+    // 注释），据此收口：拒 UNC、拒相对路径，canonicalize 后必须落在 covers 目录内
+    // 且是普通文件。校验通过后仍返回**原始路径**——souvlaki 契约要求裸 Windows
+    // 路径，canonicalize 产物带 \\?\ 前缀，不保证被 GetFileFromPathAsync 接受。
+    if cover.starts_with(r"\\") || cover.starts_with("//") {
+        return None;
+    }
+    let path = Path::new(cover);
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical_dir = covers_dir?.canonicalize().ok()?;
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_dir) || !canonical.is_file() {
+        return None;
     }
     Some(format!("file://{cover}"))
 }
@@ -287,6 +309,16 @@ fn smtc_pause(state: &AppState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::cover_to_uri;
+    use std::path::PathBuf;
+
+    /// 建一个真实存在的 covers 目录 + 封面文件（canonicalize 需要真实路径）。
+    fn temp_covers(tag: &str) -> (PathBuf, PathBuf) {
+        let covers = std::env::temp_dir().join(format!("seraph-smtc-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&covers).expect("create covers dir");
+        let file = covers.join("音乐 库 abc.jpg");
+        std::fs::write(&file, b"jpg").expect("write cover file");
+        (covers, file)
+    }
 
     #[test]
     fn n02_rejects_untrusted_network_cover_urls() {
@@ -299,31 +331,73 @@ mod tests {
             "https://i0.hdslb.com@evil.com/x.jpg",
             "http://127.0.0.1:8080/probe.jpg",
         ] {
-            assert_eq!(cover_to_uri(cover), None, "should reject {cover}");
+            assert_eq!(cover_to_uri(cover, None), None, "should reject {cover}");
         }
     }
 
     #[test]
     fn https_cover_passes_through() {
         assert_eq!(
-            cover_to_uri("https://i0.hdslb.com/x.jpg").as_deref(),
+            cover_to_uri("https://i0.hdslb.com/x.jpg", None).as_deref(),
             Some("https://i0.hdslb.com/x.jpg")
         );
     }
 
     #[test]
     fn empty_cover_is_none() {
-        assert_eq!(cover_to_uri(""), None);
-        assert_eq!(cover_to_uri("  "), None);
+        assert_eq!(cover_to_uri("", None), None);
+        assert_eq!(cover_to_uri("  ", None), None);
     }
 
     /// souvlaki 契约：file:// 前缀之后必须是 GetFileFromPathAsync 能直接
     /// 打开的裸 Windows 路径——不做百分号编码、不换正斜杠、无第三个斜杠。
+    /// L-1 之后：本地封面还必须真实存在于 covers 目录内。
     #[test]
     fn local_path_keeps_raw_windows_path_after_prefix() {
-        let path = r"C:\Users\音乐 库\covers\abc.jpg";
-        let uri = cover_to_uri(path).unwrap();
+        let (covers, file) = temp_covers("raw");
+        let cover = file.to_string_lossy().to_string();
+
+        let uri = cover_to_uri(&cover, Some(&covers)).expect("covers 内真实文件应通过");
         assert!(uri.starts_with("file://"));
-        assert_eq!(uri.trim_start_matches("file://"), path);
+        assert_eq!(uri.trim_start_matches("file://"), cover);
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&covers);
+    }
+
+    /// L-1：UNC / 相对路径 / covers 目录之外的文件一律不得透传——
+    /// `\\attacker.com\share\a.jpg` 会让 Windows Shell 向攻击者 SMB 服务器
+    /// 发起出站连接（NTLM 质询泄露面）。
+    #[test]
+    fn l1_rejects_unc_relative_and_out_of_covers_paths() {
+        let (covers, file) = temp_covers("l1");
+        // covers 之外的真实文件：存在性骗不过目录约束
+        let outside =
+            std::env::temp_dir().join(format!("seraph-smtc-l1-outside-{}.jpg", std::process::id()));
+        std::fs::write(&outside, b"jpg").expect("write outside file");
+
+        for cover in [
+            r"\\attacker.example\share\a.jpg",  // UNC → SMB 出站
+            "//attacker.example/share/a.jpg",   // UNC 正斜杠变体
+            r"covers\a.jpg",                    // 相对路径
+            r"C:\definitely\missing\cover.jpg", // 不存在的文件
+        ] {
+            assert_eq!(
+                cover_to_uri(cover, Some(&covers)),
+                None,
+                "should reject {cover}"
+            );
+        }
+        assert_eq!(
+            cover_to_uri(&outside.to_string_lossy(), Some(&covers)),
+            None,
+            "covers 目录之外的真实文件也必须拒绝"
+        );
+        // covers 目录不可用（app_data_dir 失败）时本地封面一律不推——fail closed
+        assert_eq!(cover_to_uri(&file.to_string_lossy(), None), None);
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&covers);
     }
 }

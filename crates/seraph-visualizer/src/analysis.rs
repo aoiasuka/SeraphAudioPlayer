@@ -438,7 +438,9 @@ impl AnalysisEngine {
         if gated.len() < 2 {
             return None;
         }
-        gated.sort_by(|a, b| a.partial_cmp(b).expect("finite energies"));
+        // total_cmp 而非 partial_cmp().expect：目前 NaN 恰好被上游 `> abs_gate`
+        // 过滤掉，但排序稳健性不该依赖这一巧合（IPC 线程 panic 面，2026-08-16 审查观察项）
+        gated.sort_by(|a, b| a.total_cmp(b));
         let p10 = percentile(&gated, 0.10);
         let p95 = percentile(&gated, 0.95);
         Some(energy_to_lufs(p95) - energy_to_lufs(p10))

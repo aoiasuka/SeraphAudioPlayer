@@ -70,7 +70,7 @@ impl FfmpegDecoder {
             .as_ref()
             .ok_or_else(|| DecoderError::Internal("ffmpeg decoder is not open".into()))?;
 
-        let mut command = Command::new(ffmpeg_command_path());
+        let mut command = Command::new(ffmpeg_command_path()?);
         hide_console_window(&mut command);
         command.arg("-v").arg("error");
         if start_seconds > 0.0 {
@@ -343,7 +343,7 @@ fn ffmpeg_input_arg(path: &Path) -> std::ffi::OsString {
 const FFPROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn probe_with_ffprobe(path: &Path) -> Result<StreamInfo, DecoderError> {
-    let mut command = Command::new(ffprobe_command_path());
+    let mut command = Command::new(ffprobe_command_path()?);
     hide_console_window(&mut command);
     let mut child = command
         .arg("-v")
@@ -520,7 +520,9 @@ where
         let mut stored = EXTRA_TOOL_DIRS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
-            .expect("ffmpeg search dirs mutex poisoned");
+            // 持锁区只有 Vec 操作、无 panic 面；即便中毒也取回数据继续，
+            // 不让「注册搜索目录」这类边缘操作携带 panic 面（2026-08-16 审查观察项）
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dir in dirs {
             let dir = dir.into();
             if !stored.iter().any(|existing| existing == &dir) {
@@ -574,12 +576,26 @@ fn invalidate_tool_cache() {
     }
 }
 
-fn ffmpeg_command_path() -> PathBuf {
-    find_ffmpeg().unwrap_or_else(|| PathBuf::from(tool_exe_name("ffmpeg")))
+/// M-1（2026-08-16 审查）：候选目录全部落空时**必须报错**，不得回退裸名。
+/// `Command::new("ffmpeg.exe")` 走 CreateProcessW 搜索顺序，其中含**当前工作目录**——
+/// 应用经文件关联从「歌曲文件夹」启动时，同目录植入的 ffmpeg.exe 即被执行
+/// （CWE-427，与 F-05 的 icacls/explorer 同型）。find_tool 已扫过 PATH，
+/// 裸名回退唯一多出来的搜索面就是 cwd/System 目录，正是要消除的攻击面。
+fn resolve_tool_or_missing(found: Option<PathBuf>, tool: &str) -> Result<PathBuf, DecoderError> {
+    found.ok_or_else(|| {
+        DecoderError::UnsupportedFormat(format!(
+            "{tool} not found (searched SERAPH_FFMPEG_*, app dirs and PATH); \
+             refusing bare-name fallback"
+        ))
+    })
 }
 
-fn ffprobe_command_path() -> PathBuf {
-    find_ffprobe().unwrap_or_else(|| PathBuf::from(tool_exe_name("ffprobe")))
+fn ffmpeg_command_path() -> Result<PathBuf, DecoderError> {
+    resolve_tool_or_missing(find_ffmpeg(), "ffmpeg")
+}
+
+fn ffprobe_command_path() -> Result<PathBuf, DecoderError> {
+    resolve_tool_or_missing(find_ffprobe(), "ffprobe")
 }
 
 fn find_tool(tool: &str) -> Option<PathBuf> {
@@ -597,7 +613,9 @@ fn tool_candidates(tool: &str) -> Vec<PathBuf> {
     }
 
     if let Some(lock) = EXTRA_TOOL_DIRS.get() {
-        let dirs = lock.lock().expect("ffmpeg search dirs mutex poisoned");
+        let dirs = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         candidates.extend(dirs.iter().map(|dir| dir.join(&exe_name)));
     }
 
@@ -656,6 +674,20 @@ mod tests {
         assert_eq!(arg.to_string_lossy(), "file:-weird.mp3");
         let arg = ffmpeg_input_arg(Path::new("C:/music/track.mp3"));
         assert_eq!(arg.to_string_lossy(), "C:/music/track.mp3");
+    }
+
+    /// M-1：工具缺失必须是明确错误，绝不能落到裸名交给 CreateProcess 隐式搜索
+    /// （其搜索顺序含当前工作目录，构成同名 EXE 种植面）。
+    #[test]
+    fn missing_tool_is_an_error_not_a_bare_name() {
+        let err = resolve_tool_or_missing(None, "ffmpeg").unwrap_err();
+        assert!(matches!(err, DecoderError::UnsupportedFormat(_)));
+
+        let found = PathBuf::from(r"C:\tools\ffmpeg.exe");
+        assert_eq!(
+            resolve_tool_or_missing(Some(found.clone()), "ffmpeg").unwrap(),
+            found
+        );
     }
 
     #[test]
