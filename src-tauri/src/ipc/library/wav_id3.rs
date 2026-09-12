@@ -228,8 +228,10 @@ fn parse_apic_content(content: &[u8]) -> Option<(u8, &[u8])> {
         // UTF-16（带 BOM）/ UTF-16BE：\0\0 终结，按 2 字节步进扫描
         1 | 2 => {
             let end = rest
-                .chunks_exact(2)
-                .position(|pair| pair == [0, 0])
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .position(|pair| *pair == [0, 0])
                 .map(|idx| idx * 2)?;
             &rest[end + 2..]
         }

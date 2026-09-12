@@ -86,7 +86,8 @@ pub(crate) fn decrypt_qrc(bytes: &[u8]) -> Result<String, String> {
 
     let cipher = TdesEde3::new_from_slice(QRC_KEY).map_err(|err| err.to_string())?;
     let mut decrypted = Vec::with_capacity(encrypted.len());
-    for chunk in encrypted.chunks_exact(8) {
+    let (blocks, _remainder) = encrypted.as_chunks::<8>();
+    for chunk in blocks {
         let mut block = *GenericArray::from_slice(chunk);
         cipher.decrypt_block(&mut block);
         decrypted.extend_from_slice(&block);
@@ -504,32 +505,40 @@ pub(crate) fn decode_lyric_bytes(bytes: &[u8]) -> String {
 
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect::<Vec<_>>();
         return String::from_utf16_lossy(&units);
     }
 
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
             .collect::<Vec<_>>();
         return String::from_utf16_lossy(&units);
     }
 
     if looks_like_utf16_le(bytes) {
         let units = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect::<Vec<_>>();
         return String::from_utf16_lossy(&units);
     }
 
     if looks_like_utf16_be(bytes) {
         let units = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
             .collect::<Vec<_>>();
         return String::from_utf16_lossy(&units);
     }
@@ -557,7 +566,9 @@ pub(crate) fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
 
     let pairs = bytes.len() / 2;
     let zero_count = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|pair| pair[zero_offset] == 0)
         .count();
 

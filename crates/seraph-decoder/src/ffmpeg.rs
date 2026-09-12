@@ -468,8 +468,10 @@ fn parse_duration(value: &str) -> Option<f64> {
 
 /// 把 little-endian f32 字节流写入 output buffer，复用调用方的 Vec 避免分配。
 fn bytes_to_f32_into(bytes: &[u8], output: &mut Vec<f32>) {
-    for chunk in bytes.chunks_exact(4) {
-        output.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    // 尾部不足 4 字节的余数与原 chunks_exact(4) 行为一致：直接丢弃。
+    let (chunks, _remainder) = bytes.as_chunks::<4>();
+    for chunk in chunks {
+        output.push(f32::from_le_bytes(*chunk));
     }
 }
 
