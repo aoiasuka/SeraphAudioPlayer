@@ -128,8 +128,16 @@ export interface PersistedPlayerState {
   taskbarLyricsPosition: number;
 }
 
+export interface PlaybackQueuePreview {
+  currentTrackId: string | null;
+  nextTrackId: string | null;
+  shuffleMode: boolean;
+}
+
 export interface PlayerStore {
   playlist: Track[];
+  /** 后端保留的下一首，仅用于运行时预览，不持久化。 */
+  playbackQueuePreview: PlaybackQueuePreview | null;
   currentTrackIndex: number;
   persistedCurrentTrackId: string | null;
   persistedCurrentTime: number;
@@ -254,4 +262,3 @@ export type PlayerStoreSet = (
 ) => void;
 
 export type PlayerStoreGet = () => PlayerStore;
-

@@ -35,7 +35,7 @@ export async function sendPlayCommand(
   startSeconds = 0,
   isStillCurrent?: () => boolean
 ) {
-  await syncPlaybackQueue(get);
+  await syncPlaybackQueue(get, set);
   await applyOutputConfiguration(get, set);
   // 审2-R2：上面两个 await 期间用户可能已切歌/暂停（代际递增），
   // 发送 "play" 前复查播放意图是否仍然有效，过期则丢弃，避免旧续体顶掉新状态。

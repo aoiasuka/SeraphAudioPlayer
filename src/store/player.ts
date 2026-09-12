@@ -160,6 +160,7 @@ export const usePlayerStore = create<PlayerStore>()(
 
       return {
         playlist: [],
+        playbackQueuePreview: null,
         currentTrackIndex: 0,
         persistedCurrentTrackId: null,
         persistedCurrentTime: 0,

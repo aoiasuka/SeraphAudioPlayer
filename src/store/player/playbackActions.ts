@@ -173,7 +173,14 @@ export function createPlaybackActions(
 ): Pick<PlayerStore, "nextTrackPreview" | "playNextPreview" | "togglePlayback" | "nextTrack" | "prevTrack" | "loadTrack" | "seek" | "tick" | "setVolume" | "toggleMute" | "toggleShuffle" | "toggleLoop" | "toggleLike"> {
   return {
   nextTrackPreview: () => {
-    const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
+    const { playlist, currentTrackIndex, recentTrackIds, shuffleMode, playbackQueuePreview } = get();
+    if (isTauriRuntime()) {
+      if (
+        playbackQueuePreview?.currentTrackId !== playlist[currentTrackIndex]?.id ||
+        playbackQueuePreview?.shuffleMode !== shuffleMode
+      ) return null;
+      return playlist.find((track) => track.id === playbackQueuePreview.nextTrackId) ?? null;
+    }
     const next = resolveNextIndex(
       playlist,
       currentTrackIndex,
@@ -183,18 +190,16 @@ export function createPlaybackActions(
     return next >= 0 ? playlist[next] ?? null : null;
   },
 
-  // 中-11：点击 UpNext 卡片时播放“卡片上显示的那一首”（与 nextTrackPreview 同一缓存索引），
-  // 做到所见即所得。此前卡片点击走后端 next_track（后端独立掷随机），shuffle 模式下
-  // 显示 A 却播 B。顺序模式两者本就一致，此改动只影响 shuffle 的一致性。
+  // 卡片与下一首按钮、媒体键和自动续播使用同一份后端预选结果。
   playNextPreview: () => {
-    const { playlist, currentTrackIndex, recentTrackIds, shuffleMode } = get();
-    const index = resolveNextIndex(
-      playlist,
-      currentTrackIndex,
-      shuffleMode,
-      recentTrackIds
-    );
-    if (index < 0 || index >= playlist.length) return;
+    if (isTauriRuntime()) {
+      get().nextTrack();
+      return;
+    }
+    const next = get().nextTrackPreview();
+    if (!next) return;
+    const index = get().playlist.findIndex((track) => track.id === next.id);
+    if (index < 0) return;
     get().loadTrack(index);
   },
 
@@ -257,11 +262,17 @@ export function createPlaybackActions(
 
   nextTrack: () => {
     if (get().playlist.length === 0) return;
+    if (!isTauriRuntime()) {
+      get().playNextPreview();
+      return;
+    }
     // 审2-R6：切歌使上一次 seek 的抑制窗口失效，避免误吞新曲目开头的 Progress 事件
     seekGuard.until = 0;
-    resetNextIndexCache();
-    void syncPlaybackQueue(get)
-      .then(() => sendCommandAsync("next_track"))
+    const epoch = bumpPlayEpoch();
+    void syncPlaybackQueue(get, set)
+      .then(() => {
+        if (epoch === currentPlayEpoch()) return sendCommandAsync("next_track");
+      })
       .catch((err) =>
         reportPlaybackCommandError(get, "Failed to advance to next track", err)
       );
@@ -272,8 +283,11 @@ export function createPlaybackActions(
     // 审2-R6：切歌使上一次 seek 的抑制窗口失效
     seekGuard.until = 0;
     resetNextIndexCache();
-    void syncPlaybackQueue(get)
-      .then(() => sendCommandAsync("prev_track"))
+    const epoch = bumpPlayEpoch();
+    void syncPlaybackQueue(get, set)
+      .then(() => {
+        if (epoch === currentPlayEpoch()) return sendCommandAsync("prev_track");
+      })
       .catch((err) =>
         reportPlaybackCommandError(get, "Failed to return to previous track", err)
       );
@@ -348,7 +362,7 @@ export function createPlaybackActions(
           }
         });
     } else {
-      void syncPlaybackQueue(get).catch((err) => {
+      void syncPlaybackQueue(get, set).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("Failed to sync selected track", err);
       });
@@ -422,7 +436,7 @@ export function createPlaybackActions(
     const next = !get().shuffleMode;
     set({ shuffleMode: next });
     resetNextIndexCache();
-    void syncPlaybackModes(get).catch((err) => {
+    void syncPlaybackModes(get, set).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("Failed to sync shuffle mode", err);
     });
@@ -432,7 +446,7 @@ export function createPlaybackActions(
   toggleLoop: () => {
     const next = !get().loopMode;
     set({ loopMode: next });
-    void syncPlaybackModes(get).catch((err) => {
+    void syncPlaybackModes(get, set).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("Failed to sync loop mode", err);
     });

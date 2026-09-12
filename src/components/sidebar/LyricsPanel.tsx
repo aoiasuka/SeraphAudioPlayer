@@ -58,6 +58,11 @@ export function LyricsPanel() {
   const pinnedTrackIdRef = useRef<string | null>(null);
   // 发现16：用户手动滚动后 3 秒内暂停歌词自动跟随
   const lastUserScrollAtRef = useRef(0);
+  const lastScrollContextRef = useRef<{
+    trackId: string;
+    groups: ReturnType<typeof groupLyricsByTime>;
+    padding: number;
+  } | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isFetchingOnline, setIsFetchingOnline] = useState(false);
   const [isApplyingOnline, setIsApplyingOnline] = useState(false);
@@ -97,26 +102,25 @@ export function LyricsPanel() {
 
   useLayoutEffect(() => {
     const container = containerRef.current;
-    if (activeIdx < 0) return;
-    const active = lineRefs.current[activeIdx];
-    if (!container || !active) return;
-    // L-10: 节流到 200ms，避免连续切换 group 时 smooth-scroll 互相打断
-    const handle = window.setTimeout(() => {
-      // 发现16：用户刚手动滚动过，暂停自动跟随
-      if (Date.now() - lastUserScrollAtRef.current < 3000) return;
-      const top =
-        active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
-      container.scrollTo({
-        top: Math.max(0, top),
-        behavior: "smooth",
-      });
-    }, 200);
-    return () => window.clearTimeout(handle);
-  }, [activeIdx, centerPadding, trackId]);
+    if (!container) return;
+    const previous = lastScrollContextRef.current;
+    const contentChanged = previous?.trackId !== trackId || previous.groups !== lyricGroups;
+    const resized = previous?.padding !== centerPadding;
+    lastScrollContextRef.current = { trackId, groups: lyricGroups, padding: centerPadding };
 
-  useEffect(() => {
-    lineRefs.current = [];
-  }, [trackId]);
+    // 切歌/替换歌词立即定位，不能沿用上一首的滚动位置或手动浏览暂停窗口。
+    if (contentChanged) lastUserScrollAtRef.current = 0;
+    if (!contentChanged && Date.now() - lastUserScrollAtRef.current < 3000) return;
+    // 前奏尚未到第一句时也展示开头，避免停留在上一首末尾的滚动位置。
+    const active = lineRefs.current[Math.max(0, activeIdx)];
+    const top = active
+      ? active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2
+      : 0;
+    container.scrollTo({
+      top: Math.max(0, top),
+      behavior: contentChanged || resized ? "instant" : "smooth",
+    });
+  }, [activeIdx, centerPadding, trackId, lyricGroups]);
 
   // 发现16：监听用户手动滚动（wheel / pointerdown），记录时间戳
   useEffect(() => {

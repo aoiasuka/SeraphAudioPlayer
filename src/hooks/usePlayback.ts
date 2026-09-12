@@ -36,10 +36,9 @@ export function usePlayback() {
             : typeof event.trackId === "string"
               ? event.trackId
               : undefined;
-        // M-10: 事件 trackId 与当前曲目不一致时，先把进度复位到 0，
-        // 避免上一首的尾段 progress 与新曲目的 PlaybackStarted 之间 UI 卡在错误时间。
+        // 切歌后的旧 Progress 必须丢弃，不能把新曲目的进度和歌词重置到开头。
         if (eventTrackId && track?.id && eventTrackId !== track.id) {
-          return state.currentTime > 0 ? { currentTime: 0 } : {};
+          return {};
         }
         // M-7：仅在已知时长(>0)时才钳制，否则透传后端进度，
         // 避免 duration 探测失败(=0)的曲目进度永远停在 0:00。
@@ -51,12 +50,12 @@ export function usePlayback() {
       return;
     }
 
-    if (event.type === "playback_started" || event.type === "playback_resumed") {
+    if (event.type === "playback_resumed") {
       usePlayerStore.setState({ isPlaying: true });
       return;
     }
 
-    if (event.type === "track_changed") {
+    if (event.type === "track_changed" || event.type === "playback_started") {
       // 审2-R6：后端切歌后，上一次 seek 的抑制窗口随之失效，
       // 否则会误吞新曲目开头（与旧 seek 目标差距大）的 Progress 事件。
       seekGuard.until = 0;
@@ -66,13 +65,17 @@ export function usePlayback() {
           : typeof event.trackId === "string"
             ? event.trackId
             : undefined;
-      if (!trackId) return;
-
       usePlayerStore.setState((state) => {
         const index = state.playlist.findIndex((track) => track.id === trackId);
-        if (index < 0) return {};
+        const playing = event.type === "playback_started" ? { isPlaying: true } : {};
+        if (index < 0 || !trackId) return playing;
+        // PlaybackStarted 也带曲目身份：即使遗漏 TrackChanged，歌词仍能跟随起播。
+        if (event.type === "playback_started" && index === state.currentTrackIndex) {
+          return playing;
+        }
         resetNextIndexCache();
         return {
+          ...playing,
           currentTrackIndex: index,
           currentTime: 0,
           recentTrackIds: withRecentTrack(state.recentTrackIds, trackId),
@@ -106,7 +109,7 @@ export function usePlayback() {
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    void syncPlaybackQueue(usePlayerStore.getState).catch((err) => {
+    void syncPlaybackQueue(usePlayerStore.getState, usePlayerStore.setState).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("Failed to sync playback queue", err);
     });

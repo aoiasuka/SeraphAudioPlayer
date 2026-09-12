@@ -66,6 +66,15 @@ struct PlaybackQueue {
     recent_track_ids: Vec<String>,
     shuffle_mode: bool,
     loop_mode: bool,
+    next_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackQueuePreview {
+    pub current_track_id: Option<String>,
+    pub next_track_id: Option<String>,
+    pub shuffle_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,21 +97,26 @@ impl AppState {
         recent_track_ids: Vec<String>,
         shuffle_mode: bool,
         loop_mode: bool,
-    ) {
-        let current_index = clamp_index(current_track_index, tracks.len());
-        *self.playback_queue.write() = PlaybackQueue {
+    ) -> PlaybackQueuePreview {
+        let mut queue = self.playback_queue.write();
+        queue.sync(
             tracks,
-            current_index,
+            current_track_index,
             recent_track_ids,
             shuffle_mode,
             loop_mode,
-        };
+        );
+        queue.preview()
     }
 
-    pub fn set_playback_modes(&self, shuffle_mode: bool, loop_mode: bool) {
+    pub fn set_playback_modes(&self, shuffle_mode: bool, loop_mode: bool) -> PlaybackQueuePreview {
         let mut queue = self.playback_queue.write();
+        if queue.shuffle_mode != shuffle_mode {
+            queue.next_index = None;
+        }
         queue.shuffle_mode = shuffle_mode;
         queue.loop_mode = loop_mode;
+        queue.preview()
     }
 
     pub fn set_current_track(&self, track_id: &str) {
@@ -110,8 +124,7 @@ impl AppState {
         let Some(index) = queue.tracks.iter().position(|track| track.id == track_id) else {
             return;
         };
-        queue.current_index = index;
-        queue.recent_track_ids = with_recent_track(&queue.recent_track_ids, track_id);
+        queue.select_track(index);
     }
 
     pub fn advance_track(&self, direction: TrackAdvance) -> Result<(), String> {
@@ -152,13 +165,7 @@ impl AppState {
             if queue.loop_mode {
                 queue.current_track().cloned()
             } else if queue.tracks.len() > 1 {
-                let index = queue.resolve_next_index();
-                queue.current_index = index;
-                let next = queue.current_track().cloned();
-                if let Some(track) = next.as_ref() {
-                    queue.recent_track_ids = with_recent_track(&queue.recent_track_ids, &track.id);
-                }
-                next
+                queue.advance(TrackAdvance::Next)
             } else {
                 None
             }
@@ -181,15 +188,7 @@ impl AppState {
     ) -> Result<(), String> {
         let next = {
             let mut queue = self.playback_queue.write();
-            let Some(index) = queue.resolve_advance_index(direction) else {
-                return Ok(());
-            };
-            queue.current_index = index;
-            let next = queue.current_track().cloned();
-            if let Some(track) = next.as_ref() {
-                queue.recent_track_ids = with_recent_track(&queue.recent_track_ids, &track.id);
-            }
-            next
+            queue.advance(direction)
         };
 
         let Some(track) = next else {
@@ -225,6 +224,64 @@ impl AppState {
 }
 
 impl PlaybackQueue {
+    fn sync(
+        &mut self,
+        tracks: Vec<PlaybackQueueTrack>,
+        current_track_index: usize,
+        recent_track_ids: Vec<String>,
+        shuffle_mode: bool,
+        loop_mode: bool,
+    ) {
+        let current_index = clamp_index(current_track_index, tracks.len());
+        let recent_track_ids = tracks
+            .get(current_index)
+            .map(|track| with_recent_track(&recent_track_ids, &track.id))
+            .unwrap_or_default();
+        // 重复同步和封面/歌词等元数据更新不能重新随机，否则预览会在切歌前改变。
+        let keep_next = self.current_index == current_index
+            && self.shuffle_mode == shuffle_mode
+            && self.recent_track_ids == recent_track_ids
+            && self
+                .tracks
+                .iter()
+                .map(|track| &track.id)
+                .eq(tracks.iter().map(|track| &track.id));
+        let next_index = if keep_next { self.next_index } else { None };
+        *self = Self {
+            tracks,
+            current_index,
+            recent_track_ids,
+            shuffle_mode,
+            loop_mode,
+            next_index,
+        };
+    }
+
+    fn select_track(&mut self, index: usize) {
+        let recent_track_ids = with_recent_track(&self.recent_track_ids, &self.tracks[index].id);
+        if self.current_index != index || self.recent_track_ids != recent_track_ids {
+            self.next_index = None;
+        }
+        self.current_index = index;
+        self.recent_track_ids = recent_track_ids;
+    }
+
+    fn preview(&mut self) -> PlaybackQueuePreview {
+        let next_index = self.resolve_advance_index(TrackAdvance::Next);
+        PlaybackQueuePreview {
+            current_track_id: self.current_track().map(|track| track.id.clone()),
+            next_track_id: next_index.map(|index| self.tracks[index].id.clone()),
+            shuffle_mode: self.shuffle_mode,
+        }
+    }
+
+    // 自动续播、按钮和系统媒体键都从这里消费同一份预选结果。
+    fn advance(&mut self, direction: TrackAdvance) -> Option<PlaybackQueueTrack> {
+        let index = self.resolve_advance_index(direction)?;
+        self.select_track(index);
+        self.current_track().cloned()
+    }
+
     fn current_track(&self) -> Option<&PlaybackQueueTrack> {
         self.tracks.get(self.current_index)
     }
@@ -234,7 +291,7 @@ impl PlaybackQueue {
             .is_some_and(|track| track.id.as_str() == track_id)
     }
 
-    fn resolve_advance_index(&self, direction: TrackAdvance) -> Option<usize> {
+    fn resolve_advance_index(&mut self, direction: TrackAdvance) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -245,11 +302,17 @@ impl PlaybackQueue {
         })
     }
 
-    fn resolve_next_index(&self) -> usize {
-        if self.shuffle_mode {
-            return self.resolve_shuffle_next_index();
+    fn resolve_next_index(&mut self) -> usize {
+        if let Some(index) = self.next_index {
+            return index;
         }
-        (self.current_index + 1) % self.tracks.len()
+        let index = if self.shuffle_mode {
+            self.resolve_shuffle_next_index()
+        } else {
+            (self.current_index + 1) % self.tracks.len()
+        };
+        self.next_index = Some(index);
+        index
     }
 
     fn resolve_previous_index(&self) -> usize {
@@ -328,4 +391,131 @@ fn pseudo_random_index(len: usize) -> usize {
     state ^= state << 17;
     SHUFFLE_STATE.store(state, Ordering::Relaxed);
     (state % len as u64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracks(ids: &[&str]) -> Vec<PlaybackQueueTrack> {
+        ids.iter()
+            .map(|id| PlaybackQueueTrack {
+                id: (*id).into(),
+                path: format!("C:/Music/{id}.flac"),
+                title: (*id).into(),
+                artist: String::new(),
+                album: String::new(),
+                cover: String::new(),
+                duration: 180,
+            })
+            .collect()
+    }
+
+    fn shuffled_queue() -> PlaybackQueue {
+        let mut queue = PlaybackQueue::default();
+        queue.sync(tracks(&["a", "b", "c", "d"]), 0, vec![], true, false);
+        queue
+    }
+
+    #[test]
+    fn shuffle_preview_is_stable_and_matches_every_advance() {
+        let mut queue = shuffled_queue();
+        for _ in 0..64 {
+            let preview = queue.preview();
+            assert_ne!(preview.current_track_id, preview.next_track_id);
+            for _ in 0..4 {
+                assert_eq!(queue.preview().next_track_id, preview.next_track_id);
+            }
+            let next = queue.advance(TrackAdvance::Next).unwrap();
+            assert_eq!(Some(next.id.clone()), preview.next_track_id);
+            assert_eq!(queue.current_track().unwrap().id, next.id);
+        }
+    }
+
+    #[test]
+    fn resync_and_metadata_updates_preserve_the_reserved_track() {
+        let mut queue = shuffled_queue();
+        let expected = queue.preview().next_track_id;
+        for i in 0..16 {
+            let mut updated = queue.tracks.clone();
+            updated[1].title = format!("Updated title {i}");
+            updated[2].cover = format!("C:/covers/{i}.png");
+            queue.sync(updated, 0, vec!["a".into()], true, false);
+            assert_eq!(queue.preview().next_track_id, expected);
+        }
+        assert_eq!(
+            Some(queue.advance(TrackAdvance::Next).unwrap().id),
+            expected
+        );
+    }
+
+    #[test]
+    fn duplicate_track_events_do_not_change_the_preview() {
+        let mut queue = shuffled_queue();
+        let expected = queue.preview().next_track_id;
+        queue.select_track(0);
+        queue.select_track(0);
+        assert_eq!(queue.preview().next_track_id, expected);
+    }
+
+    #[test]
+    fn shuffle_excludes_current_and_recent_tracks_when_fresh_tracks_exist() {
+        let mut queue = shuffled_queue();
+        queue.sync(
+            queue.tracks.clone(),
+            0,
+            vec!["a".into(), "b".into(), "c".into()],
+            true,
+            false,
+        );
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("d"));
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "d");
+    }
+
+    #[test]
+    fn replacing_or_reordering_a_queue_refreshes_the_preview() {
+        let mut queue = shuffled_queue();
+        queue.preview();
+        queue.sync(tracks(&["a", "e"]), 0, vec![], true, false);
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("e"));
+        queue.sync(tracks(&["e", "a"]), 1, vec![], true, false);
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "e");
+    }
+
+    #[test]
+    fn disabling_shuffle_uses_sequential_order_and_wraps() {
+        let mut queue = shuffled_queue();
+        queue.preview();
+        queue.sync(queue.tracks.clone(), 0, vec![], false, false);
+        for expected in ["b", "c", "d", "a"] {
+            assert_eq!(queue.preview().next_track_id.as_deref(), Some(expected));
+            assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, expected);
+        }
+    }
+
+    #[test]
+    fn previous_in_shuffle_follows_history_and_refreshes_next() {
+        let mut queue = shuffled_queue();
+        queue.advance(TrackAdvance::Next);
+        queue.preview();
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "a");
+        let preview = queue.preview();
+        assert_ne!(preview.next_track_id.as_deref(), Some("a"));
+        assert_eq!(
+            Some(queue.advance(TrackAdvance::Next).unwrap().id),
+            preview.next_track_id
+        );
+    }
+
+    #[test]
+    fn empty_and_single_track_queues_have_valid_previews() {
+        let mut queue = PlaybackQueue::default();
+        assert!(queue.preview().next_track_id.is_none());
+        assert!(queue.advance(TrackAdvance::Next).is_none());
+        queue.sync(tracks(&["only"]), 99, vec![], true, false);
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("only"));
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "only");
+        queue.sync(vec![], 0, vec![], true, false);
+        assert!(queue.preview().next_track_id.is_none());
+    }
 }

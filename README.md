@@ -4,9 +4,13 @@ Premium local HiFi audio player built with Rust, Tauri, and React.
 
 Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器，目标是在 Windows 上提供低延迟、可控、稳定的本地音频播放体验。底层播放、设备与切歌状态由 Rust 后端负责，React 前端只作为 UI 投影层。
 
+Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudioPlayer/releases/latest) 下载，支持 EXE 安装器及中英文 MSI。
+
 ## 核心特性
 
 - **Rust 音频后端**：播放状态、切歌、结束续播、上一首/下一首由 Rust 统一管理，减少前后端状态分叉。
+- **随机播放预览一致**：后端预选并保留下一首，「UP NEXT」、下一首按钮、系统媒体键与自动续播共用同一个选择结果。
+- **歌词跟随切歌**：切歌或替换歌词时立即重新定位；过滤上一首迟到的进度事件，任务栏歌词条在新曲目加载期间停止展示旧歌词。
 - **WASAPI Exclusive**：支持 Windows WASAPI 独占输出，绕过系统混音路径。
 - **多格式解码**：基于 Symphonia / FFmpeg 的多级解码路径，支持常见本地音频与部分流媒体缓存文件。
 - **DSD/高采样率处理**：包含 DSD PCM 转换与重采样处理模块。
@@ -55,10 +59,13 @@ Seraph Audio Player
 前端负责：
 
 - 同步当前队列快照到后端；
+- 展示后端返回的下一首预览，不再独立随机选歌；
 - 发送播放、暂停、上一首、下一首等命令；
 - 监听后端 `TrackChanged`、`PlaybackStarted`、`PlaybackStopped`、`Progress` 等事件并更新 UI。
 
-这样可以避免播放结束时前端自己推算下一首，导致 UI 状态和真实音频后端分叉。
+后端为当前队列保留下一首选择，重复同步队列、更新标题或封面不会重新随机。点击「UP NEXT」、下一首按钮、系统媒体键，以及非单曲循环时的自动续播都会消费这份选择；单曲循环开启时，曲目结束仍重播当前歌曲。前端丢弃过期的预览响应，避免异步同步覆盖新曲目的显示。
+
+歌词按当前曲目及播放时间定位。切歌和替换歌词立即重新定位，前奏尚未到第一句时展示歌词开头；同一曲目内保留平滑跟随及手动滚动后的 3 秒浏览时间。任务栏歌词条按曲目身份接收元数据和进度，迟到的旧歌词或启动快照不会覆盖新曲目。
 
 ## 缓存默认路径
 
@@ -114,7 +121,7 @@ npm audit --audit-level=low
 ### 版本升级
 
 ```bash
-npm run bump 0.4.0
+npm run bump 0.5.10
 ```
 
 一次同步 `package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml` 三处版本号并刷新两个 lock 文件。
@@ -147,6 +154,18 @@ target/release/bundle/msi/
 - `zh-CN` MSI。
 
 ## 版本记录
+
+### v0.5.10
+
+修复切歌后的歌词滞后，以及随机播放时「下一首」预览与实际播放曲目不一致的问题。
+
+- **歌词切换及时定位**：清除上一首遗留的滚动位置和手动浏览暂停状态，取消额外的 200ms 跟随延迟；新歌有前奏或两首歌的当前行索引相同时，也能立即定位。
+- **旧进度不再干扰新歌词**：忽略上一首迟到的进度事件，避免新曲目的时间轴被重置到开头；收到起播事件时也会同步曲目身份。
+- **任务栏歌词按曲目更新**：新曲目元数据加载期间隐藏旧歌词，丢弃过期请求；启动快照只补齐实时事件尚未提供的信息，保留最新的切歌、进度和暂停状态。
+- **随机预览与实际切歌统一**：后端缓存下一首选择，预览卡片、播放按钮、媒体键及自动续播使用同一结果；重复队列同步和元数据更新不会再次随机。
+- **回归覆盖**：新增 19 项前端测试和 8 项 Rust 队列测试，覆盖连续随机切歌、前奏、手动滚动后切歌、迟到事件和异步请求乱序。
+
+详细说明见 [v0.5.10 发布说明](docs/releases/v0.5.10.md)。
 
 ### v0.5.9
 
@@ -503,9 +522,14 @@ target/release/bundle/msi/
 示例：
 
 ```bash
-git tag v0.5.5
-git push origin v0.5.5
+npm run bump 0.5.10
+git add README.md docs/releases/v0.5.10.md package.json package-lock.json Cargo.toml Cargo.lock src src-tauri
+git commit -m "release: v0.5.10 歌词切换与随机播放修复"
+git tag -a v0.5.10 -m "Seraph Audio Player v0.5.10"
+git push origin main v0.5.10
 ```
+
+发布前确认版本号与 tag 一致，并通过类型检查、前后端测试、Clippy 及依赖审计。工作流会生成 Windows x64 EXE 安装器和中英文 MSI；构建成功后可用对应的 `docs/releases/` 发布说明更新 Release 正文。
 
 ## 许可证
 

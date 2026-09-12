@@ -66,7 +66,9 @@ function takeLegacyStoredX(): number | null {
 
 export function TaskbarLyricsBar() {
   const [trackId, setTrackId] = useState<string | null>(null);
-  const [track, setTrack] = useState<BarTrack | null>(null);
+  const [loadedTrack, setTrack] = useState<BarTrack | null>(null);
+  // 新曲目元数据尚在读取时，立即停止展示上一首的封面和歌词。
+  const track = loadedTrack?.id === trackId ? loadedTrack : null;
   const [playing, setPlaying] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [total, setTotal] = useState(0);
@@ -75,6 +77,7 @@ export function TaskbarLyricsBar() {
   const [dark, setDark] = useState(false);
   const trackIdRef = useRef<string | null>(null);
   trackIdRef.current = trackId;
+  const receivedSnapshotFieldsRef = useRef({ track: false, progress: false, playing: false });
   /** 曲目元数据重拉的触发计数:歌词导入后 trackId 不变也要重拉 */
   const [trackRevision, setTrackRevision] = useState(0);
   const moveDebounceRef = useRef<number | null>(null);
@@ -97,11 +100,20 @@ export function TaskbarLyricsBar() {
     void invoke<PlaybackSnapshot>("get_playback_snapshot")
       .then((snapshot) => {
         if (cancelled || !snapshot) return;
-        setTrackId(snapshot.trackId);
-        setPlaying(snapshot.playing);
-        setSeconds(snapshot.seconds);
-        setTotal(snapshot.total);
         setDark(snapshot.darkTaskbar === true);
+        // 只补齐实时事件尚未提供的字段。切歌后拒绝旧快照，但暂停事件
+        // 本身没有曲目/进度，仍需快照补齐这两项，不能整份丢弃。
+        const received = receivedSnapshotFieldsRef.current;
+        if (!received.track) {
+          trackIdRef.current = snapshot.trackId;
+          setTrackId(snapshot.trackId);
+        }
+        if (trackIdRef.current !== snapshot.trackId) return;
+        if (!received.playing) setPlaying(snapshot.playing);
+        if (!received.progress) {
+          setSeconds(snapshot.seconds);
+          setTotal(snapshot.total);
+        }
       })
       .catch(() => undefined);
 
@@ -119,31 +131,44 @@ export function TaskbarLyricsBar() {
       if (disposed) return;
       switch (event.type) {
         case "playback_started":
+          receivedSnapshotFieldsRef.current = { track: true, progress: true, playing: true };
+          trackIdRef.current = event.track_id ?? null;
           setTrackId(event.track_id ?? null);
           setPlaying(true);
           setSeconds(0);
           setTotal(0);
           break;
         case "track_changed":
+          receivedSnapshotFieldsRef.current.track = true;
+          receivedSnapshotFieldsRef.current.progress = true;
+          trackIdRef.current = event.track_id ?? null;
           setTrackId(event.track_id ?? null);
           setSeconds(0);
           setTotal(0);
           break;
         case "playback_resumed":
+          receivedSnapshotFieldsRef.current.playing = true;
           setPlaying(true);
           break;
         case "playback_paused":
+          receivedSnapshotFieldsRef.current.playing = true;
           setPlaying(false);
           break;
         case "playback_stopped":
+          receivedSnapshotFieldsRef.current.playing = true;
+          receivedSnapshotFieldsRef.current.progress = true;
           setPlaying(false);
           setSeconds(0);
           break;
         case "progress":
+          if (event.track_id && trackIdRef.current && event.track_id !== trackIdRef.current) break;
+          receivedSnapshotFieldsRef.current.progress = true;
           setSeconds(event.seconds ?? 0);
           setTotal(event.total ?? 0);
-          // 自愈:错过 TrackChanged(如窗口刚创建)时按 Progress 归位
-          if (event.track_id && event.track_id !== trackIdRef.current) {
+          // 窗口刚创建、尚无当前曲目时按 Progress 初始化；已切歌则拒绝旧进度。
+          if (event.track_id && !trackIdRef.current) {
+            receivedSnapshotFieldsRef.current.track = true;
+            trackIdRef.current = event.track_id;
             setTrackId(event.track_id);
           }
           break;
@@ -381,7 +406,7 @@ export function TaskbarLyricsBar() {
           )}
         >
           {activeLine ? (
-            <TypewriterText text={activeLine} />
+            <TypewriterText key={trackId} text={activeLine} />
           ) : (
             <span className="font-tw text-[10px] font-medium text-ink3">
               {track ? "— 暂无歌词稿 —" : "— 未在播放 —"}
