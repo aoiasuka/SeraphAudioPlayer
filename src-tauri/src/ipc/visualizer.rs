@@ -64,10 +64,11 @@ struct AnalysisHub {
 
 impl AnalysisHub {
     fn new(channels: usize, sample_rate: u32) -> IpcResult<Self> {
-        let sidebar = SimpleVisualizer::new(SIDEBAR_FFT_SIZE, SIDEBAR_BIN_COUNT, channels)
-            .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
+        let sidebar =
+            SimpleVisualizer::new(SIDEBAR_FFT_SIZE, SIDEBAR_BIN_COUNT, channels, sample_rate)
+                .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
         let analysis_fft =
-            SimpleVisualizer::new(ANALYSIS_FFT_SIZE, ANALYSIS_BIN_COUNT, channels)
+            SimpleVisualizer::new(ANALYSIS_FFT_SIZE, ANALYSIS_BIN_COUNT, channels, sample_rate)
                 .map_err(|err| IpcError::from(format!("visualizer init failed: {err}")))?;
         Ok(Self {
             channels,

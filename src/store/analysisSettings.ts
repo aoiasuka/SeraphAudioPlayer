@@ -178,6 +178,10 @@ export const useAnalysisSettingsStore = create<AnalysisSettingsState>()(
       name: "seraph-analysis-settings",
       version: ANALYSIS_SETTINGS_VERSION,
       migrate: migrateAnalysisSettings,
+      merge: (persisted, current) => ({
+        ...current,
+        ...migrateAnalysisSettings(persisted),
+      }),
       partialize: (state): AnalysisSettingsData => ({
         panels: state.panels,
         loudnessTarget: state.loudnessTarget,

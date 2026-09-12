@@ -291,12 +291,7 @@ pub fn toggle_playback(state: &AppState) -> Result<(), String> {
 }
 
 fn smtc_play(state: &AppState) -> Result<(), String> {
-    // 先尝试恢复既有会话；没有已加载文件（如启动后直接按媒体键）则从
-    // 队列当前曲目从头播放。
-    if state.audio.resume().is_ok() {
-        *state.player_state.write() = PlayerState::Playing;
-        return Ok(());
-    }
+    // 引擎按队列当前曲目的路径和 ID 决定恢复或重建，不能盲目恢复旧会话。
     state.play_current_track()
 }
 

@@ -71,11 +71,31 @@ jobs:
       - name: Audit Rust dependencies
         run: cargo audit --ignore RUSTSEC-2024-0429
 
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
       - name: Test Rust workspace
         run: cargo test --workspace
 
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 发布说明与 tag 一起提交，直接用于 Release 正文，避免正文与仓库脱节。
+      - name: Read release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $releaseNotesPath = Join-Path 'docs/releases' ($env:GITHUB_REF_NAME + '.md')
+          if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
+            throw "缺少发布说明：$releaseNotesPath"
+          }
+          $releaseNotes = Get-Content -LiteralPath $releaseNotesPath -Raw
+          if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+            throw "发布说明为空：$releaseNotesPath"
+          }
+          $releaseDelimiter = 'RELEASE_NOTES_' + [guid]::NewGuid().ToString('N')
+          @("body<<$releaseDelimiter", $releaseNotes.TrimEnd(), $releaseDelimiter) |
+            Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
@@ -84,6 +104,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Seraph Audio Player ${{ github.ref_name }}
-          releaseBody: Windows installer build for ${{ github.sha }}.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false

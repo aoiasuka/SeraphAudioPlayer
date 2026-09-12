@@ -348,7 +348,8 @@ impl PlaybackEngine {
         Self {
             event_bus,
             session: None,
-            volume: 0.7,
+            // 前端恢复设置之前保持静音，系统媒体键也不能绕过启动音量同步。
+            volume: 0.0,
             selected_device_id: None,
             driver: OutputDriver::WasapiExclusive,
             spectrum,
@@ -1516,7 +1517,9 @@ fn run_decode_worker(
                         shared
                             .frame_position
                             .store(request.prev_frames, Ordering::Relaxed);
-                        event_bus.publish(PlayerEvent::Error {
+                        event_bus.publish(PlayerEvent::SeekFailed {
+                            track_id: track_id.to_owned(),
+                            seconds: shared.progress_seconds(),
                             message: format!("当前音频流不支持跳转: {err}"),
                         });
                     }
@@ -2239,6 +2242,10 @@ fn seconds_to_frames(seconds: f64, sample_rate: u32) -> u64 {
 fn map_build_stream_error(err: cpal::BuildStreamError) -> BackendError {
     BackendError::DeviceLost(err.to_string())
 }
+
+#[cfg(test)]
+#[path = "engine_regressions.rs"]
+mod regressions;
 
 #[cfg(test)]
 mod tests {

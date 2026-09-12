@@ -236,7 +236,7 @@ export function createPlaybackActions(
         if (get().currentTrack()?.id !== playableTrack.id) return;
         // 审2-R2：把复查回调下沉进 sendPlayCommand，其内部两个 await 之后、
         // 真正发 "play" 之前再核对一次代际与当前曲目。
-        void sendPlayCommand(playableTrack, get, set, get().currentTime, () =>
+        void sendPlayCommand(playableTrack, get, set, () => get().currentTime, () =>
           epoch === currentPlayEpoch() &&
           get().currentTrack()?.id === playableTrack.id
         )
@@ -254,6 +254,7 @@ export function createPlaybackActions(
           });
       })
       .catch((err) => {
+        if (epoch !== currentPlayEpoch() || get().currentTrack()?.id !== track.id) return;
         // eslint-disable-next-line no-console
         console.warn("Failed to prepare streaming track", err);
         get().showNotification(bilibiliImportErrorMessage(err));
@@ -315,8 +316,8 @@ export function createPlaybackActions(
         track,
         (updatedTrack) => {
           set((state) => ({
-            playlist: state.playlist.map((item, itemIndex) =>
-              itemIndex === index ? updatedTrack : item
+            playlist: state.playlist.map((item) =>
+              item.id === track.id ? updatedTrack : item
             ),
           }));
         },
@@ -327,7 +328,7 @@ export function createPlaybackActions(
           if (epoch !== currentPlayEpoch()) return;
           if (get().currentTrack()?.id !== playableTrack.id) return;
           // 审2-R2：复查回调下沉进 sendPlayCommand，内部 await 之后再核对一次
-          void sendPlayCommand(playableTrack, get, set, 0, () =>
+          void sendPlayCommand(playableTrack, get, set, () => get().currentTime, () =>
             epoch === currentPlayEpoch() &&
             get().currentTrack()?.id === playableTrack.id
           )
@@ -349,6 +350,7 @@ export function createPlaybackActions(
             });
         })
         .catch((err) => {
+          if (epoch !== currentPlayEpoch() || get().currentTrack()?.id !== track.id) return;
           // eslint-disable-next-line no-console
           console.warn("Failed to prepare streaming track", err);
           get().showNotification(bilibiliImportErrorMessage(err));

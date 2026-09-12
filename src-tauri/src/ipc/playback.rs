@@ -74,7 +74,7 @@ pub async fn play(
                 )
                 .map_err(|err| err.to_string())?;
         } else {
-            state.audio.resume().map_err(|err| err.to_string())?;
+            return state.play_current_track();
         }
         *state.player_state.write() = PlayerState::Playing;
         Ok(())

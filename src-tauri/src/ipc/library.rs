@@ -20,6 +20,8 @@ mod wav_id3;
 pub use commands::*;
 // playlist_io 复用歌词模块的编码探测链（UTF-16 → UTF-8 → GBK）解码 .m3u
 pub(crate) use lyrics::decode_lyric_bytes;
-pub(crate) use media_library::{mark_tracks_cache_missing_by_paths, merge_tracks_into_cache};
+pub(crate) use media_library::{
+    mark_tracks_cache_missing_by_paths, merge_tracks_into_cache, replace_track_in_cache,
+};
 pub use online_covers::*;
 pub use types::ImportedTrack;

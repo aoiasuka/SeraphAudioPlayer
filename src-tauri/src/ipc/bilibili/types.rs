@@ -75,6 +75,7 @@ pub struct BilibiliImportOptions {
     pub(crate) prefer_flac: Option<bool>,
     pub(crate) prefer_dolby_atmos: Option<bool>,
     pub(crate) remux_with_ffmpeg: Option<bool>,
+    pub(crate) existing_track_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

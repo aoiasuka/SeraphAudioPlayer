@@ -215,6 +215,11 @@ export const usePlayerStore = create<PlayerStore>()(
       storage: createPlayerPersistStorage(),
       skipHydration: true,
       migrate: migratePersistedPlayerState,
+      // 同版本和缺版本的存储不会触发 migrate，所有水合都必须清洗字段。
+      merge: (persisted, current) => ({
+        ...current,
+        ...migratePersistedPlayerState(persisted),
+      }),
       partialize: (state) => ({
         currentTrackIndex: state.currentTrackIndex,
         // 发现1：持久化当前曲目 id；playlist 未加载（为空）时回退到已持久化的 id。

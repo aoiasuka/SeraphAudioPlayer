@@ -3,6 +3,7 @@ use seraph_audio::PlaybackController;
 use seraph_core::{EventBus, PlayerEvent, PlayerState};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -67,6 +68,9 @@ struct PlaybackQueue {
     shuffle_mode: bool,
     loop_mode: bool,
     next_index: Option<usize>,
+    // 随机去重仍用 recent_track_ids；回退/前进使用独立的有序历史与游标。
+    history: Vec<String>,
+    history_cursor: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,13 +135,21 @@ impl AppState {
         self.advance_track_with_start(direction, PlaybackStart::PreserveState)
     }
 
-    /// SMTC 媒体键 Play：无已加载会话（resume 失败）时，从队列当前曲目从头播放。
+    /// 系统入口恢复所选曲目：同一会话保留位置，选曲改变或会话结束则重新加载。
     pub fn play_current_track(&self) -> Result<(), String> {
         let track = self.playback_queue.read().current_track().cloned();
         let Some(track) = track else {
             return Ok(());
         };
-        self.play_track(&track, PlaybackStart::ForcePlaying)
+        let result = self
+            .audio
+            .play_file_at(PathBuf::from(&track.path), track.id.clone(), None);
+        *self.player_state.write() = if result.is_ok() {
+            PlayerState::Playing
+        } else {
+            PlayerState::Stopped
+        };
+        result.map_err(|err| err.to_string())
     }
 
     /// 按 id 查询队列内曲目（SMTC 元数据展示用）。
@@ -203,20 +215,26 @@ impl AppState {
             PlaybackStart::PreserveState => *self.player_state.read() == PlayerState::Playing,
         };
 
+        // 选择先同步给所有窗口。文件打开失败时仍停在明确的失败曲目，下一次
+        // “下一首”可以继续推进，不会被前端旧索引重置回上一首。
+        self.event_bus.publish(PlayerEvent::TrackChanged {
+            track_id: track.id.clone(),
+        });
+        self.event_bus.publish(PlayerEvent::Progress {
+            track_id: track.id.clone(),
+            seconds: 0.0,
+            total: track.duration as f64,
+        });
         if should_play {
-            self.audio
-                .play_file(PathBuf::from(&track.path), track.id.clone(), 0.0)
-                .map_err(|err| err.to_string())?;
-            *self.player_state.write() = PlayerState::Playing;
-        } else {
-            self.event_bus.publish(PlayerEvent::TrackChanged {
-                track_id: track.id.clone(),
-            });
-            self.event_bus.publish(PlayerEvent::Progress {
-                track_id: track.id.clone(),
-                seconds: 0.0,
-                total: 0.0,
-            });
+            let result = self
+                .audio
+                .play_file(PathBuf::from(&track.path), track.id.clone(), 0.0);
+            *self.player_state.write() = if result.is_ok() {
+                PlayerState::Playing
+            } else {
+                PlayerState::Stopped
+            };
+            result.map_err(|err| err.to_string())?;
         }
 
         Ok(())
@@ -254,16 +272,67 @@ impl PlaybackQueue {
             shuffle_mode,
             loop_mode,
             next_index,
+            history: std::mem::take(&mut self.history),
+            history_cursor: self.history_cursor,
         };
+        self.retain_history();
+        if self.history.is_empty() {
+            self.history = self
+                .recent_track_ids
+                .iter()
+                .rev()
+                .filter(|id| self.tracks.iter().any(|track| &track.id == *id))
+                .cloned()
+                .collect();
+            self.history_cursor = self.history.len().saturating_sub(1);
+        }
+        if let Some(id) = self.current_track().map(|track| track.id.clone()) {
+            self.record_history(&id);
+        }
     }
 
     fn select_track(&mut self, index: usize) {
-        let recent_track_ids = with_recent_track(&self.recent_track_ids, &self.tracks[index].id);
+        let id = self.tracks[index].id.clone();
+        let recent_track_ids = with_recent_track(&self.recent_track_ids, &id);
         if self.current_index != index || self.recent_track_ids != recent_track_ids {
             self.next_index = None;
         }
         self.current_index = index;
         self.recent_track_ids = recent_track_ids;
+        self.record_history(&id);
+    }
+
+    fn record_history(&mut self, id: &str) {
+        if self
+            .history
+            .get(self.history_cursor)
+            .is_some_and(|current| current == id)
+        {
+            return;
+        }
+        self.history.truncate(self.history_cursor + 1);
+        self.history.push(id.to_owned());
+        const MAX_HISTORY: usize = 256;
+        if self.history.len() > MAX_HISTORY {
+            self.history.drain(..self.history.len() - MAX_HISTORY);
+        }
+        self.history_cursor = self.history.len() - 1;
+    }
+
+    fn retain_history(&mut self) {
+        let valid_ids: HashSet<_> = self.tracks.iter().map(|track| track.id.as_str()).collect();
+        let cursor = self.history_cursor;
+        let mut index = 0;
+        let mut retained_before_cursor = 0usize;
+        self.history.retain(|id| {
+            let keep = valid_ids.contains(id.as_str());
+            if keep && index <= cursor {
+                retained_before_cursor += 1;
+            }
+            index += 1;
+            keep
+        });
+        self.history_cursor = retained_before_cursor.saturating_sub(1);
     }
 
     fn preview(&mut self) -> PlaybackQueuePreview {
@@ -278,6 +347,15 @@ impl PlaybackQueue {
     // 自动续播、按钮和系统媒体键都从这里消费同一份预选结果。
     fn advance(&mut self, direction: TrackAdvance) -> Option<PlaybackQueueTrack> {
         let index = self.resolve_advance_index(direction)?;
+        if self.shuffle_mode {
+            let cursor = match direction {
+                TrackAdvance::Next => self.history_cursor + 1,
+                TrackAdvance::Previous => self.history_cursor.saturating_sub(1),
+            };
+            if self.history.get(cursor) == Some(&self.tracks[index].id) {
+                self.history_cursor = cursor;
+            }
+        }
         self.select_track(index);
         self.current_track().cloned()
     }
@@ -307,7 +385,10 @@ impl PlaybackQueue {
             return index;
         }
         let index = if self.shuffle_mode {
-            self.resolve_shuffle_next_index()
+            self.history
+                .get(self.history_cursor + 1)
+                .and_then(|id| self.tracks.iter().position(|track| &track.id == id))
+                .unwrap_or_else(|| self.resolve_shuffle_next_index())
         } else {
             (self.current_index + 1) % self.tracks.len()
         };
@@ -320,14 +401,10 @@ impl PlaybackQueue {
             return (self.current_index + self.tracks.len() - 1) % self.tracks.len();
         }
 
-        let current_id = self.current_track().map(|track| track.id.as_str());
-        let previous_recent_id = self
-            .recent_track_ids
-            .iter()
-            .find(|track_id| Some(track_id.as_str()) != current_id);
-        previous_recent_id
-            .and_then(|track_id| self.tracks.iter().position(|track| track.id == *track_id))
-            .unwrap_or_else(|| (self.current_index + self.tracks.len() - 1) % self.tracks.len())
+        self.history
+            .get(self.history_cursor.saturating_sub(1))
+            .and_then(|id| self.tracks.iter().position(|track| &track.id == id))
+            .unwrap_or(self.current_index)
     }
 
     fn resolve_shuffle_next_index(&self) -> usize {
@@ -415,6 +492,76 @@ mod tests {
         let mut queue = PlaybackQueue::default();
         queue.sync(tracks(&["a", "b", "c", "d"]), 0, vec![], true, false);
         queue
+    }
+
+    #[test]
+    fn bug_audit_09_failed_advance_publishes_selection_and_allows_skipping() {
+        let state = AppState::new();
+        let mut items = tracks(&["a", "b", "c"]);
+        let missing =
+            std::env::temp_dir().join(format!("seraph-queue-audit-{}.flac", std::process::id()));
+        assert!(!missing.exists());
+        items[1].path = missing.to_string_lossy().into_owned();
+        state.sync_playback_queue(items, 0, vec![], false, false);
+        *state.player_state.write() = PlayerState::Playing;
+        let rx = state.event_bus.subscribe();
+        assert!(state.handle_playback_ended("a").is_err());
+        let events = rx.try_iter().collect::<Vec<_>>();
+        let frontend = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                PlayerEvent::TrackChanged { track_id }
+                | PlayerEvent::PlaybackStarted { track_id } => Some(track_id.as_str()),
+                _ => None,
+            })
+            .unwrap_or("a");
+        assert_eq!(frontend, "b");
+        assert_eq!(state.current_queue_track().unwrap().id, frontend);
+        assert_eq!(*state.player_state.read(), PlayerState::Stopped);
+        state.advance_track(TrackAdvance::Next).unwrap();
+        assert_eq!(state.current_queue_track().unwrap().id, "c");
+    }
+
+    #[test]
+    fn bug_audit_10_history_goes_back_and_forward_across_frontend_resync() {
+        let mut queue = shuffled_queue();
+        queue.select_track(1);
+        queue.select_track(2);
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "b");
+        queue.sync(
+            queue.tracks.clone(),
+            1,
+            vec!["b".into(), "c".into(), "a".into()],
+            true,
+            false,
+        );
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "a");
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "a");
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("b"));
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "b");
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "c");
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("d"));
+    }
+
+    #[test]
+    fn bug_audit_10_history_survives_deletion_and_branches_after_manual_selection() {
+        let mut queue = shuffled_queue();
+        queue.select_track(1);
+        queue.select_track(2);
+        queue.sync(
+            tracks(&["a", "c", "d"]),
+            1,
+            vec!["c".into(), "b".into(), "a".into()],
+            true,
+            false,
+        );
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "a");
+        assert_eq!(queue.preview().next_track_id.as_deref(), Some("c"));
+        queue.select_track(2);
+        assert_eq!(queue.advance(TrackAdvance::Previous).unwrap().id, "a");
+        assert_eq!(queue.advance(TrackAdvance::Next).unwrap().id, "d");
+        assert_eq!(queue.history, vec!["a", "d"]);
     }
 
     #[test]

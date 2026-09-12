@@ -2,6 +2,7 @@ import { invoke, normalizeIpcError } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 import { sendCommand } from "./commands";
 import { resetNextIndexCache } from "./playbackActions";
+import { bumpPlayEpoch } from "./playEpoch";
 import { normalizePath, streamingSourceInput, trackMergeKey } from "./trackIdentity";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -336,6 +337,8 @@ export function createLibraryActions(
   deleteTrack: async (trackId) => {
     const track = get().playlist.find((item) => item.id === trackId);
     if (!track) return;
+    // 删除意图立即取消挂起的重缓存播放，不等磁盘删除回执后才失效。
+    if (get().currentTrack()?.id === trackId) bumpPlayEpoch();
 
     try {
       await invoke<boolean>("delete_track", {
@@ -349,6 +352,7 @@ export function createLibraryActions(
 
       const deletingCurrentTrack = get().currentTrack()?.id === trackId;
       if (deletingCurrentTrack) {
+        bumpPlayEpoch();
         sendCommand("stop");
       }
       resetNextIndexCache();

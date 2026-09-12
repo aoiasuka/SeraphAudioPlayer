@@ -6,6 +6,39 @@ use serde_json::json;
 use std::fs;
 
 #[test]
+fn bug_audit_03_deleted_track_cannot_be_reinserted_by_recache() {
+    let a = test_imported_track("a", "C:/cache/a.m4a", "A");
+    let b = test_imported_track("b", "C:/cache/b.m4a", "B");
+    let (mut remaining, removed) = remove_cached_track(vec![a.clone(), b], "a", None);
+    assert!(removed);
+    assert!(replace_cached_track(&mut remaining, "a", &a).is_err());
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+}
+
+#[test]
+fn bug_audit_03_recache_preserves_identity_and_checks_source() {
+    let mut existing = test_imported_track("stable-id", "C:/cache/old.m4a", "A");
+    existing.source_id = Some("BV1234567890".into());
+    existing.cache_missing = true;
+    let mut incoming = test_imported_track("new-id", "C:/cache/new.flac", "A");
+    incoming.source_id = existing.source_id.clone();
+    let mut cached = vec![existing];
+    let updated = replace_cached_track(&mut cached, "stable-id", &incoming).unwrap();
+    assert_eq!(updated.id, "stable-id");
+    assert_eq!(updated.path, "C:/cache/new.flac");
+    assert!(!updated.cache_missing);
+    incoming.source_id = Some("BV0987654321".into());
+    assert!(replace_cached_track(&mut cached, "stable-id", &incoming).is_err());
+    assert_eq!(cached[0].source_id.as_deref(), Some("BV1234567890"));
+}
+
+#[test]
 fn parses_artist_and_title_from_filename() {
     let parsed = parse_filename_metadata("01 - 宇多田ヒカル - First Love");
 

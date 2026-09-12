@@ -37,6 +37,34 @@ describe("切歌时的歌词时间轴", () => {
 
   afterEach(cleanup);
 
+  it("跳转失败保留播放态并立即回滚进度", () => {
+    usePlayerStore.setState({ isPlaying: true, currentTime: 40 });
+    renderHook(usePlayback);
+    seekGuard.until = Date.now() + 400;
+    seekGuard.target = 40;
+    emit({ type: "seek_failed", track_id: "a", seconds: 8, message: "不可跳转" });
+    expect(usePlayerStore.getState().isPlaying).toBe(true);
+    expect(usePlayerStore.getState().currentTime).toBe(8);
+    expect(usePlayerStore.getState().notification?.text).toBe("不可跳转");
+    expect(seekGuard.until).toBe(0);
+  });
+
+  it("上一首的跳转失败不会回滚当前曲目", () => {
+    usePlayerStore.setState({ isPlaying: true, currentTrackIndex: 1, currentTime: 12 });
+    renderHook(usePlayback);
+    emit({ type: "seek_failed", track_id: "a", seconds: 8, message: "旧错误" });
+    expect(usePlayerStore.getState().currentTime).toBe(12);
+    expect(usePlayerStore.getState().isPlaying).toBe(true);
+    expect(usePlayerStore.getState().notification).toBeNull();
+  });
+
+  it("致命播放错误仍会停止界面播放态", () => {
+    usePlayerStore.setState({ isPlaying: true });
+    renderHook(usePlayback);
+    emit({ type: "error", message: "解码失败" });
+    expect(usePlayerStore.getState().isPlaying).toBe(false);
+  });
+
   it("切歌立即归零并清除上一首的 seek 保护", () => {
     renderHook(usePlayback);
     seekGuard.until = Date.now() + 400;

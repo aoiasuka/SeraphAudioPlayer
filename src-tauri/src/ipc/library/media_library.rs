@@ -242,6 +242,37 @@ pub(crate) fn merge_tracks_into_cache(
     Ok(imported_tracks_from_cache(&merged, tracks))
 }
 
+/// 重缓存和删除共享曲库锁，校验与落盘不可分开，否则删除后仍可能重新插入。
+pub(crate) fn replace_track_in_cache(
+    app: &AppHandle,
+    track_id: &str,
+    imported: &ImportedTrack,
+) -> Result<ImportedTrack, String> {
+    let _guard = LIBRARY_LOCK.lock();
+    let mut cached = read_cached_tracks_for_update(app)?;
+    let updated = replace_cached_track(&mut cached, track_id, imported)?;
+    write_cached_tracks(app, &cached)?;
+    Ok(updated)
+}
+
+pub(crate) fn replace_cached_track(
+    cached: &mut [ImportedTrack],
+    track_id: &str,
+    imported: &ImportedTrack,
+) -> Result<ImportedTrack, String> {
+    let existing = cached
+        .iter_mut()
+        .find(|track| track.id == track_id)
+        .ok_or_else(|| "曲目已被移除，已取消重新缓存".to_string())?;
+    if import_track_key(existing) != import_track_key(imported) {
+        return Err("重新缓存的曲目来源不匹配".into());
+    }
+    let mut updated = merge_imported_track(existing, imported);
+    updated.id.clone_from(&existing.id);
+    *existing = updated.clone();
+    Ok(updated)
+}
+
 pub(crate) fn mark_tracks_cache_missing_by_paths(
     app: &AppHandle,
     removed_paths: &[PathBuf],

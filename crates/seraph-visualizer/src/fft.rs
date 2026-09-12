@@ -32,6 +32,7 @@ pub struct SimpleVisualizer {
     fft_size: usize,
     bin_count: usize,
     channels: usize,
+    sample_rate: u32,
     started_at: Instant,
     mono_buffer: Mutex<VecDeque<f32>>,
     latest: Mutex<Option<SpectrumFrame>>,
@@ -48,6 +49,7 @@ impl std::fmt::Debug for SimpleVisualizer {
             .field("fft_size", &self.fft_size)
             .field("bin_count", &self.bin_count)
             .field("channels", &self.channels)
+            .field("sample_rate", &self.sample_rate)
             .finish()
     }
 }
@@ -57,8 +59,14 @@ impl SimpleVisualizer {
         fft_size: usize,
         bin_count: usize,
         channels: usize,
+        sample_rate: u32,
     ) -> Result<Self, VisualizerError> {
-        if fft_size == 0 || bin_count == 0 || channels == 0 || bin_count > fft_size / 2 {
+        if fft_size == 0
+            || bin_count == 0
+            || channels == 0
+            || sample_rate == 0
+            || bin_count > fft_size / 2
+        {
             return Err(VisualizerError::InvalidConfig);
         }
 
@@ -72,6 +80,7 @@ impl SimpleVisualizer {
             fft_size,
             bin_count,
             channels,
+            sample_rate,
             started_at: Instant::now(),
             mono_buffer: Mutex::new(VecDeque::with_capacity(fft_size)),
             latest: Mutex::new(None),
@@ -121,7 +130,13 @@ impl Visualizer for SimpleVisualizer {
             .collect();
         self.fft.process(&mut data);
 
-        let bins = spectrum_bins_from_fft(&data, self.bin_count, self.fft_size, self.window_gain);
+        let bins = spectrum_bins_from_fft(
+            &data,
+            self.bin_count,
+            self.fft_size,
+            self.window_gain,
+            self.sample_rate,
+        );
         *self.latest.lock() = Some(SpectrumFrame {
             bins,
             peak_left,
@@ -180,6 +195,7 @@ fn spectrum_bins_from_fft(
     bin_count: usize,
     fft_size: usize,
     window_gain: f32,
+    sample_rate: u32,
 ) -> Vec<f32> {
     let nyquist = fft_size / 2;
     if nyquist == 0 || bin_count == 0 {
@@ -187,21 +203,34 @@ fn spectrum_bins_from_fft(
     }
     // 归一化分母：窗相干增益的一半（≈ fft_size/4）。
     let norm = (window_gain * 0.5).max(1.0);
-    // log 间隔分箱：低频区分辨率高，高频区聚合，符合人耳感受。
-    let min_bin = 1.0_f32; // 跳过 DC
-    let max_bin = nyquist as f32;
-    let log_min = min_bin.ln();
-    let log_max = max_bin.ln();
-    let log_step = (log_max - log_min) / bin_count as f32;
+    // 与前端 binFreq 同一契约：箱中心固定为 20 * 1000^(i/(n-1)) Hz。
+    // FFT 索引必须按实际采样率换算，超出 Nyquist 的频段保持空白。
+    let log_min = 20.0_f32.ln();
+    let log_max = 20_000.0_f32.ln();
+    let log_step = (log_max - log_min) / bin_count.saturating_sub(1).max(1) as f32;
+    let resolution = sample_rate as f32 / fft_size as f32;
+    let nyquist_hz = sample_rate as f32 * 0.5;
     let mut bins = Vec::with_capacity(bin_count);
 
     for b in 0..bin_count {
-        let lo_log = log_min + log_step * b as f32;
-        let hi_log = log_min + log_step * (b + 1) as f32;
-        let lo = lo_log.exp().floor() as usize;
-        let hi = hi_log.exp().ceil() as usize;
-        let lo = lo.max(1).min(nyquist);
-        let hi = hi.max(lo + 1).min(nyquist + 1);
+        let center_log = log_min + log_step * b as f32;
+        let center_hz = center_log.exp();
+        if center_hz > nyquist_hz {
+            bins.push(0.0);
+            continue;
+        }
+        let lo_hz = if b == 0 {
+            20.0
+        } else {
+            (center_log - log_step * 0.5).exp()
+        };
+        let hi_hz = if b + 1 == bin_count {
+            20_000.0
+        } else {
+            (center_log + log_step * 0.5).exp()
+        };
+        let lo = ((lo_hz / resolution).ceil() as usize).max(1);
+        let hi = ((hi_hz.min(nyquist_hz) / resolution).ceil() as usize).min(nyquist + 1);
 
         let mut max_mag = 0.0_f32;
         for c in fft_output.iter().take(hi).skip(lo) {
@@ -209,6 +238,15 @@ fn spectrum_bins_from_fft(
             if mag > max_mag {
                 max_mag = mag;
             }
+        }
+        if lo >= hi {
+            // 低频箱窄于一个 FFT 频点时线性插值，避免出现交替空箱。
+            let position = center_hz / resolution;
+            let left = (position.floor() as usize).min(nyquist);
+            let right = (left + 1).min(nyquist);
+            let fraction = position - left as f32;
+            max_mag =
+                fft_output[left].norm() * (1.0 - fraction) + fft_output[right].norm() * fraction;
         }
         // 归一化到 [0, 1]：除以窗相干增益的一半，再 clamp
         bins.push((max_mag / norm).clamp(0.0, 1.0));
@@ -239,6 +277,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bug_audit_11_known_tones_use_the_same_hz_axis_at_every_rate() {
+        for sample_rate in [44_100, 96_000, 192_000] {
+            for fft_size in [4096, 16_384] {
+                for frequency in [100.0_f32, 1000.0, 10_000.0] {
+                    // 100 Hz 在高采样率的小窗中不足数个周期，另用大窗核对低频。
+                    if frequency == 100.0 && fft_size == 4096 {
+                        continue;
+                    }
+                    let visualizer = SimpleVisualizer::new(fft_size, 96, 1, sample_rate).unwrap();
+                    let samples = (0..fft_size)
+                        .map(|index| {
+                            (2.0 * PI * frequency * index as f32 / sample_rate as f32).sin() * 0.5
+                        })
+                        .collect::<Vec<_>>();
+                    visualizer.push_samples(&samples).unwrap();
+                    let bins = visualizer.latest_frame().unwrap().bins;
+                    let peak = bins
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(b.1))
+                        .unwrap()
+                        .0;
+                    let displayed = 20.0_f32 * 1000.0_f32.powf(peak as f32 / 95.0);
+                    assert!((displayed - frequency).abs() / frequency < 0.1,
+                        "rate={sample_rate}, fft={fft_size}, tone={frequency}, displayed={displayed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bug_audit_11_bins_above_nyquist_are_empty() {
+        let visualizer = SimpleVisualizer::new(4096, 96, 1, 8_000).unwrap();
+        let samples = (0..4096)
+            .map(|i| (2.0 * PI * 1000.0 * i as f32 / 8_000.0).sin())
+            .collect::<Vec<_>>();
+        visualizer.push_samples(&samples).unwrap();
+        for (index, value) in visualizer.latest_frame().unwrap().bins.iter().enumerate() {
+            if 20.0_f32 * 1000.0_f32.powf(index as f32 / 95.0) > 4000.0 {
+                assert_eq!(*value, 0.0);
+            }
+        }
+        assert!(SimpleVisualizer::new(4096, 96, 1, 0).is_err());
+    }
+
+    #[test]
     fn converts_interleaved_samples_to_mono_and_peaks() {
         let (mono, left, right) = interleaved_to_mono(&[0.5, -0.25, -1.0, 0.75], 2);
 
@@ -249,7 +333,7 @@ mod tests {
 
     #[test]
     fn builds_spectrum_frame_after_enough_samples() {
-        let visualizer = SimpleVisualizer::new(16, 4, 1).unwrap();
+        let visualizer = SimpleVisualizer::new(16, 4, 1, 48_000).unwrap();
         let samples: Vec<f32> = (0..16)
             .map(|index| (2.0 * PI * index as f32 / 16.0).sin())
             .collect();
@@ -308,7 +392,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_config() {
-        let err = SimpleVisualizer::new(8, 5, 2).unwrap_err();
+        let err = SimpleVisualizer::new(8, 5, 2, 48_000).unwrap_err();
         assert!(matches!(err, VisualizerError::InvalidConfig));
     }
 }

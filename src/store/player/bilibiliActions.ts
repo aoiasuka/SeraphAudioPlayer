@@ -27,6 +27,7 @@ async function recachePlayableTrack(
       preferFlac: true,
       preferDolbyAtmos: true,
       remuxWithFfmpeg: true,
+      existingTrackId: track.id,
     },
   });
 
@@ -235,6 +236,7 @@ export function createBilibiliActions(
       preferFlac: options?.preferFlac ?? false,
       preferDolbyAtmos: options?.preferDolbyAtmos ?? false,
       remuxWithFfmpeg: options?.remuxWithFfmpeg ?? false,
+      existingTrackId: trackId,
     };
 
     get().showNotification(`正在重新加载: ${track.title}`);

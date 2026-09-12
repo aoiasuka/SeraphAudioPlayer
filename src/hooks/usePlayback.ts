@@ -89,6 +89,18 @@ export function usePlayback() {
       return;
     }
 
+    if (event.type === "seek_failed") {
+      const state = usePlayerStore.getState();
+      const trackId = event.track_id ?? event.trackId;
+      if (trackId !== state.currentTrack()?.id) return;
+      seekGuard.until = 0;
+      if (typeof event.seconds === "number" && Number.isFinite(event.seconds)) {
+        usePlayerStore.setState({ currentTime: Math.max(0, event.seconds) });
+      }
+      state.showNotification(typeof event.message === "string" ? event.message : "无法跳转到指定位置");
+      return;
+    }
+
     if (event.type === "error") {
       const message =
         typeof event.message === "string" ? event.message : "音频播放失败";

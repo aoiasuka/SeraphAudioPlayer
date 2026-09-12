@@ -12,24 +12,12 @@ function isSamePersistedState(
   previous: PersistedPlayerState,
   next: PersistedPlayerState
 ) {
-  return (
-    previous.currentTrackIndex === next.currentTrackIndex &&
-    previous.persistedCurrentTrackId === next.persistedCurrentTrackId &&
-    previous.persistedCurrentTime === next.persistedCurrentTime &&
-    previous.recentTrackIds === next.recentTrackIds &&
-    previous.volume === next.volume &&
-    previous.isMuted === next.isMuted &&
-    previous.previousVolume === next.previousVolume &&
-    previous.shuffleMode === next.shuffleMode &&
-    previous.loopMode === next.loopMode &&
-    previous.liked === next.liked &&
-    previous.userPlaylists === next.userPlaylists &&
-    previous.currentDeviceId === next.currentDeviceId &&
-    previous.driverKind === next.driverKind &&
-    previous.activeView === next.activeView &&
-    previous.smtcEnabled === next.smtcEnabled &&
-    previous.rememberPlayback === next.rememberPlayback
-  );
+  // 直接比较 partialize 的字段集合，新增持久化设置时不会漏掉变更。
+  // previous 来自本地存储，水合清洗前也可能是坏结构。
+  if (!previous || typeof previous !== "object") return false;
+  const keys = Object.keys(next) as (keyof PersistedPlayerState)[];
+  return keys.length === Object.keys(previous).length &&
+    keys.every((key) => Object.is(previous[key], next[key]));
 }
 
 export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerState> {

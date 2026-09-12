@@ -7,43 +7,58 @@ import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackQueue } from "./queueSync";
 import type { BackendDevice, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
-async function applyOutputConfiguration(get: PlayerStoreGet, set: PlayerStoreSet) {
-  const { currentDeviceId, devices, driverKind, volume, isMuted } =
-    get();
-  await sendCommandAsync("set_output_driver", { driver: driverKind });
-  const selectedDevice =
-    devices !== mockDevices
-      ? findDeviceByCurrentId(devices, currentDeviceId)
-      : undefined;
-  if (selectedDevice) {
-    if (selectedDevice.id !== currentDeviceId) {
-      set({ currentDeviceId: selectedDevice.id });
+async function applyOutputConfiguration(
+  get: PlayerStoreGet,
+  set: PlayerStoreSet,
+  isStillCurrent: () => boolean
+) {
+  // 等待期间设备可能被用户改选。仅在一轮配置仍与最新选择一致时允许起播。
+  while (isStillCurrent()) {
+    const { devices, driverKind } = get();
+    let { currentDeviceId } = get();
+    const configurationUnchanged = () =>
+      get().driverKind === driverKind && get().currentDeviceId === currentDeviceId;
+    await sendCommandAsync("set_output_driver", { driver: driverKind });
+    if (!isStillCurrent()) return false;
+    if (!configurationUnchanged()) continue;
+    const selectedDevice =
+      devices !== mockDevices ? findDeviceByCurrentId(devices, currentDeviceId) : undefined;
+    if (selectedDevice) {
+      if (selectedDevice.id !== currentDeviceId) {
+        currentDeviceId = selectedDevice.id;
+        set({ currentDeviceId });
+      }
+      await sendCommandAsync("select_output_device", { deviceId: currentDeviceId });
+      if (!isStillCurrent()) return false;
+      if (!configurationUnchanged()) continue;
     }
-    await sendCommandAsync("select_output_device", {
-      deviceId: selectedDevice.id,
-    });
+    // 音量在下发前读取，不能恢复配置开始时的旧静音状态。
+    const { volume, isMuted } = get();
+    await sendCommandAsync("set_volume", { volume: isMuted ? 0 : volume });
+    if (!isStillCurrent()) return false;
+    if (configurationUnchanged()) return true;
   }
-  // M-4：每次播放前同步音量，避免重启后引擎停在默认 0.7 而 UI 显示其它值，
-  // 造成「UI 显示 20% 实际 70%」的突然大音量。
-  await sendCommandAsync("set_volume", { volume: isMuted ? 0 : volume });
+  return false;
 }
 
 export async function sendPlayCommand(
   track: Track,
   get: PlayerStoreGet,
   set: PlayerStoreSet,
-  startSeconds = 0,
-  isStillCurrent?: () => boolean
+  startSeconds: number | (() => number) = 0,
+  isStillCurrent: () => boolean = () => true
 ) {
+  if (!isStillCurrent()) return;
   await syncPlaybackQueue(get, set);
-  await applyOutputConfiguration(get, set);
+  if (!isStillCurrent()) return;
+  if (!await applyOutputConfiguration(get, set, isStillCurrent)) return;
   // 审2-R2：上面两个 await 期间用户可能已切歌/暂停（代际递增），
   // 发送 "play" 前复查播放意图是否仍然有效，过期则丢弃，避免旧续体顶掉新状态。
-  if (isStillCurrent && !isStillCurrent()) return;
+  if (!isStillCurrent()) return;
   await sendCommandAsync("play", {
     path: track.path,
     trackId: track.id,
-    startSeconds,
+    startSeconds: typeof startSeconds === "function" ? startSeconds() : startSeconds,
   });
 }
 
@@ -82,10 +97,15 @@ export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
 ): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "setTaskbarLyricsPosition" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+  let deviceRequest = 0;
+  let outputRevision = 0;
+  let driverRevision = 0;
   return {
   loadDevices: () => {
-    void invoke<BackendDevice[]>("list_devices")
+    const request = ++deviceRequest;
+    return invoke<BackendDevice[]>("list_devices")
       .then(async (devices) => {
+        if (request !== deviceRequest) return;
         if (!Array.isArray(devices) || devices.length === 0) return;
         const normalized = devices.map(normalizeDevice);
         const currentDeviceId = get().currentDeviceId;
@@ -98,7 +118,13 @@ export function createOutputActions(
           devices: normalized,
           currentDeviceId: selectedDeviceId,
         });
-        await sendCommandAsync("set_output_driver", { driver: get().driverKind });
+        const revision = outputRevision;
+        const driver = get().driverKind;
+        await sendCommandAsync("set_output_driver", { driver });
+        if (
+          revision !== outputRevision || request !== deviceRequest ||
+          get().currentDeviceId !== selectedDeviceId || get().driverKind !== driver
+        ) return;
         await sendCommandAsync("select_output_device", { deviceId: selectedDeviceId });
       })
       .catch((err) => {
@@ -115,6 +141,7 @@ export function createOutputActions(
     }
 
     const device = get().devices.find((item) => item.id === id);
+    outputRevision++;
     sendCommand("select_output_device", { deviceId: id });
     set({ currentDeviceId: id, deviceMenuOpen: false });
     get().showNotification(`输出设备已切换到: ${device?.name ?? id}`);
@@ -126,6 +153,9 @@ export function createOutputActions(
       return;
     }
     if (get().driverKind === k) return;
+    const epoch = bumpPlayEpoch();
+    const revision = ++driverRevision;
+    outputRevision++;
     // M-7 / 前端 M-5：切换 driver 前先停掉正在播的 session，避免后端 same-track 优化路径
     // 残留旧 driver 配置。stop 与 set_output_driver 必须串行（await stop 后再发 driver），
     // 否则 fire-and-forget 下两条命令到后端的顺序不保证，恰好触发想避免的“切换后不切音轨”。
@@ -138,7 +168,10 @@ export function createOutputActions(
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("Failed to stop before driver switch", err);
+        get().showNotification(playbackErrorMessage(err));
+        return;
       }
+      if (revision !== driverRevision || get().driverKind !== k) return;
       try {
         await sendCommandAsync("set_output_driver", { driver: k });
       } catch (err) {
@@ -149,15 +182,15 @@ export function createOutputActions(
       }
 
       // 若刚才在播，driver 切换后自动从头继续播放当前曲目，体验上无感
-      if (wasPlaying) {
+      if (wasPlaying && epoch === currentPlayEpoch() && revision === driverRevision) {
         const track = get().currentTrack();
         if (track) {
-          // 审2-R2：为续播链申请新代际；期间用户切歌/暂停则放弃续播。
-          const epoch = bumpPlayEpoch();
+          // 续播沿用入口代际，迟到流程不能把自己重新标记为最新播放意图。
           const isStillCurrent = () =>
-            epoch === currentPlayEpoch() && get().currentTrack()?.id === track.id;
+            epoch === currentPlayEpoch() && revision === driverRevision &&
+            get().currentTrack()?.id === track.id;
           try {
-            await sendPlayCommand(track, get, set, 0, isStillCurrent);
+            await sendPlayCommand(track, get, set, () => get().currentTime, isStillCurrent);
             // 审2-R2：Tauri 下 isPlaying 改由 playback_started 事件驱动（与发现15一致），
             // 删除乐观置位，避免后端实际起播失败时 UI 卡在播放态；stub 模式无事件，保留置位。
             if (!isTauriRuntime() && isStillCurrent()) set({ isPlaying: true });

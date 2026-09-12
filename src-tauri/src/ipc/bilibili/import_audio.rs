@@ -63,8 +63,14 @@ pub(crate) async fn import_bilibili_audio_inner(
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
     // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
     let app_for_merge = app.clone();
+    let existing_track_id = options.existing_track_id.clone();
     let imported = tauri::async_runtime::spawn_blocking(move || {
-        merge_tracks_into_cache(&app_for_merge, &[track])
+        if let Some(track_id) = existing_track_id {
+            crate::ipc::library::replace_track_in_cache(&app_for_merge, &track_id, &track)
+                .map(|track| vec![track])
+        } else {
+            merge_tracks_into_cache(&app_for_merge, &[track])
+        }
     })
     .await
     .map_err(|err| format!("曲库合并任务异常终止: {err}"))??;

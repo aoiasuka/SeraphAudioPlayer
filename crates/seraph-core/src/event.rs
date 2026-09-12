@@ -36,6 +36,12 @@ pub enum PlayerEvent {
     VolumeChanged {
         volume: f32,
     },
+    /// 跳转失败后会话仍可继续，携带回滚位置而不发布致命 Error。
+    SeekFailed {
+        track_id: TrackId,
+        seconds: f64,
+        message: String,
+    },
     Error {
         message: String,
     },

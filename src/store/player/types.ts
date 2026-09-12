@@ -26,6 +26,8 @@ export interface BilibiliImportOptions {
   preferFlac: boolean;
   preferDolbyAtmos: boolean;
   remuxWithFfmpeg: boolean;
+  /** 重缓存只更新仍存在的曲目，不能把下载期间删除的记录重新插入。 */
+  existingTrackId?: string;
 }
 
 export interface BilibiliImportFailure {
@@ -235,7 +237,7 @@ export interface PlayerStore {
     query?: string
   ) => Promise<OnlineLyricsCandidate[]>;
   applyOnlineLyricsForCurrentTrack: (lyrics: LyricLine[]) => Promise<boolean>;
-  loadDevices: () => void;
+  loadDevices: () => Promise<void>;
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;
   setSmtcEnabled: (enabled: boolean) => void;

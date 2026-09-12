@@ -55,15 +55,16 @@ impl SpectrumTap {
     }
 
     /// 读侧：取出自上次调用以来的新样本（追加到 `out`），返回流元数据。
-    /// 溢出（读得太慢）时自动跳到最近 TAP_CAPACITY 个样本。
+    /// 溢出时跳过已覆盖的数据，并从下一完整音频帧开始读取。
     pub fn drain(&self, out: &mut Vec<f32>) -> TapMeta {
         let mut inner = self.inner.lock();
         let capacity = inner.ring.len() as u64;
-        if inner.write_pos - inner.read_pos > capacity {
-            inner.read_pos = inner.write_pos - capacity;
-        }
-        let (read, write) = (inner.read_pos, inner.write_pos);
-        out.reserve((write - read) as usize);
+        let channels = inner.channels as u64;
+        let oldest = inner.write_pos.saturating_sub(capacity);
+        let read = inner.read_pos.max(oldest).div_ceil(channels) * channels;
+        // 尾部尚未写满的一帧留给下次 drain，不能把半帧交给分析器。
+        let write = inner.write_pos / channels * channels;
+        out.reserve(write.saturating_sub(read) as usize);
         for pos in read..write {
             out.push(inner.ring[(pos % capacity) as usize]);
         }
@@ -82,12 +83,22 @@ pub(crate) struct TapWriter<'a> {
 impl TapWriter<'_> {
     #[inline]
     pub(crate) fn set_channels(&mut self, channels: usize) {
-        self.guard.channels = channels.max(1);
+        let channels = channels.max(1);
+        if self.guard.channels != channels {
+            self.guard.read_pos = 0;
+            self.guard.write_pos = 0;
+            self.guard.channels = channels;
+        }
     }
 
     #[inline]
     pub(crate) fn set_sample_rate(&mut self, sample_rate: u32) {
-        self.guard.sample_rate = sample_rate.max(1);
+        let sample_rate = sample_rate.max(1);
+        if self.guard.sample_rate != sample_rate {
+            self.guard.read_pos = 0;
+            self.guard.write_pos = 0;
+            self.guard.sample_rate = sample_rate;
+        }
     }
 
     #[inline]
@@ -102,6 +113,80 @@ impl TapWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bug_audit_12_repeated_overflows_keep_channel_alignment() {
+        for channels in [1, 2, 6, 8] {
+            let tap = SpectrumTap::new();
+            for _ in 0..3 {
+                {
+                    let mut writer = tap.writer().unwrap();
+                    writer.set_channels(channels);
+                    writer.set_sample_rate(192_000);
+                    for _ in 0..(TAP_CAPACITY / channels + 50) {
+                        for channel in 0..channels {
+                            writer.push(channel as f32 / 10.0);
+                        }
+                    }
+                }
+                let mut samples = Vec::new();
+                let meta = tap.drain(&mut samples);
+                assert_eq!(meta.channels, channels);
+                assert!(!samples.is_empty() && samples.len().is_multiple_of(channels));
+                assert!(samples.len() <= TAP_CAPACITY);
+                for (index, sample) in samples.iter().enumerate() {
+                    assert_eq!(*sample, (index % channels) as f32 / 10.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bug_audit_12_partial_frame_waits_for_remaining_channels() {
+        let tap = SpectrumTap::new();
+        {
+            let mut writer = tap.writer().unwrap();
+            writer.set_channels(6);
+            writer.push(0.0);
+            writer.push(1.0);
+        }
+        let mut samples = Vec::new();
+        tap.drain(&mut samples);
+        assert!(samples.is_empty());
+        {
+            let mut writer = tap.writer().unwrap();
+            for channel in 2..6 {
+                writer.push(channel as f32);
+            }
+        }
+        tap.drain(&mut samples);
+        assert_eq!(samples, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn bug_audit_12_format_change_discards_samples_from_previous_stream() {
+        let tap = SpectrumTap::new();
+        {
+            let mut writer = tap.writer().unwrap();
+            writer.push(0.9);
+            writer.push(0.8);
+            writer.set_channels(6);
+            writer.set_sample_rate(96_000);
+            for channel in 0..6 {
+                writer.push(channel as f32 / 10.0);
+            }
+        }
+        let mut samples = Vec::new();
+        let meta = tap.drain(&mut samples);
+        assert_eq!(
+            meta,
+            TapMeta {
+                channels: 6,
+                sample_rate: 96_000
+            }
+        );
+        assert_eq!(samples, vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5]);
+    }
 
     #[test]
     fn drain_returns_pushed_samples_in_order() {

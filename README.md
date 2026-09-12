@@ -6,10 +6,19 @@ Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器
 
 Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudioPlayer/releases/latest) 下载，支持 EXE 安装器及中英文 MSI。
 
+当前代码版本：**v0.5.11**。本次修复启动静音、重缓存与删除竞态、随机历史回退、配置恢复和声学分析等 12 类问题，详见 [版本说明](docs/releases/v0.5.11.md) 与 [修复验证记录](docs/BUG-FIXES-2026-09-12.md)。
+
+## 安装与开始使用
+
+1. 在 Releases 下载 Windows x64 的 `*_x64-setup.exe`，按安装器提示选择语言并安装；需要 MSI 时可选择 `en-US` 或 `zh-CN` 包。
+2. 启动后导入音频文件或文件夹，在曲目列表中双击播放。
+3. 在输出设备菜单选择声卡或 DAC；音量、静音和任务栏偏好会在重启后恢复。需要独占输出时再选择 WASAPI Exclusive。
+
 ## 核心特性
 
 - **Rust 音频后端**：播放状态、切歌、结束续播、上一首/下一首由 Rust 统一管理，减少前后端状态分叉。
-- **随机播放预览一致**：后端预选并保留下一首，「UP NEXT」、下一首按钮、系统媒体键与自动续播共用同一个选择结果。
+- **随机播放预览与历史一致**：后端预选并保留下一首，「UP NEXT」、下一首按钮、系统媒体键与自动续播共用同一个选择结果；连续“上一首”按实际历史回退，再前进可返回原有历史。
+- **启动音量与静音恢复**：启动立即恢复播放设置，系统媒体播放遵循已保存的音量与静音状态；配置到达前引擎保持静音。
 - **歌词跟随切歌**：切歌或替换歌词时立即重新定位；过滤上一首迟到的进度事件，任务栏歌词条在新曲目加载期间停止展示旧歌词。
 - **WASAPI Exclusive**：支持 Windows WASAPI 独占输出，绕过系统混音路径。
 - **多格式解码**：基于 Symphonia / FFmpeg 的多级解码路径，支持常见本地音频与部分流媒体缓存文件。
@@ -17,7 +26,7 @@ Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudi
 - **参数均衡器（EQ）+ Crossfeed**：侧栏「系统 → EQ 均衡器」提供细粒度参数 EQ（RBJ biquad，峰化/搁架/低高通多类型、逐段频率·增益·Q 可调）、预放大、耳机 crossfeed；内置 10 种曲风预设，支持 AutoEq / EqualizerAPO 预设导入与 JSON/APO 导出、用户预设保存；可选是否对 DSD 生效。DSP 运行在解码线程、播放中热更新、seek 自动重置滤波状态。
 - **系统媒体控件（SMTC）**：键盘/蓝牙媒体键控制播放，系统音量浮窗与锁屏展示曲目标题、艺术家、封面与进度；可在设置 → 系统集成中停用。
 - **任务栏集成**：悬停任务栏图标的缩略图窗口内提供上一首/播放暂停/下一首按钮（图标随任务栏深浅主题自适应），任务栏图标叠加播放进度（暂停转黄色）；可选「任务栏歌词条」——贴在任务栏上的档案纸签浮层，实时单行歌词 + 旋转封面 + 底边进度线，悬停出播控按钮，可拖拽记忆位置，跟随任务栏变化自动吸附、全屏应用与自动隐藏任务栏收起时自动避让、深色任务栏自动切换墨签配色，支持鼠标穿透的「仅显示模式」。均在设置 → 系统集成开关。
-- **实时频谱可视化**：渲染线程实时安全旁路输出样本，FFT log 频段柱状频谱（48 段）随播放展示。
+- **实时频谱可视化**：渲染线程实时安全旁路输出样本，FFT log 频段柱状频谱（48 段）随播放展示；频率坐标按实际采样率换算，与分析页统一为 20 Hz～20 kHz。
 - **声学分析套件**：侧栏「系统 → 声学分析」提供六仪表实时分析页——响度计（EBU R128 / ITU BS.1770-4 语义：M/S/I、LRA、真峰≈、目标偏差标尺）、电平表（PEAK/RMS 分行条表与模拟 VU 表盘双模式，300ms 表针弹道、0 VU = -18 dBFS）、立体声声场仪（极坐标/李萨如散点 + 相关度表）、96 频点对数频谱（样条平滑迹线、峰值保持、悬停游标读数）、频谱瀑布（墨线山脊 / 纸墨热图双模式）、示波器（时间域波形，零交叉触发锁相、L/R 叠加或分离）；面板与显示内容可在「PANELS 面板设置」中自定义并持久化，且支持「LAYOUT 布局」图纸编辑模式——在 12×12 网格上拖拽移动、角部缩放六个仪表，自由定义大小与位置（自动布局仍为默认，隐藏面板自动补位）；全部由播放输出的真实样本驱动，渲染节流 + 离屏增量绘制控制开销。
 - **本地封面识别**：导入时提取音频内嵌封面（按内容哈希本地缓存、同专辑去重），经 Tauri asset 协议在播放条转盘、专辑/艺术家视图中展示；旧曲库首次启动自动补扫，孤儿封面自动清理；无内嵌封面的曲目支持在线匹配（QQ 音乐 / iTunes）。
 - **曲库检索与排序**：曲目列表支持标题/艺术家/专辑检索与多键排序，虚拟列表大曲库流畅滚动。
@@ -29,7 +38,7 @@ Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudi
 - **Bilibili 音频导入与缓存**：支持导入 Bilibili 音频并管理本地缓存。
 - **缓存保护机制**：缓存目录写入 `.seraph-cache` 标记，清理时只处理受管理的缓存文件，降低误删风险。
 - **状态一致性保护**：播放命令会等待 Rust 音频线程返回真实执行结果，再同步给前端 UI。
-- **持久化迁移**：前端播放偏好使用版本化持久化状态，旧字段会在启动时自动迁移到当前结构。
+- **持久化迁移与校验**：前端播放偏好使用版本化持久化状态，旧字段在启动时自动迁移；同版本配置也会校验字段，避免损坏的页面、音量或分析面板设置进入界面。
 - **收窄 Tauri 权限**：桌面壳只开启窗口控制、事件监听、拖放和打开/保存文件对话框所需权限。
 - **中英文 Windows 安装包**：Tauri 打包配置会生成英文/中文 MSI，并为 NSIS EXE 安装器启用语言选择。
 
@@ -65,6 +74,10 @@ Seraph Audio Player
 
 后端为当前队列保留下一首选择，重复同步队列、更新标题或封面不会重新随机。点击「UP NEXT」、下一首按钮、系统媒体键，以及非单曲循环时的自动续播都会消费这份选择；单曲循环开启时，曲目结束仍重播当前歌曲。前端丢弃过期的预览响应，避免异步同步覆盖新曲目的显示。
 
+随机播放另存最多 256 条历史记录。连续后退会移动历史游标，前进优先返回已有历史；删除曲目会清理对应记录，手动改选则从当前位置建立新分支。
+
+切换设备、驱动或重新缓存期间，以最新的选曲和定位为准，旧响应不能恢复过期的曲目或位置。系统媒体播放会核对当前选中曲目与暂停会话，避免界面选中 B 却恢复 A。可恢复的定位失败会回滚进度并提示；下一首文件打开失败时保留失败曲目的选择并停止，便于继续跳过或修复文件。
+
 歌词按当前曲目及播放时间定位。切歌和替换歌词立即重新定位，前奏尚未到第一句时展示歌词开头；同一曲目内保留平滑跟随及手动滚动后的 3 秒浏览时间。任务栏歌词条按曲目身份接收元数据和进度，迟到的旧歌词或启动快照不会覆盖新曲目。
 
 ## 缓存默认路径
@@ -91,7 +104,7 @@ Seraph Audio Player
 ### 安装依赖
 
 ```bash
-npm install
+npm ci --ignore-scripts
 ```
 
 ### 前端开发模式
@@ -111,17 +124,21 @@ npm run tauri:dev
 ```bash
 npm run typecheck
 npm test
+cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 npm audit --audit-level=low
+cargo audit --ignore RUSTSEC-2024-0429
 ```
 
-这些检查也会在 GitHub Release 工作流中作为发布门禁执行。
+Rust 审计需先安装 `cargo-audit`，并在仓库根目录执行。既有的 `glib` 例外 `RUSTSEC-2024-0429` 属于 Windows 产物不包含的 Linux GTK 依赖，原因及回收条件见 CI 工作流注释；新公告仍须处理。
+
+当前自动化回归为前端 **187 项**、Rust **268 项**，合计 **455 项**。测试范围及实体设备验证边界见 [修复验证记录](docs/BUG-FIXES-2026-09-12.md)。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
 
 ### 版本升级
 
 ```bash
-npm run bump 0.5.10
+npm run bump 0.5.11
 ```
 
 一次同步 `package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml` 三处版本号并刷新两个 lock 文件。
@@ -143,6 +160,7 @@ npm run tauri -- build --bundles nsis,msi
 产物默认位于：
 
 ```text
+target/release/seraph-audio-player.exe
 target/release/bundle/nsis/
 target/release/bundle/msi/
 ```
@@ -155,6 +173,19 @@ target/release/bundle/msi/
 
 ## 版本记录
 
+### v0.5.11
+
+修复深度筛查发现的 12 类问题，覆盖配置恢复、播放请求竞态、系统媒体续播、随机历史和声学分析。
+
+- **启动与配置恢复**：恢复静音后系统播放不再使用默认音量；5 项任务栏设置可独立持久化，同版本坏配置也会清洗。
+- **异步请求遵循最新操作**：删除正在重缓存的曲目后，迟到结果不会覆盖其他曲目或重新入库；旧设备枚举和切驱动续播不再覆盖新选择及定位。
+- **播放状态保持一致**：暂停 A 后选中 B，系统播放会加载 B；可恢复的定位失败回滚进度并保留播放态，下一首打开失败后前后端仍指向同一曲目。
+- **随机历史可连续回退**：独立历史游标支持后退、前进、删除记录及手动改选分支。
+- **分析数据更准确**：FFT 坐标按实际采样率换算；多声道采样溢出后保持完整帧，切换采样格式时清空旧数据。
+- **回归覆盖**：新增 18 项前端和 13 项 Rust 测试，前端 169 → 187、Rust 255 → 268，共 455 项。
+
+详细说明见 [v0.5.11 发布说明](docs/releases/v0.5.11.md)，触发条件与修复证据见 [BUG 审查报告](docs/BUG-AUDIT-2026-09-12.md)。
+
 ### v0.5.10
 
 修复切歌后的歌词滞后，以及随机播放时「下一首」预览与实际播放曲目不一致的问题。
@@ -165,7 +196,7 @@ target/release/bundle/msi/
 - **随机预览与实际切歌统一**：后端缓存下一首选择，预览卡片、播放按钮、媒体键及自动续播使用同一结果；重复队列同步和元数据更新不会再次随机。
 - **回归覆盖**：新增 19 项前端测试和 8 项 Rust 队列测试，覆盖连续随机切歌、前奏、手动滚动后切歌、迟到事件和异步请求乱序。
 
-详细说明见 [v0.5.10 发布说明](docs/releases/v0.5.10.md)。
+详细说明见 [v0.5.10 发布说明](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.5.10)。
 
 ### v0.5.9
 
@@ -519,17 +550,19 @@ target/release/bundle/msi/
 
 仓库包含 `.github/workflows/release.yml`。推送 `v*` tag 时会触发 Windows release 构建，并发布安装包到 GitHub Release。
 
-示例：
+以下以从 0.5.10 升级到 0.5.11 为例；版本已同步时无需重复执行 `bump`：
 
 ```bash
-npm run bump 0.5.10
-git add README.md docs/releases/v0.5.10.md package.json package-lock.json Cargo.toml Cargo.lock src src-tauri
-git commit -m "release: v0.5.10 歌词切换与随机播放修复"
-git tag -a v0.5.10 -m "Seraph Audio Player v0.5.10"
-git push origin main v0.5.10
+npm run bump 0.5.11
+git add README.md docs/releases/v0.5.11.md docs/BUG-AUDIT-2026-09-12.md docs/BUG-FIXES-2026-09-12.md docs/bug-audit-2026-09-12 package.json package-lock.json Cargo.toml Cargo.lock src src-tauri crates .github/workflows/release.yml
+git commit -m "release: v0.5.11 播放状态与声学分析修复"
+git tag -a v0.5.11 -m "Seraph Audio Player v0.5.11"
+git push origin main v0.5.11
 ```
 
-发布前确认版本号与 tag 一致，并通过类型检查、前后端测试、Clippy 及依赖审计。工作流会生成 Windows x64 EXE 安装器和中英文 MSI；构建成功后可用对应的 `docs/releases/` 发布说明更新 Release 正文。
+发布前先执行 `rustup update stable`，确认本地工具链与 CI 一致，再完成格式检查、类型检查、前后端测试、Clippy、当天的两道在线依赖审计及本地安装包构建。确认版本号与 tag 一致后，仅推送本次明确指定的 tag。
+
+发布工作流会读取 `docs/releases/<tag>.md` 作为 GitHub Release 正文，生成 Windows x64 EXE 安装器和中英文 MSI 并上传。说明文件缺失或任一门禁失败都会中止发布。
 
 ## 许可证
 
