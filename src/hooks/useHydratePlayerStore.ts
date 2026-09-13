@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { runWhenIdle } from "@/lib/startup";
-import { invoke, isTauriRuntime } from "@/lib/tauri";
+import { invoke, isTauriRuntime, listen } from "@/lib/tauri";
 import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
 import { hydrationGate } from "@/store/player/persistStorage";
@@ -9,6 +9,14 @@ export function useHydratePlayerStore() {
   useEffect(() => {
     let cancelled = false;
     let cancelLibraryLoad: (() => void) | undefined;
+    const unlisteners: (() => void)[] = [];
+    const libraryEventsReady = isTauriRuntime() ? Promise.all([
+      listen("seraph://library-updated", () => { void usePlayerStore.getState().loadBackendLibrary(); }),
+      listen<string>("seraph://library-import-warning", (message) => usePlayerStore.getState().showNotification(message)),
+    ].map((subscription) => subscription.then((unlisten) => {
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    }).catch((error) => { console.warn("曲库事件监听失败", error); }))) : Promise.resolve();
     // 播放配置立即水合；只把曲库扫描留到空闲时，避免首个点击使用默认音量。
     // 审2-R1：必须在 rehydrate 之前打开写门闩，version 迁移触发的回写才不会被丢弃
     hydrationGate.ready = true;
@@ -27,6 +35,8 @@ export function useHydratePlayerStore() {
       if (cancelled) return;
       restored.normalizeLibrary();
       await restored.loadDevices();
+      if (cancelled) return;
+      await libraryEventsReady;
       if (cancelled) return;
       cancelLibraryLoad = runWhenIdle(() => {
         void usePlayerStore.getState().loadBackendLibrary();
@@ -88,6 +98,7 @@ export function useHydratePlayerStore() {
     return () => {
       cancelled = true;
       cancelLibraryLoad?.();
+      unlisteners.forEach((unlisten) => unlisten());
     };
   }, []);
 }

@@ -137,6 +137,7 @@ pub struct BilibiliBatchImportResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BilibiliBatchProgress {
+    pub(crate) task_id: String,
     pub(crate) current: usize,
     pub(crate) total: usize,
     pub(crate) title: String,

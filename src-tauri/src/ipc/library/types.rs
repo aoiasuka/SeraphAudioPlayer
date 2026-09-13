@@ -9,7 +9,7 @@ pub struct OutputDeviceInfo {
     pub legacy_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedTrack {
     pub id: String,
@@ -49,7 +49,7 @@ pub struct DeleteTrackRequest {
     pub source_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
     pub time: f64,
     pub text: String,

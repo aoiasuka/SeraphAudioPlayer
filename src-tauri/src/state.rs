@@ -3,7 +3,7 @@ use seraph_audio::PlaybackController;
 use seraph_core::{EventBus, PlayerEvent, PlayerState};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -22,13 +22,19 @@ pub struct AppState {
     pub player_state: Arc<RwLock<PlayerState>>,
     playback_queue: Arc<RwLock<PlaybackQueue>>,
     pub audio: PlaybackController,
+    pub visualizer: Arc<crate::visualizer_service::VisualizerService>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let event_bus = EventBus::new();
+        let audio = PlaybackController::new(event_bus.clone());
+        let visualizer = Arc::new(crate::visualizer_service::VisualizerService::new(
+            audio.spectrum_tap(),
+        ));
         Self {
-            audio: PlaybackController::new(event_bus.clone()),
+            audio,
+            visualizer,
             event_bus,
             player_state: Arc::new(RwLock::new(PlayerState::Stopped)),
             playback_queue: Arc::new(RwLock::new(PlaybackQueue::default())),
@@ -63,6 +69,8 @@ pub struct PlaybackQueueTrack {
 #[derive(Debug, Clone, Default)]
 struct PlaybackQueue {
     tracks: Vec<PlaybackQueueTrack>,
+    index_by_id: HashMap<String, usize>,
+    sync_token: Option<QueueSyncToken>,
     current_index: usize,
     recent_track_ids: Vec<String>,
     shuffle_mode: bool,
@@ -71,6 +79,14 @@ struct PlaybackQueue {
     // 随机去重仍用 recent_track_ids；回退/前进使用独立的有序历史与游标。
     history: Vec<String>,
     history_cursor: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSyncToken {
+    pub client_id: String,
+    pub revision: String,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +129,35 @@ impl AppState {
         queue.preview()
     }
 
+    pub fn update_playback_queue(
+        &self,
+        tracks: Option<Vec<PlaybackQueueTrack>>,
+        current_track_index: usize,
+        recent_track_ids: Vec<String>,
+        shuffle_mode: bool,
+        loop_mode: bool,
+        sync: Option<QueueSyncToken>,
+    ) -> Result<PlaybackQueuePreview, String> {
+        if let Some(sync) = sync {
+            self.playback_queue.write().sync_update(
+                tracks,
+                current_track_index,
+                recent_track_ids,
+                shuffle_mode,
+                loop_mode,
+                sync,
+            )
+        } else {
+            Ok(self.sync_playback_queue(
+                tracks.ok_or("queue_revision_mismatch")?,
+                current_track_index,
+                recent_track_ids,
+                shuffle_mode,
+                loop_mode,
+            ))
+        }
+    }
+
     pub fn set_playback_modes(&self, shuffle_mode: bool, loop_mode: bool) -> PlaybackQueuePreview {
         let mut queue = self.playback_queue.write();
         if queue.shuffle_mode != shuffle_mode {
@@ -125,7 +170,7 @@ impl AppState {
 
     pub fn set_current_track(&self, track_id: &str) {
         let mut queue = self.playback_queue.write();
-        let Some(index) = queue.tracks.iter().position(|track| track.id == track_id) else {
+        let Some(&index) = queue.index_by_id.get(track_id) else {
             return;
         };
         queue.select_track(index);
@@ -154,12 +199,11 @@ impl AppState {
 
     /// 按 id 查询队列内曲目（SMTC 元数据展示用）。
     pub fn queue_track_by_id(&self, track_id: &str) -> Option<PlaybackQueueTrack> {
-        self.playback_queue
-            .read()
-            .tracks
-            .iter()
-            .find(|track| track.id == track_id)
-            .cloned()
+        let queue = self.playback_queue.read();
+        queue
+            .index_by_id
+            .get(track_id)
+            .map(|index| queue.tracks[*index].clone())
     }
 
     /// 队列当前曲目（任务栏歌词条播放快照用）。
@@ -242,6 +286,46 @@ impl AppState {
 }
 
 impl PlaybackQueue {
+    fn sync_update(
+        &mut self,
+        tracks: Option<Vec<PlaybackQueueTrack>>,
+        current_track_index: usize,
+        recent_track_ids: Vec<String>,
+        shuffle_mode: bool,
+        loop_mode: bool,
+        sync: QueueSyncToken,
+    ) -> Result<PlaybackQueuePreview, String> {
+        if self.sync_token.as_ref().is_some_and(|previous| {
+            previous.client_id == sync.client_id && previous.sequence >= sync.sequence
+        }) {
+            return Ok(self.preview());
+        }
+        if let Some(tracks) = tracks {
+            self.sync(
+                tracks,
+                current_track_index,
+                recent_track_ids,
+                shuffle_mode,
+                loop_mode,
+            );
+        } else {
+            if !self.sync_token.as_ref().is_some_and(|previous| {
+                previous.client_id == sync.client_id && previous.revision == sync.revision
+            }) {
+                return Err("queue_revision_mismatch".into());
+            }
+            self.sync_selection(
+                current_track_index,
+                recent_track_ids,
+                shuffle_mode,
+                loop_mode,
+                false,
+            );
+        }
+        self.sync_token = Some(sync);
+        Ok(self.preview())
+    }
+
     fn sync(
         &mut self,
         tracks: Vec<PlaybackQueueTrack>,
@@ -250,38 +334,63 @@ impl PlaybackQueue {
         shuffle_mode: bool,
         loop_mode: bool,
     ) {
-        let current_index = clamp_index(current_track_index, tracks.len());
-        let recent_track_ids = tracks
+        let changed = !self
+            .tracks
+            .iter()
+            .map(|track| &track.id)
+            .eq(tracks.iter().map(|track| &track.id));
+        if changed {
+            self.index_by_id.clear();
+            for (index, track) in tracks.iter().enumerate() {
+                self.index_by_id.entry(track.id.clone()).or_insert(index);
+            }
+        }
+        self.tracks = tracks;
+        self.sync_token = None;
+        if changed {
+            self.retain_history();
+        }
+        self.sync_selection(
+            current_track_index,
+            recent_track_ids,
+            shuffle_mode,
+            loop_mode,
+            changed,
+        );
+    }
+
+    fn sync_selection(
+        &mut self,
+        current_track_index: usize,
+        recent_track_ids: Vec<String>,
+        shuffle_mode: bool,
+        loop_mode: bool,
+        changed: bool,
+    ) {
+        let current_index = clamp_index(current_track_index, self.tracks.len());
+        let recent_track_ids = self
+            .tracks
             .get(current_index)
             .map(|track| with_recent_track(&recent_track_ids, &track.id))
             .unwrap_or_default();
         // 重复同步和封面/歌词等元数据更新不能重新随机，否则预览会在切歌前改变。
-        let keep_next = self.current_index == current_index
+        let keep_next = !changed
+            && self.current_index == current_index
             && self.shuffle_mode == shuffle_mode
-            && self.recent_track_ids == recent_track_ids
-            && self
-                .tracks
-                .iter()
-                .map(|track| &track.id)
-                .eq(tracks.iter().map(|track| &track.id));
-        let next_index = if keep_next { self.next_index } else { None };
-        *self = Self {
-            tracks,
-            current_index,
-            recent_track_ids,
-            shuffle_mode,
-            loop_mode,
-            next_index,
-            history: std::mem::take(&mut self.history),
-            history_cursor: self.history_cursor,
-        };
-        self.retain_history();
+            && self.recent_track_ids == recent_track_ids;
+        if !keep_next {
+            self.next_index = None;
+        }
+        self.current_index = current_index;
+        self.recent_track_ids = recent_track_ids;
+        self.shuffle_mode = shuffle_mode;
+        self.loop_mode = loop_mode;
         if self.history.is_empty() {
             self.history = self
                 .recent_track_ids
                 .iter()
                 .rev()
-                .filter(|id| self.tracks.iter().any(|track| &track.id == *id))
+                .filter(|id| self.index_by_id.contains_key(*id))
                 .cloned()
                 .collect();
             self.history_cursor = self.history.len().saturating_sub(1);
@@ -320,12 +429,12 @@ impl PlaybackQueue {
     }
 
     fn retain_history(&mut self) {
-        let valid_ids: HashSet<_> = self.tracks.iter().map(|track| track.id.as_str()).collect();
+        let valid_ids = &self.index_by_id;
         let cursor = self.history_cursor;
         let mut index = 0;
         let mut retained_before_cursor = 0usize;
         self.history.retain(|id| {
-            let keep = valid_ids.contains(id.as_str());
+            let keep = valid_ids.contains_key(id.as_str());
             if keep && index <= cursor {
                 retained_before_cursor += 1;
             }
@@ -387,7 +496,7 @@ impl PlaybackQueue {
         let index = if self.shuffle_mode {
             self.history
                 .get(self.history_cursor + 1)
-                .and_then(|id| self.tracks.iter().position(|track| &track.id == id))
+                .and_then(|id| self.index_by_id.get(id).copied())
                 .unwrap_or_else(|| self.resolve_shuffle_next_index())
         } else {
             (self.current_index + 1) % self.tracks.len()
@@ -403,7 +512,7 @@ impl PlaybackQueue {
 
         self.history
             .get(self.history_cursor.saturating_sub(1))
-            .and_then(|id| self.tracks.iter().position(|track| &track.id == id))
+            .and_then(|id| self.index_by_id.get(id).copied())
             .unwrap_or(self.current_index)
     }
 
@@ -412,17 +521,21 @@ impl PlaybackQueue {
             return 0;
         }
 
-        let candidates = (0..self.tracks.len()).filter(|index| *index != self.current_index);
-        let fresh: Vec<usize> = candidates
+        let recent: HashSet<&str> = self.recent_track_ids.iter().map(String::as_str).collect();
+        let mut candidates = (0..self.tracks.len()).filter(|index| *index != self.current_index);
+        let mut fresh = candidates
             .clone()
-            .filter(|index| !self.recent_track_ids.contains(&self.tracks[*index].id))
-            .collect();
-        let pool: Vec<usize> = if fresh.is_empty() {
-            candidates.collect()
-        } else {
+            .filter(|index| !recent.contains(self.tracks[*index].id.as_str()));
+        let count = fresh.clone().count();
+        if count > 0 {
             fresh
-        };
-        pool[pseudo_random_index(pool.len())]
+                .nth(pseudo_random_index(count))
+                .unwrap_or(self.current_index)
+        } else {
+            candidates
+                .nth(pseudo_random_index(self.tracks.len() - 1))
+                .unwrap_or(self.current_index)
+        }
     }
 }
 
@@ -492,6 +605,103 @@ mod tests {
         let mut queue = PlaybackQueue::default();
         queue.sync(tracks(&["a", "b", "c", "d"]), 0, vec![], true, false);
         queue
+    }
+
+    fn sync_token(revision: &str, sequence: u64) -> QueueSyncToken {
+        QueueSyncToken {
+            client_id: "main".into(),
+            revision: revision.into(),
+            sequence,
+        }
+    }
+
+    #[test]
+    fn queue_delta_preserves_tracks_and_reserved_shuffle_preview() {
+        let mut queue = PlaybackQueue::default();
+        let first = queue
+            .sync_update(
+                Some(tracks(&["a", "b", "c"])),
+                0,
+                vec![],
+                true,
+                false,
+                sync_token("v1", 1),
+            )
+            .unwrap();
+        let tracks_pointer = queue.tracks.as_ptr();
+        let next = queue
+            .sync_update(None, 0, vec![], true, true, sync_token("v1", 2))
+            .unwrap();
+        assert_eq!(first.next_track_id, next.next_track_id);
+        assert_eq!(queue.tracks.as_ptr(), tracks_pointer);
+        assert!(queue.loop_mode);
+        queue
+            .sync_update(None, 1, vec![], true, true, sync_token("v1", 3))
+            .unwrap();
+        assert_eq!(queue.current_track().unwrap().id, "b");
+        assert_eq!(queue.resolve_previous_index(), 0);
+    }
+
+    #[test]
+    fn queue_delta_mismatch_is_atomic_and_accepts_full_retry() {
+        let mut queue = PlaybackQueue::default();
+        queue
+            .sync_update(
+                Some(tracks(&["a", "b"])),
+                0,
+                vec![],
+                false,
+                false,
+                sync_token("v1", 1),
+            )
+            .unwrap();
+        assert_eq!(
+            queue
+                .sync_update(None, 1, vec![], true, true, sync_token("v2", 2))
+                .unwrap_err(),
+            "queue_revision_mismatch"
+        );
+        assert_eq!(queue.current_track().unwrap().id, "a");
+        assert!(!queue.shuffle_mode && !queue.loop_mode);
+        queue
+            .sync_update(
+                Some(tracks(&["c", "d"])),
+                1,
+                vec![],
+                true,
+                false,
+                sync_token("v2", 2),
+            )
+            .unwrap();
+        assert_eq!(queue.current_track().unwrap().id, "d");
+    }
+
+    #[test]
+    fn late_queue_snapshot_cannot_undo_newer_selection_or_library() {
+        let mut queue = PlaybackQueue::default();
+        queue
+            .sync_update(
+                Some(tracks(&["c", "d"])),
+                1,
+                vec![],
+                false,
+                false,
+                sync_token("v2", 2),
+            )
+            .unwrap();
+        let late = queue
+            .sync_update(
+                Some(tracks(&["a", "b"])),
+                0,
+                vec![],
+                true,
+                true,
+                sync_token("v1", 1),
+            )
+            .unwrap();
+        assert_eq!(late.current_track_id.as_deref(), Some("d"));
+        assert_eq!(queue.tracks[0].id, "c");
+        assert!(!queue.shuffle_mode);
     }
 
     #[test]

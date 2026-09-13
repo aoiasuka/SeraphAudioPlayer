@@ -6,6 +6,7 @@ import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
+import { VirtualGrid } from "./VirtualGrid";
 import { isLocalTrack } from "./trackFilters";
 
 export function AlbumsPage() {
@@ -88,8 +89,8 @@ export function AlbumsPage() {
   }
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 overflow-y-auto pr-1">
-      {albums.map((album) => {
+    <VirtualGrid items={albums} itemKey={(album) => album.key} label="专辑，方向键浏览"
+      renderItem={(album) => {
         return (
           <button
             key={album.key}
@@ -109,6 +110,8 @@ export function AlbumsPage() {
               <span className="mb-4 block w-full aspect-square overflow-hidden border-[1.5px] border-ink shrink-0">
                 <img
                   src={coverSrc(album.cover)}
+                  loading="lazy"
+                  decoding="async"
                   alt=""
                   className="h-full w-full object-cover grayscale-[0.2] transition-transform duration-500 group-hover:scale-110"
                 />
@@ -135,8 +138,8 @@ export function AlbumsPage() {
             </span>
           </button>
         );
-      })}
-    </div>
+      }}
+    />
   );
 }
 

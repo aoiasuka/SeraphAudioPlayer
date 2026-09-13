@@ -28,12 +28,18 @@ function normalizeQuery(query: string) {
   return query.trim().toLowerCase();
 }
 
+// 曲目与列表按 store 的不可变引用失效；旧曲库被释放后缓存也可回收。
+const searchFields = new WeakMap<Track, string[]>();
+const sortedLists = new WeakMap<Track[], Map<TrackSortKey, Track[]>>();
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 function matchesQuery(track: Track, needle: string) {
-  return (
-    track.title.toLowerCase().includes(needle) ||
-    track.artist.toLowerCase().includes(needle) ||
-    track.album.toLowerCase().includes(needle)
-  );
+  let fields = searchFields.get(track);
+  if (!fields) {
+    fields = [track.title.toLowerCase(), track.artist.toLowerCase(), track.album.toLowerCase()];
+    searchFields.set(track, fields);
+  }
+  return fields.some((field) => field.includes(needle));
 }
 
 /**
@@ -49,23 +55,20 @@ export function filterAndSortTracks(
   sortKey: TrackSortKey
 ): Track[] {
   const needle = normalizeQuery(query);
-  const filtered = needle
-    ? tracks.filter((track) => matchesQuery(track, needle))
-    : tracks;
-
-  if (sortKey === "default") {
-    // 过滤后若未变则原样返回，避免无谓复制
-    return needle ? filtered : tracks;
+  let ordered = tracks;
+  if (sortKey !== "default") {
+    let cached = sortedLists.get(tracks);
+    if (!cached) {
+      cached = new Map();
+      sortedLists.set(tracks, cached);
+    }
+    const existing = cached.get(sortKey);
+    if (existing) ordered = existing;
+    else {
+      ordered = [...tracks].sort((a, b) => sortKey === "duration"
+        ? a.duration - b.duration : collator.compare(a[sortKey], b[sortKey]));
+      cached.set(sortKey, ordered);
+    }
   }
-
-  const collator = new Intl.Collator(undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
-  const sorted = [...filtered];
-  sorted.sort((a, b) => {
-    if (sortKey === "duration") return a.duration - b.duration;
-    return collator.compare(a[sortKey], b[sortKey]);
-  });
-  return sorted;
+  return needle ? ordered.filter((track) => matchesQuery(track, needle)) : ordered;
 }

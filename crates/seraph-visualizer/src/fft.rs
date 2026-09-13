@@ -21,7 +21,7 @@ pub struct SpectrumFrame {
 
 /// 频谱可视化器 trait。
 ///
-/// `push_samples` 由音频线程推送一小段交错 PCM，`latest_frame` 返回最近一次频谱结果。
+/// `push_samples` 由分析工作线程推送一批交错 PCM，`latest_frame` 返回最近一次频谱结果。
 pub trait Visualizer: Send + Sync {
     fn push_samples(&self, samples: &[f32]) -> Result<(), VisualizerError>;
     fn latest_frame(&self) -> Option<SpectrumFrame>;
@@ -34,13 +34,19 @@ pub struct SimpleVisualizer {
     channels: usize,
     sample_rate: u32,
     started_at: Instant,
-    mono_buffer: Mutex<VecDeque<f32>>,
+    work: Mutex<FftWorkspace>,
     latest: Mutex<Option<SpectrumFrame>>,
     fft: Arc<dyn rustfft::Fft<f32>>,
     window: Vec<f32>,
     /// 中-1：窗相干增益（Σwindow）。加窗后满幅正弦的主 bin 幅度 ≈ A·Σwindow/2，
     /// 用它做归一化分母才能让 0dBFS 满幅信号映射到 1.0。用 fft_size/2 会系统性低 ~6dB。
     window_gain: f32,
+}
+
+struct FftWorkspace {
+    mono: VecDeque<f32>,
+    data: Vec<Complex32>,
+    scratch: Vec<Complex32>,
 }
 
 impl std::fmt::Debug for SimpleVisualizer {
@@ -75,6 +81,7 @@ impl SimpleVisualizer {
         let window: Vec<f32> = (0..fft_size).map(|i| hann_window(i, fft_size)).collect();
         // 中-1：相干增益取实际窗系数之和（Hann ≈ N/2），避免硬编码常量与窗函数不一致。
         let window_gain = window.iter().sum::<f32>().max(1.0);
+        let scratch_len = fft.get_inplace_scratch_len();
 
         Ok(Self {
             fft_size,
@@ -82,7 +89,11 @@ impl SimpleVisualizer {
             channels,
             sample_rate,
             started_at: Instant::now(),
-            mono_buffer: Mutex::new(VecDeque::with_capacity(fft_size)),
+            work: Mutex::new(FftWorkspace {
+                mono: VecDeque::with_capacity(fft_size),
+                data: vec![Complex32::default(); fft_size],
+                scratch: vec![Complex32::default(); scratch_len],
+            }),
             latest: Mutex::new(None),
             fft,
             window,
@@ -93,6 +104,11 @@ impl SimpleVisualizer {
     pub fn channels(&self) -> usize {
         self.channels
     }
+
+    pub fn reset(&self) {
+        self.work.lock().mono.clear();
+        *self.latest.lock() = None;
+    }
 }
 
 impl Visualizer for SimpleVisualizer {
@@ -101,48 +117,52 @@ impl Visualizer for SimpleVisualizer {
             return Ok(());
         }
 
-        let (mono, peak_left, peak_right) = interleaved_to_mono(samples, self.channels);
-        if mono.is_empty() {
+        if samples.len() < self.channels {
             return Ok(());
         }
-
-        // L-16: 单次加锁批量 extend，避免每个 sample 抢锁。
-        let buffer_snapshot = {
-            let mut buffer = self.mono_buffer.lock();
-            // 把 mono 整体推入，再裁掉超出 fft_size 的旧样本
-            buffer.extend(mono.iter().copied());
-            let excess = buffer.len().saturating_sub(self.fft_size);
-            for _ in 0..excess {
-                buffer.pop_front();
+        // mono 环、加窗输入、FFT scratch 都复用。没有逐帧临时 mono / window Vec。
+        let mut work = self.work.lock();
+        let FftWorkspace {
+            mono,
+            data,
+            scratch,
+        } = &mut *work;
+        let mut peak_left = 0.0_f32;
+        let mut peak_right = 0.0_f32;
+        for frame in samples.chunks_exact(self.channels) {
+            peak_left = peak_left.max(frame[0].abs());
+            peak_right = peak_right.max(frame.get(1).copied().unwrap_or(frame[0]).abs());
+            if mono.len() == self.fft_size {
+                mono.pop_front();
             }
-            if buffer.len() < self.fft_size {
-                return Ok(());
-            }
-            // 复制出来后立刻释放锁，再去跑 FFT
-            buffer.iter().copied().collect::<Vec<f32>>()
-        };
+            mono.push_back(frame.iter().sum::<f32>() / self.channels as f32);
+        }
+        if mono.len() < self.fft_size {
+            return Ok(());
+        }
+        for ((target, sample), window) in data.iter_mut().zip(mono.iter()).zip(&self.window) {
+            *target = Complex32::new(sample * window, 0.0);
+        }
+        self.fft.process_with_scratch(data, scratch);
 
-        // L-1: 用 rustfft 计算频谱（O(N log N) 而非旧的 O(N²) 朴素 DFT）。
-        let mut data: Vec<Complex32> = buffer_snapshot
-            .iter()
-            .zip(self.window.iter())
-            .map(|(sample, win)| Complex32::new(sample * win, 0.0))
-            .collect();
-        self.fft.process(&mut data);
-
-        let bins = spectrum_bins_from_fft(
-            &data,
+        let mut latest = self.latest.lock();
+        let frame = latest.get_or_insert_with(|| SpectrumFrame {
+            bins: Vec::with_capacity(self.bin_count),
+            peak_left: 0.0,
+            peak_right: 0.0,
+            timestamp_ms: 0,
+        });
+        spectrum_bins_from_fft(
+            data,
             self.bin_count,
             self.fft_size,
             self.window_gain,
             self.sample_rate,
+            &mut frame.bins,
         );
-        *self.latest.lock() = Some(SpectrumFrame {
-            bins,
-            peak_left,
-            peak_right,
-            timestamp_ms: self.started_at.elapsed().as_millis() as u64,
-        });
+        frame.peak_left = peak_left.min(1.0);
+        frame.peak_right = peak_right.min(1.0);
+        frame.timestamp_ms = self.started_at.elapsed().as_millis() as u64;
         Ok(())
     }
 
@@ -153,30 +173,6 @@ impl Visualizer for SimpleVisualizer {
     fn fft_size(&self) -> usize {
         self.fft_size
     }
-}
-
-fn interleaved_to_mono(samples: &[f32], channels: usize) -> (Vec<f32>, f32, f32) {
-    let channels = channels.max(1);
-    let frames = samples.len() / channels;
-    let mut mono = Vec::with_capacity(frames);
-    let mut peak_left = 0.0_f32;
-    let mut peak_right = 0.0_f32;
-
-    for frame in 0..frames {
-        let offset = frame * channels;
-        let frame_samples = &samples[offset..offset + channels];
-        peak_left = peak_left.max(frame_samples[0].abs());
-        peak_right = peak_right.max(
-            frame_samples
-                .get(1)
-                .copied()
-                .unwrap_or(frame_samples[0])
-                .abs(),
-        );
-        mono.push(frame_samples.iter().sum::<f32>() / channels as f32);
-    }
-
-    (mono, peak_left.min(1.0), peak_right.min(1.0))
 }
 
 fn hann_window(index: usize, len: usize) -> f32 {
@@ -196,10 +192,13 @@ fn spectrum_bins_from_fft(
     fft_size: usize,
     window_gain: f32,
     sample_rate: u32,
-) -> Vec<f32> {
+    bins: &mut Vec<f32>,
+) {
+    bins.clear();
     let nyquist = fft_size / 2;
     if nyquist == 0 || bin_count == 0 {
-        return vec![0.0; bin_count];
+        bins.resize(bin_count, 0.0);
+        return;
     }
     // 归一化分母：窗相干增益的一半（≈ fft_size/4）。
     let norm = (window_gain * 0.5).max(1.0);
@@ -210,7 +209,6 @@ fn spectrum_bins_from_fft(
     let log_step = (log_max - log_min) / bin_count.saturating_sub(1).max(1) as f32;
     let resolution = sample_rate as f32 / fft_size as f32;
     let nyquist_hz = sample_rate as f32 * 0.5;
-    let mut bins = Vec::with_capacity(bin_count);
 
     for b in 0..bin_count {
         let center_log = log_min + log_step * b as f32;
@@ -252,7 +250,7 @@ fn spectrum_bins_from_fft(
         bins.push((max_mag / norm).clamp(0.0, 1.0));
     }
 
-    map_bins_to_db(bins)
+    map_bins_to_db_in_place(bins);
 }
 
 /// F-14：dB 映射代替逐帧最大值归一。
@@ -260,8 +258,8 @@ fn spectrum_bins_from_fft(
 /// 把幅度按 20·log10 映射，[-72, 0] dB 线性映射到 [0, 1]。
 const SPECTRUM_DB_FLOOR: f32 = -72.0;
 
-fn map_bins_to_db(mut bins: Vec<f32>) -> Vec<f32> {
-    for bin in &mut bins {
+fn map_bins_to_db_in_place(bins: &mut [f32]) {
+    for bin in bins {
         let db = if *bin > 0.0 {
             20.0 * bin.log10()
         } else {
@@ -269,12 +267,16 @@ fn map_bins_to_db(mut bins: Vec<f32>) -> Vec<f32> {
         };
         *bin = ((db - SPECTRUM_DB_FLOOR) / -SPECTRUM_DB_FLOOR).clamp(0.0, 1.0);
     }
-    bins
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map_bins_to_db(mut bins: Vec<f32>) -> Vec<f32> {
+        map_bins_to_db_in_place(&mut bins);
+        bins
+    }
 
     #[test]
     fn bug_audit_11_known_tones_use_the_same_hz_axis_at_every_rate() {
@@ -324,11 +326,12 @@ mod tests {
 
     #[test]
     fn converts_interleaved_samples_to_mono_and_peaks() {
-        let (mono, left, right) = interleaved_to_mono(&[0.5, -0.25, -1.0, 0.75], 2);
-
-        assert_eq!(mono, vec![0.125, -0.125]);
-        assert_eq!(left, 1.0);
-        assert_eq!(right, 0.75);
+        let visualizer = SimpleVisualizer::new(2, 1, 2, 48_000).unwrap();
+        visualizer.push_samples(&[0.5, -0.25, -1.0, 0.75]).unwrap();
+        assert_eq!(visualizer.work.lock().mono, vec![0.125, -0.125]);
+        let frame = visualizer.latest_frame().unwrap();
+        assert_eq!(frame.peak_left, 1.0);
+        assert_eq!(frame.peak_right, 0.75);
     }
 
     #[test]

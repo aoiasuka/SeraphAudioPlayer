@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
-import { invoke, isTauriRuntime } from "@/lib/tauri";
+import { useEffect, useMemo, useRef } from "react";
+import { isTauriRuntime } from "@/lib/tauri";
+import { createAnalysisSession, pollVisualizer } from "@/lib/analysis/polling";
 import { usePlayerStore } from "@/store/player";
 
 interface SpectrumFrame {
@@ -8,7 +9,6 @@ interface SpectrumFrame {
   peakRight: number;
 }
 
-const POLL_INTERVAL_MS = 33; // ~30fps
 const BIN_COUNT = 48;
 /** 柱体快攻慢放系数（每 rAF 帧向目标逼近的比例），消除逐帧 FFT 硬跳变 */
 const BAR_ATTACK = 0.5;
@@ -20,6 +20,8 @@ const BAR_RELEASE = 0.22;
  */
 export function SpectrumPanel() {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const currentTrackId = usePlayerStore((s) => s.currentTrack()?.id ?? null);
+  const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const binsRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
   const targetRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
@@ -80,7 +82,7 @@ export function SpectrumPanel() {
       context.globalAlpha = 1;
     };
 
-    let pollTimer: number | null = null;
+    let stopPolling: (() => void) | undefined;
     let disposed = false;
 
     // 中-12：仅在“正在播放，或仍有非零柱需要衰减动画”时续帧。
@@ -90,7 +92,7 @@ export function SpectrumPanel() {
       isPlaying || binsRef.current.some((value) => value > 0.001);
 
     const renderLoop = () => {
-      if (disposed) return;
+      if (disposed || document.visibilityState === "hidden") return;
       draw();
       if (needsRender()) {
         rafRef.current = window.requestAnimationFrame(renderLoop);
@@ -98,19 +100,18 @@ export function SpectrumPanel() {
         rafRef.current = 0;
       }
     };
-    rafRef.current = window.requestAnimationFrame(renderLoop);
+    const onVisibilityChange = () => {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      if (document.visibilityState !== "hidden") rafRef.current = window.requestAnimationFrame(renderLoop);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    onVisibilityChange();
 
     if (isPlaying) {
-      pollTimer = window.setInterval(() => {
-        void invoke<SpectrumFrame | null>("get_spectrum_frame")
-          .then((frame) => {
-            if (disposed || !frame) return;
-            targetRef.current = frame.bins;
-          })
-          .catch(() => {
-            // 轮询失败静默；下一拍重试
-          });
-      }, POLL_INTERVAL_MS);
+      stopPolling = pollVisualizer<SpectrumFrame>("get_spectrum_frame", sessionId, (frame) => {
+        targetRef.current = frame.bins;
+      });
     } else {
       // 暂停后目标归零，渲染循环的 release 平滑把柱体自然收敛到零后自动停帧
       targetRef.current = new Array(BIN_COUNT).fill(0);
@@ -118,10 +119,11 @@ export function SpectrumPanel() {
 
     return () => {
       disposed = true;
-      if (pollTimer !== null) window.clearInterval(pollTimer);
+      stopPolling?.();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.cancelAnimationFrame(rafRef.current);
     };
-  }, [isPlaying]);
+  }, [isPlaying, sessionId]);
 
   if (!isTauriRuntime()) return null;
 

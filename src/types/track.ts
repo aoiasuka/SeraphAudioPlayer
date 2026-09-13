@@ -35,6 +35,8 @@ export interface Track {
   glow1?: string;
   glow2?: string;
   lyrics: LyricLine[];
+  /** false 表示来自曲库摘要，当前曲目需要再按 ID 读取歌词。 */
+  lyricsLoaded?: boolean;
 }
 
 export interface OutputDevice {

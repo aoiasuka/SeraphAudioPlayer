@@ -1,14 +1,14 @@
 import { usePlayerStore } from "@/store/player";
 import type { LibraryView } from "@/types/track";
 import { AlbumsPage } from "./main-pages/AlbumsPage";
-import { AnalysisPage } from "./main-pages/AnalysisPage";
 import { ArtistsPage } from "./main-pages/ArtistsPage";
-import { EqPage } from "./main-pages/EqPage";
 import { LocalPage } from "./main-pages/LocalPage";
 import { MiniPlayer } from "./main-pages/MiniPlayer";
 import { PlaylistsPage } from "./main-pages/PlaylistsPage";
 import { RecentPage, LikedPage } from "./main-pages/RecentLikedPages";
-import { StreamingPage } from "./main-pages/StreamingPage";
+const AnalysisPage = lazy(() => import("./main-pages/AnalysisPage").then((module) => ({ default: module.AnalysisPage })));
+const EqPage = lazy(() => import("./main-pages/EqPage").then((module) => ({ default: module.EqPage })));
+const StreamingPage = lazy(() => import("./main-pages/StreamingPage").then((module) => ({ default: module.StreamingPage })));
 
 interface PageCopy {
   title: string;
@@ -155,10 +155,13 @@ export function MainPages() {
       <PageHeader view={activeView} />
       <section className="min-h-0 flex-1 overflow-hidden">
         <div key={activeView} className="h-full w-full animate-page-transition flex flex-col min-h-0">
-          <PageBody view={activeView} />
+          <Suspense fallback={<div role="status" className="p-6 font-tw text-sm text-ink3">正在加载页面…</div>}>
+            <PageBody view={activeView} />
+          </Suspense>
         </div>
       </section>
       <MiniPlayer />
     </main>
   );
 }
+import { lazy, Suspense } from "react";

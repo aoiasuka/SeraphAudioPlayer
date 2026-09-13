@@ -1,3 +1,4 @@
+use super::cancellation::ImportCancellation;
 use super::prelude::*;
 
 pub(crate) async fn import_bilibili_audio_inner(
@@ -9,8 +10,9 @@ pub(crate) async fn import_bilibili_audio_inner(
     // preserve 当前一首，缓存超限会把同批先导入的文件删掉，改由批量调用方在
     // 整批结束后统一清理一次并 preserve 全部成功导入的文件。
     enforce_cache_limit: bool,
+    cancellation: &ImportCancellation,
 ) -> Result<ImportedTrack, String> {
-    let bvid = resolve_bvid(client, input).await?;
+    let bvid = cancellation.run(resolve_bvid(client, input)).await?;
     // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
     // 缺少 ffmpeg 时必须在选流阶段就避开它们，否则会导入一个永远无法播放的文件。
     let ffmpeg_path = options
@@ -18,7 +20,9 @@ pub(crate) async fn import_bilibili_audio_inner(
         .unwrap_or(true)
         .then(|| find_ffmpeg(app))
         .flatten();
-    let resolved = resolve_audio(client, &bvid, options, ffmpeg_path.is_some()).await?;
+    let resolved = cancellation
+        .run(resolve_audio(client, &bvid, options, ffmpeg_path.is_some()))
+        .await?;
     let cache_path = audio_cache_path(
         app,
         &resolved.video.bvid,
@@ -40,6 +44,7 @@ pub(crate) async fn import_bilibili_audio_inner(
         &cache_path,
         ffmpeg_path.as_deref(),
         must_remux,
+        cancellation,
     )
     .await?;
     if enforce_cache_limit {
@@ -59,6 +64,7 @@ pub(crate) async fn import_bilibili_audio_inner(
         }
     }
 
+    cancellation.check()?;
     let track = track_from_resolved_audio(&resolved, &final_path, ffmpeg_path.is_some())?;
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
     // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
@@ -470,7 +476,9 @@ pub(crate) async fn ensure_audio_file(
     path: &Path,
     ffmpeg_path: Option<&Path>,
     must_remux: bool,
+    cancellation: &ImportCancellation,
 ) -> Result<PathBuf, String> {
+    cancellation.check()?;
     // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
     // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
     let sentinel = ok_sentinel_path(path);
@@ -500,16 +508,18 @@ pub(crate) async fn ensure_audio_file(
 
     let mut last_error = None;
     for audio_url in audio_urls {
+        cancellation.check()?;
         let temp_path = temp_download_path(path);
-        match download_audio_to_file(client, audio_url, &temp_path).await {
+        match download_audio_to_file(client, audio_url, &temp_path, cancellation).await {
             Ok(()) => {
                 // M-16：finalize 含同步 ffmpeg remux（大 FLAC 1-3 秒），
                 // 不能阻塞 tokio worker，挪进 spawn_blocking。
                 let temp = temp_path.clone();
                 let target = path.to_path_buf();
                 let ffmpeg = ffmpeg_path.map(Path::to_path_buf);
+                let cancel = cancellation.clone();
                 let outcome = tauri::async_runtime::spawn_blocking(move || {
-                    finalize_audio_file(&temp, &target, ffmpeg.as_deref(), must_remux)
+                    finalize_audio_file(&temp, &target, ffmpeg.as_deref(), must_remux, &cancel)
                 })
                 .await
                 .unwrap_or_else(|err| Err(format!("finalize task panicked: {err}")));
@@ -521,13 +531,15 @@ pub(crate) async fn ensure_audio_file(
                         return Ok(final_path);
                     }
                     Err(err) => {
-                        let _ = fs::remove_file(&temp_path);
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        cancellation.check()?;
                         last_error = Some(err);
                     }
                 }
             }
             Err(err) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                cancellation.check()?;
                 last_error = Some(err);
             }
         }
@@ -571,7 +583,10 @@ pub(crate) async fn download_audio_to_file(
     client: &Client,
     audio_url: &str,
     temp_path: &Path,
+    cancellation: &ImportCancellation,
 ) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    cancellation.check()?;
     if audio_url.trim().is_empty() {
         return Err("empty bilibili audio url".into());
     }
@@ -584,13 +599,17 @@ pub(crate) async fn download_audio_to_file(
         ));
     }
 
-    let mut response = client
-        .get(audio_url)
-        .send()
-        .await
-        .map_err(|err| format!("failed to download bilibili audio: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("bilibili audio download failed: {err}"))?;
+    let mut response = cancellation
+        .run(async {
+            client
+                .get(audio_url)
+                .send()
+                .await
+                .map_err(|err| format!("failed to download bilibili audio: {err}"))?
+                .error_for_status()
+                .map_err(|err| format!("bilibili audio download failed: {err}"))
+        })
+        .await?;
 
     // 提前检查 Content-Length；超出上限直接拒绝，避免下载到一半才发现。
     if let Some(content_length) = response.content_length() {
@@ -603,30 +622,45 @@ pub(crate) async fn download_audio_to_file(
     }
 
     // L-13：流式写入临时文件，避免把整段 FLAC（数百 MB）整块驻留内存再二次复制。
-    let mut file = fs::File::create(temp_path)
-        .map_err(|err| format!("failed to create bilibili temp file: {err}"))?;
-    let mut written: u64 = 0;
-    while let Some(chunk) = response
-        .chunk()
+    let mut file = tokio::fs::File::create(temp_path)
         .await
-        .map_err(|err| format!("network read error: {err}"))?
-    {
-        written = written.saturating_add(chunk.len() as u64);
-        if written > MAX_AUDIO_DOWNLOAD_BYTES {
-            return Err(format!(
-                "bilibili audio exceeded {MAX_AUDIO_DOWNLOAD_BYTES} bytes; aborted"
-            ));
+        .map_err(|err| format!("failed to create bilibili temp file: {err}"))?;
+    let download_result = async {
+        let mut written: u64 = 0;
+        while let Some(chunk) = cancellation
+            .run(async {
+                response
+                    .chunk()
+                    .await
+                    .map_err(|err| format!("network read error: {err}"))
+            })
+            .await?
+        {
+            written = written.saturating_add(chunk.len() as u64);
+            if written > MAX_AUDIO_DOWNLOAD_BYTES {
+                return Err(format!(
+                    "bilibili audio exceeded {MAX_AUDIO_DOWNLOAD_BYTES} bytes; aborted"
+                ));
+            }
+            // 一次写入完成后再检查取消，保证关闭/删除临时文件时没有遗留在途磁盘写。
+            file.write_all(&chunk)
+                .await
+                .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
         }
-        file.write_all(&chunk)
-            .map_err(|err| format!("failed to write bilibili temp file: {err}"))?;
-    }
 
-    if written == 0 {
-        return Err("downloaded bilibili audio is empty".into());
+        if written == 0 {
+            return Err("downloaded bilibili audio is empty".into());
+        }
+        cancellation.check()
     }
-    file.flush()
-        .map_err(|err| format!("failed to flush bilibili temp file: {err}"))?;
-    Ok(())
+    .await;
+    // Tokio 文件可能还有内部阻塞写任务；成功或取消都先 flush，再允许调用方删临时文件。
+    let flush_result = file
+        .flush()
+        .await
+        .map_err(|err| format!("failed to flush bilibili temp file: {err}"));
+    drop(file);
+    download_result.and(flush_result)
 }
 
 /// 增量读取响应体，超出上限即截断并报错；
@@ -718,16 +752,19 @@ pub(crate) fn finalize_audio_file(
     path: &Path,
     ffmpeg_path: Option<&Path>,
     must_remux: bool,
+    cancellation: &ImportCancellation,
 ) -> Result<PathBuf, String> {
+    cancellation.check()?;
     // temp_path 已由 download_audio_to_file 流式写好；这里只做 remux 或就地改名。
     if let Some(ffmpeg_path) = ffmpeg_path {
-        match remux_audio(ffmpeg_path, temp_path, path) {
+        match remux_audio(ffmpeg_path, temp_path, path, cancellation) {
             Ok(()) => {
                 let _ = fs::remove_file(temp_path);
                 return Ok(path.to_path_buf());
             }
             Err(err) => {
                 let _ = fs::remove_file(path);
+                cancellation.check()?;
                 // P2-4：EAC3 等必须 remux 的流不允许把原始 fMP4 字节冠以
                 // .eac3 落盘——Symphonia 无法解码，会永久缓存一个不可播文件。
                 if must_remux {
@@ -750,10 +787,18 @@ pub(crate) fn finalize_audio_file(
     Ok(fallback_path)
 }
 
-pub(crate) fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Result<(), String> {
+pub(crate) fn remux_audio(
+    ffmpeg_path: &Path,
+    input: &Path,
+    output: &Path,
+    cancellation: &ImportCancellation,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    cancellation.check()?;
     let mut command = Command::new(ffmpeg_path);
     hide_console_window(&mut command);
-    let result = command
+    let mut child = command
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -764,11 +809,48 @@ pub(crate) fn remux_audio(ffmpeg_path: &Path, input: &Path, output: &Path) -> Re
         .arg("-c:a")
         .arg("copy")
         .arg(output)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| format!("failed to start ffmpeg: {err}"))?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
+    // 持续排空 stderr，最多保留 16 KiB 错误摘要；避免子进程被管道反压卡住。
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let mut buffer = [0u8; 4096];
+            while let Ok(count) = stderr.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min(16_384usize.saturating_sub(captured.len()));
+                captured.extend_from_slice(&buffer[..keep]);
+            }
+        }
+        captured
+    });
+    let status = loop {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err("导入已取消".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(format!("等待 ffmpeg 失败：{error}"));
+            }
+        }
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(format!("ffmpeg remux failed: {stderr}"));
     }
 

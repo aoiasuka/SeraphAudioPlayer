@@ -2017,6 +2017,7 @@ fn render_output<T>(
     }
 
     let mut consumed = 0_usize;
+    let mut missing_frames = 0_usize;
     for frame in data.chunks_mut(channels) {
         // 帧边界判定 ramp-out 完成：帧内即使 gain 中途到 0 也消费完整帧，
         // 多消费的 ≤channels-1 个静音级样本对听感无影响，但保住了帧对齐。
@@ -2030,6 +2031,9 @@ fn render_output<T>(
         // 旧代样本残留只可能位于 ring 头部且已被上面的批量清扫移除，
         // 因此 slots() 即有效样本数的可靠下界。
         if consumer.slots() < channels {
+            if !silenced {
+                missing_frames += 1;
+            }
             for sample in frame.iter_mut() {
                 state.gain = ramp_gain(state.gain, target, step);
                 write_sample(sample, 0.0);
@@ -2070,6 +2074,7 @@ fn render_output<T>(
     }
 
     let frames = consumed / channels;
+    shared.spectrum.record_missing_output(missing_frames);
     if frames > 0 {
         shared
             .frame_position

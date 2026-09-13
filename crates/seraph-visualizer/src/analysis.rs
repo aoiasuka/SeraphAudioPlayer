@@ -11,8 +11,8 @@
 //!
 //! 仅分析前两个声道（面板均为立体声语义）；单声道复制为双声道。
 
-use std::collections::VecDeque;
 use std::f64::consts::PI;
+use std::{cell::OnceCell, collections::VecDeque};
 
 /// 100ms hop：BS.1770 的 400ms 门限块 = 4 hop，短期 3s = 30 hop。
 const HOPS_MOMENTARY: usize = 4;
@@ -134,6 +134,26 @@ pub struct AnalysisSnapshot {
     pub waveform: Vec<i16>,
 }
 
+/// 显示需求由后台分析工作线程传入；关闭的仪表不执行逐样本计算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalysisFeatures {
+    pub loudness: bool,
+    pub levels: bool,
+    pub stereo: bool,
+    pub waveform: bool,
+}
+
+impl Default for AnalysisFeatures {
+    fn default() -> Self {
+        Self {
+            loudness: true,
+            levels: true,
+            stereo: true,
+            waveform: true,
+        }
+    }
+}
+
 /// 声学分析引擎：喂样本、出快照。
 #[derive(Debug)]
 pub struct AnalysisEngine {
@@ -148,9 +168,11 @@ pub struct AnalysisEngine {
     /// 最近 hop 的均方能量（声道求和），容量 = 短期窗 30 个
     recent_hops: VecDeque<f64>,
     /// 门限块能量（400ms 块 @ 100ms hop），积分用
-    gating_blocks: Vec<f64>,
+    gating_blocks: VecDeque<f64>,
     /// 短期响度采样（1 个/秒），LRA 用
-    lra_samples: Vec<f64>,
+    lra_samples: VecDeque<f64>,
+    integrated_cache: OnceCell<Option<f64>>,
+    lra_cache: OnceCell<Option<f64>>,
     hops_since_lra_sample: usize,
     /// 真峰内插的跨批次延续窗（前两声道各 3 个历史样本）
     tp_history: [[f32; 3]; 2],
@@ -182,8 +204,10 @@ impl AnalysisEngine {
             hop_energy_accum: 0.0,
             hop_frames: 0,
             recent_hops: VecDeque::with_capacity(HOPS_SHORT_TERM),
-            gating_blocks: Vec::new(),
-            lra_samples: Vec::new(),
+            gating_blocks: VecDeque::new(),
+            lra_samples: VecDeque::new(),
+            integrated_cache: OnceCell::new(),
+            lra_cache: OnceCell::new(),
             hops_since_lra_sample: 0,
             tp_history: [[0.0; 3]; 2],
             true_peak_linear: None,
@@ -208,6 +232,17 @@ impl AnalysisEngine {
 
     /// 换曲目：清空积分 / LRA / 真峰会话最大值与滑窗，滤波器结构保留。
     pub fn reset_session(&mut self) {
+        self.reset_continuity();
+        self.gating_blocks.clear();
+        self.lra_samples.clear();
+        self.integrated_cache.take();
+        self.lra_cache.take();
+        self.true_peak_max_linear = None;
+    }
+
+    /// 暂停、隐藏或仪表重新开启后，不把间断两侧的样本拼成连续的响度/真峰窗口。
+    /// 会话积分与最大值仍保留，只统计实际收到的样本。
+    pub fn reset_continuity(&mut self) {
         for chain in &mut self.filters {
             for stage in chain {
                 stage.reset();
@@ -216,12 +251,9 @@ impl AnalysisEngine {
         self.hop_energy_accum = 0.0;
         self.hop_frames = 0;
         self.recent_hops.clear();
-        self.gating_blocks.clear();
-        self.lra_samples.clear();
         self.hops_since_lra_sample = 0;
         self.tp_history = [[0.0; 3]; 2];
         self.true_peak_linear = None;
-        self.true_peak_max_linear = None;
         self.peak = [0.0; 2];
         self.rms = [0.0; 2];
         self.correlation = 0.0;
@@ -233,6 +265,13 @@ impl AnalysisEngine {
 
     /// 喂一批交错样本（渲染 tap drain 的结果）。
     pub fn push(&mut self, interleaved: &[f32]) {
+        self.push_with_features(interleaved, AnalysisFeatures::default());
+    }
+
+    pub fn push_with_features(&mut self, interleaved: &[f32], features: AnalysisFeatures) {
+        if !features.loudness && !features.levels && !features.stereo && !features.waveform {
+            return;
+        }
         let channels = self.channels;
         let frames = interleaved.len() / channels;
         if frames == 0 {
@@ -255,31 +294,37 @@ impl AnalysisEngine {
             let pair = [left, right];
 
             // 示波器环形缓冲
-            let wave_offset = self.wave_head * 2;
-            self.wave_ring[wave_offset] = left;
-            self.wave_ring[wave_offset + 1] = right;
-            self.wave_head = (self.wave_head + 1) % WAVEFORM_FRAMES;
-            if self.wave_len < WAVEFORM_FRAMES {
-                self.wave_len += 1;
+            if features.waveform {
+                let wave_offset = self.wave_head * 2;
+                self.wave_ring[wave_offset] = left;
+                self.wave_ring[wave_offset + 1] = right;
+                self.wave_head = (self.wave_head + 1) % WAVEFORM_FRAMES;
+                if self.wave_len < WAVEFORM_FRAMES {
+                    self.wave_len += 1;
+                }
             }
 
             for (ch, &sample) in pair.iter().enumerate() {
                 let abs = sample.abs();
-                if abs > peak[ch] {
+                if features.levels && abs > peak[ch] {
                     peak[ch] = abs;
                 }
-                sq_sum[ch] += f64::from(sample) * f64::from(sample);
+                if features.levels || features.stereo {
+                    sq_sum[ch] += f64::from(sample) * f64::from(sample);
+                }
 
                 // 真峰：Catmull-Rom 在最近 4 样本窗内查 3 个内插点
-                let [p0, p1, p2] = self.tp_history[ch];
-                block_tp = block_tp.max(abs).max(catmull_rom_peak(p0, p1, p2, sample));
-                self.tp_history[ch] = [p1, p2, sample];
+                if features.loudness {
+                    let [p0, p1, p2] = self.tp_history[ch];
+                    block_tp = block_tp.max(abs).max(catmull_rom_peak(p0, p1, p2, sample));
+                    self.tp_history[ch] = [p1, p2, sample];
+                }
 
                 // K 加权能量（响度）。M-19：mono 复制出的第二路不计入——
                 // BS.1770-4 对单声道定义为单通道 G=1.0，复制成 L/R 求和会让
                 // momentary/short-term/integrated 全部系统性 +3.01 LU。
                 // （peak/RMS/示波器/散点仍用复制值，那是显示层的有意设计。）
-                if channels > 1 || ch == 0 {
+                if features.loudness && (channels > 1 || ch == 0) {
                     let mut weighted = f64::from(sample);
                     for stage in &mut self.filters[ch] {
                         weighted = stage.process(weighted);
@@ -287,11 +332,15 @@ impl AnalysisEngine {
                     self.hop_energy_accum += weighted * weighted;
                 }
             }
-            cross_sum += f64::from(left) * f64::from(right);
+            if features.stereo {
+                cross_sum += f64::from(left) * f64::from(right);
+            }
 
-            self.hop_frames += 1;
-            if self.hop_frames >= self.hop_len {
-                self.finish_hop();
+            if features.loudness {
+                self.hop_frames += 1;
+                if self.hop_frames >= self.hop_len {
+                    self.finish_hop();
+                }
             }
         }
 
@@ -307,12 +356,18 @@ impl AnalysisEngine {
         } else {
             0.0
         };
-        self.true_peak_linear = Some(block_tp);
-        self.true_peak_max_linear = Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
+        if features.loudness {
+            self.true_peak_linear = Some(block_tp);
+            self.true_peak_max_linear =
+                Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
+        }
 
         // 声场散点：等距抽取 ≤160 对
         let stride = frames.div_ceil(MAX_SCATTER_PAIRS).max(1);
         self.scatter.clear();
+        if !features.stereo {
+            return;
+        }
         let mut frame = 0;
         while frame < frames {
             let offset = frame * channels;
@@ -350,9 +405,10 @@ impl AnalysisEngine {
                 .sum::<f64>()
                 / HOPS_MOMENTARY as f64;
             if self.gating_blocks.len() >= MAX_GATING_BLOCKS {
-                self.gating_blocks.remove(0);
+                self.gating_blocks.pop_front();
             }
-            self.gating_blocks.push(block);
+            self.gating_blocks.push_back(block);
+            self.integrated_cache.take();
         }
 
         // LRA 短期采样：每 1s 记一次短期响度
@@ -363,9 +419,10 @@ impl AnalysisEngine {
             self.hops_since_lra_sample = 0;
             let short_term = self.recent_hops.iter().sum::<f64>() / self.recent_hops.len() as f64;
             if self.lra_samples.len() >= MAX_LRA_SAMPLES {
-                self.lra_samples.remove(0);
+                self.lra_samples.pop_front();
             }
-            self.lra_samples.push(short_term);
+            self.lra_samples.push_back(short_term);
+            self.lra_cache.take();
         }
     }
 
@@ -393,48 +450,37 @@ impl AnalysisEngine {
 
     /// 门限积分响度（BS.1770-4）：绝对 -70 LUFS 门 → 相对 -10 LU 门 → 均值。
     fn integrated(&self) -> Option<f64> {
+        *self
+            .integrated_cache
+            .get_or_init(|| self.compute_integrated())
+    }
+
+    fn compute_integrated(&self) -> Option<f64> {
         let abs_gate = lufs_to_energy(ABSOLUTE_GATE_LUFS);
-        let above_abs: Vec<f64> = self
-            .gating_blocks
-            .iter()
-            .copied()
-            .filter(|energy| *energy > abs_gate)
-            .collect();
-        if above_abs.is_empty() {
-            return None;
-        }
-        let mean_abs = above_abs.iter().sum::<f64>() / above_abs.len() as f64;
+        let mean_abs = gated_mean(&self.gating_blocks, abs_gate)?;
         let rel_gate = lufs_to_energy(energy_to_lufs(mean_abs) - 10.0);
-        let gated: Vec<f64> = above_abs
-            .into_iter()
-            .filter(|energy| *energy > rel_gate)
-            .collect();
-        if gated.is_empty() {
-            return None;
-        }
-        Some(energy_to_lufs(
-            gated.iter().sum::<f64>() / gated.len() as f64,
-        ))
+        gated_mean(&self.gating_blocks, rel_gate.max(abs_gate)).map(energy_to_lufs)
     }
 
     /// 响度范围 LRA（EBU Tech 3342）：短期分布，绝对 -70 门 + 相对 -20 门，P95 - P10。
     fn loudness_range(&self) -> Option<f64> {
+        *self.lra_cache.get_or_init(|| self.compute_loudness_range())
+    }
+
+    fn compute_loudness_range(&self) -> Option<f64> {
         let abs_gate = lufs_to_energy(ABSOLUTE_GATE_LUFS);
-        let above_abs: Vec<f64> = self
+        let mut gated: Vec<f64> = self
             .lra_samples
             .iter()
             .copied()
             .filter(|energy| *energy > abs_gate)
             .collect();
-        if above_abs.len() < 2 {
+        if gated.len() < 2 {
             return None;
         }
-        let mean_abs = above_abs.iter().sum::<f64>() / above_abs.len() as f64;
+        let mean_abs = gated.iter().sum::<f64>() / gated.len() as f64;
         let rel_gate = lufs_to_energy(energy_to_lufs(mean_abs) - 20.0);
-        let mut gated: Vec<f64> = above_abs
-            .into_iter()
-            .filter(|energy| *energy > rel_gate)
-            .collect();
+        gated.retain(|energy| *energy > rel_gate);
         if gated.len() < 2 {
             return None;
         }
@@ -465,23 +511,69 @@ impl AnalysisEngine {
     }
 
     pub fn snapshot(&self) -> AnalysisSnapshot {
+        self.snapshot_with_features(AnalysisFeatures::default())
+    }
+
+    pub fn snapshot_with_features(&self, features: AnalysisFeatures) -> AnalysisSnapshot {
         let to_db = |linear: f32| 20.0 * linear.max(1.0e-7).log10();
         AnalysisSnapshot {
-            momentary_lufs: self.momentary().map(|value| value as f32),
-            short_term_lufs: self.short_term().map(|value| value as f32),
-            integrated_lufs: self.integrated().map(|value| value as f32),
-            loudness_range_lu: self.loudness_range().map(|value| value as f32),
-            true_peak_db: self.true_peak_linear.map(to_db),
-            true_peak_max_db: self.true_peak_max_linear.map(to_db),
+            momentary_lufs: features
+                .loudness
+                .then(|| self.momentary())
+                .flatten()
+                .map(|value| value as f32),
+            short_term_lufs: features
+                .loudness
+                .then(|| self.short_term())
+                .flatten()
+                .map(|value| value as f32),
+            integrated_lufs: features
+                .loudness
+                .then(|| self.integrated())
+                .flatten()
+                .map(|value| value as f32),
+            loudness_range_lu: features
+                .loudness
+                .then(|| self.loudness_range())
+                .flatten()
+                .map(|value| value as f32),
+            true_peak_db: features
+                .loudness
+                .then_some(self.true_peak_linear)
+                .flatten()
+                .map(to_db),
+            true_peak_max_db: features
+                .loudness
+                .then_some(self.true_peak_max_linear)
+                .flatten()
+                .map(to_db),
             peak_left: self.peak[0],
             peak_right: self.peak[1],
             rms_left: self.rms[0],
             rms_right: self.rms[1],
             correlation: self.correlation,
-            scatter: self.scatter.clone(),
-            waveform: self.waveform_snapshot(),
+            scatter: if features.stereo {
+                self.scatter.clone()
+            } else {
+                Vec::new()
+            },
+            waveform: if features.waveform {
+                self.waveform_snapshot()
+            } else {
+                Vec::new()
+            },
         }
     }
+}
+
+fn gated_mean(values: &VecDeque<f64>, gate: f64) -> Option<f64> {
+    let (sum, count) = values
+        .iter()
+        .filter(|&&energy| energy > gate)
+        .fold((0.0, 0usize), |(sum, count), energy| {
+            (sum + energy, count + 1)
+        });
+    (count > 0).then(|| sum / count as f64)
 }
 
 /// 已排序切片的线性插值分位数。
@@ -514,6 +606,65 @@ fn catmull_rom_peak(p0: f32, p1: f32, p2: f32, p3: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_history_statistics_cache_matches_reference_and_invalidates_on_new_hops() {
+        let mut engine = AnalysisEngine::new(48_000, 2);
+        engine.gating_blocks = (0..MAX_GATING_BLOCKS)
+            .map(|n| lufs_to_energy(-60.0 + (n % 50) as f64))
+            .collect();
+        engine.lra_samples = (0..MAX_LRA_SAMPLES)
+            .map(|n| lufs_to_energy(-60.0 + (n % 50) as f64))
+            .collect();
+        let above_abs: Vec<f64> = engine
+            .gating_blocks
+            .iter()
+            .copied()
+            .filter(|&energy| energy > lufs_to_energy(-70.0))
+            .collect();
+        let relative_gate = lufs_to_energy(
+            energy_to_lufs(above_abs.iter().sum::<f64>() / above_abs.len() as f64) - 10.0,
+        );
+        let gated: Vec<f64> = above_abs
+            .into_iter()
+            .filter(|&energy| energy > relative_gate)
+            .collect();
+        let expected = energy_to_lufs(gated.iter().sum::<f64>() / gated.len() as f64);
+        let first = engine.snapshot();
+        assert!((first.integrated_lufs.unwrap() as f64 - expected).abs() < 0.0001);
+        assert!(first.loudness_range_lu.unwrap() > 0.0);
+        for _ in 0..30 {
+            let next = engine.snapshot();
+            assert_eq!(next.integrated_lufs, first.integrated_lufs);
+            assert_eq!(next.loudness_range_lu, first.loudness_range_lu);
+        }
+        assert!(engine.integrated_cache.get().is_some() && engine.lra_cache.get().is_some());
+        engine.recent_hops = vec![0.5; HOPS_SHORT_TERM].into();
+        engine.hop_frames = engine.hop_len;
+        engine.hop_energy_accum = 0.5 * engine.hop_len as f64;
+        engine.hops_since_lra_sample = HOPS_PER_LRA_SAMPLE;
+        engine.finish_hop();
+        assert_eq!(engine.gating_blocks.len(), MAX_GATING_BLOCKS);
+        assert_eq!(engine.lra_samples.len(), MAX_LRA_SAMPLES);
+        assert!(engine.integrated_cache.get().is_none() && engine.lra_cache.get().is_none());
+        assert_eq!(engine.gating_blocks.back(), Some(&0.5));
+        assert_eq!(engine.lra_samples.back(), Some(&0.5));
+    }
+
+    #[test]
+    fn discontinuity_clears_windows_but_preserves_session_integration() {
+        let mut engine = AnalysisEngine::new(FS, 2);
+        engine.push(&stereo_sine(997.0, 0.1, 1.0));
+        let before = engine.snapshot();
+        engine.reset_continuity();
+        let resumed = engine.snapshot();
+        assert_eq!(resumed.integrated_lufs, before.integrated_lufs);
+        assert_eq!(resumed.true_peak_max_db, before.true_peak_max_db);
+        assert!(resumed.momentary_lufs.is_none() && resumed.waveform.is_empty());
+        engine.reset_session();
+        let reset = engine.snapshot();
+        assert!(reset.integrated_lufs.is_none() && reset.loudness_range_lu.is_none());
+    }
 
     const FS: u32 = 48_000;
 

@@ -6,6 +6,7 @@ import { seekGuard } from "@/store/player/playbackActions";
 import type { Track } from "@/types/track";
 import { usePlayerEvents } from "./usePlayerEvents";
 import { usePlayback } from "./usePlayback";
+import { invoke } from "@/lib/tauri";
 
 vi.mock("./usePlayerEvents", () => ({ usePlayerEvents: vi.fn() }));
 vi.mock("@/lib/tauri", async (importOriginal) => ({
@@ -22,6 +23,7 @@ function emit(event: { type: string; [key: string]: unknown }) {
 describe("切歌时的歌词时间轴", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(invoke).mockResolvedValue(undefined);
     seekGuard.until = 0;
     usePlayerStore.setState({
       ...usePlayerStore.getInitialState(),
@@ -36,6 +38,38 @@ describe("切歌时的歌词时间轴", () => {
   });
 
   afterEach(cleanup);
+
+  it("摘要只加载当前曲目的歌词，切歌后忽略上一首的迟到数据", async () => {
+    const pending = new Map<string, (value: Track) => void>();
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command !== "get_track_info") return Promise.resolve(undefined) as never;
+      return new Promise<Track>((resolve) => pending.set(String(args?.trackId), resolve)) as never;
+    });
+    usePlayerStore.setState((state) => ({ playlist: state.playlist.map((track) => ({ ...track, lyricsLoaded: false })) }));
+    const [a, b] = usePlayerStore.getState().playlist;
+    renderHook(usePlayback);
+    expect([...pending.keys()]).toEqual(["a"]);
+    act(() => { usePlayerStore.setState({ currentTrackIndex: 1 }); });
+    await act(async () => { pending.get("a")!({ ...a, lyrics: [{ time: 1, text: "旧曲目" }] }); });
+    expect(usePlayerStore.getState().playlist[0].lyrics).toEqual([]);
+    await act(async () => { pending.get("b")!({ ...b, lyrics: [{ time: 2, text: "当前曲目" }] }); });
+    expect(usePlayerStore.getState().currentTrack()?.lyrics[0].text).toBe("当前曲目");
+    expect(usePlayerStore.getState().currentTrack()?.lyricsLoaded).toBe(true);
+    expect([...pending.keys()]).toEqual(["a", "b"]);
+  });
+
+  it("歌词读取返回前用户已替换歌词时，保留用户刚保存的版本", async () => {
+    let complete!: (track: Track) => void;
+    vi.mocked(invoke).mockImplementation((command) => command === "get_track_info"
+      ? new Promise<Track>((resolve) => { complete = resolve; }) as never : Promise.resolve(undefined) as never);
+    usePlayerStore.setState((state) => ({ playlist: state.playlist.map((track) => ({ ...track, lyricsLoaded: false })) }));
+    const old = usePlayerStore.getState().currentTrack()!;
+    renderHook(usePlayback);
+    act(() => { usePlayerStore.setState((state) => ({ playlist: state.playlist.map((track) =>
+      track === old ? { ...track, lyrics: [{ time: 1, text: "用户版本" }], lyricsLoaded: true } : track) })); });
+    await act(async () => { complete({ ...old, lyrics: [{ time: 1, text: "迟到版本" }] }); });
+    expect(usePlayerStore.getState().currentTrack()?.lyrics[0].text).toBe("用户版本");
+  });
 
   it("跳转失败保留播放态并立即回滚进度", () => {
     usePlayerStore.setState({ isPlaying: true, currentTime: 40 });

@@ -2,6 +2,7 @@
 //!
 //! 原 `include!` 拼接结构已改为真模块树，共享项收敛到 [`prelude`]。
 
+mod cancellation;
 mod commands;
 mod constants;
 mod ffmpeg;

@@ -8,5 +8,5 @@
 pub mod analysis;
 pub mod fft;
 
-pub use analysis::{AnalysisEngine, AnalysisSnapshot};
+pub use analysis::{AnalysisEngine, AnalysisFeatures, AnalysisSnapshot};
 pub use fft::{SimpleVisualizer, SpectrumFrame, Visualizer, VisualizerError};

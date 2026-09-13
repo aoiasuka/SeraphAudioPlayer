@@ -50,7 +50,7 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
   };
 
   // 发现14：300ms trailing debounce，避免拖动音量滑块等高频 set 触发同步落盘 IO
-  let pendingWrite: { name: string; serialized: string } | null = null;
+  let pendingWrite: { name: string; value: { state: PersistedPlayerState; version?: number } } | null = null;
   let writeTimer: number | null = null;
 
   const flushPendingWrite = () => {
@@ -59,9 +59,9 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
       writeTimer = null;
     }
     if (!pendingWrite) return;
-    const { name, serialized } = pendingWrite;
+    const { name, value } = pendingWrite;
     pendingWrite = null;
-    writeNow(name, serialized);
+    writeNow(name, JSON.stringify(value));
   };
 
   if (typeof window !== "undefined") {
@@ -108,8 +108,8 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
       }
 
       lastValue = value;
-      const serialized = JSON.stringify(value);
-      pendingWrite = { name, serialized };
+      // Zustand 状态按不可变值更新，防抖期间仅保留最后一份，flush 时再编码。
+      pendingWrite = { name, value };
       if (typeof window === "undefined") {
         flushPendingWrite();
         return;

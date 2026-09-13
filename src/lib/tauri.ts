@@ -40,6 +40,8 @@ function createBrowserStub(): TauriBridge {
 const browserStub = createBrowserStub();
 let invokeFn: InvokeFn | null = null;
 let listenFn: ListenFn | null = null;
+let invokeLoading: Promise<InvokeFn> | null = null;
+let listenLoading: Promise<ListenFn> | null = null;
 
 export function isTauriRuntime() {
   return (
@@ -49,33 +51,20 @@ export function isTauriRuntime() {
 }
 
 async function getInvoke(): Promise<InvokeFn> {
+  if (!isTauriRuntime()) return browserStub.invoke;
   if (invokeFn) return invokeFn;
-  if (!isTauriRuntime()) {
-    invokeFn = browserStub.invoke;
-    return invokeFn;
-  }
-
-  try {
-    const core = await import("@tauri-apps/api/core");
-    invokeFn = core.invoke;
-    return invokeFn;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("Tauri API unavailable, falling back to stub", err);
-    invokeFn = browserStub.invoke;
-    return invokeFn;
-  }
+  invokeLoading ??= import("@tauri-apps/api/core")
+    .then((core) => { invokeFn = core.invoke; return core.invoke as InvokeFn; })
+    .catch((cause: unknown) => {
+      throw Object.assign(new Error("桌面通信初始化失败，请重试"), { cause });
+    }).finally(() => { invokeLoading = null; });
+  return invokeLoading;
 }
 
 async function getListen(): Promise<ListenFn> {
+  if (!isTauriRuntime()) return browserStub.listen;
   if (listenFn) return listenFn;
-  if (!isTauriRuntime()) {
-    listenFn = browserStub.listen;
-    return listenFn;
-  }
-
-  try {
-    const evt = await import("@tauri-apps/api/event");
+  listenLoading ??= import("@tauri-apps/api/event").then((evt) => {
     listenFn = async <T,>(
       event: string,
       cb: (payload: T) => void,
@@ -89,12 +78,10 @@ async function getListen(): Promise<ListenFn> {
       return unlisten;
     };
     return listenFn;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("Tauri events unavailable, falling back to stub", err);
-    listenFn = browserStub.listen;
-    return listenFn;
-  }
+  }).catch((cause: unknown) => {
+    throw Object.assign(new Error("桌面事件初始化失败，请重试"), { cause });
+  }).finally(() => { listenLoading = null; });
+  return listenLoading;
 }
 
 export async function invoke<T = unknown>(

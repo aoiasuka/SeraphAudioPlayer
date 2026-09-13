@@ -6,6 +6,8 @@ import { bumpPlayEpoch } from "./playEpoch";
 import { normalizePath, streamingSourceInput, trackMergeKey } from "./trackIdentity";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
+let libraryLoadSequence = 0;
+
 function dedupeTracks(tracks: Track[]) {
   const byKey = new Map<string, Track>();
   const orderedKeys: string[] = [];
@@ -123,7 +125,7 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
     cacheMissing: incoming.cacheMissing ?? false,
   };
   if (incomingLyrics.length === 0 && existingLyrics.length > 0) {
-    return { ...merged, lyrics: existingLyrics };
+    return { ...merged, lyrics: existingLyrics, lyricsLoaded: true };
   }
   return { ...merged, lyrics: incomingLyrics };
 }
@@ -427,8 +429,11 @@ export function createLibraryActions(
   },
 
   loadBackendLibrary: async () => {
+    const request = ++libraryLoadSequence;
     try {
-      const cached = await invoke<Track[]>("get_playlist");
+      const response = await invoke<Track[]>("get_playlist", { includeLyrics: false });
+      if (request !== libraryLoadSequence) return;
+      const cached = Array.isArray(response) ? response.map((track) => ({ ...track, lyricsLoaded: (track.lyrics?.length ?? 0) > 0 })) : response;
       if (!Array.isArray(cached) || cached.length === 0) return;
 
       set((state) => {
@@ -476,6 +481,7 @@ export function createLibraryActions(
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: get_playlist", err);
+      get().showNotification(`曲库读取失败：${normalizeIpcError(err).message}`);
     }
   },
 

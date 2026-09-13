@@ -1,16 +1,12 @@
+use super::cancellation::{cancel_batch, BatchImportGuard, ImportCancellation};
 use super::prelude::*;
-
-/// M-15：收藏夹批量导入的取消令牌。批量最多 200 首串行下载可达数小时，
-/// 必须给用户中断手段；置位后当前这首完成即停止，已导入部分照常返回。
-static FAVORITES_IMPORT_CANCELLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// 批量导入进度事件通道（模式同 `seraph://ffmpeg-download`）。
 const BATCH_PROGRESS_EVENT: &str = "seraph://bilibili-batch";
 
 #[tauri::command]
-pub fn cancel_bilibili_favorites_import() {
-    FAVORITES_IMPORT_CANCELLED.store(true, std::sync::atomic::Ordering::Release);
+pub fn cancel_bilibili_favorites_import(task_id: Option<String>) {
+    cancel_batch(task_id.as_deref());
 }
 
 #[tauri::command]
@@ -25,7 +21,15 @@ pub async fn import_bilibili_audio_with_options(
     options: Option<BilibiliImportOptions>,
 ) -> Result<ImportedTrack, String> {
     let client = bilibili_client_for_app(&app)?;
-    import_bilibili_audio_inner(&app, &client, &input, &options.unwrap_or_default(), true).await
+    import_bilibili_audio_inner(
+        &app,
+        &client,
+        &input,
+        &options.unwrap_or_default(),
+        true,
+        &ImportCancellation::default(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -33,21 +37,33 @@ pub async fn import_bilibili_favorites(
     app: AppHandle,
     input: String,
     options: Option<BilibiliImportOptions>,
+    task_id: Option<String>,
 ) -> Result<BilibiliBatchImportResult, String> {
-    use std::sync::atomic::Ordering;
+    let task = BatchImportGuard::start(task_id)?;
+    let cancellation = &task.0;
 
     let media_id = extract_media_id(&input).ok_or_else(|| {
         "没有找到有效的 B 站收藏夹 media_id/fid，请粘贴收藏夹链接或数字 ID".to_string()
     })?;
     let options = options.unwrap_or_default();
     let client = bilibili_client_for_app(&app)?;
-    let bvids = fetch_favorite_bvids(&client, &media_id, FAV_MAX_ITEMS).await?;
+    let bvids = match cancellation
+        .run(fetch_favorite_bvids(&client, &media_id, FAV_MAX_ITEMS))
+        .await
+    {
+        Ok(bvids) => bvids,
+        Err(_) if cancellation.is_cancelled() => {
+            return Ok(BilibiliBatchImportResult {
+                tracks: Vec::new(),
+                failed: Vec::new(),
+                cancelled: true,
+            })
+        }
+        Err(error) => return Err(error),
+    };
     if bvids.is_empty() {
         return Err("收藏夹里没有可导入的视频，或当前账号没有访问权限".into());
     }
-
-    // 新一轮批量开始：清掉上一轮可能残留的取消标记
-    FAVORITES_IMPORT_CANCELLED.store(false, Ordering::Release);
 
     let total = bvids.len();
     let mut tracks = Vec::new();
@@ -57,30 +73,38 @@ pub async fn import_bilibili_favorites(
     // 返回的最终落盘路径，含 remux fallback），批量结束后统一清理时整体 preserve。
     let mut imported_paths = Vec::new();
     for (index, item) in bvids.into_iter().enumerate() {
-        if FAVORITES_IMPORT_CANCELLED.load(Ordering::Acquire) {
+        if cancellation.is_cancelled() {
             cancelled = true;
             break;
         }
         let bvid = item.bvid.clone().unwrap_or_default();
         let display_name = item.title.clone().unwrap_or_else(|| bvid.clone());
-        let ok = match import_bilibili_audio_inner(&app, &client, &bvid, &options, false).await {
-            Ok(track) => {
-                imported_paths.push(PathBuf::from(&track.path));
-                tracks.push(track);
-                true
-            }
-            Err(reason) => {
-                failed.push(BilibiliImportFailure {
-                    input: display_name.clone(),
-                    reason,
-                });
-                false
-            }
-        };
+        let ok =
+            match import_bilibili_audio_inner(&app, &client, &bvid, &options, false, cancellation)
+                .await
+            {
+                Ok(track) => {
+                    imported_paths.push(PathBuf::from(&track.path));
+                    tracks.push(track);
+                    true
+                }
+                Err(_) if cancellation.is_cancelled() => {
+                    cancelled = true;
+                    break;
+                }
+                Err(reason) => {
+                    failed.push(BilibiliImportFailure {
+                        input: display_name.clone(),
+                        reason,
+                    });
+                    false
+                }
+            };
         // M-15：每首完成即推进度事件，前端展示 N/total 与当前曲目
         let _ = app.emit(
             BATCH_PROGRESS_EVENT,
             &BilibiliBatchProgress {
+                task_id: cancellation.id().to_string(),
                 current: index + 1,
                 total,
                 title: display_name,

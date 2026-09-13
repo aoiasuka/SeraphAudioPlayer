@@ -5,7 +5,9 @@
 //! 避免独占初始化 / 慢速磁盘 / 引擎 hang 冻结整个窗口。AppState 全字段均为
 //! Arc/句柄，Clone 只复制句柄、共享同一底层状态，可安全移入 spawn_blocking。
 
-use crate::state::{AppState, PlaybackQueuePreview, PlaybackQueueTrack, TrackAdvance};
+use crate::state::{
+    AppState, PlaybackQueuePreview, PlaybackQueueTrack, QueueSyncToken, TrackAdvance,
+};
 use seraph_core::PlayerState;
 use std::path::PathBuf;
 use tauri::State;
@@ -25,23 +27,25 @@ where
 #[tauri::command]
 pub fn sync_playback_queue(
     state: State<'_, AppState>,
-    tracks: Vec<PlaybackQueueTrack>,
+    tracks: Option<Vec<PlaybackQueueTrack>>,
     current_track_index: usize,
     recent_track_ids: Vec<String>,
     shuffle_mode: bool,
     loop_mode: bool,
+    sync: Option<QueueSyncToken>,
 ) -> Result<PlaybackQueuePreview, String> {
     debug!(
         "ipc::sync_playback_queue -> {} tracks, index {current_track_index}",
-        tracks.len()
+        tracks.as_ref().map_or(0, Vec::len)
     );
-    Ok(state.sync_playback_queue(
+    state.update_playback_queue(
         tracks,
         current_track_index,
         recent_track_ids,
         shuffle_mode,
         loop_mode,
-    ))
+        sync,
+    )
 }
 
 #[tauri::command]

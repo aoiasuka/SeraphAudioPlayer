@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   binFreq,
   drawLevelsMeter,
@@ -32,7 +32,8 @@ import {
   stepAnalysisView,
 } from "@/lib/analysis/view";
 import { ANALYSIS_BIN_COUNT, type AnalysisFrame } from "@/lib/analysis/types";
-import { invoke, isTauriRuntime } from "@/lib/tauri";
+import { isTauriRuntime } from "@/lib/tauri";
+import { createAnalysisSession, pollVisualizer, visualizerPoller } from "@/lib/analysis/polling";
 import { cn } from "@/lib/utils";
 import {
   ANALYSIS_PANEL_IDS,
@@ -279,6 +280,7 @@ function computeWideLayout(panels: Record<AnalysisPanelId, boolean>): WideLayout
 export function AnalysisPage() {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTrackId = usePlayerStore((s) => s.currentTrack()?.id ?? null);
+  const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
 
   const settings = useAnalysisSettingsStore();
   const {
@@ -416,35 +418,27 @@ export function AnalysisPage() {
   // 数据泵：桌面轮询后端；纯浏览器用模拟器
   useEffect(() => {
     const view = viewRef.current;
+    if (visibleCount === 0 || editing) return undefined;
     if (isTauriRuntime()) {
       if (!isPlaying) return undefined;
-      const timer = window.setInterval(() => {
-        void invoke<AnalysisFrame | null>("get_analysis_frame")
-          .then((frame) => {
-            if (frame) applyAnalysisFrame(view, frame, performance.now() / 1000);
-          })
-          .catch(() => {
-            // 轮询失败静默；下一拍重试
-          });
-      }, POLL_INTERVAL_MS);
-      return () => window.clearInterval(timer);
+      return pollVisualizer<AnalysisFrame>("get_analysis_frame", sessionId,
+        (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000), {
+          spectrum: panels.spectrum || panels.spectrogram,
+          loudness: panels.loudness, levels: panels.levels, field: panels.field, scope: panels.scope,
+        });
     }
     const simulator = createAnalysisSimulator();
-    const timer = window.setInterval(() => {
-      applyAnalysisFrame(
-        view,
-        simulator.next(POLL_INTERVAL_MS / 1000),
-        performance.now() / 1000
-      );
-    }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [isPlaying]);
+    return visualizerPoller.start({
+      intervalMs: POLL_INTERVAL_MS,
+      read: async () => simulator.next(POLL_INTERVAL_MS / 1000),
+      onData: (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000),
+    });
+  }, [isPlaying, sessionId, panels.spectrum, panels.spectrogram, panels.loudness, panels.levels, panels.field, panels.scope, visibleCount, editing]);
 
-  // 换曲目：清后端积分/LRA/真峰会话值，前端同步清空显示
+  // 换曲目：后端通过 sessionId 原子切换会话，前端同步清空显示。
   useEffect(() => {
     if (!currentTrackId) return;
     resetAnalysisSession(viewRef.current);
-    if (isTauriRuntime()) void invoke("reset_analysis_meters").catch(() => {});
   }, [currentTrackId]);
 
   // 窗口变窄（<1536px）时布局编辑不可用，强制退出
@@ -469,7 +463,7 @@ export function AnalysisPage() {
     let raf = 0;
 
     const renderLoop = () => {
-      if (disposed) return;
+      if (disposed || document.visibilityState === "hidden") return;
       raf = window.requestAnimationFrame(renderLoop);
       if (editingRef.current) return; // 图纸模式：冻结仪表渲染，帧预算让给拖拽
       const now = performance.now() / 1000;
@@ -626,10 +620,16 @@ export function AnalysisPage() {
             : `${formatFreq(binFreq(bin, ANALYSIS_BIN_COUNT))} Hz · ${view.spectrumDb[bin].toFixed(1)} dB`;
       }
     };
-    raf = window.requestAnimationFrame(renderLoop);
+    const onVisibilityChange = () => {
+      window.cancelAnimationFrame(raf);
+      if (document.visibilityState !== "hidden") raf = window.requestAnimationFrame(renderLoop);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    onVisibilityChange();
 
     return () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.cancelAnimationFrame(raf);
     };
   }, []);
@@ -644,7 +644,7 @@ export function AnalysisPage() {
           ACOUSTIC ANALYSIS
         </span>
         <span className="hidden truncate font-tw text-[10px] font-bold tracking-[1px] text-ink3 sm:inline">
-          声学分析 · 实时仪表档案
+          声学分析 · 积分仅累计本次页面内响度仪表开启时的播放片段
         </span>
         {standby ? (
           <span className="border-[1.5px] border-dashed border-brown px-2 py-0.5 font-tw text-[9px] font-bold tracking-[1px] text-brown">

@@ -8,6 +8,8 @@ Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudi
 
 当前代码版本：**v0.5.11**。本次修复启动静音、重缓存与删除竞态、随机历史回退、配置恢复和声学分析等 12 类问题，详见 [版本说明](docs/releases/v0.5.11.md) 与 [修复验证记录](docs/BUG-FIXES-2026-09-12.md)。
 
+main 分支在 v0.5.11 之后已落地一轮性能优化（队列增量同步、曲库快照存储与恢复、可视化按需计算、网格虚拟化、字体精简、下载取消、诊断日志），**尚未发布新版本**；改动范围、复测数据与验证边界见 [优化修复记录](docs/OPTIMIZATION-FIXES-2026-09-13.md)，原始基线见 [优化审查报告](docs/OPTIMIZATION-REVIEW-2026-09-13.md)。
+
 ## 安装与开始使用
 
 1. 在 Releases 下载 Windows x64 的 `*_x64-setup.exe`，按安装器提示选择语言并安装；需要 MSI 时可选择 `en-US` 或 `zh-CN` 包。
@@ -29,7 +31,13 @@ Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudi
 - **实时频谱可视化**：渲染线程实时安全旁路输出样本，FFT log 频段柱状频谱（48 段）随播放展示；频率坐标按实际采样率换算，与分析页统一为 20 Hz～20 kHz。
 - **声学分析套件**：侧栏「系统 → 声学分析」提供六仪表实时分析页——响度计（EBU R128 / ITU BS.1770-4 语义：M/S/I、LRA、真峰≈、目标偏差标尺）、电平表（PEAK/RMS 分行条表与模拟 VU 表盘双模式，300ms 表针弹道、0 VU = -18 dBFS）、立体声声场仪（极坐标/李萨如散点 + 相关度表）、96 频点对数频谱（样条平滑迹线、峰值保持、悬停游标读数）、频谱瀑布（墨线山脊 / 纸墨热图双模式）、示波器（时间域波形，零交叉触发锁相、L/R 叠加或分离）；面板与显示内容可在「PANELS 面板设置」中自定义并持久化，且支持「LAYOUT 布局」图纸编辑模式——在 12×12 网格上拖拽移动、角部缩放六个仪表，自由定义大小与位置（自动布局仍为默认，隐藏面板自动补位）；全部由播放输出的真实样本驱动，渲染节流 + 离屏增量绘制控制开销。
 - **本地封面识别**：导入时提取音频内嵌封面（按内容哈希本地缓存、同专辑去重），经 Tauri asset 协议在播放条转盘、专辑/艺术家视图中展示；旧曲库首次启动自动补扫，孤儿封面自动清理；无内嵌封面的曲目支持在线匹配（QQ 音乐 / iTunes）。
-- **曲库检索与排序**：曲目列表支持标题/艺术家/专辑检索与多键排序，虚拟列表大曲库流畅滚动。
+- **曲库检索与排序**：曲目列表支持标题/艺术家/专辑检索与多键排序，虚拟列表大曲库流畅滚动；排序与检索字段按曲库版本缓存，输入使用 `useDeferredValue` 优先呈现。
+- **专辑/艺术家网格虚拟化**：卡片网格只渲染可见区域及前后两行，图片延迟加载，支持方向键与 Home/End 键盘访问。
+- **队列增量同步**：首次或元数据变化时才发送完整队列，切歌、历史、模式变化只发送增量；后端按客户端、内容版本与请求序号校验，版本失配可恢复完整快照。列表数据默认不含歌词，当前曲目歌词按需读取。
+- **曲库快照存储与恢复**：曲库元数据与歌词分文件、不可变代次提交，清单原子替换，当前清单损坏时可恢复上一份完整版本（详见下文「曲库数据文件与诊断日志」）。
+- **可视化按需计算**：专用工作线程只在有仪表需求时运行，侧栏仅算小 FFT，分析页按开启的仪表计算，无需求 250 ms 后休眠；前端跨页面最多一个可视化请求在途，窗口隐藏时暂停。
+- **下载可取消**：Bilibili 收藏夹批次带任务 ID 与取消令牌，贯穿列表请求、解析、下载与转封装；音频正文异步写盘，取消后清理当前临时文件，已入库曲目保留。
+- **本地诊断日志**：所有构建写入轮转日志（单文件约 1 MiB，最多 3 个），敏感字段脱敏，音频回调只累计轻量计数。
 - **全局右键菜单**：曲目行、歌单、专辑/艺术家卡片、播放条、UP NEXT、歌词稿均有场景化右键菜单（播放/收藏/加入歌单/曲目信息/复制/在资源管理器中定位/删除等）；文本输入框保留系统编辑菜单。
 - **歌单管理**：加入歌单、歌单内排序、移除、重命名，支持 M3U8 清单导入导出。
 - **播放进度恢复**：重启后恢复上次曲目与播放位置，一键续播；可在设置 → 系统集成中通过「记忆播放」开关关闭。
@@ -54,10 +62,20 @@ Seraph Audio Player
 │  ├─ seraph-playlist/    # 播放列表与曲库模型
 │  └─ seraph-visualizer/  # 频谱 FFT 与声学分析（K 加权响度/真峰/相关度）
 ├─ src-tauri/
-│  └─ src/ipc/            # Tauri IPC、缓存、曲库、播放命令
+│  └─ src/
+│     ├─ ipc/              # Tauri IPC、缓存、曲库、播放命令
+│     │  ├─ library/snapshot.rs   # 曲库 Arc 快照与 trackId 索引
+│     │  ├─ library/storage.rs    # 曲库清单/代次���件的成组提交与恢复
+│     │  └─ bilibili/cancellation.rs  # 收藏夹下载任务 ID 与取消令牌
+│     ├─ visualizer_service.rs    # 可视化按需计算工作线程
+│     └─ diagnostics.rs           # 轮转诊断日志与脱敏
+├─ scripts/
+│  ├─ bump-version.mjs            # 版本号同步
+│  └─ benchmark-*.mjs / .rs       # 前端资源与 Rust 响度快照微基准
 └─ src/
-   ├─ components/         # React UI
+   ├─ components/         # React UI（含 main-pages/VirtualGrid）
    ├─ hooks/              # 播放事件、拖放导入、波形等 hook
+   ├─ lib/                # 桥接、串行轮询器、分析轮询等纯逻辑
    └─ store/              # 前端 UI 状态与后端命令封装
 ```
 
@@ -92,12 +110,30 @@ Seraph Audio Player
 
 每个候选路径都会尝试创建目录并写入 `.seraph-cache` 标记；如果不可写或不安全，会自动尝试下一个路径。
 
+## 曲库数据文件与诊断日志
+
+曲库元数据与歌词保存在应用数据目录下，采用清单 + 不可变代次文件的成组提交：
+
+| 文件 | 用途 |
+| --- | --- |
+| `library-snapshot.json` | 当前已提交清单，引用一份元数据文件和一份歌词文件 |
+| `library-snapshot.previous.json` | 上一份完整清单 |
+| `library-snapshots/<代次>-tracks.json` | 不可变元数据文件 |
+| `library-snapshots/<代次>-lyrics.json` | 不可变歌词文件 |
+| `library-cache.json` / `library-lyrics.json` | 首次迁移前的旧格式备份，内容保留不再更新 |
+
+提交先写新文件并落盘，再以同卷 rename 替换清单；只改元数据时复用歌词文件，只改歌词时复用元数据文件。当前清单或其引用文件损坏时，会在上一份清单及其两个文件都能解析的前提下恢复上一版，损坏文件复制为 `.corrupt` 保留现场；恢复可能丢失最近一次已提交的变更。遇到未来版本的清单会停止读写，不会把损坏曲库当作空库写回。
+
+**降级提示**：旧版本程序不认识新清单，只会看到迁移前保留的旧 JSON。若在新版产生曲库变更后需要回到旧版，请先备份整个应用数据目录。
+
+诊断日志写入 Tauri 应用日志目录下的 `seraph.log`，单文件约 1 MiB、最多保留 3 个轮转文件（`seraph.1.log` 等）。日志经有界队列后台写入，Cookie、Authorization、常见令牌字段以及 URL 中的凭据/查询/片段都会脱敏；写文件失败时保留 stderr 输出。
+
 ## 本地开发
 
 ### 环境要求
 
-- Node.js 22+
-- Rust stable
+- Node.js **24.14.0**（仓库根目录 `.node-version`，CI 与发布使用同一版本）
+- Rust **1.98.1**（CI 与发布通过 `RUSTUP_TOOLCHAIN=1.98.1` 固定；本地 `rust-toolchain.toml` 仍跟随 stable，请保持本机版本与之一致）
 - Windows SDK / MSVC 工具链
 - Tauri CLI 依赖由项目脚本调用
 
@@ -124,16 +160,28 @@ npm run tauri:dev
 ```bash
 npm run typecheck
 npm test
+npm run build
 cargo fmt --all --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 npm audit --audit-level=low
 cargo audit --ignore RUSTSEC-2024-0429
 ```
 
 Rust 审计需先安装 `cargo-audit`，并在仓库根目录执行。既有的 `glib` 例外 `RUSTSEC-2024-0429` 属于 Windows 产物不包含的 Linux GTK 依赖，原因及回收条件见 CI 工作流注释；新公告仍须处理。
 
-当前自动化回归为前端 **187 项**、Rust **268 项**，合计 **455 项**。测试范围及实体设备验证边界见 [修复验证记录](docs/BUG-FIXES-2026-09-12.md)。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
+CI 与发布工作流的 Cargo 命令都带 `--locked`，锁文件需要更新时检查会明确失败，请把 `Cargo.lock` 变更与代码一起提交。
+
+当前自动化回归为前端 **203 项**、Rust **288 项**，合计 **491 项**。测试范围及实体设备验证边界见 [优化修复记录](docs/OPTIMIZATION-FIXES-2026-09-13.md) 与 [修复验证记录](docs/BUG-FIXES-2026-09-12.md)。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
+
+### 性能微基准
+
+```bash
+npm run benchmark:optimizations   # 前端资源体积、合成曲库搜索排序、队列同步编码
+npm run benchmark:analysis        # Rust 响度历史快照（在 target 下生成 harness）
+```
+
+结果分别写入 `target/optimization-frontend-benchmark.json` 与 `target/optimization-analysis-benchmark.json`。这是合成数据上的微基准，不代表真实桌面交互延迟或整机 CPU。
 
 ### 版本升级
 
@@ -172,6 +220,19 @@ target/release/bundle/msi/
 - `zh-CN` MSI。
 
 ## 版本记录
+
+### 未发布（main，2026-09-13 性能优化轮）
+
+基于 v0.5.11 的 16 项优化建议落地，版本号未变更，未发布安装包。详见 [优化修复记录](docs/OPTIMIZATION-FIXES-2026-09-13.md)。
+
+- **队列增量同步**：切歌、历史、模式只发送增量（5 万首曲库约 224 B，此前每次约 10.5 MB）；列表省略歌词，当前曲目歌词按需读取。
+- **曲库快照存储**：元数据/歌词分文件、代次不可变、清单原子替换，损坏时恢复上一版；旧格式文件保留为迁移前备份。
+- **可视化按需计算**：单一工作线程按需求计算，无需求即休眠；前端串行轮询、隐藏窗口暂停，响度统计只在响度仪表开启时积分。
+- **界面与资源**：专辑/艺术家网格虚拟化并补键盘访问；移除重复 WOFF 字体（assets 总量 −52%）；分析/EQ/流媒体页面按需加载。
+- **下载与诊断**：收藏夹下载可按任务取消、音频正文异步写盘；所有构建启用轮转诊断日志与脱敏。
+- **工程化**：CI/发布固定 Node 24.14.0 与 Rust 1.98.1，Cargo 命令带 `--locked`；新增两个可复现微基准入口。
+- **回归覆盖**：前端 187 → 203、Rust 268 → 288，共 491 项。
+- **仍待完成**：曲库分页与缩略图缓存、首次大排序移出主线程、本地导入进度/取消、诊断导出、IPC 类型映射，以及浏览器/真实设备验收。
 
 ### v0.5.11
 
@@ -560,7 +621,7 @@ git tag -a v0.5.11 -m "Seraph Audio Player v0.5.11"
 git push origin main v0.5.11
 ```
 
-发布前先执行 `rustup update stable`，确认本地工具链与 CI 一致，再完成格式检查、类型检查、前后端测试、Clippy、当天的两道在线依赖审计及本地安装包构建。确认版本号与 tag 一致后，仅推送本次明确指定的 tag。
+发布前确认本机 Rust 与 CI 固定的 `1.98.1` 一致（两条工作流均通过 `RUSTUP_TOOLCHAIN` 与显式 `toolchain` 固定，升级版本需同时改动两处），再完成格式检查、类型检查、前后端测试、Clippy（均带 `--locked`）、当天的两道在线依赖审计及本地安装包构建。确认版本号与 tag 一致后，仅推送本次明确指定的 tag。
 
 发布工作流会读取 `docs/releases/<tag>.md` 作为 GitHub Release 正文，生成 Windows x64 EXE 安装器和中英文 MSI 并上传。说明文件缺失或任一门禁失败都会中止发布。
 

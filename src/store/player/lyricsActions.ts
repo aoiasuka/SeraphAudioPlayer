@@ -10,7 +10,7 @@ function replaceTrackLyrics(
   lyrics: LyricLine[]
 ) {
   return playlist.map((track) =>
-    track.id === trackId ? { ...track, lyrics } : track
+    track.id === trackId ? { ...track, lyrics, lyricsLoaded: true } : track
   );
 }
 

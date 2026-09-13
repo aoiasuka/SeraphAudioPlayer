@@ -7,22 +7,19 @@
 //!
 //! 注意：所有真正的音频逻辑都不在这里写，而是交给 `crates/seraph-*`。
 
+mod diagnostics;
 mod ipc;
 #[cfg(windows)]
 mod smtc;
 mod state;
 #[cfg(windows)]
 mod taskbar;
+mod visualizer_service;
 
 use state::AppState;
 use tauri::Manager;
-#[cfg(debug_assertions)]
-use tracing_subscriber::EnvFilter;
 
 pub fn run() {
-    #[cfg(debug_assertions)]
-    init_tracing();
-
     // F-03：先把生成的 handler 绑成具名值，好在外面套一层窗口白名单拦截。
     // 需要显式标注 Runtime（generate_handler! 本身是泛型的，单独绑定推不出来）。
     let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
@@ -103,6 +100,7 @@ pub fn run() {
             handler(invoke)
         })
         .setup(|app| {
+            diagnostics::init(app.handle());
             if let Ok(app_dir) = app.path().app_data_dir() {
                 seraph_decoder::configure_ffmpeg_search_dirs([app_dir.join("ffmpeg")]);
                 // 本地曲目内嵌封面提取到 covers 目录后经 asset 协议供 <img> 加载，
@@ -169,16 +167,6 @@ fn command_allowed_for_window(label: &str, command: &str) -> bool {
         // 未知 label：应用只建这两个窗口，出现第三个即视为异常，一律拒绝
         _ => false,
     }
-}
-
-#[cfg(debug_assertions)]
-fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("seraph=debug,info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
 }
 
 #[cfg(test)]

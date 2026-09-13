@@ -28,6 +28,21 @@ const TRACKS: Track[] = [
 ];
 
 describe("filterAndSortTracks", () => {
+  it("连续查询复用排序，替换曲目后更新排序与检索字段", () => {
+    const tracks = [makeTrack({ id: "a", title: "Song 10" }), makeTrack({ id: "b", title: "Song 2" })];
+    const sorted = filterAndSortTracks(tracks, "", "title");
+    expect(sorted.map((track) => track.id)).toEqual(["b", "a"]);
+    expect(filterAndSortTracks(tracks, "song", "title")).toEqual(sorted);
+    expect(filterAndSortTracks(tracks, "", "title")).toBe(sorted);
+    const updated = [{ ...tracks[0], title: "Song 1" }, tracks[1]];
+    expect(filterAndSortTracks(updated, "song", "title").map((track) => track.id)).toEqual(["a", "b"]);
+    expect(filterAndSortTracks(updated, "10", "title")).toEqual([]);
+  });
+
+  it("相同排序键保持原队列的相对顺序", () => {
+    const tracks = [makeTrack({ id: "z", title: "Same" }), makeTrack({ id: "a", title: "Same" })];
+    expect(filterAndSortTracks(tracks, "Same", "title").map((track) => track.id)).toEqual(["z", "a"]);
+  });
   it("空查询默认排序时原样返回（不复制数组）", () => {
     expect(filterAndSortTracks(TRACKS, "", "default")).toBe(TRACKS);
   });

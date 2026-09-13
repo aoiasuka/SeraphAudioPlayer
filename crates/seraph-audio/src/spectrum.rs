@@ -8,7 +8,10 @@
 //! 交给 `seraph-visualizer` 做 FFT。
 
 use parking_lot::{Mutex, MutexGuard};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 /// 环形容量：384kHz 双声道约 85ms、48kHz 双声道约 680ms——独占模式高采样率
 /// （DoP/352.8k+）流下也足以覆盖前端 30fps 轮询间隔 + 调度抖动，
@@ -17,6 +20,17 @@ const TAP_CAPACITY: usize = 64 * 1024;
 
 pub struct SpectrumTap {
     inner: Mutex<TapInner>,
+    skipped_callbacks: AtomicU64,
+    overwritten_samples: AtomicU64,
+    missing_output_frames: AtomicU64,
+}
+
+/// 缺样帧包括起播、seek、曲尾等情况，不直接等同于可听断音。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioDiagnostics {
+    pub tap_skipped_callbacks: u64,
+    pub tap_overwritten_samples: u64,
+    pub missing_output_frames: u64,
 }
 
 /// drain 时随样本一起带出的流元数据（声学分析需要采样率设计 K 加权滤波器）。
@@ -39,6 +53,9 @@ struct TapInner {
 impl SpectrumTap {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            skipped_callbacks: AtomicU64::new(0),
+            overwritten_samples: AtomicU64::new(0),
+            missing_output_frames: AtomicU64::new(0),
             inner: Mutex::new(TapInner {
                 ring: vec![0.0; TAP_CAPACITY],
                 write_pos: 0,
@@ -51,7 +68,28 @@ impl SpectrumTap {
 
     /// 渲染线程写句柄：try_lock 失败返回 None（放弃本 quantum）。
     pub(crate) fn writer(&self) -> Option<TapWriter<'_>> {
-        self.inner.try_lock().map(|guard| TapWriter { guard })
+        match self.inner.try_lock() {
+            Some(guard) => Some(TapWriter { guard }),
+            None => {
+                self.skipped_callbacks.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn record_missing_output(&self, frames: usize) {
+        if frames > 0 {
+            self.missing_output_frames
+                .fetch_add(frames as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn diagnostics(&self) -> AudioDiagnostics {
+        AudioDiagnostics {
+            tap_skipped_callbacks: self.skipped_callbacks.load(Ordering::Relaxed),
+            tap_overwritten_samples: self.overwritten_samples.load(Ordering::Relaxed),
+            missing_output_frames: self.missing_output_frames.load(Ordering::Relaxed),
+        }
     }
 
     /// 读侧：取出自上次调用以来的新样本（追加到 `out`），返回流元数据。
@@ -62,6 +100,8 @@ impl SpectrumTap {
         let channels = inner.channels as u64;
         let oldest = inner.write_pos.saturating_sub(capacity);
         let read = inner.read_pos.max(oldest).div_ceil(channels) * channels;
+        self.overwritten_samples
+            .fetch_add(read.saturating_sub(inner.read_pos), Ordering::Relaxed);
         // 尾部尚未写满的一帧留给下次 drain，不能把半帧交给分析器。
         let write = inner.write_pos / channels * channels;
         out.reserve(write.saturating_sub(read) as usize);
@@ -113,6 +153,26 @@ impl TapWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_accumulate_overflow_and_contention_without_double_counting() {
+        let tap = SpectrumTap::new();
+        {
+            let mut writer = tap.writer().unwrap();
+            assert!(tap.writer().is_none(), "实时写侧不能等待已被占用的锁");
+            for _ in 0..TAP_CAPACITY + 4 {
+                writer.push(0.25);
+            }
+        }
+        let mut samples = Vec::new();
+        tap.drain(&mut samples);
+        assert_eq!(tap.diagnostics().tap_skipped_callbacks, 1);
+        assert_eq!(tap.diagnostics().tap_overwritten_samples, 4);
+        samples.clear();
+        tap.drain(&mut samples);
+        assert!(samples.is_empty());
+        assert_eq!(tap.diagnostics().tap_overwritten_samples, 4);
+    }
 
     #[test]
     fn bug_audit_12_repeated_overflows_keep_channel_alignment() {

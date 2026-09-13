@@ -155,6 +155,7 @@ export function createBilibiliActions(
   },
 
   importBilibiliFavorites: async (input, options) => {
+    if (get().bilibiliBatchProgress) return null;
     const cleanInput = input.trim();
     if (!cleanInput) {
       get().showNotification("请输入 B 站收藏夹链接、media_id 或 fid");
@@ -163,9 +164,11 @@ export function createBilibiliActions(
 
     // M-15：立刻进入“导入中”态（total 未知先置 0），真实进度由
     // seraph://bilibili-batch 事件写入；结束/异常都在 finally 清理。
-    set({ bilibiliBatchProgress: { current: 0, total: 0, title: "", ok: true } });
+    const taskId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    set({ bilibiliBatchProgress: { taskId, current: 0, total: 0, title: "", ok: true } });
     try {
       const result = await invoke<BilibiliBatchImportResult>("import_bilibili_favorites", {
+        taskId,
         input: cleanInput,
         options,
       });
@@ -208,9 +211,11 @@ export function createBilibiliActions(
   },
 
   cancelBilibiliFavoritesImport: async () => {
+    const progress = get().bilibiliBatchProgress;
+    if (!progress) return;
     try {
-      await invoke("cancel_bilibili_favorites_import");
-      get().showNotification("正在取消收藏夹导入（当前曲目完成后停止）…");
+      await invoke("cancel_bilibili_favorites_import", { taskId: progress.taskId });
+      get().showNotification("正在取消收藏夹导入…");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: cancel_bilibili_favorites_import", err);

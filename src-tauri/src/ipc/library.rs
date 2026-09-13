@@ -11,6 +11,8 @@ mod metadata;
 mod online_covers;
 mod online_lyrics;
 mod prelude;
+mod snapshot;
+mod storage;
 #[cfg(test)]
 mod tests;
 mod types;

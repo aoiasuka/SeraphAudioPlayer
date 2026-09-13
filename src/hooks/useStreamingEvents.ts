@@ -54,7 +54,8 @@ export function useStreamingEvents() {
     // M-15：收藏夹批量导入进度。仅在导入中（progress 非 null）时更新，
     // 避免结果落定清空后又被滞后事件复活。
     register<BilibiliBatchProgress>("seraph://bilibili-batch", (progress) => {
-      if (usePlayerStore.getState().bilibiliBatchProgress === null) return;
+      const current = usePlayerStore.getState().bilibiliBatchProgress;
+      if (!current || (current.taskId && progress.taskId !== current.taskId)) return;
       usePlayerStore.setState({ bilibiliBatchProgress: progress });
     });
 

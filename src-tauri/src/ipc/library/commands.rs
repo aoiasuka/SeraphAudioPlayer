@@ -14,29 +14,43 @@ fn emit_lyrics_updated(app: &AppHandle, track_id: &str) {
 }
 
 #[tauri::command]
-pub async fn get_playlist(app: AppHandle) -> IpcResult<Vec<ImportedTrack>> {
-    // 封面补扫含 lofty 标签解析（阻塞 IO），与读缓存一并放 spawn_blocking，
-    // 避免旧曲库首次补扫时卡住 IPC 调度线程。
-    let tracks = tauri::async_runtime::spawn_blocking(move || {
-        backfill_missing_covers(&app);
-        gc_orphan_covers(&app);
-        read_cached_tracks(&app)
+pub async fn get_playlist(
+    app: AppHandle,
+    include_lyrics: Option<bool>,
+) -> IpcResult<super::snapshot::PlaylistSnapshot> {
+    let app_for_read = app.clone();
+    let snapshot =
+        tauri::async_runtime::spawn_blocking(move || read_library_snapshot(&app_for_read))
+            .await
+            .map_err(|err| {
+                IpcError::new(
+                    crate::ipc::error::IpcErrorCode::Internal,
+                    format!("get_playlist task panicked: {err}"),
+                )
+            })??;
+    // 曲库可立即使用；封面补扫和 GC 在独立阻塞任务里继续，完成后通知前端刷新摘要。
+    static MAINTENANCE_STARTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !MAINTENANCE_STARTED.swap(true, Ordering::AcqRel) {
+        tauri::async_runtime::spawn_blocking(move || {
+            if backfill_missing_covers(&app) {
+                let _ = app.emit("seraph://library-updated", ());
+            }
+            gc_orphan_covers(&app);
+        });
+    }
+    Ok(super::snapshot::PlaylistSnapshot {
+        snapshot,
+        include_lyrics: include_lyrics.unwrap_or(true),
     })
-    .await
-    .map_err(|err| {
-        IpcError::new(
-            crate::ipc::error::IpcErrorCode::Internal,
-            format!("get_playlist task panicked: {err}"),
-        )
-    })??;
-    Ok(tracks)
 }
 
 #[tauri::command]
-pub fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Option<ImportedTrack>> {
-    Ok(read_cached_tracks(&app)?
-        .into_iter()
-        .find(|track| track.id == track_id))
+pub async fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Option<ImportedTrack>> {
+    tauri::async_runtime::spawn_blocking(move || read_cached_track(&app, &track_id))
+        .await
+        .map_err(|err| IpcError::from(format!("get_track_info task panicked: {err}")))?
+        .map_err(IpcError::from)
 }
 
 #[tauri::command]
@@ -113,6 +127,12 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
 
             for warning in &warnings {
                 tracing::warn!("import_tracks: {warning}");
+            }
+            if !warnings.is_empty() {
+                let _ = app.emit(
+                    "seraph://library-import-warning",
+                    format!("已跳过 {} 项无法读取的文件或目录", warnings.len()),
+                );
             }
 
             if !tracks.is_empty() {

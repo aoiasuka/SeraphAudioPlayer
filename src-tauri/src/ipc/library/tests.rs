@@ -5,6 +5,262 @@ use super::prelude::*;
 use serde_json::json;
 use std::fs;
 
+struct TestLibraryDir(PathBuf);
+
+#[test]
+fn playlist_summary_keeps_metadata_without_cloning_or_serializing_lyrics() {
+    use super::snapshot::{LibrarySnapshot, PlaylistSnapshot};
+    let mut track = test_imported_track("a", "C:/a.flac", "A");
+    track.lyrics.push(LyricLine {
+        time: 1.0,
+        text: "long lyric".repeat(1000),
+    });
+    let snapshot = std::sync::Arc::new(LibrarySnapshot::new(vec![track.clone()]));
+    let summary = PlaylistSnapshot {
+        snapshot: snapshot.clone(),
+        include_lyrics: false,
+    };
+    let encoded = serde_json::to_vec(&summary).unwrap();
+    let restored: Vec<ImportedTrack> = serde_json::from_slice(&encoded).unwrap();
+    let mut expected = track.clone();
+    expected.lyrics.clear();
+    assert_eq!(restored, vec![expected]);
+    assert!(encoded.len() < 1000);
+    assert_eq!(snapshot.get("a").unwrap().lyrics, track.lyrics);
+    let full = PlaylistSnapshot {
+        snapshot,
+        include_lyrics: true,
+    };
+    assert_eq!(
+        serde_json::from_slice::<Vec<ImportedTrack>>(&serde_json::to_vec(&full).unwrap()).unwrap(),
+        vec![track]
+    );
+}
+
+impl TestLibraryDir {
+    fn new() -> Self {
+        let path = temp_audio_path("seraph-snapshot", "dir");
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn storage(&self) -> super::storage::LibraryStorage {
+        super::storage::LibraryStorage::new(&self.0)
+    }
+}
+
+impl Drop for TestLibraryDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn snapshot_storage_reuses_unchanged_components_and_keeps_legacy_backup() {
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let mut tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
+    tracks[0].lyrics.push(LyricLine {
+        time: 1.0,
+        text: "第一行".into(),
+    });
+    let legacy_bytes = serde_json::to_vec(&tracks).unwrap();
+    fs::write(dir.0.join("library-cache.json"), &legacy_bytes).unwrap();
+    assert_eq!(storage.load().unwrap(), tracks);
+    storage.save(&tracks, None).unwrap();
+    assert_eq!(storage.load().unwrap(), tracks);
+    assert_eq!(
+        fs::read(dir.0.join("library-cache.json")).unwrap(),
+        legacy_bytes
+    );
+
+    let mut updated = tracks.clone();
+    updated[0].cover = "C:/cover.jpg".into();
+    let stats = storage.save(&updated, Some(&tracks)).unwrap();
+    assert!(stats.metadata_bytes > 0);
+    assert_eq!(stats.lyrics_bytes, 0, "只改封面不能重写歌词");
+    assert_eq!(storage.load().unwrap(), updated);
+
+    tracks = updated.clone();
+    updated[0].lyrics[0].text = "新的歌词".into();
+    let stats = storage.save(&updated, Some(&tracks)).unwrap();
+    assert_eq!(stats.metadata_bytes, 0, "只改歌词不能重写元数据");
+    assert!(stats.lyrics_bytes > 0);
+    assert_eq!(storage.load().unwrap(), updated);
+    let manifest = fs::read(dir.0.join("library-snapshot.json")).unwrap();
+    let stats = storage.save(&updated, Some(&updated)).unwrap();
+    assert_eq!((stats.metadata_bytes, stats.lyrics_bytes), (0, 0));
+    assert_eq!(
+        fs::read(dir.0.join("library-snapshot.json")).unwrap(),
+        manifest
+    );
+
+    let original = updated.clone();
+    updated[0].lyrics.clear();
+    storage.save(&updated, Some(&original)).unwrap();
+    assert!(
+        storage.load().unwrap()[0].lyrics.is_empty(),
+        "清空歌词也必须提交"
+    );
+}
+
+#[test]
+fn snapshot_storage_survives_failure_at_every_commit_stage() {
+    for fail_at in 1..=4 {
+        let dir = TestLibraryDir::new();
+        let storage = dir.storage();
+        let mut old = vec![test_imported_track("a", "C:/a.flac", "old")];
+        old[0].lyrics.push(LyricLine {
+            time: 1.0,
+            text: "old lyric".into(),
+        });
+        storage.save(&old, None).unwrap();
+        let mut updated = old.clone();
+        updated[0].title = "new".into();
+        updated[0].lyrics[0].text = "new lyric".into();
+        let mut stage = 0;
+        let result = storage.save_with(&updated, Some(&old), |path, bytes| {
+            stage += 1;
+            if stage == fail_at {
+                return Err("模拟磁盘写入失败".into());
+            }
+            write_json_atomic(path, bytes)
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            dir.storage().load().unwrap(),
+            old,
+            "第 {fail_at} 阶段失败不能读到混合版本"
+        );
+        storage.save(&updated, Some(&old)).unwrap();
+        assert_eq!(dir.storage().load().unwrap(), updated);
+        assert!(
+            fs::read_dir(dir.0.join("library-snapshots"))
+                .unwrap()
+                .count()
+                <= 4
+        );
+    }
+}
+
+#[test]
+fn snapshot_storage_recovers_a_complete_previous_generation() {
+    for corrupt_manifest in [false, true] {
+        let dir = TestLibraryDir::new();
+        let storage = dir.storage();
+        let old = vec![test_imported_track("a", "C:/a.flac", "old")];
+        storage.save(&old, None).unwrap();
+        let mut updated = old.clone();
+        updated[0].title = "new".into();
+        updated[0].lyrics.push(LyricLine {
+            time: 1.0,
+            text: "new lyric".into(),
+        });
+        storage.save(&updated, Some(&old)).unwrap();
+        let manifest_path = dir.0.join("library-snapshot.json");
+        let corrupt_path = if corrupt_manifest {
+            manifest_path
+        } else {
+            let manifest: Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            dir.0
+                .join("library-snapshots")
+                .join(manifest["lyrics"].as_str().unwrap())
+        };
+        fs::write(&corrupt_path, b"{broken").unwrap();
+        assert_eq!(storage.load().unwrap(), old);
+        assert_eq!(dir.storage().load().unwrap(), old, "恢复结果需要跨重启保持");
+        assert!(fs::read_dir(corrupt_path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".corrupt")));
+    }
+}
+
+#[test]
+fn legacy_corrupt_lyrics_are_reported_and_never_read_as_empty() {
+    let dir = TestLibraryDir::new();
+    let tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
+    fs::write(
+        dir.0.join("library-cache.json"),
+        serde_json::to_vec(&tracks).unwrap(),
+    )
+    .unwrap();
+    let bad = dir.0.join("library-lyrics.json");
+    fs::write(&bad, b"broken lyrics").unwrap();
+    assert!(dir.storage().load().is_err());
+    assert_eq!(fs::read(bad).unwrap(), b"broken lyrics");
+    assert!(!dir.0.join("library-snapshot.json").exists());
+}
+
+#[test]
+fn future_snapshot_version_never_rolls_back_or_overwrites_data() {
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let old = vec![test_imported_track("a", "C:/a.flac", "old")];
+    storage.save(&old, None).unwrap();
+    let mut updated = old.clone();
+    updated[0].title = "new".into();
+    storage.save(&updated, Some(&old)).unwrap();
+    let path = dir.0.join("library-snapshot.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["version"] = json!(2);
+    let future = serde_json::to_vec(&manifest).unwrap();
+    fs::write(&path, &future).unwrap();
+    assert!(storage.load().unwrap_err().contains("版本"));
+    assert!(storage.save(&old, Some(&updated)).is_err());
+    assert_eq!(fs::read(path).unwrap(), future);
+}
+
+#[test]
+fn snapshot_cleanup_only_removes_owned_unreferenced_generations() {
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let old = vec![test_imported_track("a", "C:/a.flac", "old")];
+    storage.save(&old, None).unwrap();
+    let snapshots = dir.0.join("library-snapshots");
+    let unrelated = [
+        "notes-tracks.json",
+        "1-2-tracks.json",
+        "1-2-3-4-lyrics.json",
+        "1-2-3-tracks.json.corrupt",
+    ];
+    for name in unrelated {
+        fs::write(snapshots.join(name), b"preserve").unwrap();
+    }
+    let orphan = snapshots.join("1-2-3-tracks.json");
+    fs::write(&orphan, b"uncommitted snapshot").unwrap();
+    let mut updated = old.clone();
+    updated[0].title = "new".into();
+    storage.save(&updated, Some(&old)).unwrap();
+    assert!(!orphan.exists());
+    for name in unrelated {
+        assert_eq!(fs::read(snapshots.join(name)).unwrap(), b"preserve");
+    }
+    assert_eq!(storage.load().unwrap(), updated);
+    fs::remove_file(dir.0.join("library-snapshot.json")).unwrap();
+    assert_eq!(
+        storage.load().unwrap(),
+        old,
+        "当前清单缺失时仍能恢复完整上一版"
+    );
+}
+
+#[test]
+fn library_snapshot_keeps_first_duplicate_and_replaces_index_with_contents() {
+    use super::snapshot::LibrarySnapshot;
+    let original = LibrarySnapshot::new(vec![
+        test_imported_track("a", "C:/a.flac", "first"),
+        test_imported_track("a", "C:/duplicate.flac", "duplicate"),
+        test_imported_track("b", "C:/b.flac", "B"),
+    ]);
+    assert_eq!(original.get("a").unwrap().title, "first");
+    assert!(original.get("missing").is_none());
+    let updated = LibrarySnapshot::new(vec![original.get("b").unwrap().clone()]);
+    assert!(updated.get("a").is_none());
+    assert_eq!(updated.get("b").unwrap().title, "B");
+    assert_eq!(original.tracks.len(), 3);
+}
+
 #[test]
 fn bug_audit_03_deleted_track_cannot_be_reinserted_by_recache() {
     let a = test_imported_track("a", "C:/cache/a.m4a", "A");
@@ -681,7 +937,7 @@ fn corrupt_library_cache_is_reported_and_backed_up_not_emptied() {
     let result = read_tracks_from_file(&path);
     assert!(result.is_err(), "损坏缓存必须返回 Err 而不是空列表");
 
-    let backup = backup_corrupt_file(&path);
+    let backup = backup_corrupt_file(&path).unwrap();
     assert!(backup.is_file(), "坏文件应被备份为 .corrupt");
     assert_eq!(fs::read(&backup).unwrap(), b"{ this is not valid json");
     assert!(path.is_file(), "原始坏文件保留现场，不被移动");

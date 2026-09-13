@@ -4,6 +4,33 @@ use seraph_core::types::{BitDepth, Channels, SampleRate};
 use seraph_decoder::{DecoderError, Packet};
 
 #[test]
+fn missing_output_counts_frames_and_excludes_pause_and_stop() {
+    let tap = SpectrumTap::new();
+    let shared = PlaybackShared::new(48_000, 2, 0.5, tap.clone());
+    let (mut producer, mut consumer) = RingBuffer::new(16);
+    for _ in 0..2 {
+        assert!(producer
+            .push(QueuedSample {
+                generation: 0,
+                value: 0.25
+            })
+            .is_ok());
+    }
+    let mut render = RenderState::new(0);
+    let mut output = [1.0; 8];
+    render_output_f32(&mut output, &shared, &mut consumer, &mut render);
+    assert_eq!(shared.frame_position.load(Ordering::Relaxed), 1);
+    assert_eq!(tap.diagnostics().missing_output_frames, 3);
+    assert_eq!(&output[2..], &[0.0; 6]);
+    shared.paused.store(true, Ordering::Release);
+    render_output_f32(&mut output, &shared, &mut consumer, &mut render);
+    shared.paused.store(false, Ordering::Release);
+    shared.stopped.store(true, Ordering::Release);
+    render_output_f32(&mut output, &shared, &mut consumer, &mut render);
+    assert_eq!(tap.diagnostics().missing_output_frames, 3);
+}
+
+#[test]
 fn bug_audit_06_engine_is_silent_until_settings_arrive() {
     let mut engine = PlaybackEngine::new(EventBus::new());
     assert_eq!(engine.volume, 0.0);

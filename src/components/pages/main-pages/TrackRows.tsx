@@ -1,5 +1,5 @@
 import { ListPlus, Heart, Search, Trash2, X } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useDeferredValue, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
@@ -39,12 +39,13 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [trackToAddId, setTrackToAddId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
   const [sortKey, setSortKey] = useState<TrackSortKey>("default");
   // 搜索 + 排序后的视图列表。点击播放仍经 trackIndexById 映射回全局队列索引，
   // 因此过滤/排序只改变展示，不影响播放队列与切歌逻辑。
   const displayTracks = useMemo(
-    () => filterAndSortTracks(tracks, query, sortKey),
-    [tracks, query, sortKey]
+    () => filterAndSortTracks(tracks, deferredQuery, sortKey),
+    [tracks, deferredQuery, sortKey]
   );
   const trackIndexById = useMemo(() => {
     const indexById = new Map<string, number>();

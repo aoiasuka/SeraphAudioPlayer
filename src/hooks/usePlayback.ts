@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from "react";
-import { isTauriRuntime } from "@/lib/tauri";
+import { invoke, isTauriRuntime } from "@/lib/tauri";
+import type { Track } from "@/types/track";
 import { usePlayerStore } from "@/store/player";
 import { usePlayerEvents } from "@/hooks/usePlayerEvents";
 import { resetNextIndexCache, seekGuard, withRecentTrack } from "@/store/player/playbackActions";
@@ -17,6 +18,22 @@ export function usePlayback() {
   const recentTrackIds = usePlayerStore((s) => s.recentTrackIds);
   const shuffleMode = usePlayerStore((s) => s.shuffleMode);
   const loopMode = usePlayerStore((s) => s.loopMode);
+  const currentTrack = playlist[currentTrackIndex];
+
+  useEffect(() => {
+    if (!isTauriRuntime() || !currentTrack || currentTrack.lyricsLoaded !== false) return;
+    let disposed = false;
+    void invoke<Track | null>("get_track_info", { trackId: currentTrack.id }).then((details) => {
+      if (disposed || !details || details.id !== currentTrack.id) return;
+      usePlayerStore.setState((state) => {
+        // 同一曲目也可能已替换歌词；只合并本次请求看到的不可变记录。
+        if (state.currentTrack() !== currentTrack) return {};
+        return { playlist: state.playlist.map((track) => track === currentTrack
+          ? { ...track, lyrics: details.lyrics, lyricsLoaded: true } : track) };
+      });
+    }).catch((error) => { if (!disposed) console.warn("读取当前曲目歌词失败", error); });
+    return () => { disposed = true; };
+  }, [currentTrack]);
   const handleBackendEvent = useCallback((event: { type: string; [key: string]: unknown }) => {
     if (event.type === "progress") {
       // 审2-R12：NaN/Infinity 的进度事件直接丢弃，避免污染 currentTime 后 UI 显示 "NaN:NaN"

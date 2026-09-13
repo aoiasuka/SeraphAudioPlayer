@@ -44,6 +44,7 @@ export interface BilibiliBatchImportResult {
 
 /** 收藏夹批量导入进度（`seraph://bilibili-batch` 事件 payload） */
 export interface BilibiliBatchProgress {
+  taskId?: string;
   current: number;
   total: number;
   title: string;
