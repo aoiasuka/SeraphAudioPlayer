@@ -13,7 +13,7 @@ function resetStore() {
     entries: [],
     infoTrackId: null,
     createPlaylistTrackIds: null,
-    confirmDeleteTrackId: null,
+    deleteRequest: null,
   });
 }
 
@@ -63,7 +63,7 @@ describe("context menu store (v0.4.3)", () => {
     store.openContextMenu({ x: 1, y: 1 }, [{ key: "a", label: "动作" }]);
     store.requestDeleteTrack("track-2");
     expect(useContextMenuStore.getState().open).toBe(false);
-    expect(useContextMenuStore.getState().confirmDeleteTrackId).toBe("track-2");
+    expect(useContextMenuStore.getState().deleteRequest?.trackIds).toEqual(["track-2"]);
 
     store.openContextMenu({ x: 1, y: 1 }, [{ key: "a", label: "动作" }]);
     store.openCreatePlaylistWith(["t1", "t2"]);
@@ -77,5 +77,18 @@ describe("context menu store (v0.4.3)", () => {
   it("isSeparator 正确区分分隔线与动作条目", () => {
     expect(isSeparator({ type: "separator", key: "sep" })).toBe(true);
     expect(isSeparator({ key: "a", label: "动作" })).toBe(false);
+  });
+
+  it("批量确认固定去重后的 ID 快照，取消后清空", () => {
+    const ids = ["a", "b", "a"];
+    useContextMenuStore.getState().requestDeleteTracks(ids, { scope: "流媒体", all: true });
+    ids.push("c");
+    expect(useContextMenuStore.getState().deleteRequest).toMatchObject({
+      trackIds: ["a", "b"], scope: "流媒体", all: true,
+    });
+    useContextMenuStore.getState().closeDeleteTrack();
+    expect(useContextMenuStore.getState().deleteRequest).toBeNull();
+    useContextMenuStore.getState().requestDeleteTracks([]);
+    expect(useContextMenuStore.getState().deleteRequest).toBeNull();
   });
 });

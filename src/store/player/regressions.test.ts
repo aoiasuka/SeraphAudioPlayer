@@ -10,7 +10,7 @@ import { useHydratePlayerStore } from "@/hooks/useHydratePlayerStore";
 import { applyPendingConfigImport, parseConfigImport, stashPendingImport } from "@/lib/configTransfer";
 import { bumpPlayEpoch } from "@/store/player/playEpoch";
 import { runWhenIdle } from "@/lib/startup";
-import type { Track } from "@/types/track";
+import type { DeleteTracksResult, Track } from "@/types/track";
 
 vi.mock("@/lib/tauri", async (original) => ({
   ...await original<typeof import("@/lib/tauri")>(),
@@ -119,7 +119,7 @@ it("BUG-03：删除正在重缓存的曲目后，迟到响应不得覆盖下一�
   usePlayerStore.setState({ playlist: [a, b], currentTrackIndex: 0, isPlaying: false });
   invokeMock.mockImplementation(async (command) => {
     if (command === "import_bilibili_audio_with_options") return pending.promise;
-    if (command === "delete_track") return true;
+    if (command === "delete_tracks") return { deletedIds: [a.id], deletedFiles: 0, failures: [] };
     return undefined;
   });
   usePlayerStore.getState().loadTrack(0, { forcePlay: true });
@@ -154,13 +154,13 @@ it("BUG-04：旧设备枚举请求不得覆盖用户随后选择的设备", asyn
 
 it("BUG-03：删除请求等待期间也不能启动迟到的重缓存播放", async () => {
   const download = deferred<Track>();
-  const deletion = deferred<boolean>();
+  const deletion = deferred<DeleteTracksResult>();
   const a = track("pending-a", { sourceId: "BV1234567890", cacheMissing: true });
   const b = track("pending-b");
   usePlayerStore.setState({ playlist: [a, b], currentTrackIndex: 0 });
   invokeMock.mockImplementation(async (command) => {
     if (command === "import_bilibili_audio_with_options") return download.promise;
-    if (command === "delete_track") return deletion.promise;
+    if (command === "delete_tracks") return deletion.promise;
     return undefined;
   });
   usePlayerStore.getState().loadTrack(0, { forcePlay: true });
@@ -168,7 +168,7 @@ it("BUG-03：删除请求等待期间也不能启动迟到的重缓存播放", a
   download.resolve({ ...a, cacheMissing: false });
   await flush();
   const playsBeforeDeleteReply = invokeMock.mock.calls.filter(([command]) => command === "play");
-  deletion.resolve(true);
+  deletion.resolve({ deletedIds: [a.id], deletedFiles: 0, failures: [] });
   await removed;
   expect(playsBeforeDeleteReply).toEqual([]);
   expect(usePlayerStore.getState().playlist.map((item) => item.id)).toEqual([b.id]);

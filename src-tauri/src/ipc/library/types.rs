@@ -49,6 +49,22 @@ pub struct DeleteTrackRequest {
     pub source_id: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTracksResult {
+    pub deleted_ids: Vec<String>,
+    /// 实际移除的音频文件数，不包含完成标记或原本已丢失的文件。
+    pub deleted_files: usize,
+    pub failures: Vec<DeleteTrackFailure>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteTrackFailure {
+    pub id: String,
+    pub title: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
     pub time: f64,

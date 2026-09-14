@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DeviceMenu } from "@/components/player/DeviceMenu";
 import { PlaybackControls } from "@/components/player/PlaybackControls";
 import { VolumeControl } from "@/components/player/VolumeControl";
@@ -8,10 +8,22 @@ import { buildCurrentTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
 import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
+import { useImmersiveStore } from "@/store/immersive";
 
 export function MiniPlayer() {
   const track = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const immersiveOpen = useImmersiveStore((s) => s.isOpen);
+  const openImmersive = useImmersiveStore((s) => s.open);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const wasImmersiveOpen = useRef(false);
+
+  useEffect(() => {
+    if (wasImmersiveOpen.current && !immersiveOpen && track) {
+      triggerRef.current?.focus({ preventScroll: true });
+    }
+    wasImmersiveOpen.current = immersiveOpen;
+  }, [immersiveOpen, track]);
   // 封面加载失败时回退到默认转盘刻度样式
   const [coverFailed, setCoverFailed] = useState(false);
   const cover = coverSrc(track?.cover);
@@ -31,7 +43,16 @@ export function MiniPlayer() {
             if (track) showContextMenu(event, buildCurrentTrackMenuEntries(track));
           }}
         >
-          <div className={cn("reel", showCover && "has-cover", isPlaying && "spinning")}>
+          <button
+            ref={triggerRef}
+            type="button"
+            className={cn("reel shrink-0 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-stamp disabled:cursor-default", showCover && "has-cover", isPlaying && "spinning")}
+            onClick={openImmersive}
+            onKeyDown={(event) => { if (event.code === "Space") event.stopPropagation(); }}
+            disabled={!track}
+            aria-label="打开沉浸播放"
+            title="沉浸播放 · 封面、歌词与声学分析"
+          >
             {showCover ? (
               <img
                 src={cover}
@@ -41,7 +62,7 @@ export function MiniPlayer() {
                 className="h-full w-full rounded-full object-cover"
               />
             ) : null}
-          </div>
+          </button>
           <div className="min-w-0">
             <p className="truncate font-serif text-sm font-semibold text-ink">
               {track ? track.title : "未选择曲目"}

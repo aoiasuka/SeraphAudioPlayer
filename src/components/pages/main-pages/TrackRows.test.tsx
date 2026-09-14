@@ -49,6 +49,7 @@ const TRACKS = [
 
 describe("TrackRows", () => {
   beforeEach(() => {
+    useContextMenuStore.getState().closeDeleteTrack();
     usePlayerStore.setState({
       playlist: TRACKS,
       currentTrackIndex: 0,
@@ -162,13 +163,13 @@ describe("TrackRows", () => {
   });
 
   it("行内删除按钮改走全局删除确认（v0.4.3）", async () => {
-    useContextMenuStore.setState({ confirmDeleteTrackId: null });
+    useContextMenuStore.setState({ deleteRequest: null });
     const user = userEvent.setup();
     render(<TrackRows tracks={TRACKS} empty="空" />);
 
     await user.click(screen.getByLabelText("删除曲库记录 夜曲"));
 
-    expect(useContextMenuStore.getState().confirmDeleteTrackId).toBe("t1");
+    expect(useContextMenuStore.getState().deleteRequest?.trackIds).toEqual(["t1"]);
   });
 
   it("双击曲目行强制起播（v0.4.4）", () => {
@@ -199,6 +200,7 @@ describe("TrackRows", () => {
       .entries.filter((entry) => !isSeparator(entry))
       .map((entry) => (isSeparator(entry) ? "" : entry.label));
     expect(streamingLabels).toContain("重新加载…");
+    expect(streamingLabels).toContain("删除曲目及缓存文件");
 
     // 本地曲目右键无「重新加载…」
     cleanup();
@@ -210,5 +212,64 @@ describe("TrackRows", () => {
       .entries.filter((entry) => !isSeparator(entry))
       .map((entry) => (isSeparator(entry) ? "" : entry.label));
     expect(localLabels).not.toContain("重新加载…");
+  });
+
+  it("多选和双击选择不会播放，只对勾选曲目发起确认", async () => {
+    const loadTrack = vi.fn();
+    usePlayerStore.setState({ loadTrack });
+    const user = userEvent.setup();
+    render(<TrackRows tracks={TRACKS} empty="空" scopeName="本地音乐" />);
+    await user.click(screen.getByRole("button", { name: "多选曲目" }));
+    expect(screen.getByRole("button", { name: "删除所选" })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: "选择 夜曲" }));
+    fireEvent.doubleClick(screen.getByText("夜曲"));
+    await user.click(screen.getByRole("button", { name: "切换选择 First Love" }));
+    expect(loadTrack).not.toHaveBeenCalled();
+    expect(screen.getByRole("checkbox", { name: "全选当前列表" })).toBePartiallyChecked();
+    await user.click(screen.getByRole("button", { name: "删除所选" }));
+    expect(useContextMenuStore.getState().deleteRequest).toMatchObject({ trackIds: ["t1", "t2"], scope: "本地音乐", all: false });
+    expect(usePlayerStore.getState().playlist).toHaveLength(3);
+  });
+
+  it("全选覆盖虚拟列表外的全部曲目，退出多选清空选择", async () => {
+    const tracks = Array.from({ length: 300 }, (_, index) => makeTrack(`large-${index}`, `曲目 ${index}`, "Artist", 180));
+    usePlayerStore.setState({ playlist: tracks });
+    const user = userEvent.setup();
+    render(<TrackRows tracks={tracks} empty="空" />);
+    expect(screen.queryByText("曲目 299")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "多选曲目" }));
+    await user.click(screen.getByRole("checkbox", { name: "全选当前列表" }));
+    expect(screen.getByText("已选择 300 / 300 首")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "删除所选" }));
+    expect(useContextMenuStore.getState().deleteRequest?.trackIds).toHaveLength(300);
+    await user.click(screen.getByRole("button", { name: "退出多选" }));
+    await user.click(screen.getByRole("button", { name: "多选曲目" }));
+    expect(screen.getByText("已选择 0 / 300 首")).toBeInTheDocument();
+  });
+
+  it("搜索改变时清空旧选择，全部删除仅固定搜索结果", async () => {
+    const user = userEvent.setup();
+    render(<TrackRows tracks={TRACKS} empty="空" scopeName="最近播放" />);
+    await user.click(screen.getByRole("button", { name: "多选曲目" }));
+    await user.click(screen.getByRole("checkbox", { name: "全选当前列表" }));
+    await user.type(screen.getByLabelText("检索曲目"), "first");
+    expect(screen.getByText("已选择 0 / 1 首")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "全部删除" }));
+    expect(useContextMenuStore.getState().deleteRequest).toMatchObject({
+      trackIds: ["t2"], scope: "最近播放 · 搜索「first」的结果", all: true,
+    });
+    await user.type(screen.getByLabelText("检索曲目"), "missing");
+    expect(screen.getByRole("button", { name: "全部删除" })).toBeDisabled();
+  });
+
+  it("选择按 ID 保留排序，已移除的曲目不再参与选择", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<TrackRows tracks={TRACKS} empty="空" />);
+    await user.click(screen.getByRole("button", { name: "多选曲目" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择 夜曲" }));
+    await user.selectOptions(screen.getByLabelText("排序方式"), "title");
+    expect(screen.getByRole("checkbox", { name: "选择 夜曲" })).toBeChecked();
+    rerender(<TrackRows tracks={TRACKS.slice(1)} empty="空" />);
+    expect(screen.getByText("已选择 0 / 2 首")).toBeInTheDocument();
   });
 });

@@ -3,8 +3,10 @@ import { formatSeconds } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePlayerStore } from "@/store/player";
 import { useWaveform, WAVEFORM_SIDE_PADDING } from "@/hooks/useWaveform";
+import { useImmersiveStore } from "@/store/immersive";
 
 export function WaveformProgress() {
+  const immersiveOpen = useImmersiveStore((s) => s.isOpen);
   const track = usePlayerStore((s) => s.currentTrack());
   const currentTime = usePlayerStore((s) => s.currentTime);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -16,7 +18,7 @@ export function WaveformProgress() {
 
   const displayTime = dragTime ?? currentTime;
 
-  useWaveform(canvasRef, { track, currentTime: displayTime, isPlaying });
+  useWaveform(canvasRef, { track, currentTime: displayTime, isPlaying, enabled: !immersiveOpen });
 
   const timeFromClientX = (clientX: number) => {
     if (!track || track.duration <= 0) return;

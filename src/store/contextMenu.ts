@@ -31,6 +31,15 @@ export interface ContextMenuSeparator {
 
 export type ContextMenuEntry = ContextMenuAction | ContextMenuSeparator;
 
+export interface DeleteTracksRequest {
+  id: number;
+  trackIds: string[];
+  scope: string;
+  all: boolean;
+}
+
+let deleteRequestSequence = 0;
+
 export function isSeparator(
   entry: ContextMenuEntry
 ): entry is ContextMenuSeparator {
@@ -46,8 +55,8 @@ interface ContextMenuState {
   infoTrackId: string | null;
   /** 「新建歌单并加入」弹窗锁定的曲目 id（单曲或整组） */
   createPlaylistTrackIds: string[] | null;
-  /** 全局删除曲库记录确认弹窗锁定的曲目 id */
-  confirmDeleteTrackId: string | null;
+  /** 打开确认框时锁定 ID 快照，后续新导入的曲目不进入本次删除范围。 */
+  deleteRequest: DeleteTracksRequest | null;
   /** B 站流媒体「重新加载」弹窗锁定的曲目 id */
   reloadStreamingTrackId: string | null;
   openContextMenu: (
@@ -60,19 +69,20 @@ interface ContextMenuState {
   openCreatePlaylistWith: (trackIds: string[]) => void;
   closeCreatePlaylistWith: () => void;
   requestDeleteTrack: (trackId: string) => void;
+  requestDeleteTracks: (trackIds: string[], options?: { scope?: string; all?: boolean }) => void;
   closeDeleteTrack: () => void;
   openReloadStreaming: (trackId: string) => void;
   closeReloadStreaming: () => void;
 }
 
-export const useContextMenuStore = create<ContextMenuState>()((set) => ({
+export const useContextMenuStore = create<ContextMenuState>()((set, get) => ({
   open: false,
   x: 0,
   y: 0,
   entries: [],
   infoTrackId: null,
   createPlaylistTrackIds: null,
-  confirmDeleteTrackId: null,
+  deleteRequest: null,
   reloadStreamingTrackId: null,
   openContextMenu: ({ x, y }, entries) => set({ open: true, x, y, entries }),
   closeContextMenu: () => set({ open: false, entries: [] }),
@@ -83,8 +93,17 @@ export const useContextMenuStore = create<ContextMenuState>()((set) => ({
     set({ createPlaylistTrackIds: trackIds, open: false, entries: [] }),
   closeCreatePlaylistWith: () => set({ createPlaylistTrackIds: null }),
   requestDeleteTrack: (trackId) =>
-    set({ confirmDeleteTrackId: trackId, open: false, entries: [] }),
-  closeDeleteTrack: () => set({ confirmDeleteTrackId: null }),
+    get().requestDeleteTracks([trackId], { scope: "当前曲目" }),
+  requestDeleteTracks: (trackIds, options) => {
+    const ids = Array.from(new Set(trackIds.filter(Boolean)));
+    if (ids.length === 0) return;
+    set({
+      deleteRequest: { id: ++deleteRequestSequence, trackIds: ids, scope: options?.scope ?? "当前列表", all: options?.all ?? false },
+      open: false,
+      entries: [],
+    });
+  },
+  closeDeleteTrack: () => set({ deleteRequest: null }),
   openReloadStreaming: (trackId) =>
     set({ reloadStreamingTrackId: trackId, open: false, entries: [] }),
   closeReloadStreaming: () => set({ reloadStreamingTrackId: null }),

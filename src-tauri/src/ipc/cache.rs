@@ -281,6 +281,126 @@ fn remove_ok_sentinel(path: &Path) {
     }
 }
 
+/// 单曲删除仅处理已入库的精确路径，支持仍有缓存标记的历史目录。
+/// 不创建目录/标记，不递归删除，也不跟随符号链接或 Windows 重解析点。
+pub(crate) fn delete_streaming_cache_file(path: &Path) -> Result<bool, String> {
+    use std::path::Component;
+
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("缓存文件路径无效，已保留曲目记录".into());
+    }
+    let is_audio = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "m4a" | "flac" | "opus" | "aac" | "mp3" | "eac3"
+            )
+        });
+    if !is_audio {
+        return Err("该文件不是受支持的流媒体音频缓存，已保留曲目记录".into());
+    }
+
+    // 必须检查整个祖先链；缓存目录自身有标记也不能豁免上级 junction。
+    for ancestor in path.ancestors() {
+        if let Some(metadata) = cache_delete_metadata(ancestor)? {
+            reject_cache_link(ancestor, &metadata)?;
+            if ancestor != path && !metadata.is_dir() {
+                return Err("缓存文件的上级路径不是目录".into());
+            }
+        }
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "缓存文件名无效".to_string())?;
+    #[cfg(windows)]
+    if path
+        .components()
+        .any(|part| matches!(part, Component::Normal(name) if name.to_string_lossy().contains(':')))
+    {
+        return Err("不允许删除备用数据流路径".into());
+    }
+    let sentinel = path.with_file_name(format!(".{file_name}.ok"));
+    let audio_metadata = cache_delete_metadata(path)?;
+    let sentinel_metadata = cache_delete_metadata(&sentinel)?;
+    for (target, metadata) in [
+        (path, &audio_metadata),
+        (sentinel.as_path(), &sentinel_metadata),
+    ] {
+        if let Some(metadata) = metadata {
+            reject_cache_link(target, metadata)?;
+            if !metadata.is_file() {
+                return Err(format!("拒绝删除非普通文件：{}", target.display()));
+            }
+        }
+    }
+    // 两个文件都已不存在时，只清理过期记录，不必重建已经移除的缓存目录。
+    if audio_metadata.is_none() && sentinel_metadata.is_none() {
+        return Ok(false);
+    }
+
+    let mut managed = false;
+    for directory in path.parent().into_iter().flat_map(Path::ancestors) {
+        let marker = directory.join(CACHE_MARKER_FILE);
+        if let Some(metadata) = cache_delete_metadata(&marker)? {
+            reject_cache_link(&marker, &metadata)?;
+            validate_cache_dir(directory)?;
+            if !metadata.is_file() {
+                return Err("缓存目录标记不是普通文件".into());
+            }
+            require_managed_cache_dir(directory)?;
+            managed = true;
+            break;
+        }
+    }
+    if !managed {
+        return Err("文件不在 Seraph 管理的缓存目录中，已保留文件和曲目记录".into());
+    }
+
+    // 先删除完成标记；标记无法清理时不触碰音频。
+    remove_cache_file_if_present(&sentinel)?;
+    remove_cache_file_if_present(path)
+}
+
+fn cache_delete_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("无法检查缓存文件 {}：{err}", path.display())),
+    }
+}
+
+fn reject_cache_link(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    let is_link = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    let is_link = {
+        use std::os::windows::fs::MetadataExt;
+        is_link || metadata.file_attributes() & 0x400 != 0
+    };
+    if is_link {
+        return Err(format!(
+            "拒绝通过链接或重解析点删除文件：{}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn remove_cache_file_if_present(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("删除缓存文件失败 {}：{err}", path.display())),
+    }
+}
+
 fn normalized_path_key(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())

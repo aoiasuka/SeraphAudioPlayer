@@ -74,15 +74,39 @@ fn delete_track_inner(app: &AppHandle, track: &DeleteTrackRequest) -> IpcResult<
         return Err(IpcError::invalid_input("missing track identity"));
     }
 
-    // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
+    // 兼容旧单曲入口，但文件路径始终来自后端曲库，不信任请求中的路径。
     let _guard = LIBRARY_LOCK.lock();
     let tracks = read_cached_tracks_for_update(app)?;
-    let (updated, removed) = remove_cached_track(tracks, track_id, target_key.as_deref());
-    if removed {
-        write_cached_tracks(app, &updated)?;
+    let ids = tracks
+        .iter()
+        .filter(|item| cached_track_matches_delete(item, track_id, target_key.as_deref()))
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let result = super::deletion::delete_selected_tracks(tracks, &ids, |updated| {
+        write_cached_tracks(app, updated)
+    })?;
+    if let Some(failure) = result.failures.first() {
+        return Err(IpcError::from(failure.message.clone()));
     }
+    Ok(!result.deleted_ids.is_empty())
+}
 
-    Ok(removed)
+#[tauri::command]
+pub async fn delete_tracks(
+    app: AppHandle,
+    track_ids: Vec<String>,
+) -> IpcResult<DeleteTracksResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 一次持锁读改写，防止与导入/重缓存互相覆盖；整批只提交一次存储代次。
+        let _guard = LIBRARY_LOCK.lock();
+        let tracks = read_cached_tracks_for_update(&app)?;
+        super::deletion::delete_selected_tracks(tracks, &track_ids, |updated| {
+            write_cached_tracks(&app, updated)
+        })
+    })
+    .await
+    .map_err(|err| IpcError::from(format!("批量删除任务异常终止: {err}")))?
+    .map_err(IpcError::from)
 }
 
 #[tauri::command]

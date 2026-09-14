@@ -1,5 +1,5 @@
-import { ListPlus, Heart, Search, Trash2, X } from "lucide-react";
-import { useDeferredValue, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { ListPlus, ListChecks, Heart, Search, Trash2, X } from "lucide-react";
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
@@ -9,6 +9,7 @@ import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import {
   filterAndSortTracks,
+  isStreamingTrack,
   TRACK_SORT_OPTIONS,
   type TrackSortKey,
 } from "./trackFilters";
@@ -23,7 +24,7 @@ function compactQualityLabel(track: Track) {
     : track.bitdepth;
 }
 
-export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string }) {
+export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { tracks: Track[]; empty: string; scopeName?: string }) {
   const playlist = usePlayerStore((s) => s.playlist);
   const currentTrack = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -34,6 +35,10 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
   const addTrackToUserPlaylist = usePlayerStore((s) => s.addTrackToUserPlaylist);
   // v0.4.3：删除确认弹窗全局化（右键菜单与行内按钮共用），此处只发起请求
   const requestDeleteTrack = useContextMenuStore((s) => s.requestDeleteTrack);
+  const requestDeleteTracks = useContextMenuStore((s) => s.requestDeleteTracks);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -47,6 +52,31 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     () => filterAndSortTracks(tracks, deferredQuery, sortKey),
     [tracks, deferredQuery, sortKey]
   );
+  const displayIds = useMemo(() => new Set(displayTracks.map((track) => track.id)), [displayTracks]);
+  const selectedTracks = useMemo(() => displayTracks.filter((track) => selectedIds.has(track.id)), [displayTracks, selectedIds]);
+  const allSelected = displayTracks.length > 0 && selectedTracks.length === displayTracks.length;
+  const isFiltering = query !== deferredQuery;
+  const deleteScope = query.trim() ? `${scopeName} · 搜索「${query.trim()}」的结果` : scopeName;
+  useEffect(() => {
+    // 删除、取消收藏或切换筛选后，不保留不可见曲目的选择。
+    setSelectedIds((previous) => {
+      const next = new Set([...previous].filter((id) => displayIds.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [displayIds]);
+  useLayoutEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedTracks.length > 0 && !allSelected;
+    }
+  }, [selectedTracks.length, allSelected, selectionMode]);
+  const toggleSelection = (trackId: string) => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(trackId)) next.delete(trackId);
+      else next.add(trackId);
+      return next;
+    });
+  };
   const trackIndexById = useMemo(() => {
     const indexById = new Map<string, number>();
     playlist.forEach((track, index) => indexById.set(track.id, index));
@@ -60,13 +90,14 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
     [playlist, trackToAddId, tracks]
   );
   const visibleRows = useMemo(() => {
+    const effectiveScrollTop = Math.min(scrollTop, Math.max(0, displayTracks.length * TRACK_ROW_HEIGHT - viewportHeight));
     const start = Math.max(
       0,
-      Math.floor(scrollTop / TRACK_ROW_HEIGHT) - TRACK_ROW_OVERSCAN
+      Math.floor(effectiveScrollTop / TRACK_ROW_HEIGHT) - TRACK_ROW_OVERSCAN
     );
     const end = Math.min(
       displayTracks.length,
-      Math.ceil((scrollTop + viewportHeight) / TRACK_ROW_HEIGHT) +
+      Math.ceil((effectiveScrollTop + viewportHeight) / TRACK_ROW_HEIGHT) +
         TRACK_ROW_OVERSCAN
     );
 
@@ -122,13 +153,14 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
         </span>
       </div>
       {/* 检索 + 排序工具行 */}
-      <div className="mb-3 flex items-center gap-2">
-        <label className="flex h-8 min-w-0 flex-1 items-center gap-2 border-[1.5px] border-line bg-card px-2.5 transition-colors focus-within:border-ink">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <label className="flex h-8 min-w-[180px] flex-1 items-center gap-2 border-[1.5px] border-line bg-card px-2.5 transition-colors focus-within:border-ink">
           <Search className="h-3.5 w-3.5 shrink-0 text-ink3" />
           <input
             value={query}
             onChange={(event) => {
               setQuery(event.target.value);
+              setSelectedIds(new Set());
               resetScroll();
             }}
             placeholder="检索标题 / 艺术家 / 专辑…"
@@ -140,6 +172,7 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
               type="button"
               onClick={() => {
                 setQuery("");
+                setSelectedIds(new Set());
                 resetScroll();
               }}
               className="text-ink3 transition-colors hover:text-stamp"
@@ -164,7 +197,51 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          aria-label={selectionMode ? "退出多选" : "多选曲目"}
+          aria-pressed={selectionMode}
+          onClick={() => { setSelectionMode(!selectionMode); setSelectedIds(new Set()); }}
+          className="stamp-btn inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 font-tw text-xs font-bold"
+        >
+          {selectionMode ? <X className="h-3.5 w-3.5" /> : <ListChecks className="h-3.5 w-3.5" />}
+          {selectionMode ? "退出多选" : "多选"}
+        </button>
+        <button
+          type="button"
+          disabled={displayTracks.length === 0 || isFiltering}
+          onClick={() => requestDeleteTracks(displayTracks.map((track) => track.id), { scope: deleteScope, all: true })}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 border-[1.5px] border-stamp/40 px-2.5 font-tw text-xs font-bold text-stamp transition-colors hover:border-stamp hover:bg-stamp/5 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          全部删除
+        </button>
       </div>
+      {selectionMode && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 border-[1.5px] border-line bg-card px-3 py-2 font-tw text-xs">
+          <label className="flex cursor-pointer items-center gap-2 font-bold text-ink">
+            <input
+              ref={selectAllRef}
+              type="checkbox"
+              checked={allSelected}
+              disabled={displayTracks.length === 0 || isFiltering}
+              onChange={() => setSelectedIds(allSelected ? new Set() : new Set(displayIds))}
+              className="h-4 w-4 accent-stamp"
+              aria-label={query.trim() ? "全选搜索结果" : "全选当前列表"}
+            />
+            {query.trim() ? "全选搜索结果" : "全选"}
+          </label>
+          <span className="text-ink3" aria-live="polite">已选择 {selectedTracks.length} / {displayTracks.length} 首</span>
+          <button
+            type="button"
+            disabled={selectedTracks.length === 0 || isFiltering}
+            onClick={() => requestDeleteTracks(selectedTracks.map((track) => track.id), { scope: deleteScope })}
+            className="ml-auto inline-flex h-7 items-center gap-1.5 border border-stamp bg-stamp px-2.5 font-bold text-paper transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Trash2 className="h-3.5 w-3.5" />删除所选
+          </button>
+        </div>
+      )}
       {displayTracks.length === 0 ? (
         <div className="flex min-h-[160px] items-center justify-center border-[1.5px] border-dashed border-line bg-card font-tw text-sm text-ink3">
           没有匹配「{query.trim()}」的曲目
@@ -185,41 +262,52 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
             .toString()
             .padStart(3, "0");
           const playing = active && isPlaying;
+          const deleteLabel = isStreamingTrack(track) ? "删除曲目及缓存文件" : "删除曲库记录";
 
           return (
             <div
               key={track.id}
               onDoubleClick={() => {
                 // 双击行内任意处即从头强制播放本曲目（含停止态）
-                if (index >= 0) loadTrack(index, { forcePlay: true });
+                if (!selectionMode && index >= 0) loadTrack(index, { forcePlay: true });
               }}
               onContextMenu={(event) =>
                 showContextMenu(event, buildTrackMenuEntries(track))
               }
               className={cn(
                 "archive-card group relative grid h-[49px] select-none grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
-                active && "is-playing"
+                active && "is-playing",
+                selectionMode && selectedIds.has(track.id) && "border-stamp bg-stamp/5"
               )}
             >
               {playing && (
                 <div className="absolute -top-[7px] left-1/2 -translate-x-1/2 -rotate-2 w-[72px] h-[16px] bg-stamp/[0.18] border-x border-dashed border-stamp/30" />
               )}
-              <div className="font-tw text-[11px] text-ink3 leading-tight">
+              {selectionMode ? (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(track.id)}
+                  onChange={() => toggleSelection(track.id)}
+                  aria-label={`选择 ${track.title}`}
+                  className="h-4 w-4 cursor-pointer accent-stamp"
+                />
+              ) : <div className="font-tw text-[11px] text-ink3 leading-tight">
                 REC.
                 <b className="block text-[15px] text-ink font-bold">
                   <span className={active ? "text-stamp" : undefined}>
                     {recNo}
                   </span>
                 </b>
-              </div>
+              </div>}
               <button
                 type="button"
                 onClick={() => {
-                  if (index >= 0) loadTrack(index);
+                  if (selectionMode) toggleSelection(track.id);
+                  else if (index >= 0) loadTrack(index);
                 }}
-                disabled={index < 0}
+                disabled={!selectionMode && index < 0}
                 className="min-w-0 text-left disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label={`播放 ${track.title}`}
+                aria-label={`${selectionMode ? "切换选择" : "播放"} ${track.title}`}
               >
                 <span className="flex min-w-0 items-center gap-1.5">
                   {playing && (
@@ -290,8 +378,8 @@ export function TrackRows({ tracks, empty }: { tracks: Track[]; empty: string })
                 type="button"
                 onClick={() => requestDeleteTrack(track.id)}
                 className="flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-stamp focus:opacity-100 focus:text-stamp group-hover:opacity-100"
-                aria-label={`删除曲库记录 ${track.title}`}
-                title="删除曲库记录"
+                aria-label={`${deleteLabel} ${track.title}`}
+                title={deleteLabel}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>

@@ -215,7 +215,7 @@ export function buildTrackMenuEntries(
     { type: "separator", key: "sep-danger" },
     {
       key: "delete",
-      label: "删除曲库记录",
+      label: isStreamingTrack(track) ? "删除曲目及缓存文件" : "删除曲库记录",
       icon: Trash2,
       danger: true,
       onSelect: () => menu.requestDeleteTrack(track.id),

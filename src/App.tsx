@@ -12,6 +12,13 @@ import { useSpacePlayback } from "@/hooks/useSpacePlayback";
 import { useStreamingEvents } from "@/hooks/useStreamingEvents";
 import { useUpdateCheck } from "@/hooks/useUpdateCheck";
 import { usePlayerStore } from "@/store/player";
+import { useImmersiveStore } from "@/store/immersive";
+
+const LazyImmersivePlayer = lazy(() =>
+  import("@/components/immersive/ImmersivePlayer").then((module) => ({
+    default: module.ImmersivePlayer,
+  }))
+);
 
 const LazyRightPanel = lazy(() =>
   import("@/components/layout/RightPanel").then((module) => ({
@@ -46,9 +53,15 @@ function App() {
   useUpdateCheck();
   const isDraggingFiles = useFileDropImport();
   const hasTrack = usePlayerStore((s) => s.currentTrack() !== null);
+  const immersiveOpen = useImmersiveStore((s) => s.isOpen);
+  const closeImmersive = useImmersiveStore((s) => s.close);
   const settingsOpen = usePlayerStore((s) => s.settingsOpen);
   const hasNotification = usePlayerStore((s) => s.notification !== null);
   const [notificationMounted, setNotificationMounted] = useState(false);
+
+  useEffect(() => {
+    if (!hasTrack) closeImmersive();
+  }, [hasTrack, closeImmersive]);
 
   useEffect(() => {
     // M-16：出现过通知后保持组件挂载，让退场滑出动画能完整播放，
@@ -62,7 +75,11 @@ function App() {
       <div className="relative w-full h-full min-h-0 min-w-0 overflow-hidden flex flex-col app-shell select-none">
         <TitleBar />
 
-        <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden z-10 relative">
+        {/* 保留资料库的滚动与筛选状态；隐藏时，各可视化组件同步停止取帧。 */}
+        <div
+          className="flex-1 min-h-0 min-w-0 flex overflow-hidden z-10 relative"
+          style={immersiveOpen && hasTrack ? { display: "none" } : undefined}
+        >
           <Sidebar />
           <MainPages />
           {hasTrack && (
@@ -71,6 +88,16 @@ function App() {
             </Suspense>
           )}
         </div>
+        {immersiveOpen && hasTrack && (
+          <Suspense fallback={
+            <div className="flex flex-1 items-center justify-center gap-4 font-tw text-sm text-ink2">
+              <span role="status">正在打开沉浸播放…</span>
+              <button className="stamp-btn px-3 py-1" onClick={closeImmersive}>收起</button>
+            </div>
+          }>
+            <LazyImmersivePlayer />
+          </Suspense>
+        )}
       </div>
 
       {/* v0.4.3：全局右键菜单层（屏蔽默认菜单 + 自绘菜单 + 曲目信息/新建歌单/删除确认弹窗） */}

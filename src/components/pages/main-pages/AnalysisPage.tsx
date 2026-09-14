@@ -41,6 +41,7 @@ import {
   type AnalysisPanelId,
 } from "@/store/analysisSettings";
 import { usePlayerStore } from "@/store/player";
+import { useImmersiveStore } from "@/store/immersive";
 import { AnalysisLayoutEditor } from "./AnalysisLayoutEditor";
 
 const POLL_INTERVAL_MS = 33; // ~30fps 数据泵
@@ -278,6 +279,7 @@ function computeWideLayout(panels: Record<AnalysisPanelId, boolean>): WideLayout
  * 声学分析设置（页眉「PANELS」浮层）控制并持久化。
  */
 export function AnalysisPage() {
+  const immersiveOpen = useImmersiveStore((s) => s.isOpen);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTrackId = usePlayerStore((s) => s.currentTrack()?.id ?? null);
   const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
@@ -418,7 +420,7 @@ export function AnalysisPage() {
   // 数据泵：桌面轮询后端；纯浏览器用模拟器
   useEffect(() => {
     const view = viewRef.current;
-    if (visibleCount === 0 || editing) return undefined;
+    if (visibleCount === 0 || editing || immersiveOpen) return undefined;
     if (isTauriRuntime()) {
       if (!isPlaying) return undefined;
       return pollVisualizer<AnalysisFrame>("get_analysis_frame", sessionId,
@@ -433,7 +435,7 @@ export function AnalysisPage() {
       read: async () => simulator.next(POLL_INTERVAL_MS / 1000),
       onData: (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000),
     });
-  }, [isPlaying, sessionId, panels.spectrum, panels.spectrogram, panels.loudness, panels.levels, panels.field, panels.scope, visibleCount, editing]);
+  }, [isPlaying, sessionId, panels.spectrum, panels.spectrogram, panels.loudness, panels.levels, panels.field, panels.scope, visibleCount, editing, immersiveOpen]);
 
   // 换曲目：后端通过 sessionId 原子切换会话，前端同步清空显示。
   useEffect(() => {
@@ -459,6 +461,7 @@ export function AnalysisPage() {
 
   // 渲染循环：节流步进弹道学 + 画可见画布 + 刷新数字读数
   useEffect(() => {
+    if (immersiveOpen) return;
     let disposed = false;
     let raf = 0;
 
@@ -632,7 +635,7 @@ export function AnalysisPage() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.cancelAnimationFrame(raf);
     };
-  }, []);
+  }, [immersiveOpen]);
 
   const narrowPanel = "min-h-[280px] shrink-0";
 

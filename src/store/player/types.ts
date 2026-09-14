@@ -1,4 +1,5 @@
 import type {
+  DeleteTracksResult,
   DriverKind,
   LibraryView,
   LyricLine,
@@ -195,6 +196,7 @@ export interface PlayerStore {
   renameUserPlaylist: (playlistId: string, name: string) => void;
   deleteUserPlaylist: (playlistId: string) => void;
   deleteTrack: (trackId: string) => Promise<void>;
+  deleteTracks: (trackIds: string[]) => Promise<DeleteTracksResult>;
   loadBackendLibrary: () => Promise<void>;
   importLocalTracks: (
     paths: string[],

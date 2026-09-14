@@ -13,6 +13,20 @@ pub(crate) async fn import_bilibili_audio_inner(
     cancellation: &ImportCancellation,
 ) -> Result<ImportedTrack, String> {
     let bvid = cancellation.run(resolve_bvid(client, input)).await?;
+    // 同一来源的下载、缓存命中、入库与删除互斥，且跨音质/缓存目录使用同一身份。
+    // guard 只登记占用，不跨 await 持有 mutex；一直保留到入库完成。
+    let operation = acquire_audio_operation(&bvid)?;
+    if let Some(track_id) = options.existing_track_id.clone() {
+        let app_for_check = app.clone();
+        let exists = tauri::async_runtime::spawn_blocking(move || {
+            crate::ipc::library::read_cached_track(&app_for_check, &track_id)
+        })
+        .await
+        .map_err(|err| format!("曲库检查任务异常终止: {err}"))??;
+        if exists.is_none() {
+            return Err("曲目已被移除，已取消重新缓存".into());
+        }
+    }
     // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
     // 缺少 ffmpeg 时必须在选流阶段就避开它们，否则会导入一个永远无法播放的文件。
     let ffmpeg_path = options
@@ -71,6 +85,8 @@ pub(crate) async fn import_bilibili_audio_inner(
     let app_for_merge = app.clone();
     let existing_track_id = options.existing_track_id.clone();
     let imported = tauri::async_runtime::spawn_blocking(move || {
+        // 即便上层异步请求结束，入库工作线程完成前也不能释放来源占用。
+        let _operation = operation;
         if let Some(track_id) = existing_track_id {
             crate::ipc::library::replace_track_in_cache(&app_for_merge, &track_id, &track)
                 .map(|track| vec![track])
@@ -448,26 +464,25 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     })
 }
 
-/// P2-1：进程内进行中下载任务表，拒绝对同一目标文件的并发下载，
-/// 防止交错写入产出损坏缓存又被 sentinel 标记为有效。
-pub(crate) static DOWNLOADS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<PathBuf>> =
+/// 下载和删除共用来源占用表，避免交错写入、删除后重缓存复活文件。
+static AUDIO_OPERATIONS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<String>> =
     parking_lot::Mutex::new(BTreeSet::new());
 
-pub(crate) struct DownloadSlot(PathBuf);
+pub(crate) struct AudioOperationSlot(String);
 
-impl Drop for DownloadSlot {
+impl Drop for AudioOperationSlot {
     fn drop(&mut self) {
-        DOWNLOADS_IN_FLIGHT.lock().remove(&self.0);
+        AUDIO_OPERATIONS_IN_FLIGHT.lock().remove(&self.0);
     }
 }
 
-pub(crate) fn acquire_download_slot(path: &Path) -> Result<DownloadSlot, String> {
-    let key = path.to_path_buf();
-    let mut in_flight = DOWNLOADS_IN_FLIGHT.lock();
+pub(crate) fn acquire_audio_operation(source: &str) -> Result<AudioOperationSlot, String> {
+    let key = source.trim().replace('\\', "/").to_ascii_lowercase();
+    let mut in_flight = AUDIO_OPERATIONS_IN_FLIGHT.lock();
     if !in_flight.insert(key.clone()) {
-        return Err(format!("该音频正在下载中，请稍候再试: {}", path.display()));
+        return Err("该曲目正在下载、重新缓存或删除，请稍后重试".into());
     }
-    Ok(DownloadSlot(key))
+    Ok(AudioOperationSlot(key))
 }
 
 pub(crate) async fn ensure_audio_file(
@@ -492,8 +507,6 @@ pub(crate) async fn ensure_audio_file(
     if fallback_path != path && cached_audio_file_is_valid(&fallback_path) {
         return Ok(fallback_path);
     }
-
-    let _slot = acquire_download_slot(path)?;
 
     // 清理可能残留的不完整文件 + 旧 sentinel
     let _ = fs::remove_file(&sentinel);

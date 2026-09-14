@@ -298,23 +298,13 @@ pub(crate) fn merge_cached_tracks(
     dedupe_cached_tracks(cached)
 }
 
-pub(crate) fn remove_cached_track(
-    tracks: Vec<ImportedTrack>,
+pub(crate) fn cached_track_matches_delete(
+    track: &ImportedTrack,
     track_id: &str,
     target_key: Option<&str>,
-) -> (Vec<ImportedTrack>, bool) {
-    let before = tracks.len();
-    let updated = tracks
-        .into_iter()
-        .filter(|track| {
-            let id_matches = !track_id.is_empty() && track.id == track_id;
-            let key_matches = target_key.is_some_and(|key| import_track_key(track) == key);
-            !(id_matches || key_matches)
-        })
-        .collect::<Vec<_>>();
-
-    let removed = updated.len() != before;
-    (updated, removed)
+) -> bool {
+    (!track_id.is_empty() && track.id == track_id)
+        || target_key.is_some_and(|key| import_track_key(track) == key)
 }
 
 pub(crate) fn dedupe_cached_tracks(tracks: Vec<ImportedTrack>) -> Vec<ImportedTrack> {

@@ -1,6 +1,5 @@
-import { invoke, normalizeIpcError } from "@/lib/tauri";
-import type { Track } from "@/types/track";
-import { sendCommand } from "./commands";
+import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
+import type { DeleteTracksResult, Track } from "@/types/track";
 import { resetNextIndexCache } from "./playbackActions";
 import { bumpPlayEpoch } from "./playEpoch";
 import { normalizePath, streamingSourceInput, trackMergeKey } from "./trackIdentity";
@@ -133,7 +132,7 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
 export function createLibraryActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "createUserPlaylist" | "renameUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
+): Pick<PlayerStore, "createUserPlaylist" | "renameUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "deleteTracks" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
   return {
   createUserPlaylist: (name) => {
     const trimmedName = name.trim();
@@ -337,65 +336,92 @@ export function createLibraryActions(
   },
 
   deleteTrack: async (trackId) => {
-    const track = get().playlist.find((item) => item.id === trackId);
-    if (!track) return;
-    // 删除意图立即取消挂起的重缓存播放，不等磁盘删除回执后才失效。
-    if (get().currentTrack()?.id === trackId) bumpPlayEpoch();
+    await get().deleteTracks([trackId]);
+  },
+
+  deleteTracks: async (trackIds) => {
+    const requested = new Set(trackIds);
+    const tracks = get().playlist.filter((track) => requested.has(track.id));
+    const empty: DeleteTracksResult = { deletedIds: [], deletedFiles: 0, failures: [] };
+    if (tracks.length === 0) return empty;
+    const ids = tracks.map((track) => track.id);
+    // 删除意图立即取消挂起的重缓存播放和此前的曲库读取。
+    libraryLoadSequence += 1;
+    const currentId = get().currentTrack()?.id;
+    if (currentId && requested.has(currentId)) bumpPlayEpoch();
 
     try {
-      await invoke<boolean>("delete_track", {
-        track: {
-          id: track.id,
-          path: track.path,
-          sourceUrl: track.sourceUrl ?? null,
-          sourceId: track.sourceId ?? null,
-        },
-      });
-
-      const deletingCurrentTrack = get().currentTrack()?.id === trackId;
-      if (deletingCurrentTrack) {
-        bumpPlayEpoch();
-        sendCommand("stop");
+      // Windows 音频解码器会占用文件，收到停止回执后才能执行物理删除。
+      if (currentId && requested.has(currentId)) {
+        await invoke("stop");
+        if (get().currentTrack()?.id === currentId) {
+          set({ isPlaying: false, currentTime: 0 });
+        }
       }
-      resetNextIndexCache();
+      let result = await invoke<DeleteTracksResult>("delete_tracks", { trackIds: ids });
+      // 仅浏览器演示允许无 IPC 回执；桌面端绝不将无效响应视为删除成功。
+      if (!result && !isTauriRuntime()) result = { ...empty, deletedIds: ids };
+      if (!result || !Array.isArray(result.deletedIds) || !Array.isArray(result.failures)) {
+        throw new Error("未收到有效的删除结果，请重试");
+      }
+      const deleted = new Set(result.deletedIds.filter((id) => requested.has(id)));
+      libraryLoadSequence += 1;
+
+      const latestId = get().currentTrack()?.id;
+      if (latestId && deleted.has(latestId)) {
+        bumpPlayEpoch();
+        // 等待期间用户/系统可能切到另一首待删曲目，只停止仍在删除集合中的播放。
+        if (latestId !== currentId || get().isPlaying) {
+          await invoke("stop").catch((err) => {
+            console.warn("删除后停止播放失败", err);
+          });
+        }
+      }
+      if (deleted.size > 0) resetNextIndexCache();
 
       set((state) => {
-        const removedIndex = state.playlist.findIndex(
-          (item) => item.id === trackId
-        );
-        if (removedIndex < 0) return {};
-
-        const playlist = state.playlist.filter((item) => item.id !== trackId);
+        if (deleted.size === 0) return {};
+        const previousId = state.playlist[state.currentTrackIndex]?.id;
+        const deletingCurrent = !!previousId && deleted.has(previousId);
+        const playlist = state.playlist.filter((item) => !deleted.has(item.id));
         const liked = { ...state.liked };
-        delete liked[trackId];
-        const currentTrackIndex =
-          playlist.length === 0
-            ? 0
-            : removedIndex < state.currentTrackIndex
-              ? state.currentTrackIndex - 1
-              : removedIndex === state.currentTrackIndex
-                ? Math.min(removedIndex, playlist.length - 1)
-                : Math.min(state.currentTrackIndex, playlist.length - 1);
+        for (const id of deleted) delete liked[id];
+        const survivingBefore = state.playlist.slice(0, state.currentTrackIndex)
+          .filter((item) => !deleted.has(item.id)).length;
+        const currentTrackIndex = deletingCurrent
+          ? Math.max(0, Math.min(survivingBefore, playlist.length - 1))
+          : Math.max(0, playlist.findIndex((item) => item.id === previousId));
 
         return {
           playlist,
           currentTrackIndex,
-          currentTime: deletingCurrentTrack ? 0 : state.currentTime,
-          isPlaying: deletingCurrentTrack ? false : state.isPlaying,
-          recentTrackIds: state.recentTrackIds.filter((id) => id !== trackId),
+          currentTime: deletingCurrent ? 0 : state.currentTime,
+          isPlaying: deletingCurrent ? false : state.isPlaying,
+          persistedCurrentTrackId: playlist[currentTrackIndex]?.id ?? null,
+          persistedCurrentTime: deletingCurrent ? 0 : state.currentTime,
+          recentTrackIds: state.recentTrackIds.filter((id) => !deleted.has(id)),
           liked,
           userPlaylists: state.userPlaylists.map((playlist) => ({
             ...playlist,
-            trackIds: playlist.trackIds.filter((id) => id !== trackId),
+            trackIds: playlist.trackIds.filter((id) => !deleted.has(id)),
           })),
         };
       });
 
-      get().showNotification(`已从曲库移除：${track.title}`);
+      const summary = tracks.length === 1 && deleted.size === 1
+        ? `已从曲库移除：${tracks[0].title}`
+        : `已删除 ${deleted.size} 首曲目`;
+      get().showNotification(
+        `${summary}${result.deletedFiles > 0 ? `，清理 ${result.deletedFiles} 个缓存音频文件` : ""}` +
+        (result.failures.length > 0 ? `；${result.failures.length} 首未删除，请查看失败原因` : "")
+      );
+      return result;
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("Tauri command failed: delete_track", err);
-      get().showNotification("删除曲库记录失败");
+      libraryLoadSequence += 1;
+      const message = normalizeIpcError(err).message;
+      console.warn("Tauri command failed: delete_tracks", err);
+      get().showNotification(`删除失败：${message}`);
+      return { ...empty, failures: tracks.map((track) => ({ id: track.id, title: track.title, message })) };
     }
   },
 

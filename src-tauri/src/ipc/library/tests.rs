@@ -1,9 +1,12 @@
 //! library 模块单元测试。已从 include! 迁出为独立 `mod tests`，
 //! 共享项经 `super::prelude::*`（其 glob 汇聚各子模块 pub(crate) 项）引入。
 #![cfg(test)]
+use super::deletion::delete_selected_tracks;
 use super::prelude::*;
 use serde_json::json;
 use std::fs;
+
+mod deletion_tests;
 
 struct TestLibraryDir(PathBuf);
 
@@ -265,8 +268,13 @@ fn library_snapshot_keeps_first_duplicate_and_replaces_index_with_contents() {
 fn bug_audit_03_deleted_track_cannot_be_reinserted_by_recache() {
     let a = test_imported_track("a", "C:/cache/a.m4a", "A");
     let b = test_imported_track("b", "C:/cache/b.m4a", "B");
-    let (mut remaining, removed) = remove_cached_track(vec![a.clone(), b], "a", None);
-    assert!(removed);
+    let mut remaining = Vec::new();
+    let result = delete_selected_tracks(vec![a.clone(), b], &["a".into()], |updated| {
+        remaining = updated.to_vec();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(result.deleted_ids, ["a"]);
     assert!(replace_cached_track(&mut remaining, "a", &a).is_err());
     assert_eq!(
         remaining
@@ -653,15 +661,17 @@ fn removes_cached_track_by_id() {
         test_imported_track("b", "C:/Music/b.flac", "B"),
     ];
 
-    let (updated, removed) = remove_cached_track(tracks, "a", None);
-
-    assert!(removed);
-    assert_eq!(updated.len(), 1);
-    assert_eq!(updated[0].id, "b");
+    let result = delete_selected_tracks(tracks, &["a".into()], |updated| {
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, "b");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(result.deleted_ids, ["a"]);
 }
 
 #[test]
-fn removes_cached_track_by_streaming_source_key() {
+fn matches_legacy_delete_request_by_streaming_source_key() {
     let mut track = test_imported_track("old-id", "C:/Cache/BV1xx-1.flac", "Stream");
     track.source_id = Some("BV1xx".into());
     let request = DeleteTrackRequest {
@@ -672,10 +682,11 @@ fn removes_cached_track_by_streaming_source_key() {
     };
     let key = delete_track_request_key(&request);
 
-    let (updated, removed) = remove_cached_track(vec![track], &request.id, key.as_deref());
-
-    assert!(removed);
-    assert!(updated.is_empty());
+    assert!(cached_track_matches_delete(
+        &track,
+        &request.id,
+        key.as_deref()
+    ));
 }
 
 #[test]

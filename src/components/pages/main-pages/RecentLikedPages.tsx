@@ -20,7 +20,7 @@ export function RecentPage() {
     [recentTrackIds, trackById]
   );
 
-  return <TrackRows tracks={tracks} empty="播放过的曲目会显示在这里" />;
+  return <TrackRows tracks={tracks} empty="播放过的曲目会显示在这里" scopeName="最近播放" />;
 }
 
 export function LikedPage() {
@@ -31,6 +31,6 @@ export function LikedPage() {
     [playlist, liked]
   );
 
-  return <TrackRows tracks={tracks} empty="还没有收藏曲目" />;
+  return <TrackRows tracks={tracks} empty="还没有收藏曲目" scopeName="我喜欢" />;
 }
 

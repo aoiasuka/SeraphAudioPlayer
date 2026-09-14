@@ -14,3 +14,5 @@ mod session;
 mod types;
 
 pub use commands::*;
+pub(crate) use import_audio::acquire_audio_operation;
+pub(crate) use parsing::extract_bvid;

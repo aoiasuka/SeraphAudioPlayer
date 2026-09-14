@@ -95,7 +95,8 @@ export const formatFreq = (freq: number) =>
 /** 画布 DPR 适配；jsdom（测试）无 2D 上下文时返回 null 跳过绘制 */
 export function prepCanvas(
   canvas: HTMLCanvasElement,
-  cachedSize?: { w: number; h: number }
+  cachedSize?: { w: number; h: number },
+  minimumPixelRatio = 1
 ): { ctx: CanvasRenderingContext2D; w: number; h: number } | null {
   // 尺寸优先取 ResizeObserver 缓存，避免渲染循环每帧读 clientWidth 强制 layout
   let w: number;
@@ -112,14 +113,15 @@ export function prepCanvas(
   if (w < 40 || h < 30) return null;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.max(window.devicePixelRatio || 1, minimumPixelRatio);
   const width = Math.max(1, Math.round(w * dpr));
   const height = Math.max(1, Math.round(h * dpr));
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // CSS 网格可能产生小数尺寸；按实际像素尺寸映射，避免取整后再拉伸。
+  ctx.setTransform(width / w, 0, 0, height / h, 0, 0);
   return { ctx, w, h };
 }
 

@@ -39,6 +39,18 @@ export interface Track {
   lyricsLoaded?: boolean;
 }
 
+export interface DeleteTrackFailure {
+  id: string;
+  title: string;
+  message: string;
+}
+
+export interface DeleteTracksResult {
+  deletedIds: string[];
+  deletedFiles: number;
+  failures: DeleteTrackFailure[];
+}
+
 export interface OutputDevice {
   id: string;
   name: string;

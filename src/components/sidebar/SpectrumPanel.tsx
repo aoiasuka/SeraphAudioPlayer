@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { isTauriRuntime } from "@/lib/tauri";
 import { createAnalysisSession, pollVisualizer } from "@/lib/analysis/polling";
 import { usePlayerStore } from "@/store/player";
+import { useImmersiveStore } from "@/store/immersive";
 
 interface SpectrumFrame {
   bins: number[];
@@ -19,6 +20,7 @@ const BAR_RELEASE = 0.22;
  * 暂停/停止后本地衰减到零（不再打 IPC）。纯浏览器开发模式不渲染。
  */
 export function SpectrumPanel() {
+  const immersiveOpen = useImmersiveStore((s) => s.isOpen);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTrackId = usePlayerStore((s) => s.currentTrack()?.id ?? null);
   const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
@@ -28,7 +30,7 @@ export function SpectrumPanel() {
   const rafRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
+    if (!isTauriRuntime() || immersiveOpen) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -123,7 +125,7 @@ export function SpectrumPanel() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.cancelAnimationFrame(rafRef.current);
     };
-  }, [isPlaying, sessionId]);
+  }, [isPlaying, sessionId, immersiveOpen]);
 
   if (!isTauriRuntime()) return null;
 

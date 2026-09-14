@@ -54,29 +54,33 @@ export function useWaveform(
     track: Track | null;
     currentTime: number;
     isPlaying: boolean;
+    enabled?: boolean;
   }
 ) {
-  const { track, currentTime, isPlaying } = options;
+  const { track, currentTime, isPlaying, enabled = true } = options;
   const playbackRef = useRef({ currentTime, isPlaying });
+  const reducedMotionRef = useRef(false);
   const scheduleDrawRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const wasPlaying = playbackRef.current.isPlaying;
     playbackRef.current = { currentTime, isPlaying };
 
-    if (!isPlaying || (!wasPlaying && isPlaying)) {
+    if (!isPlaying || (!wasPlaying && isPlaying) || reducedMotionRef.current) {
       scheduleDrawRef.current?.();
     }
   }, [currentTime, isPlaying]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !track) return;
+    if (!canvas || !track || !enabled) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const canvasEl = canvas;
     const context = ctx;
     const activeTrack = track;
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    reducedMotionRef.current = motionQuery.matches;
 
     let raf = 0;
     let cssWidth = 0;
@@ -106,7 +110,7 @@ export function useWaveform(
     };
 
     function draw(time = 0) {
-      if (cssWidth <= 0) {
+      if (cssWidth <= 0 || document.visibilityState === "hidden") {
         raf = 0;
         return;
       }
@@ -124,7 +128,7 @@ export function useWaveform(
       const fadeEnd = ratio + 0.038;
 
       for (let i = 0; i < BAR_COUNT; i++) {
-        const harmonic = latestIsPlaying
+        const harmonic = latestIsPlaying && !reducedMotionRef.current
           ? Math.sin(time * 0.006 - i * 0.18) * 0.06
           : 0;
         const dynamicScale = 1.0 + (latestIsPlaying ? harmonic : 0);
@@ -170,7 +174,7 @@ export function useWaveform(
         context.fill();
       }
 
-      if (playbackRef.current.isPlaying) {
+      if (playbackRef.current.isPlaying && !reducedMotionRef.current) {
         raf = requestAnimationFrame(draw);
       } else {
         raf = 0;
@@ -179,7 +183,12 @@ export function useWaveform(
 
     const scheduleDraw = () => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(draw);
+      raf = document.visibilityState === "hidden" ? 0 : requestAnimationFrame(draw);
+    };
+
+    const onMotionChange = () => {
+      reducedMotionRef.current = motionQuery.matches;
+      scheduleDraw();
     };
 
     const handleResize = () => {
@@ -189,6 +198,8 @@ export function useWaveform(
 
     resize();
     window.addEventListener("resize", handleResize);
+    document.addEventListener("visibilitychange", scheduleDraw);
+    motionQuery.addEventListener("change", onMotionChange);
     const parentElement = canvasEl.parentElement;
     const resizeObserver =
       typeof ResizeObserver === "undefined" || !parentElement
@@ -204,12 +215,14 @@ export function useWaveform(
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", handleResize);
+      document.removeEventListener("visibilitychange", scheduleDraw);
+      motionQuery.removeEventListener("change", onMotionChange);
       resizeObserver?.disconnect();
       if (scheduleDrawRef.current === scheduleDraw) {
         scheduleDrawRef.current = null;
       }
     };
-  }, [canvasRef, track]);
+  }, [canvasRef, track, enabled]);
 }
 
 export const WAVEFORM_SIDE_PADDING = SIDE_PADDING;
