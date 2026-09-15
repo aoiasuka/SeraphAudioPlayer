@@ -22,8 +22,8 @@ const HOPS_PER_LRA_SAMPLE: usize = 10;
 /// 门限块历史上限（100ms 一块 ≈ 5.5 小时），超出丢最旧，积分退化为"最近窗口"。
 const MAX_GATING_BLOCKS: usize = 200_000;
 const MAX_LRA_SAMPLES: usize = 20_000;
-/// 声场散点最多保留的样本对数。
-const MAX_SCATTER_PAIRS: usize = 160;
+/// 声场散点最多保留的样本对数，放大窗口时仍有足够的真实采样密度。
+const MAX_SCATTER_PAIRS: usize = 480;
 /// 绝对门限 -70 LUFS 对应的块能量。
 const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 /// 示波器环形缓冲帧数（@48kHz ≈ 42.7ms 时间窗）。
@@ -362,7 +362,7 @@ impl AnalysisEngine {
                 Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
         }
 
-        // 声场散点：等距抽取 ≤160 对
+        // 声场散点：等距抽取，点数受 MAX_SCATTER_PAIRS 限制。
         let stride = frames.div_ceil(MAX_SCATTER_PAIRS).max(1);
         self.scatter.clear();
         if !features.stereo {

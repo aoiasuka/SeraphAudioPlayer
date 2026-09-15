@@ -70,14 +70,19 @@
 
 .immersive-lyrics { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
 .immersive-lyrics-heading { height: 40px; flex: 0 0 40px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
-.immersive-lyric-tools { display: flex; gap: 18px; font-size: 11px; color: var(--ink2); }
-.immersive-lyric-tools button { display: flex; align-items: center; gap: 5px; }
+.immersive-lyric-tools { display: flex; flex-shrink: 0; gap: 18px; font-size: 11px; color: var(--ink2); }
+.immersive-lyric-tools button { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .immersive-lyric-tools button:disabled { opacity: 0.45; }
 .immersive-lyrics-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: none; -ms-overflow-style: none; mask-image: linear-gradient(transparent, black 8%, black 90%, transparent); }
 .immersive-lyrics-scroll::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .immersive-lyrics-scroll:focus-visible { outline: 1px solid var(--stamp); outline-offset: -2px; }
 .immersive-lyric-line { position: relative; display: block; width: 100%; text-align: left; padding: 16px 18px; margin: 5px 0; color: var(--ink2); line-height: 1.65; font-family: var(--serif); font-size: var(--lyric-size); overflow-wrap: anywhere; }
 .immersive-lyric-line > span { display: block; }
+/* 完整文本只参与排版，逐字内容覆盖其上，换行时保持当前句居中。 */
+.immersive-lyric-text { position: relative; }
+.immersive-lyric-placeholder { visibility: hidden; }
+.immersive-lyric-placeholder::after { animation: none; }
+.immersive-lyric-typing { position: absolute; inset: 0; }
 .immersive-lyric-line small { display: block; font-size: 12px; line-height: 1.8; margin-top: 6px; font-family: var(--sans); }
 .immersive-lyric-line.is-distant { color: var(--ink3); }
 .immersive-lyric-line.is-current { font-size: calc(var(--lyric-size) + 4px); color: var(--stamp); }

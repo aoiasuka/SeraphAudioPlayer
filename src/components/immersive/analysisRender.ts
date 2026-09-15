@@ -2,9 +2,10 @@ import { clamp, LEVEL_DB_FLOOR, SPECTRUM_DB_FLOOR, type AnalysisView } from "@/l
 import { formatFreq, type ArchiveColors, type SpectrumGeometry } from "@/lib/analysis/render";
 
 const FONT = '10px "Courier Prime", "Courier New", monospace';
-const FIELD_TRAIL_ALPHA = [0.85, 0.24, 0.09, 0.035];
+const FIELD_TRAIL_ALPHA = [0.85, 0.36, 0.16, 0.075, 0.035, 0.015];
+export const IMMERSIVE_FIELD_TRAIL_FRAMES = FIELD_TRAIL_ALPHA.length;
 
-/** 小尺寸声场：缩减内边距，像素对齐细散点，淡化历史帧。 */
+/** 声场：保留短余晖，随画布尺寸略增点径，并对齐像素保持清晰。 */
 export function drawImmersiveField(
   ctx: CanvasRenderingContext2D, w: number, h: number,
   colors: ArchiveColors, trail: Float32Array[],
@@ -15,7 +16,8 @@ export function drawImmersiveField(
   const size = Math.max(10, Math.min(w, h) / 2 - 10);
   const transform = ctx.getTransform();
   const scaleX = transform.a || 1, scaleY = transform.d || 1;
-  const pointPixels = Math.max(1, Math.round(Math.min(scaleX, scaleY) * 1.1));
+  const pointSize = clamp(size / 110, 1.1, 1.75);
+  const pointPixels = Math.max(1, Math.round(Math.min(scaleX, scaleY) * pointSize));
   const pointW = pointPixels / scaleX, pointH = pointPixels / scaleY;
   const outline = () => {
     ctx.beginPath();

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Languages, Music2, Type } from "lucide-react";
+import { CloudDownload, Languages, Music2, Type } from "lucide-react";
+import { TypewriterText } from "@/components/ui/TypewriterText";
 import { activeGroupIndex, groupLyricsByTime } from "@/lib/lyrics/activeLine";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
@@ -77,6 +78,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
       <header className="immersive-lyrics-heading">
         <span className="immersive-eyebrow">LYRICS / 歌词</span>
         <div className="immersive-lyric-tools">
+          <button aria-label="在线匹配歌词" title="在线匹配歌词" onClick={() => window.dispatchEvent(new CustomEvent("seraph:open-lyrics-search"))}><CloudDownload size={14} /><span>在线匹配</span></button>
           <button aria-label="显示译文" title={showTranslation ? "隐藏译文" : "显示译文"} aria-pressed={showTranslation} disabled={!hasTranslation} onClick={onToggleTranslation}><Languages size={13} /><span>译文</span></button>
           <button aria-label="放大歌词字号" title={largeLyrics ? "恢复歌词字号" : "放大歌词字号"} aria-pressed={largeLyrics} onClick={onToggleSize}><Type size={14} /><span>字号</span></button>
         </div>
@@ -86,7 +88,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
           <div style={{ paddingBlock: centerPadding }}>
             {groups.map((group, index) => (
               <button
-                key={`${group.time}-${index}`}
+                key={`${track.id}-${group.time}-${index}`}
                 ref={(element) => { lineRefs.current[index] = element; }}
                 className={`immersive-lyric-line${index === activeIndex ? " is-current" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
                 aria-current={index === activeIndex ? "true" : undefined}
@@ -98,7 +100,14 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                   seek(Math.max(0, group.time));
                 }}
               >
-                <span>{group.lines[0]?.text}</span>
+                <span className="immersive-lyric-text">
+                  {index === activeIndex ? (
+                    <>
+                      <span className="immersive-lyric-placeholder type-caret" aria-hidden="true">{group.lines[0]?.text}</span>
+                      <span className="immersive-lyric-typing"><TypewriterText key={group.lines[0]?.text} text={group.lines[0]?.text ?? ""} /></span>
+                    </>
+                  ) : group.lines[0]?.text}
+                </span>
                 {showTranslation && group.lines.slice(1).map((line, translationIndex) => <small key={translationIndex}>{line.text}</small>)}
               </button>
             ))}

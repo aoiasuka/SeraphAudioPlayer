@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { CloudDownload, Copy, Loader2, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { TypewriterText } from "@/components/ui/TypewriterText";
@@ -53,6 +54,7 @@ export function LyricsPanel() {
   const showNotification = usePlayerStore((s) => s.showNotification);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const onlineTriggerRef = useRef<HTMLElement | null>(null);
   const lineRefs = useRef<Array<HTMLDivElement | null>>([]);
   // 发现3：打开弹窗/文件选择器那一刻锁定的曲目 id，应用前校验曲目未被切换
   const pinnedTrackIdRef = useRef<string | null>(null);
@@ -162,12 +164,13 @@ export function LyricsPanel() {
   };
 
   const handleOnlineLyricsClick = async () => {
+    onlineTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     pinnedTrackIdRef.current = track?.id ?? null;
     setManualSearchQuery(track?.title ?? "");
     await runOnlineLyricsSearch();
   };
 
-  // v0.4.3：播放条右键菜单「在线匹配歌词」经全局事件打开本面板的搜索弹窗。
+  // 播放条右键菜单与沉浸歌词工具栏共用本面板的匹配流程。
   // handler 每次渲染变化，经 ref 转发保持监听器只挂一次。
   const openLyricsSearchRef = useRef(handleOnlineLyricsClick);
   openLyricsSearchRef.current = handleOnlineLyricsClick;
@@ -177,6 +180,14 @@ export function LyricsPanel() {
     return () =>
       window.removeEventListener("seraph:open-lyrics-search", onOpenSearch);
   }, []);
+
+  useEffect(() => {
+    if (!onlineDialogOpen) return;
+    return () => {
+      const trigger = onlineTriggerRef.current;
+      if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    };
+  }, [onlineDialogOpen]);
 
   const copyLyricsText = async (text: string) => {
     const copied = await copyText(text);
@@ -412,7 +423,7 @@ export function LyricsPanel() {
         </div>
       </div>
 
-      <Dialog
+      {createPortal(<Dialog
         open={onlineDialogOpen}
         onClose={() => {
           if (!isApplyingOnline) setOnlineDialogOpen(false);
@@ -598,7 +609,7 @@ export function LyricsPanel() {
             </div>
           </section>
         </div>
-      </Dialog>
+      </Dialog>, document.body)}
     </>
   );
 }

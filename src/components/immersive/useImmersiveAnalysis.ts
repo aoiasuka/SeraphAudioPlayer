@@ -6,7 +6,7 @@ import { binFreq, prepCanvas, resolveArchiveColors, spectrumBinFromX, type Spect
 import { formatSeconds } from "@/lib/format";
 import { isTauriRuntime } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
-import { drawImmersiveField, drawImmersiveLevels, drawImmersiveSpectrum, levelLabel } from "./analysisRender";
+import { drawImmersiveField, drawImmersiveLevels, drawImmersiveSpectrum, IMMERSIVE_FIELD_TRAIL_FRAMES, levelLabel } from "./analysisRender";
 
 export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
   const [context] = useState(() => ({ view: createAnalysisView(), sessionId: createAnalysisSession(), trail: [] as Float32Array[], frameTime: 0 }));
@@ -51,7 +51,7 @@ export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
         const points = view.stereo.pts;
         if (points.length && trail[trail.length - 1] !== points) {
           trail.push(points);
-          if (trail.length > 4) trail.shift();
+          if (trail.length > IMMERSIVE_FIELD_TRAIL_FRAMES) trail.shift();
         } else if (!points.length) trail.length = 0;
       }
       draw(spectrumRef, (ctx, w, h) => { geometryRef.current = drawImmersiveSpectrum(ctx, w, h, view, colors, cursorRef.current); });
