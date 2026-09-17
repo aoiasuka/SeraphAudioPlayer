@@ -15,9 +15,8 @@
 use super::prelude::*;
 use crate::ipc::url_guard::{is_public_https_url, is_safe_amll_ttml_url};
 
-/// 默认 DB 地址（GitHub raw，amll-dev 组织）。
-pub(crate) const DEFAULT_AMLL_TTML_DB_URL: &str =
-    "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main";
+/// 默认 DB 地址（社区镜像 amlldb.bikonoo.com，网易云目录模板）。
+pub(crate) const DEFAULT_AMLL_TTML_DB_URL: &str = "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml";
 
 /// 每次搜索最多试取多少个候选的 TTML（每个 = 一次 GET，绝大多数 404）。
 const MAX_TTML_LOOKUPS: usize = 6;
@@ -79,12 +78,21 @@ fn lookup_url(template: &str, key: &str, custom: bool) -> Option<String> {
     let (dir, id) = key.split_once('/')?;
     let valid = |s: &str| {
         !s.is_empty()
-            && s
-                .chars()
+            && s.chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     };
     if !valid(dir) || !valid(id) {
         return None;
+    }
+    // 模板写死了目录（`/ncm-lyrics/%s.ttml`）又没有 {dir} 占位时，只对该平台的候选生效，
+    // 免得拿 QQ 的 songid 去网易云目录白打一枪
+    if !template.contains("{dir}") {
+        let pinned_other_dir = ["ncm-lyrics", "qq-lyrics"]
+            .iter()
+            .any(|known| *known != dir && template.contains(&format!("/{known}/")));
+        if pinned_other_dir {
+            return None;
+        }
     }
     let url = expand_template(template, dir, id);
     url_guard_for(custom)(&url).then_some(url)
@@ -220,44 +228,57 @@ mod tests {
     fn normalizes_and_guards_db_url() {
         assert_eq!(
             normalize_amll_db_url("", false).as_deref(),
-            Some("https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/{dir}/{id}.ttml")
+            Some(DEFAULT_AMLL_TTML_DB_URL)
         );
+        // 无占位符的 base URL 自动补路径
         assert_eq!(
-            normalize_amll_db_url("https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/", false)
-                .as_deref(),
-            Some("https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/{dir}/{id}.ttml")
+            normalize_amll_db_url("https://amlldb.bikonoo.com/", false).as_deref(),
+            Some("https://amlldb.bikonoo.com/{dir}/{id}.ttml")
         );
         // 带占位符的模板原样保留
         assert_eq!(
             normalize_amll_db_url("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml", true).as_deref(),
             Some("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml")
         );
-        assert!(normalize_amll_db_url("http://raw.githubusercontent.com/x", false).is_none());
-        assert!(normalize_amll_db_url("https://evil.com/amll", false).is_none());
-        assert!(normalize_amll_db_url("https://raw.githubusercontent.com@evil.com/x", false).is_none());
+        // 预设模式：只认 bikonoo；GitHub raw / jsDelivr 已下线
+        assert!(normalize_amll_db_url(
+            "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main",
+            false
+        )
+        .is_none());
+        assert!(normalize_amll_db_url(
+            "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main",
+            false
+        )
+        .is_none());
+        assert!(normalize_amll_db_url("http://amlldb.bikonoo.com/x", false).is_none());
+        assert!(normalize_amll_db_url("https://amlldb.bikonoo.com@evil.com/x", false).is_none());
         // 自定义模式：公网域放行，内网/IP/明文拒
-        assert!(normalize_amll_db_url("https://amlldb.bikonoo.com", true).is_some());
+        assert!(normalize_amll_db_url("https://example.org/db", true).is_some());
         assert!(normalize_amll_db_url("https://127.0.0.1/db", true).is_none());
         assert!(normalize_amll_db_url("https://localhost/db", true).is_none());
         assert!(normalize_amll_db_url("http://amlldb.bikonoo.com", true).is_none());
     }
 
     #[test]
-    fn lookup_url_rejects_path_tricks() {
-        let base = normalize_amll_db_url("", false).unwrap();
+    fn lookup_url_rejects_path_tricks_and_respects_pinned_dir() {
+        let default = DEFAULT_AMLL_TTML_DB_URL;
         assert_eq!(
-            lookup_url(&base, "ncm-lyrics/123", false).as_deref(),
-            Some("https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/ncm-lyrics/123.ttml")
+            lookup_url(default, "ncm-lyrics/123", false).as_deref(),
+            Some("https://amlldb.bikonoo.com/ncm-lyrics/123.ttml")
         );
-        let custom = "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml";
+        // 模板写死 ncm-lyrics：QQ 候选跳过
+        assert!(lookup_url(default, "qq-lyrics/123", false).is_none());
+
+        let all = normalize_amll_db_url("https://amlldb.bikonoo.com", false).unwrap();
         assert_eq!(
-            lookup_url(custom, "ncm-lyrics/9", true).as_deref(),
-            Some("https://amlldb.bikonoo.com/ncm-lyrics/9.ttml")
+            lookup_url(&all, "qq-lyrics/9", false).as_deref(),
+            Some("https://amlldb.bikonoo.com/qq-lyrics/9.ttml")
         );
-        assert!(lookup_url(&base, "ncm-lyrics/../../x", false).is_none());
-        assert!(lookup_url(&base, "ncm-lyrics/1?x=1", false).is_none());
-        assert!(lookup_url(&base, "123", false).is_none());
-        assert!(lookup_url(&base, "qq-lyrics/", false).is_none());
+        assert!(lookup_url(&all, "ncm-lyrics/../../x", false).is_none());
+        assert!(lookup_url(&all, "ncm-lyrics/1?x=1", false).is_none());
+        assert!(lookup_url(&all, "123", false).is_none());
+        assert!(lookup_url(&all, "qq-lyrics/", false).is_none());
     }
 
     #[tokio::test]

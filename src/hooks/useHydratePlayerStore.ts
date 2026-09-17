@@ -88,6 +88,12 @@ export function useHydratePlayerStore() {
           }
         );
       }
+      // v0.6.0：歌词排除规则在 Rust 侧匹配，水合后把持久化的规则同步过去
+      if (isTauriRuntime() && state.lyricsExcludeRules.length > 0) {
+        void invoke("set_lyrics_exclude_rules", { rules: state.lyricsExcludeRules }).catch(
+          (err) => console.warn("同步歌词排除规则失败", err)
+        );
+      }
     }).catch((err) => {
       if (cancelled) return;
       console.warn("Failed to initialize playback settings", err);

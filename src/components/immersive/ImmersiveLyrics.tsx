@@ -4,17 +4,14 @@ import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { activeGroupIndex, groupLyricsByTime, hasWordTiming } from "@/lib/lyrics/activeLine";
-import { filterLyricsByRules } from "@/lib/lyrics/exclude";
+import { visibleLyrics } from "@/lib/lyrics/exclude";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
 function useLyricGroups(track: Track) {
-  const excludeRules = usePlayerStore((s) => s.lyricsExcludeRules);
-  const lyrics = useMemo(
-    () => filterLyricsByRules(track.lyrics, excludeRules),
-    [track.lyrics, excludeRules]
-  );
+  // 排除规则由后端打 hidden 标记，这里只过滤
+  const lyrics = useMemo(() => visibleLyrics(track.lyrics), [track.lyrics]);
   const groups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
   // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。
   const activeIndex = usePlayerStore((s) => activeGroupIndex(groups, s.currentTime));
@@ -121,7 +118,12 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                   <span className="immersive-lyric-text">
                     {isCurrent ? (
                       hasWordTiming(main) ? (
-                        <KaraokeLine words={main.words} currentTime={smoothTime} />
+                        <KaraokeLine
+                          words={main.words}
+                          currentTime={smoothTime}
+                          sungColor="var(--stamp)"
+                          unsungColor="rgba(181, 72, 42, 0.32)"
+                        />
                       ) : (
                         <>
                           <span className="immersive-lyric-placeholder type-caret" aria-hidden="true">{main?.text}</span>

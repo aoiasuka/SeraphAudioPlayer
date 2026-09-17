@@ -51,7 +51,7 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
     vi.unstubAllGlobals();
   });
 
-  it("当前行带 words 时逐字渲染，并显示译文与音译；排除规则即时生效", () => {
+  it("当前行带 words 时逐字渲染，并显示译文与音译；后端 hidden 标记即时生效", () => {
     render(<LyricsPanel />);
     const karaoke = screen.getByTestId("karaoke-line");
     const words = karaoke.querySelectorAll(".karaoke-word");
@@ -59,15 +59,23 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
     // currentTime=11：第一个音节唱到一半，第二个未开始
     expect(words[0]).toHaveAttribute("data-progress", "0.50");
     expect(words[1]).toHaveAttribute("data-progress", "0.00");
+    // 回归：文字色必须是具体颜色，不能靠 currentColor（音节自身透明会连带整行不可见）
+    expect((words[0] as HTMLElement).style.color).toBe("var(--ink)");
+    expect((words[0] as HTMLElement).style.backgroundImage).not.toContain("currentColor");
     expect(screen.getByText("你好世界")).toBeInTheDocument();
     expect(screen.getByText("ha-ro")).toBeInTheDocument();
     expect(screen.getByText("作词：某人")).toBeInTheDocument();
 
+    // 排除规则由后端打 hidden 标记：模拟后端回传后的形态
     act(() =>
-      usePlayerStore.setState({
-        lyricsExcludeRules: [{ id: "k", kind: "keyword", pattern: "作词" }],
+      usePlayerStore.setState((state) => ({
+        playlist: state.playlist.map((item) =>
+          item.id === "w"
+            ? { ...item, lyrics: item.lyrics.map((line) => line.text.startsWith("作词") ? { ...line, hidden: true } : line) }
+            : item
+        ),
         showLyricsRoman: false,
-      })
+      }))
     );
     expect(screen.queryByText("作词：某人")).toBeNull();
     expect(screen.queryByText("ha-ro")).toBeNull();

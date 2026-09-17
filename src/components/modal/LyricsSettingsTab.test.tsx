@@ -35,37 +35,39 @@ describe("歌词设置标签页", () => {
     expect(usePlayerStore.getState().ttmlLyricsEnabled).toBe(false);
   });
 
-  it("AMLL 地址弹窗：预设模式拒绝白名单外域名，自定义模式接受公网模板并拒绝内网", () => {
+  it("AMLL 地址弹窗：预设模式固定 bikonoo 地址，自定义模式接受公网模板并拒绝内网", () => {
     render(<LyricsSettingsTab />);
     fireEvent.click(screen.getAllByRole("button", { name: "配置" })[0]);
     const dialog = screen.getByRole("dialog");
-    const input = within(dialog).getByLabelText("AMLL TTML DB 地址");
-    fireEvent.change(input, { target: { value: "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml" } });
-    expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
+    // 预设模式没有输入框，只展示固定地址
+    expect(within(dialog).queryByLabelText("AMLL TTML DB 地址")).toBeNull();
+    expect(within(dialog).getByText("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml")).toBeInTheDocument();
+    expect(within(dialog).getByText(/示例请求：https:\/\/amlldb\.bikonoo\.com\/ncm-lyrics\/\d+\.ttml/)).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("radio", { name: "自定义地址" }));
+    const input = within(dialog).getByLabelText("AMLL TTML DB 地址");
+    fireEvent.change(input, { target: { value: "https://example.org/{dir}/{id}.ttml" } });
     expect(within(dialog).getByRole("button", { name: "保存" })).toBeEnabled();
-    expect(within(dialog).getByText(/示例请求：https:\/\/amlldb\.bikonoo\.com\/ncm-lyrics\/\d+\.ttml/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/示例请求：https:\/\/example\.org\/ncm-lyrics\/\d+\.ttml/)).toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: "https://127.0.0.1/%s.ttml" } });
     expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "amlldb.bikonoo.com" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "amlldb.bikonoo.com（全平台）" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
     expect(usePlayerStore.getState().amllTtmlDbUrl).toBe("https://amlldb.bikonoo.com/{dir}/{id}.ttml");
     expect(usePlayerStore.getState().amllTtmlDbCustom).toBe(true);
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("AMLL 地址弹窗：预设镜像按钮可填入并保存", () => {
+  it("AMLL 地址弹窗：从自定义切回预设并保存即恢复固定地址", () => {
+    usePlayerStore.setState({ amllTtmlDbUrl: "https://example.org/%s", amllTtmlDbCustom: true });
     render(<LyricsSettingsTab />);
     fireEvent.click(screen.getAllByRole("button", { name: "配置" })[0]);
     const dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "jsDelivr" }));
+    fireEvent.click(within(dialog).getByRole("radio", { name: "预设" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-    expect(usePlayerStore.getState().amllTtmlDbUrl).toBe(
-      "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main"
-    );
+    expect(usePlayerStore.getState().amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
     expect(usePlayerStore.getState().amllTtmlDbCustom).toBe(false);
   });
 

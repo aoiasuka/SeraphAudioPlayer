@@ -36,6 +36,10 @@ pub struct ImportedTrack {
     pub glow1: String,
     pub glow2: String,
     pub lyrics: Vec<LyricLine>,
+    /// AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`），来自本地歌词文件名里的平台 ID
+    /// 等可靠来源；在线匹配时优先用它直取 TTML，不必依赖三源搜索命中。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lyrics_lookup_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +97,10 @@ pub struct LyricLine {
     /// 音译/罗马音（TTML `ttm:role="x-roman"`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roman: Option<String>,
+    /// 被「歌词排除规则」命中（Rust 侧 regex/关键词匹配）。**只在返回给前端前打标**，
+    /// 不落曲库缓存；前端按此标记隐藏而不自己匹配。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl LyricLine {
@@ -133,6 +141,35 @@ pub struct OnlineLyricsOptions {
     pub ttml_db_url: String,
     /// true = 自定义地址模式（任意公网 https，禁重定向）；false = 预设镜像白名单
     pub ttml_db_custom: bool,
+    /// 曲目已知的 AMLL 查找键（`ImportedTrack.lyrics_lookup_keys`），有则直取 TTML
+    pub lookup_keys: Vec<String>,
+}
+
+/// 歌词排除规则（与前端 `LyricsExcludeRule` 同形）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsExcludeRule {
+    pub id: String,
+    /// "keyword" | "regex"
+    pub kind: String,
+    pub pattern: String,
+}
+
+/// 单条规则的校验结果（`set_lyrics_exclude_rules` / `validate_lyrics_exclude_rule` 返回）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsExcludeRuleStatus {
+    pub id: String,
+    pub error: Option<String>,
+}
+
+/// `find_local_lyrics` 的结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalLyricsMatch {
+    pub path: String,
+    pub lyrics: Vec<LyricLine>,
+    pub lookup_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

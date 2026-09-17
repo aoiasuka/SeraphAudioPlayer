@@ -1,17 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  compileExcludeRules,
-  filterLyricsByRules,
-  sanitizeExcludeRules,
-  validateRegexPattern,
-} from "./exclude";
+import { sanitizeExcludeRules, visibleLyrics } from "./exclude";
 import type { LyricLine } from "@/types/track";
-
-const lyrics: LyricLine[] = [
-  { time: 0, text: "作词：某人" },
-  { time: 1, text: "Hello World", translation: "你好世界" },
-  { time: 2, text: "第二句", roman: "di er ju" },
-];
 
 describe("sanitizeExcludeRules", () => {
   it("丢弃坏元素、去重、截断并补 id", () => {
@@ -31,25 +20,17 @@ describe("sanitizeExcludeRules", () => {
   });
 });
 
-describe("filterLyricsByRules", () => {
-  it("无规则时原数组引用直接返回", () => {
-    expect(filterLyricsByRules(lyrics, [])).toBe(lyrics);
-  });
+describe("visibleLyrics", () => {
+  const lyrics: LyricLine[] = [
+    { time: 0, text: "作词：某人", hidden: true },
+    { time: 1, text: "Hello" },
+    { time: 2, text: "第二句", hidden: false },
+  ];
 
-  it("关键词大小写不敏感，正则命中译文/音译也排除", () => {
-    const filtered = filterLyricsByRules(lyrics, [
-      { id: "a", kind: "keyword", pattern: "hello" },
-      { id: "b", kind: "regex", pattern: "^作词" },
-    ]);
-    expect(filtered.map((l) => l.text)).toEqual(["第二句"]);
-    const byRoman = filterLyricsByRules(lyrics, [{ id: "c", kind: "regex", pattern: "er ju$" }]);
-    expect(byRoman.map((l) => l.text)).toEqual(["作词：某人", "Hello World"]);
-  });
-
-  it("坏正则跳过而不是清空歌词", () => {
-    const excluded = compileExcludeRules([{ id: "x", kind: "regex", pattern: "(" }]);
-    expect(lyrics.some(excluded)).toBe(false);
-    expect(validateRegexPattern("(")).not.toBeNull();
-    expect(validateRegexPattern("^ok$")).toBeNull();
+  it("按后端 hidden 标记过滤；无隐藏行时原引用返回", () => {
+    expect(visibleLyrics(lyrics).map((l) => l.text)).toEqual(["Hello", "第二句"]);
+    const clean = lyrics.slice(1);
+    expect(visibleLyrics(clean)).toBe(clean);
+    expect(visibleLyrics([])).toEqual([]);
   });
 });

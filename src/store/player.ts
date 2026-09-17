@@ -169,6 +169,7 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     lyricsExcludeRules: sanitizeExcludeRules(state.lyricsExcludeRules),
     showLyricsTranslation: state.showLyricsTranslation !== false,
     showLyricsRoman: state.showLyricsRoman === true,
+    lyricsFolder: typeof state.lyricsFolder === "string" ? state.lyricsFolder.trim() : "",
   };
 }
 
@@ -215,6 +216,7 @@ export const usePlayerStore = create<PlayerStore>()(
         lyricsExcludeRules: [],
         showLyricsTranslation: true,
         showLyricsRoman: false,
+        lyricsFolder: "",
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -286,6 +288,7 @@ export const usePlayerStore = create<PlayerStore>()(
         lyricsExcludeRules: state.lyricsExcludeRules,
         showLyricsTranslation: state.showLyricsTranslation,
         showLyricsRoman: state.showLyricsRoman,
+        lyricsFolder: state.lyricsFolder,
       }),
     }
   )

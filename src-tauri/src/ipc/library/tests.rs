@@ -14,7 +14,9 @@ struct TestLibraryDir(PathBuf);
 fn playlist_summary_keeps_metadata_without_cloning_or_serializing_lyrics() {
     use super::snapshot::{LibrarySnapshot, PlaylistSnapshot};
     let mut track = test_imported_track("a", "C:/a.flac", "A");
-    track.lyrics.push(LyricLine::new(1.0, "long lyric".repeat(1000)));
+    track
+        .lyrics
+        .push(LyricLine::new(1.0, "long lyric".repeat(1000)));
     let snapshot = std::sync::Arc::new(LibrarySnapshot::new(vec![track.clone()]));
     let summary = PlaylistSnapshot {
         snapshot: snapshot.clone(),
@@ -738,6 +740,7 @@ fn test_imported_track(id: &str, path: &str, title: &str) -> ImportedTrack {
         glow1: "#fff".into(),
         glow2: "#000".into(),
         lyrics: Vec::new(),
+        lyrics_lookup_keys: Vec::new(),
     }
 }
 

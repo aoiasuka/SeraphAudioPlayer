@@ -16,6 +16,8 @@ export interface LyricLine {
   translation?: string;
   /** 音译 / 罗马音（TTML）。 */
   roman?: string;
+  /** 被歌词排除规则命中（后端打标，仅显示层使用）。 */
+  hidden?: boolean;
 }
 
 export type LyricsSourcePriority = "auto" | "netease" | "kugou" | "qq";
@@ -61,6 +63,8 @@ export interface Track {
   lyrics: LyricLine[];
   /** false 表示来自曲库摘要，当前曲目需要再按 ID 读取歌词。 */
   lyricsLoaded?: boolean;
+  /** AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`），来自本地歌词文件名等可靠来源。 */
+  lyricsLookupKeys?: string[];
 }
 
 export interface DeleteTrackFailure {

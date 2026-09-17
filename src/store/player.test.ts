@@ -123,6 +123,9 @@ describe("player store startup and persistence", () => {
     expect(migrated.lyricsExcludeRules).toEqual([]);
     expect(migrated.showLyricsTranslation).toBe(true);
     expect(migrated.showLyricsRoman).toBe(false);
+    expect(migrated.lyricsFolder).toBe("");
+    expect(migratePersistedPlayerState({ lyricsFolder: " C:/L " }).lyricsFolder).toBe("C:/L");
+    expect(migratePersistedPlayerState({ lyricsFolder: 5 }).lyricsFolder).toBe("");
   });
 
   it("sanitizes lyrics settings: bad url falls back, rules are cleaned", () => {
@@ -141,9 +144,14 @@ describe("player store startup and persistence", () => {
     ]);
     expect(migrated.ttmlLyricsEnabled).toBe(false);
     const mirror = migratePersistedPlayerState({
-      amllTtmlDbUrl: "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/",
+      amllTtmlDbUrl: "https://amlldb.bikonoo.com/{dir}/{id}.ttml/",
     });
-    expect(mirror.amllTtmlDbUrl).toBe("https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main");
+    expect(mirror.amllTtmlDbUrl).toBe("https://amlldb.bikonoo.com/{dir}/{id}.ttml");
+    // 旧版本存的 GitHub raw 预设已失效 → 回默认
+    const legacy = migratePersistedPlayerState({
+      amllTtmlDbUrl: "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main",
+    });
+    expect(legacy.amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
     // 自定义模式下公网模板保留，内网回默认
     const custom = migratePersistedPlayerState({
       amllTtmlDbUrl: "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml",
@@ -157,7 +165,7 @@ describe("player store startup and persistence", () => {
 
   it("setAmllTtmlDbUrl validates by mode and keeps the old value on rejection", () => {
     usePlayerStore.setState({ amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL, amllTtmlDbCustom: false, notification: null });
-    expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://amlldb.bikonoo.com/%s", false)).toBe(false);
+    expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://example.org/%s", false)).toBe(false);
     expect(usePlayerStore.getState().amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
     expect(usePlayerStore.getState().notification?.text).toContain("自定义模式");
     expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://127.0.0.1/%s", true)).toBe(false);
@@ -189,8 +197,47 @@ describe("player store startup and persistence", () => {
         ttmlEnabled: true,
         ttmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
         ttmlDbCustom: false,
+        lookupKeys: [],
       },
     });
+  });
+
+  it("forwards track lookup keys and syncs exclude rules to the backend", async () => {
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValueOnce([]);
+    usePlayerStore.setState({
+      playlist: [testTrack({ id: "t", lyricsLookupKeys: ["ncm-lyrics/65923804"] })],
+      currentTrackIndex: 0,
+    });
+    await usePlayerStore.getState().fetchOnlineLyricsForCurrentTrack();
+    const [, args] = invokeMock.mock.calls.find(([command]) => command === "fetch_online_lyrics")!;
+    expect((args as { options: { lookupKeys: string[] } }).options.lookupKeys).toEqual(["ncm-lyrics/65923804"]);
+
+    usePlayerStore.getState().setLyricsExcludeRules([{ id: "k", kind: "keyword", pattern: "作词" }]);
+    expect(invokeMock).toHaveBeenCalledWith("set_lyrics_exclude_rules", {
+      rules: [{ id: "k", kind: "keyword", pattern: "作词" }],
+    });
+  });
+
+  it("findLocalLyricsForTrack writes lyrics and merges lookup keys; noop without folder", async () => {
+    const track = testTrack({ id: "t", title: "唯一", artist: "王力宏" });
+    usePlayerStore.setState({ playlist: [track], currentTrackIndex: 0, lyricsFolder: "" });
+    expect(await usePlayerStore.getState().findLocalLyricsForTrack(track)).toBe(false);
+
+    usePlayerStore.setState({ lyricsFolder: "C:/Users/me/Lyrics" });
+    invokeMock.mockResolvedValueOnce({
+      path: "C:/Users/me/Lyrics/王力宏 - 唯一 (65923804).lrc",
+      lyrics: [{ time: 1, text: "a" }],
+      lookupKeys: ["ncm-lyrics/65923804"],
+    });
+    expect(await usePlayerStore.getState().findLocalLyricsForTrack(track)).toBe(true);
+    const updated = usePlayerStore.getState().playlist[0];
+    expect(updated.lyrics).toEqual([{ time: 1, text: "a" }]);
+    expect(updated.lyricsLoaded).toBe(true);
+    expect(updated.lyricsLookupKeys).toEqual(["ncm-lyrics/65923804"]);
+    expect(invokeMock).toHaveBeenCalledWith("find_local_lyrics", expect.objectContaining({
+      trackId: "t", title: "唯一", artist: "王力宏", folder: "C:/Users/me/Lyrics",
+    }));
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {

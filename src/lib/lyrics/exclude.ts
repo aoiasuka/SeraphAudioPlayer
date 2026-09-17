@@ -3,9 +3,10 @@ import type { LyricLine, LyricsExcludeRule } from "@/types/track";
 /**
  * 歌词排除规则（设置 → 歌词设置 → 歌词排除配置）。
  *
- * 只在显示层过滤：曲库里的歌词原样保留，规则改动即时生效、随时可逆。
- * 关键词按大小写不敏感的子串匹配；正则按 JS 语法（默认加 `i`），
- * 编译失败的规则跳过而不是让整篇歌词消失。
+ * v0.6.0 起匹配在 **Rust 侧**完成（`ipc/library/exclude.rs`，`regex` crate）：前端只维护
+ * 规则列表并经 `set_lyrics_exclude_rules` 同步；后端回传歌词时给命中的行打
+ * `LyricLine.hidden`，这里只按标记过滤。正则语法因此是 Rust 的（无环视、无反向引用），
+ * 校验也走 `validate_lyrics_exclude_rules` IPC。
  */
 
 export const MAX_EXCLUDE_RULES = 50;
@@ -32,52 +33,8 @@ export function sanitizeExcludeRules(value: unknown): LyricsExcludeRule[] {
   return rules;
 }
 
-/** 校验正则能否编译；返回错误信息或 null。 */
-export function validateRegexPattern(pattern: string): string | null {
-  try {
-    new RegExp(pattern, "i");
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : "无效的正则表达式";
-  }
-}
-
-export function compileExcludeRules(
-  rules: LyricsExcludeRule[]
-): (line: LyricLine) => boolean {
-  const keywords: string[] = [];
-  const regexes: RegExp[] = [];
-  for (const rule of rules) {
-    if (rule.kind === "keyword") {
-      keywords.push(rule.pattern.toLowerCase());
-    } else {
-      try {
-        regexes.push(new RegExp(rule.pattern, "i"));
-      } catch {
-        // 坏规则跳过
-      }
-    }
-  }
-  if (keywords.length === 0 && regexes.length === 0) return () => false;
-  return (line) => {
-    const haystacks = [line.text, line.translation ?? "", line.roman ?? ""];
-    for (const value of haystacks) {
-      if (!value) continue;
-      const lower = value.toLowerCase();
-      if (keywords.some((keyword) => lower.includes(keyword))) return true;
-      if (regexes.some((regex) => regex.test(value))) return true;
-    }
-    return false;
-  };
-}
-
-/** 应用排除规则；无规则时原数组直接返回（保持引用稳定，避免无谓重渲染）。 */
-export function filterLyricsByRules(
-  lyrics: LyricLine[],
-  rules: LyricsExcludeRule[]
-): LyricLine[] {
-  if (rules.length === 0 || lyrics.length === 0) return lyrics;
-  const excluded = compileExcludeRules(rules);
-  const filtered = lyrics.filter((line) => !excluded(line));
-  return filtered.length === lyrics.length ? lyrics : filtered;
+/** 去掉后端标记为 hidden 的行；没有任何隐藏行时原数组引用直接返回（避免无谓重渲染）。 */
+export function visibleLyrics(lyrics: LyricLine[]): LyricLine[] {
+  if (lyrics.length === 0 || !lyrics.some((line) => line.hidden)) return lyrics;
+  return lyrics.filter((line) => !line.hidden);
 }

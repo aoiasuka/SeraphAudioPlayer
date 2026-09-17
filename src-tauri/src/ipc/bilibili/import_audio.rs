@@ -921,6 +921,7 @@ pub(crate) fn track_from_resolved_audio(
         glow1,
         glow2,
         lyrics: Vec::new(),
+        lyrics_lookup_keys: Vec::new(),
     })
 }
 

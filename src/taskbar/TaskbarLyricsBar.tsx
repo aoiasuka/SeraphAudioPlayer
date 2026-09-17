@@ -8,6 +8,7 @@ import {
   groupLyricsByTime,
   hasWordTiming,
 } from "@/lib/lyrics/activeLine";
+import { visibleLyrics } from "@/lib/lyrics/exclude";
 import {
   coverSrc,
   emitToMain,
@@ -28,6 +29,8 @@ const CLOSE_EVENT = "seraph://taskbar-lyrics-close";
 const POSITION_EVENT = "seraph://taskbar-lyrics-position";
 /** 后端写完歌词缓存的广播,payload 为 trackId。 */
 const LYRICS_UPDATED_EVENT = "seraph://track-lyrics-updated";
+/** 后端排除规则变更广播（无 payload），条重拉当前曲目取新的 hidden 标记。 */
+const LYRICS_RULES_UPDATED_EVENT = "seraph://lyrics-rules-updated";
 
 interface PlaybackSnapshot {
   trackId: string | null;
@@ -256,9 +259,25 @@ export function TaskbarLyricsBar() {
       })
       .catch(() => undefined);
 
+    // 排除规则改了 → hidden 标记变化，重拉当前曲目（规则匹配在后端，条自己不算）
+    let unlistenRules: (() => void) | undefined;
+    void listen<unknown>(LYRICS_RULES_UPDATED_EVENT, () => {
+      if (disposed) return;
+      setTrackRevision((value) => value + 1);
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlistenRules = fn;
+      })
+      .catch(() => undefined);
+
     return () => {
       disposed = true;
       unlisten?.();
+      unlistenRules?.();
     };
   }, []);
 
@@ -312,7 +331,7 @@ export function TaskbarLyricsBar() {
   }, []);
 
   const lyricGroups = useMemo(
-    () => groupLyricsByTime(track?.lyrics ?? []),
+    () => groupLyricsByTime(visibleLyrics(track?.lyrics ?? [])),
     [track]
   );
   const activeIdx = useMemo(
@@ -416,6 +435,8 @@ export function TaskbarLyricsBar() {
               <KaraokeLine
                 words={activeLineEntry.words}
                 currentTime={smoothSeconds}
+                sungColor={dark ? "#f5f1e8" : "#2b2722"}
+                unsungColor={dark ? "rgba(245, 241, 232, 0.4)" : "rgba(43, 39, 34, 0.35)"}
               />
             ) : (
               <TypewriterText key={trackId} text={activeLine} />

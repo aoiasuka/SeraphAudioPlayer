@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-audio"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "cpal",
  "parking_lot",
@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-core"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4083,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-decoder"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "seraph-core",
  "symphonia",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-dsp"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-playlist"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "seraph-core",
  "serde",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-tauri"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4153,7 +4153,7 @@ dependencies = [
 
 [[package]]
 name = "seraph-visualizer"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "parking_lot",
  "rtrb",

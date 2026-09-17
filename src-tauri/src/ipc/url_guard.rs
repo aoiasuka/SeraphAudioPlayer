@@ -28,11 +28,10 @@ pub(crate) const ONLINE_COVER_HOST_SUFFIXES: &[&str] = &[
 /// 带前导点 = 只认子域:三家的 API 全在子域上,裸顶级域没有歌词接口。
 pub(crate) const LYRICS_HOST_SUFFIXES: &[&str] = &[".163.com", ".kugou.com", ".qq.com"];
 
-/// AMLL TTML DB 镜像白名单(设置里可切换镜像,但不能填任意域——用户自定义
-/// 出站目标 + 逐跳重定向复验是既有安全基线,不因"只是取歌词"放宽)。
-/// GitHub raw 裸域即入口;jsDelivr 各 CDN(cdn/fastly/gcore.jsdelivr.net)只认子域。
-pub(crate) const AMLL_TTML_HOST_SUFFIXES: &[&str] =
-    &["raw.githubusercontent.com", ".jsdelivr.net"];
+/// AMLL TTML DB「预设」模式白名单——社区镜像 amlldb.bikonoo.com(2026-09-17 起唯一预设;
+/// GitHub raw / jsDelivr 路径在 amll-dev 迁移后已失效,一并移除)。自定义模式另走
+/// `is_public_https_url` + 禁重定向。
+pub(crate) const AMLL_TTML_HOST_SUFFIXES: &[&str] = &["amlldb.bikonoo.com"];
 
 /// GitHub 更新检查(check_for_update 只请求 api.github.com,正常零重定向;
 /// 出现 302 时也只许留在同 host)。
@@ -252,16 +251,20 @@ mod tests {
             "https://objects.githubusercontent.com/github-production-release-asset/x"
         ));
         assert!(is_safe_amll_ttml_url(
+            "https://amlldb.bikonoo.com/ncm-lyrics/1.ttml"
+        ));
+        assert!(!is_safe_amll_ttml_url(
             "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/ncm-lyrics/1.ttml"
         ));
-        assert!(is_safe_amll_ttml_url(
-            "https://fastly.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/qq-lyrics/1.ttml"
+        assert!(!is_safe_amll_ttml_url(
+            "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/x"
         ));
-        assert!(!is_safe_amll_ttml_url("https://jsdelivr.net/x"));
-        assert!(!is_safe_amll_ttml_url("https://github.com/amll-dev/amll-ttml-db"));
+        assert!(!is_safe_amll_ttml_url("https://bikonoo.com/x"));
 
         // 自定义模式守卫：公网域名放行，其余拒
-        assert!(is_public_https_url("https://amlldb.bikonoo.com/ncm-lyrics/1.ttml"));
+        assert!(is_public_https_url(
+            "https://amlldb.bikonoo.com/ncm-lyrics/1.ttml"
+        ));
         for url in [
             "http://amlldb.bikonoo.com/x",
             "https://127.0.0.1/x",
@@ -273,7 +276,10 @@ mod tests {
             "https://db.internal/x",
             "https://user@amlldb.bikonoo.com/x",
         ] {
-            assert!(!is_public_https_url(url), "public guard should reject {url}");
+            assert!(
+                !is_public_https_url(url),
+                "public guard should reject {url}"
+            );
         }
 
         // 盲 SSRF 探针与伪装：全部表都必须拒

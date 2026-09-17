@@ -2,7 +2,15 @@ import { invoke } from "@/lib/tauri";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
 import type { LyricLine, OnlineLyricsCandidate, Track } from "@/types/track";
+import { sendCommand } from "./commands";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
+
+/** `find_local_lyrics` 的返回。 */
+interface LocalLyricsMatch {
+  path: string;
+  lyrics: LyricLine[];
+  lookupKeys: string[];
+}
 
 const MAX_LYRIC_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -82,8 +90,54 @@ export function createLyricsActions(
   | "setLyricsExcludeRules"
   | "setShowLyricsTranslation"
   | "setShowLyricsRoman"
+  | "setLyricsFolder"
+  | "findLocalLyricsForTrack"
 > {
   return {
+  setLyricsFolder: (folder) => {
+    const normalized = folder.trim();
+    if (get().lyricsFolder === normalized) return;
+    set({ lyricsFolder: normalized });
+    get().showNotification(
+      normalized ? "已设置本地歌词目录，切歌时自动匹配" : "已清除本地歌词目录"
+    );
+  },
+
+  findLocalLyricsForTrack: async (track) => {
+    const folder = get().lyricsFolder;
+    if (!folder) return false;
+    try {
+      const result = await invoke<LocalLyricsMatch | null>("find_local_lyrics", {
+        trackId: track.id,
+        trackPath: track.path,
+        title: track.title,
+        artist: track.artist,
+        folder,
+        preferTraditional: get().preferTraditionalLyrics,
+      });
+      if (!result || result.lyrics.length === 0) return false;
+      set((state) => ({
+        playlist: state.playlist.map((item) =>
+          item.id === track.id
+            ? {
+                ...item,
+                lyrics: result.lyrics,
+                lyricsLoaded: true,
+                lyricsLookupKeys: Array.from(
+                  new Set([...(item.lyricsLookupKeys ?? []), ...result.lookupKeys])
+                ),
+              }
+            : item
+        ),
+      }));
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: find_local_lyrics", err);
+      return false;
+    }
+  },
+
   setLyricsSourcePriority: (priority) => {
     if (get().lyricsSourcePriority === priority) return;
     set({ lyricsSourcePriority: priority });
@@ -119,7 +173,10 @@ export function createLyricsActions(
   },
 
   setLyricsExcludeRules: (rules) => {
-    set({ lyricsExcludeRules: sanitizeExcludeRules(rules) });
+    const sanitized = sanitizeExcludeRules(rules);
+    set({ lyricsExcludeRules: sanitized });
+    // 匹配在 Rust 侧：同步规则，后端会广播 seraph://lyrics-rules-updated 让各窗口重拉歌词
+    sendCommand("set_lyrics_exclude_rules", { rules: sanitized });
   },
 
   setShowLyricsTranslation: (enabled) => {
@@ -204,6 +261,7 @@ export function createLyricsActions(
             ttmlEnabled: ttmlLyricsEnabled,
             ttmlDbUrl: amllTtmlDbUrl,
             ttmlDbCustom: amllTtmlDbCustom,
+            lookupKeys: track.lyricsLookupKeys ?? [],
           },
         }
       );

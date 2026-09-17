@@ -1,16 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link2, MicVocal, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Folder, Link2, MicVocal, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
-import {
-  MAX_EXCLUDE_PATTERN_CHARS,
-  MAX_EXCLUDE_RULES,
-  validateRegexPattern,
-} from "@/lib/lyrics/exclude";
+import { MAX_EXCLUDE_PATTERN_CHARS, MAX_EXCLUDE_RULES } from "@/lib/lyrics/exclude";
+import { invoke, isTauriRuntime } from "@/lib/tauri";
 import {
   AMLL_LINKS,
   AMLL_TTML_DB_CUSTOM_PRESETS,
-  AMLL_TTML_DB_MIRRORS,
+  AMLL_TTML_DB_PRESET_URL,
   DEFAULT_AMLL_TTML_DB_URL,
   isValidAmllTtmlDbUrl,
   LYRICS_SOURCE_OPTIONS,
@@ -40,6 +37,26 @@ export function LyricsSettingsTab() {
   const setTaskbarLyricsClickThrough = usePlayerStore((s) => s.setTaskbarLyricsClickThrough);
   const taskbarLyricsPosition = usePlayerStore((s) => s.taskbarLyricsPosition);
   const setTaskbarLyricsPosition = usePlayerStore((s) => s.setTaskbarLyricsPosition);
+  const lyricsFolder = usePlayerStore((s) => s.lyricsFolder);
+  const setLyricsFolder = usePlayerStore((s) => s.setLyricsFolder);
+  const showNotification = usePlayerStore((s) => s.showNotification);
+
+  const chooseLyricsFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择本地歌词目录",
+        defaultPath: lyricsFolder || undefined,
+      });
+      if (typeof selected === "string" && selected.trim()) setLyricsFolder(selected);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri dialog unavailable", err);
+      showNotification("无法打开文件夹选择窗口");
+    }
+  };
 
   const [urlDialogOpen, setUrlDialogOpen] = useState(false);
   const [excludeDialogOpen, setExcludeDialogOpen] = useState(false);
@@ -109,7 +126,7 @@ export function LyricsSettingsTab() {
         title="AMLL TTML DB 地址"
         description={
           <>
-            AMLL TTML DB 地址，请确保地址正确，否则将导致歌词获取失败。支持预设镜像或自定义模板地址。
+            AMLL TTML DB 地址，请确保地址正确，否则将导致歌词获取失败。默认使用社区镜像，也可切换为自定义模板地址。
             <span className="mt-1 block truncate font-tw text-[10px] text-ink3" title={amllUrl}>
               {amllCustom ? "自定义" : "预设"}：{amllUrl}
             </span>
@@ -138,6 +155,39 @@ export function LyricsSettingsTab() {
         >
           配置
         </button>
+      </SettingRow>
+
+      <SettingRow
+        title="本地歌词目录"
+        description={
+          <>
+            切歌时若曲库没有歌词，按「艺术家 - 曲名」在该目录匹配 .lrc / .qrc / .krc / .yrc / .ttml；
+            文件名括号里的网易云歌曲 ID（如 LDDC 导出的 <code className="bg-paper2 px-1">王力宏 - 唯一 (65923804).lrc</code>）会用于 AMLL 逐字歌词直取。
+            <span className="mt-1 block truncate font-tw text-[10px] text-ink3" title={lyricsFolder}>
+              {lyricsFolder ? `当前：${lyricsFolder}` : "未设置"}
+            </span>
+          </>
+        }
+      >
+        <div className="flex shrink-0 gap-1.5">
+          {lyricsFolder ? (
+            <button
+              type="button"
+              onClick={() => setLyricsFolder("")}
+              className="h-8 border-[1.5px] border-line bg-card px-2.5 font-tw text-xs font-bold text-ink2 hover:border-ink"
+            >
+              清除
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void chooseLyricsFolder()}
+            className="stamp-btn inline-flex h-8 items-center gap-1.5 px-3 font-tw text-xs font-bold"
+          >
+            <Folder className="h-3.5 w-3.5" />
+            选择目录
+          </button>
+        </div>
       </SettingRow>
 
       <SettingRow title="显示译文" description="歌词稿与沉浸页显示 TTML 译文或双语歌词的译文行。">
@@ -280,15 +330,14 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
     }
   }, [open, amllUrl, amllCustom]);
 
-  const valid = isValidAmllTtmlDbUrl(draft, custom);
-  const preview = valid ? previewAmllTtmlUrl(draft) : "";
+  const effectiveDraft = custom ? draft : AMLL_TTML_DB_PRESET_URL;
+  const valid = isValidAmllTtmlDbUrl(effectiveDraft, custom);
+  const preview = valid ? previewAmllTtmlUrl(effectiveDraft) : "";
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (setAmllTtmlDbUrl(draft, custom)) onClose();
+    if (setAmllTtmlDbUrl(effectiveDraft, custom)) onClose();
   };
-
-  const presets = custom ? AMLL_TTML_DB_CUSTOM_PRESETS : AMLL_TTML_DB_MIRRORS;
 
   return (
     <Dialog open={open} onClose={onClose} className="max-w-lg space-y-4">
@@ -299,7 +348,7 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
           AMLL TTML DB 地址
         </h3>
         <p className="mt-1 font-tw text-[11px] leading-relaxed text-ink2">
-          逐字歌词按平台歌曲 ID 从该地址读取。地址可用占位符：
+          逐字歌词按平台歌曲 ID 从该地址读取。自定义地址可用占位符：
           <code className="mx-0.5 bg-paper2 px-1">{"{dir}"}</code>= 目录（ncm-lyrics / qq-lyrics），
           <code className="mx-0.5 bg-paper2 px-1">{"{id}"}</code>或<code className="mx-0.5 bg-paper2 px-1">%s</code>= 歌曲 ID；
           不含占位符时按仓库根地址处理。
@@ -308,7 +357,7 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
       <form onSubmit={submit} className="space-y-3">
         <div className="flex gap-1.5" role="radiogroup" aria-label="地址模式">
           {([
-            [false, "预设镜像", "只允许 GitHub Raw / jsDelivr，重定向逐跳复验"],
+            [false, "预设", "使用内置社区镜像 amlldb.bikonoo.com，重定向逐跳复验"],
             [true, "自定义地址", "任意公网 HTTPS 域名；禁止重定向，拒绝内网/IP"],
           ] as const).map(([value, label, hint]) => (
             <button
@@ -317,7 +366,10 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
               role="radio"
               aria-checked={custom === value}
               title={hint}
-              onClick={() => setCustom(value)}
+              onClick={() => {
+                setCustom(value);
+                if (value && !draft) setDraft(AMLL_TTML_DB_PRESET_URL);
+              }}
               className={
                 custom === value
                   ? "h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper"
@@ -328,40 +380,47 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          {presets.map((mirror) => (
-            <button
-              key={mirror.url}
-              type="button"
-              onClick={() => setDraft(mirror.url)}
-              className={
-                draft === mirror.url
-                  ? "h-7 border-[1.5px] border-ink bg-ink px-2 font-tw text-[10px] font-bold text-paper"
-                  : "h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[10px] font-bold text-ink2 hover:border-ink"
-              }
-            >
-              {mirror.label}
-            </button>
-          ))}
-        </div>
-        <label className="block space-y-1.5">
-          <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">
-            {custom ? "URL Template" : "Base URL"}
-          </span>
-          <input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            spellCheck={false}
-            aria-label="AMLL TTML DB 地址"
-            className="w-full border-[1.5px] border-ink bg-card p-2 font-tw text-xs text-ink outline-none focus:border-stamp"
-          />
-        </label>
+        {custom ? (
+          <>
+            <div className="flex flex-wrap gap-1.5">
+              {AMLL_TTML_DB_CUSTOM_PRESETS.map((mirror) => (
+                <button
+                  key={mirror.url}
+                  type="button"
+                  onClick={() => setDraft(mirror.url)}
+                  className={
+                    draft === mirror.url
+                      ? "h-7 border-[1.5px] border-ink bg-ink px-2 font-tw text-[10px] font-bold text-paper"
+                      : "h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[10px] font-bold text-ink2 hover:border-ink"
+                  }
+                >
+                  {mirror.label}
+                </button>
+              ))}
+            </div>
+            <label className="block space-y-1.5">
+              <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">URL Template</span>
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                spellCheck={false}
+                aria-label="AMLL TTML DB 地址"
+                className="w-full border-[1.5px] border-ink bg-card p-2 font-tw text-xs text-ink outline-none focus:border-stamp"
+              />
+            </label>
+          </>
+        ) : (
+          <div className="space-y-1.5">
+            <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">Preset URL</span>
+            <code className="block break-all border-[1.5px] border-line bg-paper2 p-2 font-tw text-xs text-ink">
+              {AMLL_TTML_DB_PRESET_URL}
+            </code>
+          </div>
+        )}
         <p className={`break-all font-tw text-[10px] ${valid ? "text-ink3" : "text-stamp"}`}>
           {valid
             ? `示例请求：${preview}`
-            : custom
-              ? "地址无效：必须是 https:// 公网域名，不接受 IP 直连、localhost 或内网主机名。"
-              : "地址无效：预设模式只接受 raw.githubusercontent.com 或 *.jsdelivr.net；其它域名请切换到自定义地址。"}
+            : "地址无效：必须是 https:// 公网域名，不接受 IP 直连、localhost 或内网主机名。"}
         </p>
         <p className="font-tw text-[10px] leading-relaxed text-ink3">
           相关：
@@ -409,9 +468,42 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
   const setRules = usePlayerStore((s) => s.setLyricsExcludeRules);
   const [kind, setKind] = useState<LyricsExcludeRule["kind"]>("keyword");
   const [pattern, setPattern] = useState("");
+  const [regexError, setRegexError] = useState<string | null>(null);
 
   const trimmed = pattern.trim();
-  const regexError = kind === "regex" && trimmed ? validateRegexPattern(trimmed) : null;
+
+  // 正则按 Rust regex 语法校验（IPC）；浏览器开发态没有后端时退化为 JS RegExp 近似检查
+  useEffect(() => {
+    if (kind !== "regex" || !trimmed) {
+      setRegexError(null);
+      return;
+    }
+    let disposed = false;
+    const probe: LyricsExcludeRule = { id: "probe", kind: "regex", pattern: trimmed };
+    if (!isTauriRuntime()) {
+      try {
+        new RegExp(trimmed, "i");
+        setRegexError(null);
+      } catch (err) {
+        setRegexError(err instanceof Error ? err.message : "无效的正则表达式");
+      }
+      return;
+    }
+    void invoke<{ id: string; error: string | null }[]>("validate_lyrics_exclude_rules", {
+      rules: [probe],
+    })
+      .then((statuses) => {
+        if (disposed) return;
+        setRegexError(statuses?.[0]?.error ?? null);
+      })
+      .catch((err) => {
+        if (!disposed) setRegexError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [kind, trimmed]);
+
   const canAdd =
     trimmed.length > 0 &&
     trimmed.length <= MAX_EXCLUDE_PATTERN_CHARS &&
@@ -437,7 +529,7 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
         <h3 className="font-serif text-base font-bold text-ink">歌词排除配置</h3>
         <p className="mt-1 font-tw text-[11px] leading-relaxed text-ink2">
           命中规则的歌词行不会显示（原文、译文、音译任一命中即排除）。只影响显示，不修改已保存的歌词；
-          关键词不区分大小写，正则按 JavaScript 语法。常见用法：排除「作词」「作曲」「制作人」等制作信息行。
+          关键词不区分大小写，正则按 Rust regex 语法（不支持环视与反向引用），由后端编译匹配。常见用法：排除「作词」「作曲」「制作人」等制作信息行。
         </p>
       </div>
       <form onSubmit={addRule} className="flex gap-1.5">

@@ -8,7 +8,11 @@ interface KaraokeLineProps {
   /** 平滑后的播放时间（秒） */
   currentTime: number;
   className?: string;
-  /** 已唱 / 未唱颜色（CSS 颜色值），默认沿用当前文字色与其 38% 透明版 */
+  /**
+   * 已唱 / 未唱颜色。**必须是具体颜色值，不能用 currentColor**：
+   * 音节自身 `color: transparent`（靠 background-clip 显字），currentColor 会随之变透明，
+   * 整行看不见（v0.6.0 修过的坑）。
+   */
   sungColor?: string;
   unsungColor?: string;
 }
@@ -21,8 +25,8 @@ export function KaraokeLine({
   words,
   currentTime,
   className,
-  sungColor = "currentColor",
-  unsungColor = "color-mix(in srgb, currentColor 38%, transparent)",
+  sungColor = "var(--ink)",
+  unsungColor = "rgba(43, 39, 34, 0.35)",
 }: KaraokeLineProps) {
   const progress = useMemo(() => wordProgress(words, currentTime), [words, currentTime]);
   return (
@@ -40,6 +44,8 @@ export function KaraokeLine({
             )}
             data-progress={ratio.toFixed(2)}
             style={{
+              // 兜底色：不支持 background-clip:text 的环境按普通文字显示
+              color: sungColor,
               backgroundImage: `linear-gradient(90deg, ${sungColor} ${percent}, ${unsungColor} ${percent})`,
             }}
           >

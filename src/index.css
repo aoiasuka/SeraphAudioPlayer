@@ -95,17 +95,19 @@
     scrollbar-width: none;
   }
 
-  /* 逐字歌词：每个音节用渐变背景裁切文字，按进度从左到右填色 */
+  /* 逐字歌词：每个音节用渐变背景裁切文字，按进度从左到右填色。
+     文字色由渐变提供，所以这里把填充色抠透明；不支持裁切的环境保留 inline color 兜底。 */
   .karaoke-line {
     display: inline;
   }
-  .karaoke-word {
-    display: inline;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    -webkit-text-fill-color: transparent;
-    white-space: pre-wrap;
+  @supports (-webkit-background-clip: text) or (background-clip: text) {
+    .karaoke-word {
+      display: inline;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      white-space: pre-wrap;
+    }
   }
 
   /* 应用外壳：牛皮纸 + 纹路 */

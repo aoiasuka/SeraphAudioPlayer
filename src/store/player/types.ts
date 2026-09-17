@@ -142,6 +142,8 @@ export interface PersistedPlayerState {
   lyricsExcludeRules: LyricsExcludeRule[];
   showLyricsTranslation: boolean;
   showLyricsRoman: boolean;
+  /** 本地歌词目录（绝对路径，空串 = 未设置）；切歌时按「艺术家 - 曲名」自动匹配 */
+  lyricsFolder: string;
 }
 
 export interface PlaybackQueuePreview {
@@ -186,6 +188,7 @@ export interface PlayerStore {
   lyricsExcludeRules: LyricsExcludeRule[];
   showLyricsTranslation: boolean;
   showLyricsRoman: boolean;
+  lyricsFolder: string;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -279,6 +282,9 @@ export interface PlayerStore {
   setLyricsExcludeRules: (rules: LyricsExcludeRule[]) => void;
   setShowLyricsTranslation: (enabled: boolean) => void;
   setShowLyricsRoman: (enabled: boolean) => void;
+  setLyricsFolder: (folder: string) => void;
+  /** 在本地歌词目录里匹配并写入该曲目的歌词；命中返回 true */
+  findLocalLyricsForTrack: (track: Track) => Promise<boolean>;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;

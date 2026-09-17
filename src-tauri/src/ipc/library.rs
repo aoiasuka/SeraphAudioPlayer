@@ -7,6 +7,8 @@ mod amll;
 mod commands;
 mod deletion;
 mod dsd_tags;
+mod exclude;
+mod local_lyrics;
 mod lyrics;
 mod media_library;
 mod metadata;

@@ -47,10 +47,18 @@ pub async fn get_playlist(
 
 #[tauri::command]
 pub async fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Option<ImportedTrack>> {
-    tauri::async_runtime::spawn_blocking(move || read_cached_track(&app, &track_id))
-        .await
-        .map_err(|err| IpcError::from(format!("get_track_info task panicked: {err}")))?
-        .map_err(IpcError::from)
+    tauri::async_runtime::spawn_blocking(move || {
+        read_cached_track(&app, &track_id).map(|track| {
+            track.map(|mut track| {
+                // 排除规则只在回传前打标，不落缓存
+                mark_hidden(&mut track.lyrics);
+                track
+            })
+        })
+    })
+    .await
+    .map_err(|err| IpcError::from(format!("get_track_info task panicked: {err}")))?
+    .map_err(IpcError::from)
 }
 
 #[tauri::command]
@@ -254,7 +262,7 @@ fn save_track_lyrics_inner(
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(lyrics)
+    Ok(marked(lyrics))
 }
 
 #[tauri::command]
@@ -279,7 +287,37 @@ pub async fn fetch_online_lyrics(
         LyricsSourcePriority::parse(&options.source_priority),
     )
     .await;
-    if fetch.candidates.is_empty() {
+
+    let mut candidates = fetch.candidates;
+    // TTML 二次查找：曲目已知的查找键（本地歌词文件名里的网易云 ID）排最前直取，
+    // 再用网易云/QQ 候选的平台 ID 试取；命中一律 splice 到候选最前
+    if options.ttml_enabled {
+        if let Some(template) = normalize_amll_db_url(&options.ttml_db_url, options.ttml_db_custom)
+        {
+            let mut seeds = Vec::with_capacity(candidates.len() + 1);
+            if !options.lookup_keys.is_empty() {
+                seeds.push(OnlineLyricsCandidate {
+                    id: "lookup-seed".into(),
+                    source: String::new(),
+                    title: title.clone(),
+                    artist: artist.clone(),
+                    album: None,
+                    duration: (duration > 0).then_some(duration),
+                    lyrics: Vec::new(),
+                    ttml_lookup_keys: options.lookup_keys.clone(),
+                });
+            }
+            seeds.extend(candidates.iter().cloned());
+            let ttml = fetch_amll_ttml_candidates(&template, options.ttml_db_custom, &seeds).await;
+            if !ttml.is_empty() {
+                candidates.splice(0..0, ttml);
+            }
+        } else {
+            tracing::warn!("AMLL TTML DB 地址不在白名单内，已跳过 TTML 查找");
+        }
+    }
+
+    if candidates.is_empty() {
         // M-12：有源在搜索阶段就失败（断网/接口异常）时不能谎报“未找到”，
         // 让前端拿到 network 错误码给出可行动的提示。
         if fetch.failed_sources > 0 {
@@ -290,26 +328,121 @@ pub async fn fetch_online_lyrics(
         return Err(IpcError::not_found("online lyrics not found"));
     }
 
-    let mut candidates = fetch.candidates;
-    // TTML 二次查找：用网易云/QQ 候选的平台 ID 去 AMLL DB 试取逐字歌词，命中排最前
-    if options.ttml_enabled {
-        if let Some(template) = normalize_amll_db_url(&options.ttml_db_url, options.ttml_db_custom) {
-            let ttml =
-                fetch_amll_ttml_candidates(&template, options.ttml_db_custom, &candidates).await;
-            if !ttml.is_empty() {
-                candidates.splice(0..0, ttml);
-            }
-        } else {
-            tracing::warn!("AMLL TTML DB 地址不在白名单内，已跳过 TTML 查找");
-        }
-    }
-    if options.prefer_traditional {
-        for candidate in &mut candidates {
+    for candidate in &mut candidates {
+        if options.prefer_traditional {
             candidate.lyrics = lyrics_to_traditional(std::mem::take(&mut candidate.lyrics));
         }
+        mark_hidden(&mut candidate.lyrics);
     }
 
     Ok(candidates)
+}
+
+/// 歌词排除规则同步到后端并广播刷新（主窗口与任务栏都按事件重拉当前曲目歌词）。
+#[tauri::command]
+pub fn set_lyrics_exclude_rules(
+    app: AppHandle,
+    rules: Vec<LyricsExcludeRule>,
+) -> IpcResult<Vec<LyricsExcludeRuleStatus>> {
+    if rules.len() > MAX_EXCLUDE_RULES {
+        return Err(IpcError::invalid_input(format!(
+            "排除规则最多 {MAX_EXCLUDE_RULES} 条"
+        )));
+    }
+    let statuses = replace_rules(&rules);
+    if let Err(err) = app.emit(LYRICS_RULES_UPDATED_EVENT, ()) {
+        tracing::warn!("emit {LYRICS_RULES_UPDATED_EVENT} failed: {err}");
+    }
+    Ok(statuses)
+}
+
+/// 编辑弹窗逐条校验（不改当前生效规则）。
+#[tauri::command]
+pub fn validate_lyrics_exclude_rules(
+    rules: Vec<LyricsExcludeRule>,
+) -> IpcResult<Vec<LyricsExcludeRuleStatus>> {
+    Ok(validate_rules(&rules))
+}
+
+/// 在用户指定的歌词目录里按「艺术家 - 曲名」匹配歌词文件，命中即写入曲库并返回。
+/// 文件名括号里的网易云 ID 记为 `lyrics_lookup_keys`，供 AMLL TTML 直取。
+#[tauri::command]
+pub async fn find_local_lyrics(
+    app: AppHandle,
+    track_id: String,
+    track_path: Option<String>,
+    title: String,
+    artist: String,
+    folder: String,
+    prefer_traditional: Option<bool>,
+) -> IpcResult<Option<LocalLyricsMatch>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        find_local_lyrics_inner(
+            &app,
+            &track_id,
+            track_path.as_deref(),
+            &title,
+            &artist,
+            &folder,
+            prefer_traditional.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Internal,
+            format!("find_local_lyrics task panicked: {err}"),
+        )
+    })?
+}
+
+fn find_local_lyrics_inner(
+    app: &AppHandle,
+    track_id: &str,
+    track_path: Option<&str>,
+    title: &str,
+    artist: &str,
+    folder: &str,
+    prefer_traditional: bool,
+) -> IpcResult<Option<LocalLyricsMatch>> {
+    if track_id.trim().is_empty() {
+        return Err(IpcError::invalid_input("missing track id"));
+    }
+    let folder = validate_lyrics_folder(folder).map_err(IpcError::invalid_input)?;
+    let Some((path, lookup_keys)) = find_in_folder(&folder, title, artist) else {
+        return Ok(None);
+    };
+    let Some(mut lyrics) = read_local_lyrics(&path) else {
+        return Ok(None);
+    };
+    if prefer_traditional {
+        lyrics = lyrics_to_traditional(lyrics);
+    }
+
+    let _guard = LIBRARY_LOCK.lock();
+    let mut tracks = read_cached_tracks_for_update(app)?;
+    apply_track_lyrics(
+        &mut tracks,
+        track_id,
+        lyrics.clone(),
+        track_path,
+        covers_dir_path(app).ok().as_deref(),
+    )?;
+    if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
+        for key in &lookup_keys {
+            if !track.lyrics_lookup_keys.contains(key) {
+                track.lyrics_lookup_keys.push(key.clone());
+            }
+        }
+    }
+    write_cached_tracks(app, &tracks)?;
+    emit_lyrics_updated(app, track_id);
+
+    Ok(Some(LocalLyricsMatch {
+        path: path.to_string_lossy().into_owned(),
+        lyrics: marked(lyrics),
+        lookup_keys,
+    }))
 }
 
 #[tauri::command]
@@ -358,5 +491,5 @@ fn apply_online_lyrics_inner(
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(lyrics)
+    Ok(marked(lyrics))
 }

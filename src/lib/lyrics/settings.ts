@@ -4,22 +4,18 @@ import type { LyricsSourcePriority } from "@/types/track";
 
 /**
  * AMLL TTML DB 地址是**模板**：`{dir}` = ncm-lyrics / qq-lyrics，`{id}` 或 `%s` = 平台歌曲 ID。
- * 不含占位符的地址按 base URL 处理，后端自动补 `/{dir}/{id}.ttml`。
+ * 不含占位符的地址按 base URL 处理，后端自动补 `/{dir}/{id}.ttml`；
+ * 模板里写死了目录（如 `/ncm-lyrics/%s.ttml`）时只对该平台的候选生效。
  */
-export const DEFAULT_AMLL_TTML_DB_URL =
-  "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main";
+export const DEFAULT_AMLL_TTML_DB_URL = "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml";
 
-/** 预设镜像：与后端 `AMLL_TTML_HOST_SUFFIXES` 白名单一致；预设模式下只能选这些。 */
-export const AMLL_TTML_DB_MIRRORS: { label: string; url: string }[] = [
-  { label: "GitHub Raw（默认）", url: DEFAULT_AMLL_TTML_DB_URL },
-  { label: "jsDelivr", url: "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main" },
-  { label: "jsDelivr（Fastly）", url: "https://fastly.jsdelivr.net/gh/amll-dev/amll-ttml-db@main" },
-  { label: "jsDelivr（Gcore）", url: "https://gcore.jsdelivr.net/gh/amll-dev/amll-ttml-db@main" },
-];
+/** 预设模式的固定地址（不可编辑）；host 与后端 `AMLL_TTML_HOST_SUFFIXES` 白名单一致。 */
+export const AMLL_TTML_DB_PRESET_URL = DEFAULT_AMLL_TTML_DB_URL;
 
-/** 自定义模式下的常用地址（社区镜像等），只是填入快捷方式，仍走自定义模式校验。 */
+/** 自定义模式下的快捷填入项。 */
 export const AMLL_TTML_DB_CUSTOM_PRESETS: { label: string; url: string }[] = [
-  { label: "amlldb.bikonoo.com", url: "https://amlldb.bikonoo.com/{dir}/{id}.ttml" },
+  { label: "amlldb.bikonoo.com（网易云）", url: "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml" },
+  { label: "amlldb.bikonoo.com（全平台）", url: "https://amlldb.bikonoo.com/{dir}/{id}.ttml" },
 ];
 
 /** 相关站点（设置页里的说明链接）。 */
@@ -31,7 +27,7 @@ export const AMLL_LINKS = {
   tool: "https://tool.amll.dev/",
 };
 
-const AMLL_ALLOWED_HOST_SUFFIXES = ["raw.githubusercontent.com", ".jsdelivr.net"];
+const AMLL_ALLOWED_HOST_SUFFIXES = ["amlldb.bikonoo.com"];
 const PRIVATE_HOST_SUFFIXES = [".local", ".localhost", ".internal", ".lan", ".home.arpa"];
 
 function parseHttpsUrl(raw: string): URL | null {
@@ -45,7 +41,7 @@ function parseHttpsUrl(raw: string): URL | null {
   return url;
 }
 
-/** 预设镜像模式：host 必须命中白名单（带点只认子域，不带点裸域与子域都认）。 */
+/** 预设模式：host 必须命中白名单（带点只认子域，不带点裸域与子域都认）。 */
 export function isAllowedAmllTtmlDbUrl(raw: string): boolean {
   const url = parseHttpsUrl(raw);
   if (!url) return false;

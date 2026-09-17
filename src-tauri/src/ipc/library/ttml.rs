@@ -64,9 +64,11 @@ impl LineBuilder {
                 .filter(|word| !word.text.trim().is_empty())
                 .collect::<Vec<_>>()
         });
-        let begin = self
-            .begin
-            .or_else(|| words.as_ref().and_then(|words| words.first().map(|w| w.start)))?;
+        let begin = self.begin.or_else(|| {
+            words
+                .as_ref()
+                .and_then(|words| words.first().map(|w| w.start))
+        })?;
         let end = self
             .end
             .or_else(|| words.as_ref().and_then(|words| words.last().map(|w| w.end)));
@@ -77,6 +79,7 @@ impl LineBuilder {
             words: words.filter(|words| !words.is_empty()),
             translation: clean_lyric_text(&self.translation),
             roman: clean_lyric_text(&self.roman),
+            hidden: false,
         })
     }
 }
@@ -245,7 +248,11 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
         return Vec::new();
     }
 
-    lines.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    lines.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     lines.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
     clamp_lyrics(lines)
 }

@@ -19,7 +19,7 @@ import {
   groupLyricsByTime,
   hasWordTiming,
 } from "@/lib/lyrics/activeLine";
-import { filterLyricsByRules } from "@/lib/lyrics/exclude";
+import { visibleLyrics } from "@/lib/lyrics/exclude";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -80,15 +80,12 @@ export function LyricsPanel() {
   const [manualSearchQuery, setManualSearchQuery] = useState("");
   const [centerPadding, setCenterPadding] = useState(0);
   const rawLyrics = track?.lyrics ?? [];
-  const excludeRules = usePlayerStore((s) => s.lyricsExcludeRules);
   const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const ttmlLyricsEnabled = usePlayerStore((s) => s.ttmlLyricsEnabled);
-  const lyrics = useMemo(
-    () => filterLyricsByRules(rawLyrics, excludeRules),
-    [rawLyrics, excludeRules]
-  );
+  // 排除规则由后端打 hidden 标记，这里只过滤
+  const lyrics = useMemo(() => visibleLyrics(rawLyrics), [rawLyrics]);
   const lyricGroups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
   const trackId = track?.id ?? "empty";
   const selectedCandidate =

@@ -55,6 +55,7 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   amllTtmlDbCustom: "boolean",
   showLyricsTranslation: "boolean",
   showLyricsRoman: "boolean",
+  lyricsFolder: "string",
 };
 
 interface PersistedEnvelope {

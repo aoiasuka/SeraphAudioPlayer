@@ -60,6 +60,7 @@ mod tests {
             }]),
             translation: Some("发展".into()),
             roman: Some("tou fa".into()),
+            hidden: false,
         };
         let converted = lyrics_to_traditional(vec![line]);
         assert_eq!(converted[0].text, "頭髮");

@@ -662,6 +662,7 @@ pub(crate) fn track_from_path(
         glow1,
         glow2,
         lyrics,
+        lyrics_lookup_keys: Vec::new(),
     })
 }
 
