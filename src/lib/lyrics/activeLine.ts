@@ -1,4 +1,4 @@
-import type { LyricLine } from "@/types/track";
+import type { LyricLine, LyricWord } from "@/types/track";
 
 /**
  * 歌词分组与当前行定位纯函数。
@@ -58,4 +58,24 @@ export function activeGroupIndex(
   }
 
   return match;
+}
+
+/** 该行是否带可用的逐字时间轴。 */
+export function hasWordTiming(
+  line: LyricLine | undefined
+): line is LyricLine & { words: LyricWord[] } {
+  return !!line?.words && line.words.length > 0;
+}
+
+/**
+ * 逐字进度：返回每个音节在 currentTime 下的完成度 0..1。
+ * 已唱完为 1、未开始为 0、进行中按线性插值；零时长音节到点即 1。
+ */
+export function wordProgress(words: LyricWord[], currentTime: number): number[] {
+  return words.map((word) => {
+    if (currentTime >= word.end) return 1;
+    if (currentTime < word.start) return 0;
+    const span = word.end - word.start;
+    return span <= 0 ? 1 : Math.min(1, Math.max(0, (currentTime - word.start) / span));
+  });
 }

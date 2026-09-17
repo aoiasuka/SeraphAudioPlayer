@@ -250,10 +250,7 @@ pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderLyricLine>) -> Vec
     lines.sort_by_key(|line| line.start_ms);
     let mut lyrics = lines
         .into_iter()
-        .map(|line| LyricLine {
-            time: line.start_ms as f64 / 1000.0,
-            text: line.text,
-        })
+        .map(|line| LyricLine::new(line.start_ms as f64 / 1000.0, line.text))
         .collect::<Vec<_>>();
     lyrics.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
     lyrics
@@ -445,10 +442,7 @@ pub(crate) fn parse_krc_translation_lines(
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(" ");
-                    clean_lyric_text(&text).map(|text| LyricLine {
-                        time: original_line.start_ms as f64 / 1000.0,
-                        text,
-                    })
+                    clean_lyric_text(&text).map(|text| LyricLine::new(original_line.start_ms as f64 / 1000.0, text))
                 })
                 .collect::<Vec<_>>()
         })
@@ -615,10 +609,7 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
                 for time in times {
                     // L-9：LRC 通行约定——正 offset 让歌词提前显示（time - offset）。
                     let shifted = ((time * 1000.0).round() as i64 - offset_ms).max(0);
-                    timed.push(LyricLine {
-                        time: shifted as f64 / 1000.0,
-                        text: text.clone(),
-                    });
+                    timed.push(LyricLine::new(shifted as f64 / 1000.0, text.clone()));
                 }
             }
             continue;
@@ -644,10 +635,7 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
     unsynced
         .into_iter()
         .enumerate()
-        .map(|(index, text)| LyricLine {
-            time: index as f64 * 4.0,
-            text,
-        })
+        .map(|(index, text)| LyricLine::new(index as f64 * 4.0, text))
         .collect()
 }
 
@@ -844,10 +832,7 @@ mod lyrics_limit_tests {
     #[test]
     fn clamp_truncates_on_char_boundary() {
         // 中文歌词按字节截断会切出半个字符 → 必须按 char 截
-        let lyrics = clamp_lyrics(vec![LyricLine {
-            time: 0.0,
-            text: "中".repeat(MAX_LYRIC_LINE_CHARS + 10),
-        }]);
+        let lyrics = clamp_lyrics(vec![LyricLine::new(0.0, "中".repeat(MAX_LYRIC_LINE_CHARS + 10))]);
         assert_eq!(lyrics[0].text.chars().count(), MAX_LYRIC_LINE_CHARS);
         assert!(lyrics[0].text.chars().all(|ch| ch == '中'));
     }

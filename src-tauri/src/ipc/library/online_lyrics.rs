@@ -37,10 +37,32 @@ pub(crate) struct OnlineLyricsFetch {
     pub failed_sources: usize,
 }
 
+/// 设置「歌词源优先级」。Auto = 三源并发、按接口顺序聚合；指定源 = 该源候选排最前
+/// （仍并发请求其它源作兜底，避免首选源挂掉时用户空手而归）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LyricsSourcePriority {
+    Auto,
+    Netease,
+    Kugou,
+    Qq,
+}
+
+impl LyricsSourcePriority {
+    pub(crate) fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "netease" => Self::Netease,
+            "kugou" => Self::Kugou,
+            "qq" => Self::Qq,
+            _ => Self::Auto,
+        }
+    }
+}
+
 pub(crate) async fn fetch_online_lyrics_from_sources(
     client: &Client,
     query: &str,
     duration: u64,
+    priority: LyricsSourcePriority,
 ) -> OnlineLyricsFetch {
     // 三源并发：此前串行 await，半死接口的超时会逐源叠加（最坏数分钟）
     let (netease, kugou, qq) = tokio::join!(
@@ -48,9 +70,18 @@ pub(crate) async fn fetch_online_lyrics_from_sources(
         fetch_kugou_lyrics(client, query, duration),
         fetch_qq_lyrics(client, query, duration),
     );
+    let mut ordered = vec![
+        (LyricsSourcePriority::Netease, netease),
+        (LyricsSourcePriority::Kugou, kugou),
+        (LyricsSourcePriority::Qq, qq),
+    ];
+    if priority != LyricsSourcePriority::Auto {
+        // 稳定排序：首选源提前，其余保持原序
+        ordered.sort_by_key(|(source, _)| *source != priority);
+    }
     let mut candidates = Vec::new();
     let mut failed_sources = 0usize;
-    for outcome in [netease, kugou, qq] {
+    for (_, outcome) in ordered {
         match outcome {
             Ok(list) => candidates.extend(list),
             Err(()) => failed_sources += 1,
@@ -137,6 +168,7 @@ pub(crate) async fn fetch_netease_lyrics(
                 .and_then(|album| value_string(album, "name")),
             duration: provider_duration_ms(song).map(|ms| ms / 1000),
             lyrics,
+            ttml_lookup_keys: vec![format!("ncm-lyrics/{song_id}")],
         });
     }
 
@@ -229,6 +261,7 @@ pub(crate) async fn fetch_kugou_lyrics(
             album: value_string(candidate, "album"),
             duration: provider_duration_ms(candidate).map(|ms| ms / 1000),
             lyrics,
+            ttml_lookup_keys: Vec::new(),
         });
     }
 
@@ -307,6 +340,13 @@ pub(crate) async fn fetch_qq_lyrics(
             album: value_string(song, "albumname"),
             duration: provider_duration_ms(song).map(|ms| ms / 1000),
             lyrics,
+            // AMLL 的 qq-lyrics 目录按数字 songid 命名（非 songmid）
+            ttml_lookup_keys: song
+                .get("songid")
+                .or_else(|| song.get("id"))
+                .and_then(Value::as_u64)
+                .map(|id| vec![format!("qq-lyrics/{id}")])
+                .unwrap_or_default(),
         });
     }
 

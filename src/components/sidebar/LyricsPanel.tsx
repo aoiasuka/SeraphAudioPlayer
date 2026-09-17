@@ -10,12 +10,16 @@ import {
 import { createPortal } from "react-dom";
 import { CloudDownload, Copy, Loader2, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
+import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
+import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { copyText } from "@/lib/clipboard";
 import {
   activeGroupIndex,
   groupLyricsByTime,
+  hasWordTiming,
 } from "@/lib/lyrics/activeLine";
+import { filterLyricsByRules } from "@/lib/lyrics/exclude";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -75,7 +79,16 @@ export function LyricsPanel() {
   const [onlineDialogOpen, setOnlineDialogOpen] = useState(false);
   const [manualSearchQuery, setManualSearchQuery] = useState("");
   const [centerPadding, setCenterPadding] = useState(0);
-  const lyrics = track?.lyrics ?? [];
+  const rawLyrics = track?.lyrics ?? [];
+  const excludeRules = usePlayerStore((s) => s.lyricsExcludeRules);
+  const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
+  const showRoman = usePlayerStore((s) => s.showLyricsRoman);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const ttmlLyricsEnabled = usePlayerStore((s) => s.ttmlLyricsEnabled);
+  const lyrics = useMemo(
+    () => filterLyricsByRules(rawLyrics, excludeRules),
+    [rawLyrics, excludeRules]
+  );
   const lyricGroups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
   const trackId = track?.id ?? "empty";
   const selectedCandidate =
@@ -87,6 +100,9 @@ export function LyricsPanel() {
     () => activeGroupIndex(lyricGroups, currentTime),
     [lyricGroups, currentTime]
   );
+  const activeLine = activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
+  const activeHasWords = hasWordTiming(activeLine);
+  const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -391,23 +407,48 @@ export function LyricsPanel() {
                     >
                       <div className="min-w-0 space-y-0.5">
                         {group.lines.map((line, lineIdx) => (
-                          <p
-                            key={`${track.id}-${idx}-${lineIdx}`}
-                            className={cn(
-                              "break-words font-serif leading-[28px] transition-all duration-300 ease-out",
-                              active
-                                ? lineIdx === 0
-                                  ? "text-[16.5px] font-semibold text-ink"
-                                  : "text-[13px] font-medium text-ink2"
-                                : "text-[14px] text-ink3"
-                            )}
-                          >
-                            {active && lineIdx === 0 ? (
-                              <TypewriterText text={line.text} />
-                            ) : (
-                              line.text
-                            )}
-                          </p>
+                          <div key={`${track.id}-${idx}-${lineIdx}`}>
+                            <p
+                              className={cn(
+                                "break-words font-serif leading-[28px] transition-all duration-300 ease-out",
+                                active
+                                  ? lineIdx === 0
+                                    ? "text-[16.5px] font-semibold text-ink"
+                                    : "text-[13px] font-medium text-ink2"
+                                  : "text-[14px] text-ink3"
+                              )}
+                            >
+                              {active && lineIdx === 0 ? (
+                                hasWordTiming(line) ? (
+                                  <KaraokeLine words={line.words} currentTime={smoothTime} />
+                                ) : (
+                                  <TypewriterText text={line.text} />
+                                )
+                              ) : (
+                                line.text
+                              )}
+                            </p>
+                            {showTranslation && line.translation ? (
+                              <p
+                                className={cn(
+                                  "break-words font-tw leading-[22px]",
+                                  active ? "text-[12px] text-ink2" : "text-[11px] text-ink3"
+                                )}
+                              >
+                                {line.translation}
+                              </p>
+                            ) : null}
+                            {showRoman && line.roman ? (
+                              <p
+                                className={cn(
+                                  "break-words font-tw leading-[20px] italic",
+                                  active ? "text-[11px] text-ink3" : "text-[10px] text-ink3/80"
+                                )}
+                              >
+                                {line.roman}
+                              </p>
+                            ) : null}
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -449,6 +490,7 @@ export function LyricsPanel() {
               {/* N-09:向第三方外发曲目元数据属用户数据外发,即便是主动触发也应明示去向。 */}
               <p className="mt-1.5 font-tw text-[10px] leading-relaxed text-ink3">
                 匹配时会将曲名与艺术家发送至网易云音乐、酷狗、QQ 音乐进行搜索；不发送音频文件本身。
+                {ttmlLyricsEnabled ? "已启用 AMLL TTML DB 逐字歌词查找，命中的逐字歌词会排在最前。" : ""}
               </p>
             </div>
             <form onSubmit={handleManualLyricsSearch} className="mb-3">
@@ -514,7 +556,14 @@ export function LyricsPanel() {
                       )}
                     >
                       <span className="flex items-center justify-between gap-2">
-                        <span className="border border-brown bg-paper2 px-1.5 py-0.5 font-tw text-[10px] font-bold text-brown">
+                        <span
+                          className={cn(
+                            "border px-1.5 py-0.5 font-tw text-[10px] font-bold",
+                            candidate.id.startsWith("ttml-")
+                              ? "border-stamp bg-stamp-soft text-stamp"
+                              : "border-brown bg-paper2 text-brown"
+                          )}
+                        >
                           {candidate.source}
                         </span>
                         <span className="font-tw text-[10px] text-ink3">
@@ -597,6 +646,16 @@ export function LyricsPanel() {
                       </span>
                       <span className="font-serif text-xs leading-relaxed text-ink">
                         {line.text}
+                        {line.translation ? (
+                          <span className="mt-0.5 block font-tw text-[11px] text-ink2">
+                            {line.translation}
+                          </span>
+                        ) : null}
+                        {line.roman ? (
+                          <span className="block font-tw text-[10px] italic text-ink3">
+                            {line.roman}
+                          </span>
+                        ) : null}
                       </span>
                     </div>
                   ))}

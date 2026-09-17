@@ -26,6 +26,8 @@ const candidate: OnlineLyricsCandidate = {
   id: "matched", source: "QQ 音乐", title: "搜索匹配结果", artist: "演奏者", duration: 180,
   lyrics: [{ time: 10, text: "Matched line" }, { time: 10, text: "匹配后的译文" }],
 };
+// store 默认歌词设置 → fetch_online_lyrics 的 options
+const lyricsOptions = expect.objectContaining({ sourcePriority: "auto", preferTraditional: false, ttmlEnabled: true });
 
 function Harness() {
   return <><div data-testid="normal-mode" style={{ display: "none" }}><LyricsPanel /></div><ImmersivePlayer /></>;
@@ -99,7 +101,7 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     expect(dialog).toBeVisible();
     expect(screen.getByTestId("normal-mode")).not.toContainElement(dialog);
     expect(bridge.invoke).toHaveBeenCalledTimes(1);
-    expect(bridge.invoke).toHaveBeenCalledWith("fetch_online_lyrics", { trackId: track.id, title: track.title, artist: track.artist, duration: 180 });
+    expect(bridge.invoke).toHaveBeenCalledWith("fetch_online_lyrics", { trackId: track.id, title: track.title, artist: track.artist, duration: 180, options: lyricsOptions });
     expect(usePlayerStore.getState().currentTrack()?.lyrics).toEqual(track.lyrics);
 
     const search = within(dialog).getByLabelText("手动搜索");
@@ -107,7 +109,7 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     await user.type(search, "  another song  ");
     await user.click(within(dialog).getByRole("button", { name: "搜索在线歌词" }));
     await screen.findByRole("heading", { name: "选择在线歌词" });
-    expect(bridge.invoke).toHaveBeenLastCalledWith("fetch_online_lyrics", { trackId: track.id, title: "another song", artist: "", duration: 180 });
+    expect(bridge.invoke).toHaveBeenLastCalledWith("fetch_online_lyrics", { trackId: track.id, title: "another song", artist: "", duration: 180, options: lyricsOptions });
     await user.click(within(dialog).getByRole("button", { name: "使用这份歌词" }));
     expect(bridge.invoke).toHaveBeenLastCalledWith("apply_online_lyrics", { trackId: track.id, trackPath: track.path, lyrics: candidate.lyrics });
     expect(immersive.getByRole("button", { name: /Matched line/ })).toHaveAttribute("aria-current", "true");

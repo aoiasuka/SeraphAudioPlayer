@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Home, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
+import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
+import { useSmoothTime } from "@/hooks/useSmoothTime";
 import {
   activeGroupIndex,
   groupLyricsByTime,
+  hasWordTiming,
 } from "@/lib/lyrics/activeLine";
 import {
   coverSrc,
@@ -316,8 +319,11 @@ export function TaskbarLyricsBar() {
     () => activeGroupIndex(lyricGroups, seconds),
     [lyricGroups, seconds]
   );
-  const activeLine =
-    activeIdx >= 0 ? (lyricGroups[activeIdx]?.lines[0]?.text ?? "") : "";
+  const activeLineEntry =
+    activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
+  const activeLine = activeLineEntry?.text ?? "";
+  const activeHasWords = hasWordTiming(activeLineEntry);
+  const smoothSeconds = useSmoothTime(seconds, playing, activeHasWords);
 
   const effectiveTotal = total > 0 ? total : (track?.duration ?? 0);
   const progressRatio =
@@ -406,7 +412,14 @@ export function TaskbarLyricsBar() {
           )}
         >
           {activeLine ? (
-            <TypewriterText key={trackId} text={activeLine} />
+            activeHasWords && activeLineEntry ? (
+              <KaraokeLine
+                words={activeLineEntry.words}
+                currentTime={smoothSeconds}
+              />
+            ) : (
+              <TypewriterText key={trackId} text={activeLine} />
+            )
           ) : (
             <span className="font-tw text-[10px] font-medium text-ink3">
               {track ? "— 暂无歌词稿 —" : "— 未在播放 —"}

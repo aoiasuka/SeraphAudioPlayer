@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   activeGroupIndex,
   groupLyricsByTime,
+  hasWordTiming,
+  wordProgress,
 } from "./activeLine";
 import type { LyricLine } from "@/types/track";
 
@@ -61,5 +63,28 @@ describe("activeGroupIndex", () => {
 
   it("handles empty groups", () => {
     expect(activeGroupIndex([], 5)).toBe(-1);
+  });
+});
+
+describe("逐字进度", () => {
+  const words = [
+    { start: 1, end: 2, text: "a" },
+    { start: 2, end: 2, text: "b" },
+    { start: 2, end: 4, text: "c" },
+  ];
+
+  it("hasWordTiming 只认非空 words", () => {
+    expect(hasWordTiming(undefined)).toBe(false);
+    expect(hasWordTiming(line(0, "x"))).toBe(false);
+    expect(hasWordTiming({ ...line(0, "x"), words: [] })).toBe(false);
+    expect(hasWordTiming({ ...line(0, "x"), words })).toBe(true);
+  });
+
+  it("wordProgress 按线性插值，零时长音节到点即 1", () => {
+    expect(wordProgress(words, 0)).toEqual([0, 0, 0]);
+    expect(wordProgress(words, 1.5)).toEqual([0.5, 0, 0]);
+    expect(wordProgress(words, 2)).toEqual([1, 1, 0]);
+    expect(wordProgress(words, 3)).toEqual([1, 1, 0.5]);
+    expect(wordProgress(words, 9)).toEqual([1, 1, 1]);
   });
 });

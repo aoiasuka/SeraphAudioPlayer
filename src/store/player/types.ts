@@ -3,6 +3,8 @@ import type {
   DriverKind,
   LibraryView,
   LyricLine,
+  LyricsExcludeRule,
+  LyricsSourcePriority,
   OnlineLyricsCandidate,
   OutputDevice,
   Track,
@@ -130,6 +132,16 @@ export interface PersistedPlayerState {
   taskbarLyricsClickThrough: boolean;
   // v0.5.5：歌词条沿任务栏长边的位置比例（0 = 最靠起点，1 = 最靠终点）
   taskbarLyricsPosition: number;
+  // v0.6.0：歌词设置
+  lyricsSourcePriority: LyricsSourcePriority;
+  preferTraditionalLyrics: boolean;
+  ttmlLyricsEnabled: boolean;
+  amllTtmlDbUrl: string;
+  /** true = 自定义地址模式（任意公网 https，模板占位）；false = 预设镜像白名单 */
+  amllTtmlDbCustom: boolean;
+  lyricsExcludeRules: LyricsExcludeRule[];
+  showLyricsTranslation: boolean;
+  showLyricsRoman: boolean;
 }
 
 export interface PlaybackQueuePreview {
@@ -166,6 +178,14 @@ export interface PlayerStore {
   taskbarLyricsEnabled: boolean;
   taskbarLyricsClickThrough: boolean;
   taskbarLyricsPosition: number;
+  lyricsSourcePriority: LyricsSourcePriority;
+  preferTraditionalLyrics: boolean;
+  ttmlLyricsEnabled: boolean;
+  amllTtmlDbUrl: string;
+  amllTtmlDbCustom: boolean;
+  lyricsExcludeRules: LyricsExcludeRule[];
+  showLyricsTranslation: boolean;
+  showLyricsRoman: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -251,6 +271,14 @@ export interface PlayerStore {
   setTaskbarLyricsClickThrough: (enabled: boolean) => void;
   /** 歌词条横向（垂直任务栏时为纵向）位置比例，0..=1 */
   setTaskbarLyricsPosition: (ratio: number) => void;
+  setLyricsSourcePriority: (priority: LyricsSourcePriority) => void;
+  setPreferTraditionalLyrics: (enabled: boolean) => void;
+  setTtmlLyricsEnabled: (enabled: boolean) => void;
+  /** 按模式校验；非法地址返回 false 且不写入。同时写入模式位。 */
+  setAmllTtmlDbUrl: (url: string, custom: boolean) => boolean;
+  setLyricsExcludeRules: (rules: LyricsExcludeRule[]) => void;
+  setShowLyricsTranslation: (enabled: boolean) => void;
+  setShowLyricsRoman: (enabled: boolean) => void;
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;

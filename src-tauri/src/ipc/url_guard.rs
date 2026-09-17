@@ -28,6 +28,12 @@ pub(crate) const ONLINE_COVER_HOST_SUFFIXES: &[&str] = &[
 /// 带前导点 = 只认子域:三家的 API 全在子域上,裸顶级域没有歌词接口。
 pub(crate) const LYRICS_HOST_SUFFIXES: &[&str] = &[".163.com", ".kugou.com", ".qq.com"];
 
+/// AMLL TTML DB 镜像白名单(设置里可切换镜像,但不能填任意域——用户自定义
+/// 出站目标 + 逐跳重定向复验是既有安全基线,不因"只是取歌词"放宽)。
+/// GitHub raw 裸域即入口;jsDelivr 各 CDN(cdn/fastly/gcore.jsdelivr.net)只认子域。
+pub(crate) const AMLL_TTML_HOST_SUFFIXES: &[&str] =
+    &["raw.githubusercontent.com", ".jsdelivr.net"];
+
 /// GitHub 更新检查(check_for_update 只请求 api.github.com,正常零重定向;
 /// 出现 302 时也只许留在同 host)。
 pub(crate) const GITHUB_API_HOST_SUFFIXES: &[&str] = &["api.github.com"];
@@ -85,6 +91,39 @@ pub(crate) fn is_safe_system_image_url(raw: &str) -> bool {
 /// L-3：在线歌词 client 的重定向白名单。
 pub(crate) fn is_safe_lyrics_url(raw: &str) -> bool {
     is_https_url_with_host_suffix(raw, LYRICS_HOST_SUFFIXES)
+}
+
+/// AMLL TTML DB 请求与重定向白名单(base URL 校验与逐跳复验共用)。
+pub(crate) fn is_safe_amll_ttml_url(raw: &str) -> bool {
+    is_https_url_with_host_suffix(raw, AMLL_TTML_HOST_SUFFIXES)
+}
+
+/// 「自定义地址」模式的底线:https、无 userinfo、host 是带点的公网域名——
+/// 拒绝 IP 直连(含 IPv6 字面量)、localhost、`.local`/`.internal` 与无点的内网主机名。
+/// 调用方还必须禁用重定向(自定义域不可信,不能让它把请求转向内网)。
+pub(crate) fn is_public_https_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // IP 字面量：IPv6 带方括号，IPv4 全数字点分
+    if host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    let name = host.to_ascii_lowercase();
+    if !name.contains('.') || name == "localhost" {
+        return false;
+    }
+    !(name.ends_with(".local")
+        || name.ends_with(".localhost")
+        || name.ends_with(".internal")
+        || name.ends_with(".lan")
+        || name.ends_with(".home.arpa"))
 }
 
 /// L-3：GitHub 更新检查 client 的重定向白名单。
@@ -212,6 +251,30 @@ mod tests {
         assert!(is_safe_ffmpeg_download_url(
             "https://objects.githubusercontent.com/github-production-release-asset/x"
         ));
+        assert!(is_safe_amll_ttml_url(
+            "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/ncm-lyrics/1.ttml"
+        ));
+        assert!(is_safe_amll_ttml_url(
+            "https://fastly.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/qq-lyrics/1.ttml"
+        ));
+        assert!(!is_safe_amll_ttml_url("https://jsdelivr.net/x"));
+        assert!(!is_safe_amll_ttml_url("https://github.com/amll-dev/amll-ttml-db"));
+
+        // 自定义模式守卫：公网域名放行，其余拒
+        assert!(is_public_https_url("https://amlldb.bikonoo.com/ncm-lyrics/1.ttml"));
+        for url in [
+            "http://amlldb.bikonoo.com/x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+            "https://10.0.0.5/x",
+            "https://localhost/x",
+            "https://nas/x",
+            "https://printer.local/x",
+            "https://db.internal/x",
+            "https://user@amlldb.bikonoo.com/x",
+        ] {
+            assert!(!is_public_https_url(url), "public guard should reject {url}");
+        }
 
         // 盲 SSRF 探针与伪装：全部表都必须拒
         for url in [
@@ -224,6 +287,7 @@ mod tests {
             "https://evilb23.tv.evil.com/x",     // 无关域
         ] {
             assert!(!is_safe_lyrics_url(url), "lyrics should reject {url}");
+            assert!(!is_safe_amll_ttml_url(url), "amll should reject {url}");
             assert!(!is_safe_github_api_url(url), "github should reject {url}");
             assert!(
                 !is_safe_bilibili_site_url(url),

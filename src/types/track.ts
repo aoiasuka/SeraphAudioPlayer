@@ -1,6 +1,30 @@
+/** 逐字歌词的一个音节（秒）。 */
+export interface LyricWord {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface LyricLine {
   time: number;
   text: string;
+  /** 行结束时间（秒），仅逐字来源提供。 */
+  end?: number;
+  /** 逐字时间轴（AMLL TTML）；缺省按整行处理。 */
+  words?: LyricWord[];
+  /** 译文字段（TTML）。LRC 类来源的译文仍是相邻同时间戳行。 */
+  translation?: string;
+  /** 音译 / 罗马音（TTML）。 */
+  roman?: string;
+}
+
+export type LyricsSourcePriority = "auto" | "netease" | "kugou" | "qq";
+
+/** 歌词排除规则：命中的歌词行不显示（仅显示层过滤，不改曲库数据）。 */
+export interface LyricsExcludeRule {
+  id: string;
+  kind: "keyword" | "regex";
+  pattern: string;
 }
 
 export interface OnlineLyricsCandidate {

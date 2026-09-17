@@ -47,6 +47,14 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   taskbarLyricsEnabled: "boolean",
   taskbarLyricsClickThrough: "boolean",
   taskbarLyricsPosition: "number",
+  // v0.6.0 歌词设置（排除规则是数组，单独在 pickPlayerSettings 里带上）
+  lyricsSourcePriority: "string",
+  preferTraditionalLyrics: "boolean",
+  ttmlLyricsEnabled: "boolean",
+  amllTtmlDbUrl: "string",
+  amllTtmlDbCustom: "boolean",
+  showLyricsTranslation: "boolean",
+  showLyricsRoman: "boolean",
 };
 
 interface PersistedEnvelope {
@@ -81,6 +89,9 @@ function pickPlayerSettings(state: Record<string, unknown>) {
   const picked: Record<string, unknown> = {};
   for (const [field, kind] of Object.entries(PLAYER_SETTINGS_FIELDS)) {
     if (typeof state[field] === kind) picked[field] = state[field];
+  }
+  if (Array.isArray(state.lyricsExcludeRules)) {
+    picked.lyricsExcludeRules = state.lyricsExcludeRules;
   }
   return picked;
 }

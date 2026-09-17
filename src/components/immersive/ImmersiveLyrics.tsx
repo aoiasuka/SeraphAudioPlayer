@@ -1,13 +1,21 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CloudDownload, Languages, Music2, Type } from "lucide-react";
+import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
-import { activeGroupIndex, groupLyricsByTime } from "@/lib/lyrics/activeLine";
+import { useSmoothTime } from "@/hooks/useSmoothTime";
+import { activeGroupIndex, groupLyricsByTime, hasWordTiming } from "@/lib/lyrics/activeLine";
+import { filterLyricsByRules } from "@/lib/lyrics/exclude";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
 function useLyricGroups(track: Track) {
-  const groups = useMemo(() => groupLyricsByTime(track.lyrics), [track.lyrics]);
+  const excludeRules = usePlayerStore((s) => s.lyricsExcludeRules);
+  const lyrics = useMemo(
+    () => filterLyricsByRules(track.lyrics, excludeRules),
+    [track.lyrics, excludeRules]
+  );
+  const groups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
   // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。
   const activeIndex = usePlayerStore((s) => activeGroupIndex(groups, s.currentTime));
   return { groups, activeIndex };
@@ -25,6 +33,7 @@ interface LyricsProps {
 export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact = false, onToggleTranslation, onToggleSize }: LyricsProps) {
   const { groups, activeIndex } = useLyricGroups(track);
   const seek = usePlayerStore((s) => s.seek);
+  const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const resumeTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -32,7 +41,13 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
   const centerPadding = viewport.height / 2;
   const [following, setFollowing] = useState(true);
   const lastContext = useRef<{ id: string; groups: typeof groups; viewport: typeof viewport }>();
-  const hasTranslation = groups.some((group) => group.lines.length > 1);
+  // 译文两种形态：LRC 类的相邻同时间戳行，或 TTML 的 translation 字段
+  const hasTranslation = groups.some((group) => group.lines.length > 1 || !!group.lines[0]?.translation);
+  const activeLine = activeIndex >= 0 ? groups[activeIndex]?.lines[0] : undefined;
+  const activeHasWords = hasWordTiming(activeLine);
+  const currentTime = usePlayerStore((s) => (activeHasWords ? s.currentTime : 0));
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -86,31 +101,41 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
       {groups.length ? (
         <div ref={scrollRef} className="immersive-lyrics-scroll" tabIndex={0} aria-label="滚动歌词" onWheel={pauseFollowing} onPointerDown={pauseFollowing} onKeyDown={(event) => { if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", "Tab"].includes(event.key)) pauseFollowing(); }}>
           <div style={{ paddingBlock: centerPadding }}>
-            {groups.map((group, index) => (
-              <button
-                key={`${track.id}-${group.time}-${index}`}
-                ref={(element) => { lineRefs.current[index] = element; }}
-                className={`immersive-lyric-line${index === activeIndex ? " is-current" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
-                aria-current={index === activeIndex ? "true" : undefined}
-                aria-label={`${formatSeconds(group.time)} · ${group.lines[0]?.text}`}
-                disabled={!canSeek || group.time > track.duration}
-                onClick={() => {
-                  clearTimeout(resumeTimer.current);
-                  setFollowing(true);
-                  seek(Math.max(0, group.time));
-                }}
-              >
-                <span className="immersive-lyric-text">
-                  {index === activeIndex ? (
-                    <>
-                      <span className="immersive-lyric-placeholder type-caret" aria-hidden="true">{group.lines[0]?.text}</span>
-                      <span className="immersive-lyric-typing"><TypewriterText key={group.lines[0]?.text} text={group.lines[0]?.text ?? ""} /></span>
-                    </>
-                  ) : group.lines[0]?.text}
-                </span>
-                {showTranslation && group.lines.slice(1).map((line, translationIndex) => <small key={translationIndex}>{line.text}</small>)}
-              </button>
-            ))}
+            {groups.map((group, index) => {
+              const main = group.lines[0];
+              const isCurrent = index === activeIndex;
+              return (
+                <button
+                  key={`${track.id}-${group.time}-${index}`}
+                  ref={(element) => { lineRefs.current[index] = element; }}
+                  className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
+                  aria-current={isCurrent ? "true" : undefined}
+                  aria-label={`${formatSeconds(group.time)} · ${main?.text}`}
+                  disabled={!canSeek || group.time > track.duration}
+                  onClick={() => {
+                    clearTimeout(resumeTimer.current);
+                    setFollowing(true);
+                    seek(Math.max(0, group.time));
+                  }}
+                >
+                  <span className="immersive-lyric-text">
+                    {isCurrent ? (
+                      hasWordTiming(main) ? (
+                        <KaraokeLine words={main.words} currentTime={smoothTime} />
+                      ) : (
+                        <>
+                          <span className="immersive-lyric-placeholder type-caret" aria-hidden="true">{main?.text}</span>
+                          <span className="immersive-lyric-typing"><TypewriterText key={main?.text} text={main?.text ?? ""} /></span>
+                        </>
+                      )
+                    ) : main?.text}
+                  </span>
+                  {showRoman && main?.roman ? <small className="immersive-lyric-roman">{main.roman}</small> : null}
+                  {showTranslation && main?.translation ? <small>{main.translation}</small> : null}
+                  {showTranslation && group.lines.slice(1).map((line, translationIndex) => <small key={translationIndex}>{line.text}</small>)}
+                </button>
+              );
+            })}
           </div>
         </div>
       ) : (

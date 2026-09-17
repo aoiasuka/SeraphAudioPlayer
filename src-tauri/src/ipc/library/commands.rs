@@ -186,10 +186,17 @@ pub async fn save_track_lyrics(
     track_id: String,
     lyrics_bytes: Vec<u8>,
     track_path: Option<String>,
+    prefer_traditional: Option<bool>,
 ) -> IpcResult<Vec<LyricLine>> {
     // H-1：持锁 + 可能的 lofty/ffprobe 探测（未入库曲目）都是阻塞操作，放 spawn_blocking。
     tauri::async_runtime::spawn_blocking(move || {
-        save_track_lyrics_inner(&app, &track_id, &lyrics_bytes, track_path.as_deref())
+        save_track_lyrics_inner(
+            &app,
+            &track_id,
+            &lyrics_bytes,
+            track_path.as_deref(),
+            prefer_traditional.unwrap_or(false),
+        )
     })
     .await
     .map_err(|err| {
@@ -205,6 +212,7 @@ fn save_track_lyrics_inner(
     track_id: &str,
     lyrics_bytes: &[u8],
     track_path: Option<&str>,
+    prefer_traditional: bool,
 ) -> IpcResult<Vec<LyricLine>> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
@@ -225,9 +233,12 @@ fn save_track_lyrics_inner(
         )));
     }
 
-    let lyrics = parse_lyrics_bytes(lyrics_bytes);
+    let mut lyrics = parse_lyrics_bytes(lyrics_bytes);
     if lyrics.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
+    }
+    if prefer_traditional {
+        lyrics = lyrics_to_traditional(lyrics);
     }
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
@@ -252,14 +263,22 @@ pub async fn fetch_online_lyrics(
     title: String,
     artist: String,
     duration: u64,
+    options: Option<OnlineLyricsOptions>,
 ) -> IpcResult<Vec<OnlineLyricsCandidate>> {
     let query = online_lyrics_query(&title, &artist);
     if query.is_empty() {
         return Err(IpcError::invalid_input("missing track title"));
     }
+    let options = options.unwrap_or_default();
 
     let client = online_lyrics_client().map_err(IpcError::network)?;
-    let fetch = fetch_online_lyrics_from_sources(&client, &query, duration).await;
+    let fetch = fetch_online_lyrics_from_sources(
+        &client,
+        &query,
+        duration,
+        LyricsSourcePriority::parse(&options.source_priority),
+    )
+    .await;
     if fetch.candidates.is_empty() {
         // M-12：有源在搜索阶段就失败（断网/接口异常）时不能谎报“未找到”，
         // 让前端拿到 network 错误码给出可行动的提示。
@@ -271,7 +290,26 @@ pub async fn fetch_online_lyrics(
         return Err(IpcError::not_found("online lyrics not found"));
     }
 
-    Ok(fetch.candidates)
+    let mut candidates = fetch.candidates;
+    // TTML 二次查找：用网易云/QQ 候选的平台 ID 去 AMLL DB 试取逐字歌词，命中排最前
+    if options.ttml_enabled {
+        if let Some(template) = normalize_amll_db_url(&options.ttml_db_url, options.ttml_db_custom) {
+            let ttml =
+                fetch_amll_ttml_candidates(&template, options.ttml_db_custom, &candidates).await;
+            if !ttml.is_empty() {
+                candidates.splice(0..0, ttml);
+            }
+        } else {
+            tracing::warn!("AMLL TTML DB 地址不在白名单内，已跳过 TTML 查找");
+        }
+    }
+    if options.prefer_traditional {
+        for candidate in &mut candidates {
+            candidate.lyrics = lyrics_to_traditional(std::mem::take(&mut candidate.lyrics));
+        }
+    }
+
+    Ok(candidates)
 }
 
 #[tauri::command]

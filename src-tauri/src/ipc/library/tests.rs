@@ -14,10 +14,7 @@ struct TestLibraryDir(PathBuf);
 fn playlist_summary_keeps_metadata_without_cloning_or_serializing_lyrics() {
     use super::snapshot::{LibrarySnapshot, PlaylistSnapshot};
     let mut track = test_imported_track("a", "C:/a.flac", "A");
-    track.lyrics.push(LyricLine {
-        time: 1.0,
-        text: "long lyric".repeat(1000),
-    });
+    track.lyrics.push(LyricLine::new(1.0, "long lyric".repeat(1000)));
     let snapshot = std::sync::Arc::new(LibrarySnapshot::new(vec![track.clone()]));
     let summary = PlaylistSnapshot {
         snapshot: snapshot.clone(),
@@ -62,10 +59,7 @@ fn snapshot_storage_reuses_unchanged_components_and_keeps_legacy_backup() {
     let dir = TestLibraryDir::new();
     let storage = dir.storage();
     let mut tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
-    tracks[0].lyrics.push(LyricLine {
-        time: 1.0,
-        text: "第一行".into(),
-    });
+    tracks[0].lyrics.push(LyricLine::new(1.0, "第一行"));
     let legacy_bytes = serde_json::to_vec(&tracks).unwrap();
     fs::write(dir.0.join("library-cache.json"), &legacy_bytes).unwrap();
     assert_eq!(storage.load().unwrap(), tracks);
@@ -112,10 +106,7 @@ fn snapshot_storage_survives_failure_at_every_commit_stage() {
         let dir = TestLibraryDir::new();
         let storage = dir.storage();
         let mut old = vec![test_imported_track("a", "C:/a.flac", "old")];
-        old[0].lyrics.push(LyricLine {
-            time: 1.0,
-            text: "old lyric".into(),
-        });
+        old[0].lyrics.push(LyricLine::new(1.0, "old lyric"));
         storage.save(&old, None).unwrap();
         let mut updated = old.clone();
         updated[0].title = "new".into();
@@ -154,10 +145,7 @@ fn snapshot_storage_recovers_a_complete_previous_generation() {
         storage.save(&old, None).unwrap();
         let mut updated = old.clone();
         updated[0].title = "new".into();
-        updated[0].lyrics.push(LyricLine {
-            time: 1.0,
-            text: "new lyric".into(),
-        });
+        updated[0].lyrics.push(LyricLine::new(1.0, "new lyric"));
         storage.save(&updated, Some(&old)).unwrap();
         let manifest_path = dir.0.join("library-snapshot.json");
         let corrupt_path = if corrupt_manifest {
@@ -638,10 +626,7 @@ fn merges_cached_tracks_by_path() {
 #[test]
 fn merge_preserves_cached_lyrics_when_reimport_has_none() {
     let mut cached_track = test_imported_track("old", "C:/Music/a.flac", "Old");
-    cached_track.lyrics = vec![LyricLine {
-        time: 1.5,
-        text: "cached line".into(),
-    }];
+    cached_track.lyrics = vec![LyricLine::new(1.5, "cached line")];
     let imported = vec![test_imported_track("new", "c:/music/a.flac", "Updated")];
 
     let merged = merge_cached_tracks(vec![cached_track], &imported);
@@ -692,10 +677,7 @@ fn matches_legacy_delete_request_by_streaming_source_key() {
 #[test]
 fn imported_tracks_from_cache_returns_preserved_lyrics() {
     let mut cached_track = test_imported_track("new", "c:/music/a.flac", "Updated");
-    cached_track.lyrics = vec![LyricLine {
-        time: 1.5,
-        text: "cached line".into(),
-    }];
+    cached_track.lyrics = vec![LyricLine::new(1.5, "cached line")];
     let imported = vec![test_imported_track("new", "C:/Music/a.flac", "Updated")];
 
     let returned = imported_tracks_from_cache(&[cached_track], &imported);
@@ -712,10 +694,7 @@ fn applies_track_lyrics_by_id() {
         test_imported_track("a", "C:/Music/a.flac", "A"),
         test_imported_track("b", "C:/Music/b.flac", "B"),
     ];
-    let lyrics = vec![LyricLine {
-        time: 2.0,
-        text: "imported line".into(),
-    }];
+    let lyrics = vec![LyricLine::new(2.0, "imported line")];
 
     apply_track_lyrics(&mut tracks, "b", lyrics, None, None).expect("apply lyrics");
 
@@ -727,10 +706,7 @@ fn applies_track_lyrics_by_id() {
 #[test]
 fn errors_when_applying_lyrics_to_missing_track() {
     let mut tracks = vec![test_imported_track("a", "C:/Music/a.flac", "A")];
-    let lyrics = vec![LyricLine {
-        time: 0.0,
-        text: "line".into(),
-    }];
+    let lyrics = vec![LyricLine::new(0.0, "line")];
 
     let err =
         apply_track_lyrics(&mut tracks, "missing", lyrics, None, None).expect_err("missing track");
@@ -966,10 +942,7 @@ fn missing_library_cache_reads_as_empty() {
 #[test]
 fn splits_and_merges_lyrics_round_trip() {
     let mut with_lyrics = test_imported_track("a", "C:/Music/a.flac", "A");
-    with_lyrics.lyrics = vec![LyricLine {
-        time: 1.0,
-        text: "line one".into(),
-    }];
+    with_lyrics.lyrics = vec![LyricLine::new(1.0, "line one")];
     let without = test_imported_track("b", "C:/Music/b.flac", "B");
 
     let (stripped, sidecar) = split_lyrics_for_storage(&[with_lyrics.clone(), without.clone()]);
@@ -992,10 +965,7 @@ fn splits_and_merges_lyrics_round_trip() {
 fn merge_lyrics_keeps_inline_when_sidecar_absent() {
     // 旧格式迁移：主文件内联歌词、边车缺失时，内联歌词必须保留
     let mut inline = test_imported_track("a", "C:/Music/a.flac", "A");
-    inline.lyrics = vec![LyricLine {
-        time: 2.0,
-        text: "legacy inline".into(),
-    }];
+    inline.lyrics = vec![LyricLine::new(2.0, "legacy inline")];
 
     let restored = merge_lyrics_from_storage(vec![inline], &std::collections::HashMap::new());
     assert_eq!(restored[0].lyrics.len(), 1);

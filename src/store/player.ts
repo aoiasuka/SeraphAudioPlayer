@@ -10,6 +10,13 @@ import { createPlayerPersistStorage } from "./player/persistStorage";
 import { createStreamingActions } from "./player/streamingActions";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
 import { createUiActions } from "./player/uiActions";
+import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
+import {
+  DEFAULT_AMLL_TTML_DB_URL,
+  isValidAmllTtmlDbUrl,
+  normalizeAmllTtmlDbUrl,
+  sanitizeLyricsSourcePriority,
+} from "@/lib/lyrics/settings";
 import type { DriverKind, LibraryView, UserPlaylist } from "@/types/track";
 
 export type {
@@ -149,6 +156,19 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     taskbarLyricsClickThrough: state.taskbarLyricsClickThrough === true,
     // v0.5.5：歌词条位置比例，旧版本无此字段时用默认落点对应的比例
     taskbarLyricsPosition: normalizeLyricsPosition(state.taskbarLyricsPosition),
+    // v0.6.0：歌词设置。TTML 默认开（SPlayer 同款默认）；繁体默认关；地址非法回退默认
+    lyricsSourcePriority: sanitizeLyricsSourcePriority(state.lyricsSourcePriority),
+    preferTraditionalLyrics: state.preferTraditionalLyrics === true,
+    ttmlLyricsEnabled: state.ttmlLyricsEnabled !== false,
+    amllTtmlDbCustom: state.amllTtmlDbCustom === true,
+    amllTtmlDbUrl:
+      typeof state.amllTtmlDbUrl === "string" &&
+      isValidAmllTtmlDbUrl(state.amllTtmlDbUrl, state.amllTtmlDbCustom === true)
+        ? normalizeAmllTtmlDbUrl(state.amllTtmlDbUrl)
+        : DEFAULT_AMLL_TTML_DB_URL,
+    lyricsExcludeRules: sanitizeExcludeRules(state.lyricsExcludeRules),
+    showLyricsTranslation: state.showLyricsTranslation !== false,
+    showLyricsRoman: state.showLyricsRoman === true,
   };
 }
 
@@ -187,6 +207,14 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarLyricsEnabled: false,
         taskbarLyricsClickThrough: false,
         taskbarLyricsPosition: DEFAULT_TASKBAR_LYRICS_POSITION,
+        lyricsSourcePriority: "auto",
+        preferTraditionalLyrics: false,
+        ttmlLyricsEnabled: true,
+        amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
+        amllTtmlDbCustom: false,
+        lyricsExcludeRules: [],
+        showLyricsTranslation: true,
+        showLyricsRoman: false,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -250,6 +278,14 @@ export const usePlayerStore = create<PlayerStore>()(
         taskbarLyricsEnabled: state.taskbarLyricsEnabled,
         taskbarLyricsClickThrough: state.taskbarLyricsClickThrough,
         taskbarLyricsPosition: state.taskbarLyricsPosition,
+        lyricsSourcePriority: state.lyricsSourcePriority,
+        preferTraditionalLyrics: state.preferTraditionalLyrics,
+        ttmlLyricsEnabled: state.ttmlLyricsEnabled,
+        amllTtmlDbUrl: state.amllTtmlDbUrl,
+        amllTtmlDbCustom: state.amllTtmlDbCustom,
+        lyricsExcludeRules: state.lyricsExcludeRules,
+        showLyricsTranslation: state.showLyricsTranslation,
+        showLyricsRoman: state.showLyricsRoman,
       }),
     }
   )

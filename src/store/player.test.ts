@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { invoke } from "@/lib/tauri";
+import { DEFAULT_AMLL_TTML_DB_URL } from "@/lib/lyrics/settings";
 import {
   DEFAULT_TASKBAR_LYRICS_POSITION,
   migratePersistedPlayerState,
@@ -113,6 +114,83 @@ describe("player store startup and persistence", () => {
     expect(migrated.taskbarLyricsPosition).toBe(
       DEFAULT_TASKBAR_LYRICS_POSITION
     );
+    // v0.6.0：歌词设置默认值
+    expect(migrated.lyricsSourcePriority).toBe("auto");
+    expect(migrated.preferTraditionalLyrics).toBe(false);
+    expect(migrated.ttmlLyricsEnabled).toBe(true);
+    expect(migrated.amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
+    expect(migrated.amllTtmlDbCustom).toBe(false);
+    expect(migrated.lyricsExcludeRules).toEqual([]);
+    expect(migrated.showLyricsTranslation).toBe(true);
+    expect(migrated.showLyricsRoman).toBe(false);
+  });
+
+  it("sanitizes lyrics settings: bad url falls back, rules are cleaned", () => {
+    const migrated = migratePersistedPlayerState({
+      lyricsSourcePriority: "kugou",
+      amllTtmlDbUrl: "https://evil.com/db",
+      lyricsExcludeRules: [{ kind: "keyword", pattern: "作词" }, "bad"],
+      ttmlLyricsEnabled: false,
+    });
+    expect(migrated.lyricsSourcePriority).toBe("kugou");
+    // 预设模式下白名单外域名回默认
+    expect(migrated.amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
+    expect(migrated.amllTtmlDbCustom).toBe(false);
+    expect(migrated.lyricsExcludeRules).toEqual([
+      { id: "keyword:作词", kind: "keyword", pattern: "作词" },
+    ]);
+    expect(migrated.ttmlLyricsEnabled).toBe(false);
+    const mirror = migratePersistedPlayerState({
+      amllTtmlDbUrl: "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/",
+    });
+    expect(mirror.amllTtmlDbUrl).toBe("https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main");
+    // 自定义模式下公网模板保留，内网回默认
+    const custom = migratePersistedPlayerState({
+      amllTtmlDbUrl: "https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml",
+      amllTtmlDbCustom: true,
+    });
+    expect(custom.amllTtmlDbUrl).toBe("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml");
+    expect(custom.amllTtmlDbCustom).toBe(true);
+    const lan = migratePersistedPlayerState({ amllTtmlDbUrl: "https://nas.local/%s", amllTtmlDbCustom: true });
+    expect(lan.amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
+  });
+
+  it("setAmllTtmlDbUrl validates by mode and keeps the old value on rejection", () => {
+    usePlayerStore.setState({ amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL, amllTtmlDbCustom: false, notification: null });
+    expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://amlldb.bikonoo.com/%s", false)).toBe(false);
+    expect(usePlayerStore.getState().amllTtmlDbUrl).toBe(DEFAULT_AMLL_TTML_DB_URL);
+    expect(usePlayerStore.getState().notification?.text).toContain("自定义模式");
+    expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://127.0.0.1/%s", true)).toBe(false);
+    expect(usePlayerStore.getState().setAmllTtmlDbUrl("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml/", true)).toBe(true);
+    expect(usePlayerStore.getState().amllTtmlDbUrl).toBe("https://amlldb.bikonoo.com/ncm-lyrics/%s.ttml");
+    expect(usePlayerStore.getState().amllTtmlDbCustom).toBe(true);
+  });
+
+  it("fetchOnlineLyricsForCurrentTrack forwards lyrics settings as options", async () => {
+    invokeMock.mockResolvedValueOnce([]);
+    usePlayerStore.setState({
+      playlist: [testTrack({ id: "t", title: "T", artist: "A" })],
+      currentTrackIndex: 0,
+      lyricsSourcePriority: "qq",
+      preferTraditionalLyrics: true,
+      ttmlLyricsEnabled: true,
+      amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
+      amllTtmlDbCustom: false,
+    });
+    await usePlayerStore.getState().fetchOnlineLyricsForCurrentTrack();
+    expect(invokeMock).toHaveBeenCalledWith("fetch_online_lyrics", {
+      trackId: "t",
+      title: "T",
+      artist: "A",
+      duration: 180,
+      options: {
+        sourcePriority: "qq",
+        preferTraditional: true,
+        ttmlEnabled: true,
+        ttmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
+        ttmlDbCustom: false,
+      },
+    });
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {

@@ -65,10 +65,44 @@ pub struct DeleteTrackFailure {
     pub message: String,
 }
 
+/// 逐字歌词的一个音节/单词（TTML `<span begin end>`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LyricWord {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+/// 歌词行。`time`/`text` 是所有来源的最小公倍数；其余字段只有逐字来源
+/// （AMLL TTML）会填，序列化时 None 一律省略，旧曲库缓存（只有 time/text）
+/// 反序列化时走 `serde(default)`，格式向前向后都兼容。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
     pub time: f64,
     pub text: String,
+    /// 行结束时间（秒）；LRC 类来源没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    /// 逐字时间轴；为空/None 时前端按整行处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<LyricWord>>,
+    /// 译文（TTML `ttm:role="x-translation"`）。LRC 类来源的译文仍以
+    /// 相邻同时间戳行表示，前端两种形态都渲染。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<String>,
+    /// 音译/罗马音（TTML `ttm:role="x-roman"`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roman: Option<String>,
+}
+
+impl LyricLine {
+    pub fn new(time: f64, text: impl Into<String>) -> Self {
+        Self {
+            time,
+            text: text.into(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +115,24 @@ pub struct OnlineLyricsCandidate {
     pub album: Option<String>,
     pub duration: Option<u64>,
     pub lyrics: Vec<LyricLine>,
+    /// 该候选在 AMLL TTML DB 里的查找键（如 `ncm-lyrics/123`），只在后端
+    /// 三源搜索 → TTML 二次查找之间传递，不出 IPC。
+    #[serde(skip)]
+    pub ttml_lookup_keys: Vec<String>,
+}
+
+/// 前端「歌词设置」里影响在线获取的选项（`fetch_online_lyrics` 的 options 参数）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OnlineLyricsOptions {
+    /// "auto" | "netease" | "kugou" | "qq"
+    pub source_priority: String,
+    pub prefer_traditional: bool,
+    pub ttml_enabled: bool,
+    /// 地址模板（`{dir}`/`{id}`/`%s` 占位；无占位符视为 base URL）
+    pub ttml_db_url: String,
+    /// true = 自定义地址模式（任意公网 https，禁重定向）；false = 预设镜像白名单
+    pub ttml_db_custom: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,6 @@
 import { invoke } from "@/lib/tauri";
+import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
+import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
 import type { LyricLine, OnlineLyricsCandidate, Track } from "@/types/track";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -68,8 +70,68 @@ function onlineLyricsErrorMessage(err: unknown) {
 export function createLyricsActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "importLyricsForCurrentTrack" | "fetchOnlineLyricsForCurrentTrack" | "applyOnlineLyricsForCurrentTrack"> {
+): Pick<
+  PlayerStore,
+  | "importLyricsForCurrentTrack"
+  | "fetchOnlineLyricsForCurrentTrack"
+  | "applyOnlineLyricsForCurrentTrack"
+  | "setLyricsSourcePriority"
+  | "setPreferTraditionalLyrics"
+  | "setTtmlLyricsEnabled"
+  | "setAmllTtmlDbUrl"
+  | "setLyricsExcludeRules"
+  | "setShowLyricsTranslation"
+  | "setShowLyricsRoman"
+> {
   return {
+  setLyricsSourcePriority: (priority) => {
+    if (get().lyricsSourcePriority === priority) return;
+    set({ lyricsSourcePriority: priority });
+  },
+
+  setPreferTraditionalLyrics: (enabled) => {
+    if (get().preferTraditionalLyrics === enabled) return;
+    set({ preferTraditionalLyrics: enabled });
+    get().showNotification(
+      enabled ? "新获取的歌词将转换为繁体中文" : "已关闭繁体中文转换"
+    );
+  },
+
+  setTtmlLyricsEnabled: (enabled) => {
+    if (get().ttmlLyricsEnabled === enabled) return;
+    set({ ttmlLyricsEnabled: enabled });
+  },
+
+  setAmllTtmlDbUrl: (url, custom) => {
+    const normalized = normalizeAmllTtmlDbUrl(url);
+    if (!isValidAmllTtmlDbUrl(normalized, custom)) {
+      get().showNotification(
+        custom
+          ? "地址无效：需为公网 HTTPS 域名（不接受 IP 直连、localhost 或内网主机）"
+          : "地址不在预设镜像列表内（仅 GitHub Raw / jsDelivr）；如需其它域名请切换到自定义模式"
+      );
+      return false;
+    }
+    if (get().amllTtmlDbUrl !== normalized || get().amllTtmlDbCustom !== custom) {
+      set({ amllTtmlDbUrl: normalized, amllTtmlDbCustom: custom });
+    }
+    return true;
+  },
+
+  setLyricsExcludeRules: (rules) => {
+    set({ lyricsExcludeRules: sanitizeExcludeRules(rules) });
+  },
+
+  setShowLyricsTranslation: (enabled) => {
+    if (get().showLyricsTranslation === enabled) return;
+    set({ showLyricsTranslation: enabled });
+  },
+
+  setShowLyricsRoman: (enabled) => {
+    if (get().showLyricsRoman === enabled) return;
+    set({ showLyricsRoman: enabled });
+  },
+
   importLyricsForCurrentTrack: async (file) => {
     const track = get().currentTrack();
     if (!track) {
@@ -93,6 +155,7 @@ export function createLyricsActions(
         trackId: track.id,
         trackPath: track.path,
         lyricsBytes,
+        preferTraditional: get().preferTraditionalLyrics,
       });
 
       if (!Array.isArray(lyrics) || lyrics.length === 0) {
@@ -119,6 +182,13 @@ export function createLyricsActions(
     }
 
     const manualQuery = query?.trim();
+    const {
+      lyricsSourcePriority,
+      preferTraditionalLyrics,
+      ttmlLyricsEnabled,
+      amllTtmlDbUrl,
+      amllTtmlDbCustom,
+    } = get();
 
     try {
       const candidates = await invoke<OnlineLyricsCandidate[]>(
@@ -128,6 +198,13 @@ export function createLyricsActions(
           title: manualQuery || track.title,
           artist: manualQuery ? "" : track.artist,
           duration: track.duration,
+          options: {
+            sourcePriority: lyricsSourcePriority,
+            preferTraditional: preferTraditionalLyrics,
+            ttmlEnabled: ttmlLyricsEnabled,
+            ttmlDbUrl: amllTtmlDbUrl,
+            ttmlDbCustom: amllTtmlDbCustom,
+          },
         }
       );
 

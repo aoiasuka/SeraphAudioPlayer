@@ -84,6 +84,7 @@
 .immersive-lyric-placeholder::after { animation: none; }
 .immersive-lyric-typing { position: absolute; inset: 0; }
 .immersive-lyric-line small { display: block; font-size: 12px; line-height: 1.8; margin-top: 6px; font-family: var(--sans); }
+.immersive-lyric-line small.immersive-lyric-roman { font-style: italic; opacity: 0.75; margin-top: 2px; }
 .immersive-lyric-line.is-distant { color: var(--ink3); }
 .immersive-lyric-line.is-current { font-size: calc(var(--lyric-size) + 4px); color: var(--stamp); }
 .immersive-lyric-line.is-current::before { content: ""; width: 3px; height: 24px; position: absolute; left: 0; top: 28px; background: var(--stamp); }

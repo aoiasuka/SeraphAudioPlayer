@@ -3,6 +3,7 @@
 //! 原先用 `include!` 把子文件拼成单一巨型模块，rust-analyzer 无法正常
 //! 索引且可见性没有边界；现改为真模块树，跨模块共享项收敛到 [`prelude`]。
 
+mod amll;
 mod commands;
 mod deletion;
 mod dsd_tags;
@@ -16,8 +17,10 @@ mod snapshot;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod ttml;
 mod types;
 mod wav_id3;
+mod zh;
 
 // 兄弟 ipc 模块（cache/bilibili）沿用 `super::library::xxx` 路径
 pub use commands::*;
