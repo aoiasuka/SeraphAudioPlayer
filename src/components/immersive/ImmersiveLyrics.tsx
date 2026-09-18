@@ -3,7 +3,7 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
-import { activeVisibleIndex, hasWordTiming, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { activeVisibleIndex, hasWordTiming, isInIntermission, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
@@ -14,9 +14,11 @@ function useLyricGroups(track: Track) {
   const groups = resolved.visible;
   // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。
   const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, s.currentTime));
+  // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（布尔选择器，只在翻转时重渲染）
+  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, s.currentTime));
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = track.lyrics.length > 0 && groups.length === 0;
-  return { groups, activeIndex, allHiddenByRules };
+  return { groups, activeIndex, intermission, allHiddenByRules };
 }
 
 interface LyricsProps {
@@ -29,7 +31,7 @@ interface LyricsProps {
 }
 
 export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact = false, onToggleTranslation, onToggleSize }: LyricsProps) {
-  const { groups, activeIndex, allHiddenByRules } = useLyricGroups(track);
+  const { groups, activeIndex, intermission, allHiddenByRules } = useLyricGroups(track);
   const seek = usePlayerStore((s) => s.seek);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -106,7 +108,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                 <button
                   key={`${track.id}-${group.time}-${index}`}
                   ref={(element) => { lineRefs.current[index] = element; }}
-                  className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
+                  className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${isCurrent && intermission ? " is-intermission" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
                   aria-current={isCurrent ? "true" : undefined}
                   aria-label={`${formatSeconds(group.time)} · ${main?.text}`}
                   disabled={!canSeek || group.time > track.duration}

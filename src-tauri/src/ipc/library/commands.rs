@@ -552,6 +552,71 @@ pub async fn test_amll_ttml_db(
     Ok(run_amll_ttml_db_test(&template, custom, sample_key.as_deref()).await)
 }
 
+/// 把曲库里该曲目的歌词导出为 LRC（增强型 / 逐字 / 逐行）。
+///
+/// 主窗口专用（F-03 白名单不放行）。路径经 `validate_export_path`（F-02：绝对路径、
+/// `.lrc` 扩展名、拒 `..`）。导出的是曲库原始歌词，不受排除规则影响——排除是显示层概念。
+/// 返回写出的行数。
+#[tauri::command]
+pub async fn export_track_lyrics(
+    app: AppHandle,
+    track_id: String,
+    path: String,
+    format: LrcExportFormat,
+    options: Option<LrcExportOptions>,
+) -> IpcResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_track_lyrics_inner(&app, &track_id, &path, format, &options.unwrap_or_default())
+    })
+    .await
+    .map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Internal,
+            format!("export_track_lyrics task panicked: {err}"),
+        )
+    })?
+}
+
+fn export_track_lyrics_inner(
+    app: &AppHandle,
+    track_id: &str,
+    path: &str,
+    format: LrcExportFormat,
+    options: &LrcExportOptions,
+) -> IpcResult<usize> {
+    if track_id.trim().is_empty() {
+        return Err(IpcError::invalid_input("missing track id"));
+    }
+    let target = super::super::path_guard::validate_export_path(path, &["lrc"])?;
+
+    let track = read_cached_track(app, track_id)
+        .map_err(IpcError::from)?
+        .ok_or_else(|| IpcError::not_found("track was not found"))?;
+    if track.lyrics.is_empty() {
+        return Err(IpcError::invalid_input("track has no lyrics"));
+    }
+
+    let tool = format!("Seraph Audio Player {}", env!("CARGO_PKG_VERSION"));
+    let meta = LrcExportMeta {
+        title: &track.title,
+        artist: &track.artist,
+        album: &track.album,
+        tool: &tool,
+    };
+    let content = lyrics_to_lrc(&track.lyrics, format, options, &meta);
+    let written = content
+        .lines()
+        .filter(|line| line.starts_with('[') && line.as_bytes().get(3) == Some(&b':'))
+        .count();
+    fs::write(&target, content.as_bytes()).map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Io,
+            format!("failed to write lyrics file: {err}"),
+        )
+    })?;
+    Ok(written)
+}
+
 #[cfg(test)]
 mod lookup_key_tests {
     use super::sanitize_lookup_keys;

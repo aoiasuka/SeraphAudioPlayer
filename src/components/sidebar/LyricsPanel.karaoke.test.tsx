@@ -81,4 +81,21 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
     expect(screen.queryByText("ha-ro")).toBeNull();
     expect(screen.getByText("Plain line")).toBeInTheDocument();
   });
+
+  it("逐字行唱完且距下一句尚远时当前句进入间奏淡出；行级歌词不受影响", () => {
+    const { container } = render(<LyricsPanel />);
+    // currentTime=11：正在唱，不是间奏
+    expect(container.querySelector("[data-intermission]")).toBeNull();
+    // 行 end=14，下一句 20 → 空档 6s；16s 起淡出
+    act(() => usePlayerStore.setState({ currentTime: 16.5 }));
+    const faded = container.querySelector<HTMLElement>("[data-intermission='true']");
+    expect(faded).not.toBeNull();
+    expect(faded!.textContent).toContain("Hello");
+    expect(faded!.className).toContain("opacity-55");
+    // 到下一句（无 end 的行级歌词）后不再判定
+    act(() => usePlayerStore.setState({ currentTime: 40 }));
+    expect(container.querySelector("[data-intermission]")).toBeNull();
+    const plain = screen.getByText("Plain line").closest(".flex.items-start") as HTMLElement;
+    expect(plain.className).toContain("opacity-100");
+  });
 });

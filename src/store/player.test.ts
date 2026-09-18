@@ -16,6 +16,12 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   };
 });
 
+const saveDialogMock = vi.fn<() => Promise<string | null>>(async () => null);
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: (...args: unknown[]) => saveDialogMock(...(args as [])),
+  open: vi.fn(async () => null),
+}));
+
 const invokeMock = invoke as unknown as Mock;
 
 async function flushAsyncQueue() {
@@ -276,6 +282,41 @@ describe("player store startup and persistence", () => {
     expect(invokeMock).toHaveBeenCalledWith("find_local_lyrics", expect.objectContaining({
       trackId: "t", title: "唯一", artist: "王力宏", folder: "C:/Users/me/Lyrics",
     }));
+  });
+
+  it("exportLyricsForCurrentTrack：无歌词不弹框；取消保存不调命令；选路径后按格式与显示开关导出", async () => {
+    const track = testTrack({ id: "t", title: "唯一", artist: "王力宏", lyrics: [] });
+    usePlayerStore.setState({
+      playlist: [track],
+      currentTrackIndex: 0,
+      showLyricsTranslation: true,
+      showLyricsRoman: false,
+    });
+    saveDialogMock.mockClear();
+    invokeMock.mockClear();
+    expect(await usePlayerStore.getState().exportLyricsForCurrentTrack("enhanced")).toBe(false);
+    expect(saveDialogMock).not.toHaveBeenCalled();
+
+    usePlayerStore.setState({
+      playlist: [{ ...track, lyrics: [{ time: 1, text: "a" }] }],
+    });
+    saveDialogMock.mockResolvedValueOnce(null);
+    expect(await usePlayerStore.getState().exportLyricsForCurrentTrack("enhanced")).toBe(false);
+    expect(saveDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "王力宏 - 唯一.lrc" })
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("export_track_lyrics", expect.anything());
+
+    saveDialogMock.mockResolvedValueOnce("C:/out/唯一.lrc");
+    invokeMock.mockResolvedValueOnce(12);
+    expect(await usePlayerStore.getState().exportLyricsForCurrentTrack("verbatim")).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("export_track_lyrics", {
+      trackId: "t",
+      path: "C:/out/唯一.lrc",
+      format: "verbatim",
+      options: { msDigits: 3, includeTranslation: true, includeRoman: false },
+    });
+    expect(usePlayerStore.getState().notification?.text).toContain("逐字 LRC");
   });
 
   it("honors explicit rememberPlayback=false in persisted state", () => {

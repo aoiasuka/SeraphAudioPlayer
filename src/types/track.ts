@@ -22,6 +22,9 @@ export interface LyricLine {
 
 export type LyricsSourcePriority = "auto" | "netease" | "kugou" | "qq";
 
+/** `export_track_lyrics` 的目标格式：增强型（ESLyric `<t>`）/ 逐字（`[t]`）/ 逐行。 */
+export type LrcExportFormat = "enhanced" | "verbatim" | "line";
+
 /** 歌词排除规则：命中的歌词行不显示（仅显示层过滤，不改曲库数据）。 */
 export interface LyricsExcludeRule {
   id: string;

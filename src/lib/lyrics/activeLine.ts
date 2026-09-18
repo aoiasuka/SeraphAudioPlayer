@@ -124,3 +124,41 @@ export function wordProgress(words: LyricWord[], currentTime: number): number[] 
     return span <= 0 ? 1 : Math.min(1, Math.max(0, (currentTime - word.start) / span));
   });
 }
+
+/** 一句唱完后多久算进入间奏（秒）。 */
+export const INTERMISSION_DELAY_SECONDS = 2;
+/** 句尾到下一句起点至少留这么长的空档才按间奏处理（秒），短停顿不淡出。 */
+export const INTERMISSION_MIN_GAP_SECONDS = 6;
+
+/** 一组（同时间戳的原文 / 译文）的结束时间：取组内各行 `end` 的最大值；都没有则 undefined。 */
+export function groupEnd(group: LyricGroup): number | undefined {
+  let end: number | undefined;
+  for (const line of group.lines) {
+    if (typeof line.end === "number" && Number.isFinite(line.end) && line.end > group.time) {
+      end = end === undefined ? line.end : Math.max(end, line.end);
+    }
+  }
+  return end;
+}
+
+/**
+ * 当前句是否已进入间奏：只有带可靠结束时间的句子（逐字来源）才会判定。
+ * 条件：播放位置超过句尾 `INTERMISSION_DELAY_SECONDS`，且句尾到下一可见句起点的空档
+ * 不少于 `INTERMISSION_MIN_GAP_SECONDS`（末句按无下一句处理）。三处显示组件据此把当前句
+ * 淡出，避免长间奏期间一直高亮一句已经唱完的歌词（对照 LDDC 桌面歌词的淡入淡出）。
+ */
+export function isInIntermission(
+  resolved: ResolvedLyricGroups,
+  activeVisible: number,
+  currentTime: number
+): boolean {
+  if (activeVisible < 0) return false;
+  const group = resolved.visible[activeVisible];
+  if (!group) return false;
+  const end = groupEnd(group);
+  if (end === undefined) return false;
+  if (currentTime < end + INTERMISSION_DELAY_SECONDS) return false;
+  const next = resolved.visible[activeVisible + 1];
+  const gap = next ? next.time - end : Number.POSITIVE_INFINITY;
+  return gap >= INTERMISSION_MIN_GAP_SECONDS;
+}

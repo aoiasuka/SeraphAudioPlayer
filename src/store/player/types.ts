@@ -2,6 +2,7 @@ import type {
   DeleteTracksResult,
   DriverKind,
   LibraryView,
+  LrcExportFormat,
   LyricLine,
   LyricsExcludeRule,
   LyricsSourcePriority,
@@ -266,6 +267,8 @@ export interface PlayerStore {
     lyrics: LyricLine[],
     lookupKeys?: string[]
   ) => Promise<boolean>;
+  /** 弹出保存对话框，把当前曲目歌词导出为 LRC（增强型 / 逐字 / 逐行）；成功返回 true */
+  exportLyricsForCurrentTrack: (format: LrcExportFormat) => Promise<boolean>;
   loadDevices: () => Promise<void>;
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;

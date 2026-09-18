@@ -1,7 +1,7 @@
-import { invoke } from "@/lib/tauri";
+import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
-import type { LyricLine, OnlineLyricsCandidate, Track } from "@/types/track";
+import type { LrcExportFormat, LyricLine, OnlineLyricsCandidate, Track } from "@/types/track";
 import { sendCommand } from "./commands";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -13,6 +13,23 @@ interface LocalLyricsMatch {
 }
 
 const MAX_LYRIC_FILE_BYTES = 2 * 1024 * 1024;
+
+const LRC_EXPORT_FORMAT_LABEL: Record<LrcExportFormat, string> = {
+  enhanced: "增强型 LRC",
+  verbatim: "逐字 LRC",
+  line: "逐行 LRC",
+};
+
+/** 导出文件名：`艺术家 - 曲名.lrc`，去掉文件系统不允许的字符。 */
+function lyricsExportFileName(track: Track) {
+  const stem = [track.artist, track.title]
+    .map((part) => part?.trim() ?? "")
+    .filter(Boolean)
+    .join(" - ")
+    .replace(/[\\/:*?"<>|\r\n]+/g, " ")
+    .trim();
+  return `${stem || "lyrics"}.lrc`;
+}
 
 function replaceTrackLyrics(
   playlist: Track[],
@@ -83,6 +100,7 @@ export function createLyricsActions(
   | "importLyricsForCurrentTrack"
   | "fetchOnlineLyricsForCurrentTrack"
   | "applyOnlineLyricsForCurrentTrack"
+  | "exportLyricsForCurrentTrack"
   | "setLyricsSourcePriority"
   | "setPreferTraditionalLyrics"
   | "setTtmlLyricsEnabled"
@@ -328,6 +346,48 @@ export function createLyricsActions(
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: apply_online_lyrics", err);
       get().showNotification(onlineLyricsErrorMessage(err));
+      return false;
+    }
+  },
+
+  exportLyricsForCurrentTrack: async (format) => {
+    const track = get().currentTrack();
+    if (!track) {
+      get().showNotification("请先选择曲目");
+      return false;
+    }
+    if (track.lyrics.length === 0) {
+      get().showNotification("当前曲目没有歌词可导出");
+      return false;
+    }
+
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        defaultPath: lyricsExportFileName(track),
+        filters: [{ name: "LRC 歌词", extensions: ["lrc"] }],
+      });
+      if (!target) return false;
+
+      // 导出的是曲库原始歌词（后端读取），不受排除规则影响
+      const written = await invoke<number>("export_track_lyrics", {
+        trackId: track.id,
+        path: target,
+        format,
+        options: {
+          msDigits: 3,
+          includeTranslation: get().showLyricsTranslation,
+          includeRoman: get().showLyricsRoman,
+        },
+      });
+      get().showNotification(
+        `已导出 ${LRC_EXPORT_FORMAT_LABEL[format]}（${written} 行）`
+      );
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: export_track_lyrics", err);
+      get().showNotification(`导出歌词失败：${normalizeIpcError(err).message}`);
       return false;
     }
   },

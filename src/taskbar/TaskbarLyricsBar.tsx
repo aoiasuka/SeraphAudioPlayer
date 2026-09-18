@@ -6,6 +6,7 @@ import { useSmoothTime } from "@/hooks/useSmoothTime";
 import {
   activeVisibleIndex,
   hasWordTiming,
+  isInIntermission,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
 import {
@@ -346,6 +347,8 @@ export function TaskbarLyricsBar() {
   const activeLine = activeLineEntry?.text ?? "";
   const activeHasWords = hasWordTiming(activeLineEntry);
   const smoothSeconds = useSmoothTime(seconds, playing, activeHasWords);
+  // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
+  const intermission = isInIntermission(resolvedGroups, activeIdx, seconds);
 
   const effectiveTotal = total > 0 ? total : (track?.duration ?? 0);
   const progressRatio =
@@ -428,9 +431,11 @@ export function TaskbarLyricsBar() {
       >
         <div
           data-tauri-drag-region
+          data-intermission={intermission ? "true" : undefined}
           className={cn(
-            "w-full truncate font-serif text-[15px] font-semibold leading-tight",
-            dark ? "text-paper" : "text-ink"
+            "w-full truncate font-serif text-[15px] font-semibold leading-tight transition-opacity duration-500",
+            dark ? "text-paper" : "text-ink",
+            intermission && "opacity-50"
           )}
         >
           {activeLine ? (

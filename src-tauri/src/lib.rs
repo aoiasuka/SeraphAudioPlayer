@@ -69,6 +69,7 @@ pub fn run() {
             ipc::library::validate_lyrics_exclude_rules,
             ipc::library::fetch_online_cover,
             ipc::library::save_track_lyrics,
+            ipc::library::export_track_lyrics,
             ipc::library::list_devices,
             ipc::update::check_for_update,
             ipc::update::open_release_page,
@@ -194,6 +195,7 @@ mod tests {
             "delete_track",
             "delete_tracks",
             "save_track_lyrics",
+            "export_track_lyrics",
             "bilibili_login_qrcode",
             "clear_cache",
         ] {

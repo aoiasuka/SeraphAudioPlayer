@@ -349,11 +349,11 @@ pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderWordLine>) -> Vec<
 
 /// 把 `(起始毫秒, 时长毫秒, 原文片段)` 序列收成音节：纯空白片段并入前一音节
 /// （词间空格属前一音节，与 TTML / 增强 LRC 口径一致；开头的空白直接丢弃），
-/// 文本经 `strip_inline_time_tags` + 全角空格归一，音节全部无效时返回空。
+/// 文本经 `clean_lyric_segment`（与整行同一套清洗），音节全部无效时返回空。
 fn collect_provider_words(segments: Vec<(u64, u64, &str)>) -> Vec<LyricWord> {
     let mut words: Vec<LyricWord> = Vec::new();
     for (start_ms, duration_ms, raw) in segments {
-        let text = strip_inline_time_tags(raw).replace(['\u{3000}', '\t'], " ");
+        let text = clean_lyric_segment(raw);
         if text.trim().is_empty() {
             if let Some(last) = words.last_mut() {
                 if !text.is_empty() && !last.text.ends_with(' ') {
@@ -769,14 +769,14 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
         let (times, body) = split_lrc_time_tags(line);
         if !times.is_empty() {
             if let Some(text) = clean_lyric_text(body) {
-                // 增强型 LRC（LDDC / 网易云导出）：行内 `<mm:ss.xxx>` 是逐字时间，
-                // 行尾孤立标签是行结束时间；与行时间同受 offset 校正。
-                let enhanced = parse_enhanced_lrc_words(body, offset_ms);
                 for time in times {
                     // L-9：LRC 通行约定——正 offset 让歌词提前显示（time - offset）。
                     let shifted = ((time * 1000.0).round() as i64 - offset_ms).max(0);
                     let mut lyric = LyricLine::new(shifted as f64 / 1000.0, text.clone());
-                    if let Some((words, end)) = enhanced.clone() {
+                    // 增强型（`<t>` 在文字前，ESLyric / LDDC）与逐字型（`[t]` 在文字后，
+                    // LDDC「逐字 LRC」）两种行内时间标签都拆成音节；首标签之前的文字
+                    // 从行起点算起；与行时间同受 offset 校正。
+                    if let Some((words, end)) = parse_inline_lrc_words(body, time, offset_ms) {
                         lyric.words = Some(words);
                         lyric.end = end;
                     }
@@ -800,6 +800,8 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         timed.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
+        snap_lddc_translation_lines(&mut timed);
+        infer_line_ends(&mut timed);
         return timed;
     }
 
@@ -808,6 +810,62 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
         .enumerate()
         .map(|(index, text)| LyricLine::new(index as f64 * 4.0, text))
         .collect()
+}
+
+/// LDDC「译文时间戳 = 下一句原文起点 − 1 ms」写法（`last_ref_line_time_sty=1`，
+/// 2 位毫秒模式下是 − 10 ms）：这类译文行没有逐字标签，紧贴下一句而离本句原文很远，
+/// 前端按相邻同时间戳分组会把它当成独立一句闪一下。识别条件收得很窄：行 X 无 words、
+/// 下一行 Y 与 X 的间距在 (0, 11 ms] 内、X 的前一行 P 早于 X。命中时把 X 的时间改成 P 的
+/// 时间，让它并入 P 句。要求输入已按时间排序。
+pub(crate) fn snap_lddc_translation_lines(lines: &mut [LyricLine]) {
+    const MAX_GAP_SECONDS: f64 = 0.011;
+    let mut index = 1;
+    while index + 1 < lines.len() {
+        let gap = lines[index + 1].time - lines[index].time;
+        let is_snap_candidate = lines[index].words.is_none()
+            && gap > 0.0
+            && gap <= MAX_GAP_SECONDS
+            && lines[index - 1].time < lines[index].time - MAX_GAP_SECONDS;
+        if is_snap_candidate {
+            lines[index].time = lines[index - 1].time;
+        }
+        index += 1;
+    }
+    // 改过时间的行要挪到它所并入的那一句之后（保持稳定排序，译文仍排在原文后面）
+    lines.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// 行内逐字标签解析时，末音节没有结束标签会以 `end == start`（零时长）占位。
+/// 这里在整首歌排序后用下一组的起点补齐：末音节 end 与行 end 都设为下一个
+/// **时间更晚**的行的起点（同时间戳的译文行跳过）。最后一行没有后继，保持零时长；
+/// 没有 words 的普通行不合成 end（`lyrics_are_unsynced` 等判定依赖 `end.is_none()`）。
+pub(crate) fn infer_line_ends(lines: &mut [LyricLine]) {
+    for index in 0..lines.len() {
+        let Some(next_time) = lines[index + 1..]
+            .iter()
+            .map(|line| line.time)
+            .find(|time| *time > lines[index].time + 0.01)
+        else {
+            continue;
+        };
+        let line = &mut lines[index];
+        let Some(words) = line.words.as_mut() else {
+            continue;
+        };
+        let Some(last) = words.last_mut() else {
+            continue;
+        };
+        if last.end <= last.start && next_time > last.start {
+            last.end = next_time;
+            if line.end.is_none_or(|end| end <= last.start) {
+                line.end = Some(next_time);
+            }
+        }
+    }
 }
 
 pub(crate) fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
@@ -830,68 +888,103 @@ pub(crate) fn split_lrc_time_tags(line: &str) -> (Vec<f64>, &str) {
     (times, rest)
 }
 
-/// 增强型 LRC 行体 → 逐字音节 + 行结束时间。
+/// 行内逐字时间标签 → 音节 + 行结束时间。两种摆法共用一套算法：
 ///
-/// 形如 `<00:18.459>我<00:18.814>的<00:19.284>天<00:23.097>`：每个 `<t>` 到下一个 `<t>` 之间
-/// 的文本是一个音节，起止即两标签时间；末尾没有文本的标签是行结束。少于一个有效音节
-/// 或标签不是时间（如 `<br>`）时返回 None，行按普通 LRC 处理。
-pub(crate) fn parse_enhanced_lrc_words(
+/// - 增强型（ESLyric / LDDC「增强型 LRC」）：`<t>` 在音节**前**——
+///   `[00:18.459]<00:18.459>我<00:18.814>的<00:19.284>天<00:23.097>`
+/// - 逐字型（LDDC「逐字 LRC」）：`[t]` 在音节**后**——
+///   `[00:18.459]我[00:18.814]的[00:19.284]天[00:23.097]`
+///
+/// 不论括号，每段文本的起点都是它前面的标签（首段用行起点），终点都是它后面的标签。
+/// 末段没有后续标签时终点未知，先以 `end == start` 占位，由 `infer_line_ends` 在整首歌
+/// 排序后用下一句起点补齐。行尾孤立标签（其后无文字）= 行结束时间。纯空白段并入前一
+/// 音节（词间空格属前一音节，与 TTML / QRC 口径一致）。`<` 命中即不再看 `[`（混合行里的
+/// `[t]` 只当文本内标签剥离）；标签不是时间（如 `<br>`）或没有任何有效音节时返回 None，
+/// 该行按普通 LRC 处理。所有时间同受 offset 校正。
+pub(crate) fn parse_inline_lrc_words(
     body: &str,
+    line_time: f64,
+    offset_ms: i64,
+) -> Option<(Vec<LyricWord>, Option<f64>)> {
+    parse_tagged_lrc_words(body, '<', '>', line_time, offset_ms)
+        .or_else(|| parse_tagged_lrc_words(body, '[', ']', line_time, offset_ms))
+}
+
+fn parse_tagged_lrc_words(
+    body: &str,
+    open: char,
+    close: char,
+    line_time: f64,
     offset_ms: i64,
 ) -> Option<(Vec<LyricWord>, Option<f64>)> {
     let shift =
         |seconds: f64| ((seconds * 1000.0).round() as i64 - offset_ms).max(0) as f64 / 1000.0;
 
-    // 收集 (时间, 标签结束偏移, 标签起始偏移)
+    // 收集 (时间, 标签起始偏移, 标签结束偏移)
     let mut tags: Vec<(f64, usize, usize)> = Vec::new();
     let mut cursor = 0;
-    while let Some(relative_open) = body[cursor..].find('<') {
-        let open = cursor + relative_open;
-        let Some(relative_close) = body[open + 1..].find('>') else {
+    while let Some(relative_open) = body[cursor..].find(open) {
+        let start = cursor + relative_open;
+        let token_start = start + open.len_utf8();
+        let Some(relative_close) = body[token_start..].find(close) else {
             break;
         };
-        let close = open + 1 + relative_close;
-        match parse_lrc_time_token(&body[open + 1..close]) {
+        let token_end = token_start + relative_close;
+        match parse_lrc_time_token(&body[token_start..token_end]) {
             Some(time) => {
-                tags.push((time, close + 1, open));
-                cursor = close + 1;
+                let after = token_end + close.len_utf8();
+                tags.push((time, start, after));
+                cursor = after;
             }
-            None => cursor = open + 1,
+            None => cursor = token_start,
         }
     }
     if tags.is_empty() {
         return None;
     }
 
-    let mut words = Vec::new();
-    for (index, (time, text_start, _)) in tags.iter().enumerate() {
-        let text_end = tags
-            .get(index + 1)
-            .map(|(_, _, open)| *open)
-            .unwrap_or(body.len());
-        let raw = &body[*text_start..text_end];
-        // 音节内保留原始空白（词间空格属于前一个音节），只丢掉纯空白音节
-        if raw.trim().is_empty() {
+    // n 个标签切出 n+1 段：段 i 的起点是标签 i-1（首段用行起点），终点是标签 i（末段未知）
+    let mut words: Vec<LyricWord> = Vec::new();
+    for index in 0..=tags.len() {
+        let text_start = if index == 0 { 0 } else { tags[index - 1].2 };
+        let text_end = tags.get(index).map(|tag| tag.1).unwrap_or(body.len());
+        let raw = &body[text_start..text_end];
+        let start = if index == 0 {
+            line_time
+        } else {
+            tags[index - 1].0
+        };
+        let end = tags.get(index).map(|tag| tag.0);
+
+        let text = clean_lyric_segment(raw);
+        if text.trim().is_empty() {
+            // 空白段：时间并入前一音节，保证时间轴连续；开头的空白直接丢弃
+            if let Some(last) = words.last_mut() {
+                if !text.is_empty() && !last.text.ends_with(' ') {
+                    last.text.push(' ');
+                }
+                if let Some(end) = end {
+                    last.end = last.end.max(shift(end));
+                }
+            }
             continue;
         }
-        let end = tags.get(index + 1).map(|(next, ..)| *next).unwrap_or(*time);
+        let start = shift(start);
         words.push(LyricWord {
-            start: shift(*time),
-            end: shift(end.max(*time)),
-            text: strip_inline_time_tags(raw).replace(['\u{3000}', '\t'], " "),
+            start,
+            // 末段终点未知 → 零时长占位，交给 infer_line_ends
+            end: end.map(|end| shift(end).max(start)).unwrap_or(start),
+            text,
         });
     }
     if words.is_empty() {
         return None;
     }
 
-    // 行尾孤立标签 = 行结束；否则用最后一个音节的结束
-    let last_tag = tags.last().map(|(time, ..)| *time)?;
-    let trailing_text_empty = body[tags.last().map(|(_, s, _)| *s).unwrap_or(body.len())..]
-        .trim()
-        .is_empty();
-    let end = if trailing_text_empty {
-        Some(shift(last_tag))
+    // 行尾孤立标签 = 行结束；否则用最后一个音节的结束（可能是占位值）
+    let (last_tag_time, _, last_tag_end) = *tags.last()?;
+    let end = if body[last_tag_end..].trim().is_empty() {
+        Some(shift(last_tag_time))
     } else {
         words.last().map(|word| word.end)
     };
@@ -973,24 +1066,49 @@ pub(crate) fn is_lrc_metadata_line(line: &str) -> bool {
     )
 }
 
+/// 整行清洗：逐段清洗后再把所有空白折叠成单个空格并去首尾。空则 None。
 pub(crate) fn clean_lyric_text(value: &str) -> Option<String> {
-    let text = strip_inline_time_tags(value)
-        .replace(['\u{3000}', '\t'], " ")
-        .replace("<br>", " ")
-        .replace("<br/>", " ")
-        .replace("<br />", " ")
-        .trim_matches('\0')
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
+    let text = clean_lyric_segment(value)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
 
     (!text.is_empty()).then_some(text)
+}
+
+/// 音节 / 片段级清洗：剥行内时间标签、`<br>` → 空格、去 `\0`、HTML 实体解码、
+/// 全角空格与制表符归一为半角空格、连续空白压成一个空格。**不 trim**——词间空格属于
+/// 前一音节，音节文本拼接起来（折叠空白后）必须与整行 `clean_lyric_text` 一致。
+pub(crate) fn clean_lyric_segment(value: &str) -> String {
+    let decoded = strip_inline_time_tags(value)
+        .replace("<br />", " ")
+        .replace("<br/>", " ")
+        .replace("<br>", " ")
+        .replace('\0', "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'");
+
+    let mut output = String::with_capacity(decoded.len());
+    let mut pending_space = false;
+    for ch in decoded.chars() {
+        if ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            output.push(' ');
+            pending_space = false;
+        }
+        output.push(ch);
+    }
+    if pending_space {
+        output.push(' ');
+    }
+    output
 }
 
 pub(crate) fn lrc_tag_content(line: &str) -> Option<&str> {
@@ -1077,11 +1195,13 @@ mod enhanced_lrc_tests {
 
     #[test]
     fn plain_lrc_and_html_like_tags_are_untouched() {
-        assert!(parse_enhanced_lrc_words("hello <br> world", 0).is_none());
-        assert!(parse_enhanced_lrc_words("no tags", 0).is_none());
+        assert!(parse_inline_lrc_words("hello <br> world", 0.0, 0).is_none());
+        assert!(parse_inline_lrc_words("no tags", 0.0, 0).is_none());
+        assert!(parse_inline_lrc_words("纯文本[br]", 0.0, 0).is_none());
         let lines = parse_lyrics_text("[00:01.00]a<br>b\n");
         assert_eq!(lines[0].text, "a b");
         assert!(lines[0].words.is_none());
+        assert!(lines[0].end.is_none());
     }
 
     #[test]
@@ -1091,6 +1211,136 @@ mod enhanced_lrc_tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].time, lines[1].time);
         assert_eq!(lines[1].words.as_ref().unwrap().len(), 1);
+    }
+
+    fn word_texts(line: &LyricLine) -> Vec<&str> {
+        line.words
+            .as_ref()
+            .map(|words| words.iter().map(|w| w.text.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn ms(value: f64) -> i64 {
+        (value * 1000.0).round() as i64
+    }
+
+    #[test]
+    fn parses_lddc_verbatim_lrc_with_trailing_tag() {
+        // LDDC「逐字 LRC」：`[t]` 在文字后，首音节起点 = 行起点，行尾孤立标签 = 行结束
+        let lines = parse_lyrics_text("[00:01.00]我[00:01.20]的[00:01.50]天[00:02.00]\n");
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!(line.text, "我的天");
+        assert_eq!(word_texts(line), ["我", "的", "天"]);
+        let words = line.words.as_ref().unwrap();
+        assert_eq!((ms(words[0].start), ms(words[0].end)), (1000, 1200));
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (1200, 1500));
+        assert_eq!((ms(words[2].start), ms(words[2].end)), (1500, 2000));
+        assert_eq!(line.end.map(ms), Some(2000));
+    }
+
+    #[test]
+    fn verbatim_lrc_without_trailing_tag_ends_at_next_line() {
+        let lines = parse_lyrics_text("[00:01.00]我[00:01.20]的\n[00:03.00]下一句\n");
+        assert_eq!(lines.len(), 2);
+        let words = lines[0].words.as_ref().unwrap();
+        assert_eq!(word_texts(&lines[0]), ["我", "的"]);
+        // 末音节没有结束标签 → 用下一行起点补齐，行 end 同步
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (1200, 3000));
+        assert_eq!(lines[0].end.map(ms), Some(3000));
+        // 普通行不合成 end
+        assert!(lines[1].words.is_none());
+        assert!(lines[1].end.is_none());
+    }
+
+    #[test]
+    fn leading_text_before_first_tag_becomes_first_word() {
+        let lines = parse_lyrics_text("[00:01.00]Hello <00:01.50>world<00:02.00>\n");
+        let line = &lines[0];
+        assert_eq!(line.text, "Hello world");
+        assert_eq!(word_texts(line), ["Hello ", "world"]);
+        let words = line.words.as_ref().unwrap();
+        assert_eq!((ms(words[0].start), ms(words[0].end)), (1000, 1500));
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (1500, 2000));
+        assert_eq!(line.end.map(ms), Some(2000));
+    }
+
+    #[test]
+    fn mixed_angle_and_square_tags_prefer_enhanced_form() {
+        // `<` 命中即按增强型解析，行内 `[t]` 只作为文本内标签剥离
+        let lines = parse_lyrics_text("[00:02.00]a <00:02.10>b [00:02.20]c\n[00:05.00]next\n");
+        assert_eq!(lines[0].text, "a b c");
+        assert_eq!(word_texts(&lines[0]), ["a ", "b c"]);
+        let words = lines[0].words.as_ref().unwrap();
+        assert_eq!((ms(words[0].start), ms(words[0].end)), (2000, 2100));
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (2100, 5000));
+    }
+
+    #[test]
+    fn last_line_without_end_tag_keeps_zero_duration_tail() {
+        let lines = parse_lyrics_text("[00:01.00]<00:01.00>a<00:01.50>b\n");
+        let words = lines[0].words.as_ref().unwrap();
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (1500, 1500));
+        assert_eq!(lines[0].end.map(ms), Some(1500));
+    }
+
+    #[test]
+    fn verbatim_lrc_words_follow_offset() {
+        let lines = parse_lyrics_text("[offset:-196]\n[00:01.000]我[00:01.200]的[00:02.000]\n");
+        let line = &lines[0];
+        assert_eq!(ms(line.time), 1196);
+        let words = line.words.as_ref().unwrap();
+        assert_eq!((ms(words[0].start), ms(words[0].end)), (1196, 1396));
+        assert_eq!((ms(words[1].start), ms(words[1].end)), (1396, 2196));
+        assert_eq!(line.end.map(ms), Some(2196));
+    }
+
+    #[test]
+    fn word_texts_are_cleaned_like_the_full_line() {
+        let samples = [
+            "[00:01.00]<00:01.00>Tom &amp; Jerry<00:02.00>",
+            "[00:01.00]<00:01.00>a<br><00:01.50>b\u{3000}c<00:02.00>",
+            "[00:01.00]我[00:01.20]的\t[00:01.50]天[00:02.00]",
+            "[00:01.00]Hello <00:01.50>wo\0rld<00:02.00>",
+        ];
+        for sample in samples {
+            let lines = parse_lyrics_text(sample);
+            let line = &lines[0];
+            let joined = word_texts(line).concat();
+            assert_eq!(
+                joined.split_whitespace().collect::<Vec<_>>(),
+                line.text.split_whitespace().collect::<Vec<_>>(),
+                "sample: {sample}"
+            );
+        }
+        let lines = parse_lyrics_text("[00:01.00]<00:01.00>Tom &amp; Jerry<00:02.00>");
+        assert_eq!(word_texts(&lines[0]), ["Tom & Jerry"]);
+    }
+
+    #[test]
+    fn lddc_translation_snapped_to_previous_line_is_grouped_with_it() {
+        // LDDC last_ref_line_time_sty=1：译文时间戳 = 下一句起点 − 1 ms
+        let text = "[00:18.459]<00:18.459>我<00:18.814>的<00:23.097>\n[00:24.115]反正也不愿\n[00:24.116]<00:24.116>透<00:24.622>明<00:26.000>\n";
+        let lines = parse_lyrics_text(text);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].text, "反正也不愿");
+        assert_eq!(ms(lines[1].time), 18459);
+        assert!(lines[1].words.is_none());
+        assert_eq!(ms(lines[2].time), 24116);
+    }
+
+    #[test]
+    fn genuine_adjacent_lines_are_not_snapped() {
+        // 相隔 200 ms 的真实歌词不受影响；第一行没有前驱也不动；带 words 的行不动
+        let lines = parse_lyrics_text("[00:01.000]a\n[00:01.200]b\n[00:03.000]c\n");
+        assert_eq!(ms(lines[1].time), 1200);
+        let lines = parse_lyrics_text("[00:01.000]a\n[00:01.005]b\n");
+        assert_eq!(ms(lines[0].time), 1000);
+        assert_eq!(ms(lines[1].time), 1005);
+        let lines = parse_lyrics_text(
+            "[00:01.000]a\n[00:02.995]<00:02.995>x<00:03.500>\n[00:03.000]<00:03.000>y<00:04.000>\n",
+        );
+        assert_eq!(ms(lines[1].time), 2995);
     }
 }
 

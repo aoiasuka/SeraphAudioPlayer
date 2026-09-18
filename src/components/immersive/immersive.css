@@ -86,7 +86,9 @@
 .immersive-lyric-line small { display: block; font-size: 12px; line-height: 1.8; margin-top: 6px; font-family: var(--sans); }
 .immersive-lyric-line small.immersive-lyric-roman { font-style: italic; opacity: 0.75; margin-top: 2px; }
 .immersive-lyric-line.is-distant { color: var(--ink3); }
-.immersive-lyric-line.is-current { font-size: calc(var(--lyric-size) + 4px); color: var(--stamp); }
+.immersive-lyric-line.is-current { font-size: calc(var(--lyric-size) + 4px); color: var(--stamp); transition: opacity 600ms ease; }
+/* 间奏：当前句唱完且距下一句尚远（逐字来源带行结束时间）时淡出，避免长间奏一直高亮 */
+.immersive-lyric-line.is-current.is-intermission { opacity: 0.5; }
 .immersive-lyric-line.is-current::before { content: ""; width: 3px; height: 24px; position: absolute; left: 0; top: 28px; background: var(--stamp); }
 .immersive-lyric-line:focus-visible { outline-offset: -3px !important; }
 .immersive-lyrics-large { --lyric-size: 30px; }

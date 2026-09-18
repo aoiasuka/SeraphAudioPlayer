@@ -9,6 +9,7 @@ mod deletion;
 mod dsd_tags;
 mod exclude;
 mod local_lyrics;
+mod lrc_export;
 mod lyrics;
 mod media_library;
 mod metadata;

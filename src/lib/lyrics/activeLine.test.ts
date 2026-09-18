@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   activeGroupIndex,
   activeVisibleIndex,
+  groupEnd,
   groupLyricsByTime,
   hasWordTiming,
+  INTERMISSION_DELAY_SECONDS,
+  INTERMISSION_MIN_GAP_SECONDS,
+  isInIntermission,
   resolveVisibleGroups,
   wordProgress,
 } from "./activeLine";
@@ -142,5 +146,49 @@ describe("逐字进度", () => {
     expect(wordProgress(words, 2)).toEqual([1, 1, 0]);
     expect(wordProgress(words, 3)).toEqual([1, 1, 0.5]);
     expect(wordProgress(words, 9)).toEqual([1, 1, 1]);
+  });
+});
+
+describe("间奏判定（行结束时间）", () => {
+  const timed = (time: number, end: number, text: string): LyricLine => ({ time, end, text });
+
+  it("groupEnd 取组内最大 end，无 end 或 end 不晚于起点则 undefined", () => {
+    expect(groupEnd({ time: 1, lines: [line(1, "a")] })).toBeUndefined();
+    expect(groupEnd({ time: 1, lines: [timed(1, 1, "a")] })).toBeUndefined();
+    expect(groupEnd({ time: 1, lines: [timed(1, 3, "a"), timed(1, 5, "译")] })).toBe(5);
+  });
+
+  it("句尾之后超过延迟且空档够长才算间奏；下一句临近不算", () => {
+    const resolved = resolveVisibleGroups([
+      timed(0, 4, "第一句"),
+      timed(20, 24, "第二句"),
+      timed(25, 28, "第三句"),
+    ]);
+    // 第一句 4s 结束，下一句 20s → 空档 16s
+    expect(isInIntermission(resolved, 0, 3)).toBe(false);
+    expect(isInIntermission(resolved, 0, 4 + INTERMISSION_DELAY_SECONDS - 0.1)).toBe(false);
+    expect(isInIntermission(resolved, 0, 4 + INTERMISSION_DELAY_SECONDS)).toBe(true);
+    expect(isInIntermission(resolved, 0, 19)).toBe(true);
+    // 第二句 24s 结束，下一句 25s → 空档 1s，不淡出
+    expect(isInIntermission(resolved, 1, 24.9)).toBe(false);
+    // 末句：无下一句按无限空档
+    expect(isInIntermission(resolved, 2, 28 + INTERMISSION_DELAY_SECONDS)).toBe(true);
+  });
+
+  it("没有结束时间的行级歌词永不判定为间奏；越界下标返回 false", () => {
+    const resolved = resolveVisibleGroups([line(0, "a"), line(30, "b")]);
+    expect(isInIntermission(resolved, 0, 20)).toBe(false);
+    expect(isInIntermission(resolved, -1, 20)).toBe(false);
+    expect(isInIntermission(resolved, 5, 20)).toBe(false);
+    expect(INTERMISSION_MIN_GAP_SECONDS).toBeGreaterThan(INTERMISSION_DELAY_SECONDS);
+  });
+
+  it("隐藏句不参与下一句空档计算（按可见分组）", () => {
+    const resolved = resolveVisibleGroups([
+      timed(0, 4, "第一句"),
+      { time: 5, text: "作词：某人", hidden: true },
+      timed(20, 24, "第二句"),
+    ]);
+    expect(isInIntermission(resolved, 0, 10)).toBe(true);
   });
 });

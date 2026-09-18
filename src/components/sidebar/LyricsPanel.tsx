@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { CloudDownload, Copy, Loader2, Search, Upload } from "lucide-react";
+import { CloudDownload, Copy, Download, Loader2, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
@@ -17,6 +17,7 @@ import { copyText } from "@/lib/clipboard";
 import {
   activeVisibleIndex,
   hasWordTiming,
+  isInIntermission,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,9 @@ export function LyricsPanel() {
   );
   const applyOnlineLyricsForCurrentTrack = usePlayerStore(
     (s) => s.applyOnlineLyricsForCurrentTrack
+  );
+  const exportLyricsForCurrentTrack = usePlayerStore(
+    (s) => s.exportLyricsForCurrentTrack
   );
   const showNotification = usePlayerStore((s) => s.showNotification);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
@@ -108,6 +112,11 @@ export function LyricsPanel() {
   const activeLine = activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeHasWords = hasWordTiming(activeLine);
   const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
+  // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
+  const intermission = useMemo(
+    () => isInIntermission(resolvedGroups, activeIdx, currentTime),
+    [resolvedGroups, activeIdx, currentTime]
+  );
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -247,6 +256,31 @@ export function LyricsPanel() {
         label: "导入本地歌词…",
         icon: Upload,
         onSelect: handleImportClick,
+      },
+      {
+        key: "export-lrc",
+        label: "导出歌词…",
+        icon: Download,
+        disabled: rawLyrics.length === 0,
+        children: [
+          {
+            key: "export-enhanced",
+            label: "增强型 LRC（ESLyric）",
+            hint: "<t> 逐字",
+            onSelect: () => void exportLyricsForCurrentTrack("enhanced"),
+          },
+          {
+            key: "export-verbatim",
+            label: "逐字 LRC",
+            hint: "[t] 逐字",
+            onSelect: () => void exportLyricsForCurrentTrack("verbatim"),
+          },
+          {
+            key: "export-line",
+            label: "逐行 LRC",
+            onSelect: () => void exportLyricsForCurrentTrack("line"),
+          },
+        ],
       }
     );
     return entries;
@@ -429,8 +463,13 @@ export function LyricsPanel() {
                       className={cn(
                         "flex items-start gap-2 px-1 transition-all duration-300 ease-out origin-left",
                         canSeek ? "cursor-pointer" : "cursor-default",
-                        active ? "opacity-100" : "opacity-40 hover:opacity-70"
+                        active
+                          ? intermission
+                            ? "opacity-55"
+                            : "opacity-100"
+                          : "opacity-40 hover:opacity-70"
                       )}
+                      data-intermission={active && intermission ? "true" : undefined}
                     >
                       <div className="min-w-0 space-y-0.5">
                         {group.lines.map((line, lineIdx) => (
