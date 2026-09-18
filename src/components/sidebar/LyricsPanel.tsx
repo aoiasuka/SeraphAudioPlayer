@@ -15,14 +15,14 @@ import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { copyText } from "@/lib/clipboard";
 import {
-  activeGroupIndex,
-  groupLyricsByTime,
+  activeVisibleIndex,
   hasWordTiming,
+  resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
-import { visibleLyrics } from "@/lib/lyrics/exclude";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
+import type { LyricGroup } from "@/lib/lyrics/activeLine";
 import type { LyricLine, OnlineLyricsCandidate } from "@/types/track";
 
 function formatCandidateDuration(duration?: number | null) {
@@ -56,6 +56,7 @@ export function LyricsPanel() {
     (s) => s.applyOnlineLyricsForCurrentTrack
   );
   const showNotification = usePlayerStore((s) => s.showNotification);
+  const toggleSettings = usePlayerStore((s) => s.toggleSettings);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const onlineTriggerRef = useRef<HTMLElement | null>(null);
@@ -66,7 +67,7 @@ export function LyricsPanel() {
   const lastUserScrollAtRef = useRef(0);
   const lastScrollContextRef = useRef<{
     trackId: string;
-    groups: ReturnType<typeof groupLyricsByTime>;
+    groups: LyricGroup[];
     padding: number;
   } | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -84,9 +85,16 @@ export function LyricsPanel() {
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const ttmlLyricsEnabled = usePlayerStore((s) => s.ttmlLyricsEnabled);
-  // 排除规则由后端打 hidden 标记，这里只过滤
-  const lyrics = useMemo(() => visibleLyrics(rawLyrics), [rawLyrics]);
-  const lyricGroups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
+  // 排除规则由后端打 hidden 标记：全量分组用于定位、可见分组用于渲染，
+  // 被隐藏句的时间区间不并入上一句（该区间内不高亮任何行）。
+  const resolvedGroups = useMemo(() => resolveVisibleGroups(rawLyrics), [rawLyrics]);
+  const lyricGroups = resolvedGroups.visible;
+  const lyrics = useMemo(
+    () => lyricGroups.flatMap((group) => group.lines),
+    [lyricGroups]
+  );
+  // 原始歌词非空但全部被排除规则隐藏
+  const allHiddenByRules = rawLyrics.length > 0 && lyricGroups.length === 0;
   const trackId = track?.id ?? "empty";
   const selectedCandidate =
     onlineCandidates.find((candidate) => candidate.id === selectedCandidateId) ??
@@ -94,8 +102,8 @@ export function LyricsPanel() {
     null;
 
   const activeIdx = useMemo(
-    () => activeGroupIndex(lyricGroups, currentTime),
-    [lyricGroups, currentTime]
+    () => activeVisibleIndex(resolvedGroups, currentTime),
+    [resolvedGroups, currentTime]
   );
   const activeLine = activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeHasWords = hasWordTiming(activeLine);
@@ -270,7 +278,8 @@ export function LyricsPanel() {
     setIsApplyingOnline(true);
     try {
       const applied = await applyOnlineLyricsForCurrentTrack(
-        selectedCandidate.lyrics
+        selectedCandidate.lyrics,
+        selectedCandidate.lookupKeys
       );
       if (applied) setOnlineDialogOpen(false);
     } finally {
@@ -366,8 +375,29 @@ export function LyricsPanel() {
             className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1 text-left no-scrollbar"
           >
             {lyricGroups.length === 0 ? (
-              <div className="flex h-full min-h-[180px] items-center justify-center text-center">
-                <p className="font-tw text-xs font-medium text-ink3">暂无歌词稿</p>
+              <div className="flex h-full min-h-[180px] flex-col items-center justify-center gap-3 text-center">
+                {allHiddenByRules ? (
+                  <>
+                    <p className="font-tw text-xs font-medium text-ink3">
+                      歌词已被排除规则全部隐藏
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        toggleSettings();
+                        // 设置弹窗若监听该事件可直接切到「歌词设置」标签
+                        window.dispatchEvent(
+                          new CustomEvent("seraph:open-settings-tab", { detail: "lyrics" })
+                        );
+                      }}
+                      className="inline-flex h-7 items-center border-[1.5px] border-line bg-card px-2.5 font-tw text-[11px] font-bold text-ink2 transition-all hover:border-ink hover:text-ink"
+                    >
+                      打开歌词设置
+                    </button>
+                  </>
+                ) : (
+                  <p className="font-tw text-xs font-medium text-ink3">暂无歌词稿</p>
+                )}
               </div>
             ) : (
               <div className="flex min-h-full flex-col gap-2">

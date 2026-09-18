@@ -60,6 +60,51 @@ export function activeGroupIndex(
   return match;
 }
 
+/**
+ * 全部行分组与可见行分组的对照。
+ *
+ * 排除规则命中的行由后端打 `hidden` 标记。若先过滤再分组，被隐藏句的时间区间
+ * 会被并入上一句（上一句"延长"到下一可见句开始），所以这里保留全量分组做定位，
+ * 只用可见分组做渲染与点击 seek。
+ */
+export interface ResolvedLyricGroups {
+  /** 按全部行（含 hidden）分组 */
+  all: LyricGroup[];
+  /** 每组剔除 hidden 行后仍非空的组；组内 lines 只保留可见行 */
+  visible: LyricGroup[];
+  /** all 的第 i 组在 visible 里的下标；整组隐藏时为 -1 */
+  visibleIndexOfAll: number[];
+}
+
+export function resolveVisibleGroups(lyrics: LyricLine[]): ResolvedLyricGroups {
+  const all = groupLyricsByTime(lyrics);
+  const visible: LyricGroup[] = [];
+  const visibleIndexOfAll: number[] = [];
+  for (const group of all) {
+    const lines = group.lines.filter((line) => !line.hidden);
+    if (lines.length === 0) {
+      visibleIndexOfAll.push(-1);
+      continue;
+    }
+    visibleIndexOfAll.push(visible.length);
+    visible.push(lines.length === group.lines.length ? group : { time: group.time, lines });
+  }
+  return { all, visible, visibleIndexOfAll };
+}
+
+/**
+ * 当前播放时间对应的**可见**组下标：先在全量分组里二分定位，再映射到可见分组。
+ * 当前所在句整组被隐藏时返回 -1（此刻不高亮任何行，也不延长上一句）。
+ */
+export function activeVisibleIndex(
+  resolved: ResolvedLyricGroups,
+  currentTime: number
+): number {
+  const index = activeGroupIndex(resolved.all, currentTime);
+  if (index < 0) return -1;
+  return resolved.visibleIndexOfAll[index] ?? -1;
+}
+
 /** 该行是否带可用的逐字时间轴。 */
 export function hasWordTiming(
   line: LyricLine | undefined

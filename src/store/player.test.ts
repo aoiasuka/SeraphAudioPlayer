@@ -73,6 +73,44 @@ describe("player store output driver", () => {
   });
 });
 
+describe("player store lyrics settings reset", () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+    usePlayerStore.setState({
+      notification: null,
+      lyricsSourcePriority: "netease",
+      preferTraditionalLyrics: true,
+      ttmlLyricsEnabled: false,
+      amllTtmlDbUrl: "https://example.org/%s.ttml",
+      amllTtmlDbCustom: true,
+      lyricsExcludeRules: [{ id: "k", kind: "keyword", pattern: "作词" }],
+      showLyricsTranslation: false,
+      showLyricsRoman: true,
+      lyricsFolder: "D:/lyrics",
+      taskbarLyricsEnabled: true,
+    });
+  });
+
+  it("resetLyricsSettings 恢复 9 个字段、经 setLyricsExcludeRules 同步后端并提示；不动任务栏设置", () => {
+    usePlayerStore.getState().resetLyricsSettings();
+
+    expect(usePlayerStore.getState()).toMatchObject({
+      lyricsSourcePriority: "auto",
+      preferTraditionalLyrics: false,
+      ttmlLyricsEnabled: true,
+      amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
+      amllTtmlDbCustom: false,
+      lyricsExcludeRules: [],
+      showLyricsTranslation: true,
+      showLyricsRoman: false,
+      lyricsFolder: "",
+      taskbarLyricsEnabled: true,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_lyrics_exclude_rules", { rules: [] });
+    expect(usePlayerStore.getState().notification?.text).toBe("歌词设置已恢复默认");
+  });
+});
+
 describe("player store startup and persistence", () => {
   it("starts with an empty production playlist", () => {
     expect(usePlayerStore.getState().playlist).toEqual([]);

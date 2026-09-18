@@ -237,6 +237,22 @@ export const usePlayerStore = create<PlayerStore>()(
         ...createLyricsActions(storeSet, storeGet),
         ...createOutputActions(storeSet, storeGet),
         ...createStreamingActions(storeSet, storeGet),
+
+        resetLyricsSettings: () => {
+          storeSet({
+            lyricsSourcePriority: "auto",
+            preferTraditionalLyrics: false,
+            ttmlLyricsEnabled: true,
+            amllTtmlDbUrl: DEFAULT_AMLL_TTML_DB_URL,
+            amllTtmlDbCustom: false,
+            showLyricsTranslation: true,
+            showLyricsRoman: false,
+            lyricsFolder: "",
+          });
+          // 排除规则匹配在 Rust 侧，必须走 action 让后端同步并广播重拉
+          storeGet().setLyricsExcludeRules([]);
+          storeGet().showNotification("歌词设置已恢复默认");
+        },
       };
     },
     {

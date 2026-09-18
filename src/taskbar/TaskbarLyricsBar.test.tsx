@@ -117,3 +117,43 @@ describe("任务栏歌词切歌", () => {
     expect(screen.getByRole("button", { name: "播放" })).toBeTruthy();
   });
 });
+
+describe("任务栏歌词排除规则", () => {
+  beforeEach(() => {
+    handlers.clear();
+    invokeMock.mockReset();
+    localStorage.clear();
+  });
+
+  afterEach(cleanup);
+
+  it("隐藏句区间不延长上一句，显示占位；全部隐藏时显示专用文案", async () => {
+    const withHidden = {
+      ...trackA,
+      lyrics: [
+        { time: 0, text: "第一句" },
+        { time: 10, text: "作词：某人", hidden: true },
+        { time: 20, text: "第三句" },
+      ],
+    };
+    const allHidden = { ...trackB, lyrics: [{ time: 0, text: "作曲：某人", hidden: true }] };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "get_playback_snapshot") return { ...snapshotA, seconds: 5 };
+      if (command === "get_track_info") return args.trackId === "a" ? withHidden : allHidden;
+    });
+    render(<TaskbarLyricsBar />);
+    await screen.findByText("第一句");
+
+    emit({ type: "progress", track_id: "a", seconds: 15, total: 180 });
+    expect(screen.queryByText("第一句")).toBeNull();
+    expect(screen.queryByText("作词：某人")).toBeNull();
+    expect(screen.getByText("— 暂无歌词稿 —")).toBeTruthy();
+
+    emit({ type: "progress", track_id: "a", seconds: 20, total: 180 });
+    expect(screen.getByText("第三句")).toBeTruthy();
+
+    emit({ type: "track_changed", track_id: "b" });
+    expect(await screen.findByText("— 歌词已被排除规则隐藏 —")).toBeTruthy();
+    expect(screen.queryByText("— 暂无歌词稿 —")).toBeNull();
+  });
+});

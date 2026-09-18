@@ -123,10 +123,24 @@ pub struct OnlineLyricsCandidate {
     pub album: Option<String>,
     pub duration: Option<u64>,
     pub lyrics: Vec<LyricLine>,
-    /// 该候选在 AMLL TTML DB 里的查找键（如 `ncm-lyrics/123`），只在后端
-    /// 三源搜索 → TTML 二次查找之间传递，不出 IPC。
-    #[serde(skip)]
+    /// 该候选在 AMLL TTML DB 里的查找键（如 `ncm-lyrics/123`）。后端三源搜索 →
+    /// TTML 二次查找之间传递；AMLL 命中的候选把键带出 IPC（`lookupKeys`），
+    /// 前端应用时回传 `apply_online_lyrics` 回写进曲目 `lyrics_lookup_keys`。
+    #[serde(rename = "lookupKeys", default, skip_serializing_if = "Vec::is_empty")]
     pub ttml_lookup_keys: Vec<String>,
+}
+
+/// `test_amll_ttml_db`（歌词设置页「测试连接」）的结果。`kind` 是机器可读分类：
+/// invalid_url / unreachable / not_found / http_error / html / invalid_xml /
+/// unsupported_ttml / ok；`message` 是给用户看的中文说明。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmllTestResult {
+    pub ok: bool,
+    pub kind: String,
+    pub message: String,
+    pub url: String,
+    pub lines: usize,
 }
 
 /// 前端「歌词设置」里影响在线获取的选项（`fetch_online_lyrics` 的 options 参数）。

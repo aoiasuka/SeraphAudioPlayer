@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Folder, Link2, MicVocal, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Folder, Link2, Loader2, MicVocal, Plug, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
 import { MAX_EXCLUDE_PATTERN_CHARS, MAX_EXCLUDE_RULES } from "@/lib/lyrics/exclude";
@@ -14,7 +14,32 @@ import {
   previewAmllTtmlUrl,
 } from "@/lib/lyrics/settings";
 import { usePlayerStore } from "@/store/player";
+import type { AmllTtmlDbTestKind, AmllTtmlDbTestResult } from "@/store/player/types";
 import type { LyricsExcludeRule, LyricsSourcePriority } from "@/types/track";
+
+/** 「制作信息预设」一键加入的正则（Rust regex 语法），默认不启用，只是按钮。 */
+export const CREDITS_EXCLUDE_PRESET_PATTERN =
+  "^(作词|作曲|编曲|制作人|混音|母带|监制|出品|录音|和声|吉他|贝斯|鼓|键盘|弦乐|发行|OP|SP|词|曲)\\s*[:：]";
+
+/** 命中预览最多列出的行数 */
+const HIDDEN_PREVIEW_LIMIT = 30;
+
+/** test_amll_ttml_db 各结果分类的中文说明 */
+const AMLL_TEST_KIND_TEXT: Record<AmllTtmlDbTestKind, string> = {
+  invalid_url: "地址无效",
+  unreachable: "地址不可达（网络或超时）",
+  not_found: "目标未收录（示例歌曲不存在，地址本身可达）",
+  http_error: "服务返回错误",
+  html: "返回的是网页而不是 TTML（通常是镜像 404 页）",
+  invalid_xml: "返回内容不是有效的 TTML XML",
+  unsupported_ttml: "是 TTML 但解析不出歌词行",
+  ok: "连接正常",
+};
+
+function describeAmllTest(result: AmllTtmlDbTestResult) {
+  if (result.kind === "ok") return `连接正常，解析到 ${result.lines} 行`;
+  return AMLL_TEST_KIND_TEXT[result.kind] ?? result.message;
+}
 
 /** 设置弹窗里的「歌词设置」标签页。开关即时生效并持久化，没有“保存”步骤。 */
 export function LyricsSettingsTab() {
@@ -40,6 +65,7 @@ export function LyricsSettingsTab() {
   const lyricsFolder = usePlayerStore((s) => s.lyricsFolder);
   const setLyricsFolder = usePlayerStore((s) => s.setLyricsFolder);
   const showNotification = usePlayerStore((s) => s.showNotification);
+  const resetLyricsSettings = usePlayerStore((s) => s.resetLyricsSettings);
 
   const chooseLyricsFolder = async () => {
     try {
@@ -206,6 +232,23 @@ export function LyricsSettingsTab() {
         />
       </SettingRow>
 
+      <SettingRow
+        title="恢复歌词设置默认值"
+        description="把歌词源优先级、繁体转换、TTML 开关、AMLL 地址、排除规则、译文/音译显示与本地歌词目录全部恢复为默认；不影响任务栏歌词条设置。"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            if (!window.confirm("确定要把歌词设置全部恢复为默认值吗？排除规则会被清空。")) return;
+            resetLyricsSettings();
+          }}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-stamp hover:text-stamp"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          恢复默认
+        </button>
+      </SettingRow>
+
       <h4 className="pt-2 font-tw text-[10px] tracking-[2px] text-ink3 uppercase">
         [ Taskbar / 任务栏歌词条 ]
       </h4>
@@ -322,17 +365,47 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
   const setAmllTtmlDbUrl = usePlayerStore((s) => s.setAmllTtmlDbUrl);
   const [draft, setDraft] = useState(amllUrl);
   const [custom, setCustom] = useState(amllCustom);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<AmllTtmlDbTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const canTest = isTauriRuntime();
 
   useEffect(() => {
     if (open) {
       setDraft(amllUrl);
       setCustom(amllCustom);
+      setTestResult(null);
+      setTestError(null);
     }
   }, [open, amllUrl, amllCustom]);
 
   const effectiveDraft = custom ? draft : AMLL_TTML_DB_PRESET_URL;
   const valid = isValidAmllTtmlDbUrl(effectiveDraft, custom);
   const preview = valid ? previewAmllTtmlUrl(effectiveDraft) : "";
+
+  // 草稿改动后旧的测试结论不再成立
+  useEffect(() => {
+    setTestResult(null);
+    setTestError(null);
+  }, [effectiveDraft, custom]);
+
+  const runTest = async () => {
+    if (!valid || testing || !canTest) return;
+    setTesting(true);
+    setTestResult(null);
+    setTestError(null);
+    try {
+      const result = await invoke<AmllTtmlDbTestResult>("test_amll_ttml_db", {
+        template: effectiveDraft,
+        custom,
+      });
+      setTestResult(result);
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -429,6 +502,23 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
           <a className="mx-1 underline hover:text-ink" href={AMLL_LINKS.search} target="_blank" rel="noreferrer">在线检索</a>·
           <a className="mx-1 underline hover:text-ink" href={AMLL_LINKS.tool} target="_blank" rel="noreferrer">TTML 制作工具</a>
         </p>
+        {testResult || testError ? (
+          <div
+            role="status"
+            className={`border-[1.5px] px-2.5 py-2 ${
+              testResult?.ok ? "border-ink bg-paper2" : "border-stamp bg-stamp-soft"
+            }`}
+          >
+            <p className={`font-tw text-[11px] font-bold ${testResult?.ok ? "text-ink" : "text-stamp"}`}>
+              {testResult ? describeAmllTest(testResult) : `测试失败：${testError}`}
+            </p>
+            {testResult?.url ? (
+              <p className="mt-0.5 break-all font-tw text-[10px] text-ink3" title={testResult.url}>
+                请求：{testResult.url}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <div className="flex justify-between gap-2 border-t border-line pt-3">
           <button
             type="button"
@@ -450,6 +540,16 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
               取消
             </button>
             <button
+              type="button"
+              onClick={() => void runTest()}
+              disabled={!valid || testing || !canTest}
+              title={canTest ? "向该地址请求一首示例歌曲的 TTML 并尝试解析" : "仅桌面端可测试连接"}
+              className="inline-flex h-8 items-center gap-1.5 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 hover:border-ink disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plug className="h-3.5 w-3.5" />}
+              测试连接
+            </button>
+            <button
               type="submit"
               disabled={!valid}
               className="h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper hover:bg-stamp hover:border-stamp disabled:bg-line disabled:border-line disabled:text-ink2"
@@ -466,6 +566,8 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
 function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const rules = usePlayerStore((s) => s.lyricsExcludeRules);
   const setRules = usePlayerStore((s) => s.setLyricsExcludeRules);
+  const showNotification = usePlayerStore((s) => s.showNotification);
+  const currentTrack = usePlayerStore((s) => s.currentTrack());
   const [kind, setKind] = useState<LyricsExcludeRule["kind"]>("keyword");
   const [pattern, setPattern] = useState("");
   const [regexError, setRegexError] = useState<string | null>(null);
@@ -522,6 +624,24 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
 
   const removeRule = (id: string) => setRules(rules.filter((rule) => rule.id !== id));
 
+  // 「制作信息预设」：一键加入一条常见制作信息行正则；已有相同 pattern 则提示不重复
+  const hasCreditsPreset = rules.some((rule) => rule.pattern === CREDITS_EXCLUDE_PRESET_PATTERN);
+  const addCreditsPreset = () => {
+    if (hasCreditsPreset) {
+      showNotification("制作信息预设已存在");
+      return;
+    }
+    if (rules.length >= MAX_EXCLUDE_RULES) return;
+    setRules([
+      ...rules,
+      { id: `regex:credits-preset:${Date.now()}`, kind: "regex", pattern: CREDITS_EXCLUDE_PRESET_PATTERN },
+    ]);
+  };
+
+  // 当前曲目命中预览：hidden 标记由后端在回传时打好，规则变更后会重拉，这里不自己匹配
+  const hiddenLines = currentTrack?.lyrics.filter((line) => line.hidden === true) ?? [];
+  const hiddenOverflow = Math.max(0, hiddenLines.length - HIDDEN_PREVIEW_LIMIT);
+
   return (
     <Dialog open={open} onClose={onClose} className="max-w-lg space-y-4">
       <span className="file-tab">FILE — LYRICS / EXCLUDE</span>
@@ -564,6 +684,18 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
       ) : rules.length >= MAX_EXCLUDE_RULES ? (
         <p className="font-tw text-[10px] text-stamp">最多 {MAX_EXCLUDE_RULES} 条规则。</p>
       ) : null}
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-tw text-[10px] text-ink3">预设：</span>
+        <button
+          type="button"
+          onClick={addCreditsPreset}
+          disabled={!hasCreditsPreset && rules.length >= MAX_EXCLUDE_RULES}
+          title={CREDITS_EXCLUDE_PRESET_PATTERN}
+          className="h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[10px] font-bold text-ink2 hover:border-ink disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          制作信息预设
+        </button>
+      </div>
       <div className="max-h-[40vh] space-y-1.5 overflow-y-auto pr-1">
         {rules.length === 0 ? (
           <div className="flex h-24 items-center justify-center border-[1.5px] border-dashed border-line font-tw text-xs text-ink3">
@@ -591,6 +723,31 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
               </button>
             </div>
           ))
+        )}
+      </div>
+      <div className="space-y-1.5 border-t border-line pt-3">
+        <h4 className="font-tw text-[10px] font-bold uppercase tracking-[0.14em] text-ink3">
+          当前曲目命中预览
+        </h4>
+        {!currentTrack ? (
+          <p className="font-tw text-[11px] text-ink3">当前没有播放曲目</p>
+        ) : hiddenLines.length === 0 ? (
+          <p className="font-tw text-[11px] text-ink3">当前曲目没有被隐藏的行</p>
+        ) : (
+          <ul className="max-h-[20vh] space-y-0.5 overflow-y-auto pr-1" aria-label="被隐藏的歌词行">
+            {hiddenLines.slice(0, HIDDEN_PREVIEW_LIMIT).map((line, index) => (
+              <li
+                key={`${line.time}-${index}`}
+                className="truncate font-tw text-[11px] text-ink2 line-through decoration-stamp/70"
+                title={line.text}
+              >
+                {line.text}
+              </li>
+            ))}
+            {hiddenOverflow > 0 ? (
+              <li className="font-tw text-[10px] text-ink3">…还有 {hiddenOverflow} 行</li>
+            ) : null}
+          </ul>
         )}
       </div>
       <div className="flex justify-end gap-2 border-t border-line pt-3">

@@ -54,12 +54,57 @@ fn parse_lyrics_bytes_inner(bytes: &[u8]) -> Vec<LyricLine> {
     }
 
     let text = decode_lyric_bytes(bytes);
+
+    // 手动导入（`save_track_lyrics`）只拿到裸字节没有扩展名：先按内容嗅探 TTML，
+    // 命中且解析非空即返回；空则继续走三方/LRC 解析，不影响既有路径。
+    if looks_like_ttml(&text) {
+        let ttml_lyrics = super::ttml::parse_ttml_lyrics(&text);
+        if !ttml_lyrics.is_empty() {
+            return ttml_lyrics;
+        }
+    }
+
     let provider_lyrics = parse_provider_lyrics_text(&text);
     if !provider_lyrics.is_empty() {
         return provider_lyrics;
     }
 
     parse_lyrics_text(&text)
+}
+
+/// TTML 内容嗅探：去 BOM/前导空白后以 `<?xml` 或 `<tt` 开头，且开头一段里含 `<tt`
+/// （大小写不敏感）。只看前 8 K 字符，避免为嗅探把 4 MB 文本整份小写化。
+pub(crate) fn looks_like_ttml(text: &str) -> bool {
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+    let head = trimmed
+        .chars()
+        .take(8 * 1024)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (head.starts_with("<?xml") || head.starts_with("<tt")) && head.contains("<tt")
+}
+
+/// 按扩展名分派的歌词文件解析：`.ttml` 走 TTML 解析（经 `clamp_lyrics` 收口），
+/// 其余交给 `parse_lyrics_bytes`。同名 sidecar 与本地歌词目录两处复用。
+pub(crate) fn parse_lyrics_file_bytes(path_ext: Option<&str>, bytes: &[u8]) -> Vec<LyricLine> {
+    if path_ext.is_some_and(|ext| ext.eq_ignore_ascii_case("ttml")) {
+        return clamp_lyrics(super::ttml::parse_ttml_lyrics(&decode_lyric_bytes(bytes)));
+    }
+    parse_lyrics_bytes(bytes)
+}
+
+/// 判定一组歌词是否是「纯文本合成」的假时间轴：`parse_lyrics_text` 对无时间戳歌词
+/// 按 `index * 4s` 铺时间，因此全部行恰为 4 秒等差、且没有 words/end 即视为未同步。
+/// 空列表返回 false；单行 `[00:00.00]` 的真 LRC 与单行纯文本无法区分，一律按未同步算。
+// 供后续「纯文本歌词不滚动/提示」逻辑调用，目前只有测试引用。
+#[allow(dead_code)]
+pub(crate) fn lyrics_are_unsynced(lyrics: &[LyricLine]) -> bool {
+    !lyrics.is_empty()
+        && lyrics.iter().enumerate().all(|(index, line)| {
+            (line.time - index as f64 * 4.0).abs() < 1e-6
+                && line.words.is_none()
+                && line.end.is_none()
+        })
 }
 
 pub(crate) fn parse_encrypted_qrc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
@@ -176,8 +221,24 @@ pub(crate) fn parse_qrc_text(text: &str) -> Vec<LyricLine> {
     provider_lines_to_lyrics(parse_qrc_content(&decode_xml_entities(&content)))
 }
 
-pub(crate) fn parse_qrc_content(text: &str) -> Vec<ProviderLyricLine> {
-    parse_timed_provider_lines(text, qrc_line_text)
+/// 三方（QRC / KRC / YRC）歌词行：`base` 是行级起点与清洗后的整行文本，
+/// `end_ms` 来自行头 `[start,dur]`，`words` 是逐字音节（已换算为秒）。
+/// `ProviderLyricLine` 定义在 types.rs，这里以包装方式扩展而不改动它。
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderWordLine {
+    pub(crate) base: ProviderLyricLine,
+    pub(crate) end_ms: Option<u64>,
+    pub(crate) words: Vec<LyricWord>,
+}
+
+/// 行体拆分结果：拼接后的整行原文（尚未 `clean_lyric_text`）+ 逐字音节。
+pub(crate) struct ProviderBody {
+    pub(crate) text: String,
+    pub(crate) words: Vec<LyricWord>,
+}
+
+pub(crate) fn parse_qrc_content(text: &str) -> Vec<ProviderWordLine> {
+    parse_timed_provider_lines(text, |body, _| qrc_body(body))
 }
 
 pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
@@ -197,25 +258,36 @@ pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
             continue;
         }
 
-        let Some((start_ms, _, body)) = split_provider_timed_line(line) else {
+        let Some((start_ms, duration_ms, body)) = split_provider_timed_line(line) else {
             continue;
         };
         // 审2-S6：清洗失败（如纯间奏/空白行）的行以空文本占位保留在 original
         // 中，保证译文按行号对齐时索引空间不塌缩；占位行在输出前被过滤。
-        let text = clean_lyric_text(&tagged_line_text(body, '<', '>', 3)).unwrap_or_default();
-        original.push(ProviderLyricLine { start_ms, text });
+        // KRC 音节标签 `<offset,dur,0>` 的 offset 相对行 start，这里换算成绝对毫秒。
+        let parsed = tagged_body(body, '<', '>', 3, start_ms);
+        let text = clean_lyric_text(&parsed.text).unwrap_or_default();
+        original.push(ProviderWordLine {
+            base: ProviderLyricLine { start_ms, text },
+            end_ms: Some(start_ms.saturating_add(duration_ms)),
+            words: parsed.words,
+        });
     }
 
     // 审2-S6：主歌词输出前过滤空占位行；译文对齐（下方）用完整 original。
     let mut lyrics = provider_lines_to_lyrics(
         original
             .iter()
-            .filter(|line| !line.text.is_empty())
+            .filter(|line| !line.base.text.is_empty())
             .cloned()
             .collect(),
     );
     if let Some(language_tag) = language_tag {
-        lyrics.extend(parse_krc_translation_lines(&language_tag, &original));
+        // 译文行只需行级时间，不带 words
+        let bases = original
+            .iter()
+            .map(|line| line.base.clone())
+            .collect::<Vec<_>>();
+        lyrics.extend(parse_krc_translation_lines(&language_tag, &bases));
         lyrics.sort_by(|a, b| {
             a.time
                 .partial_cmp(&b.time)
@@ -228,32 +300,79 @@ pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
 }
 
 pub(crate) fn parse_yrc_text(text: &str) -> Vec<LyricLine> {
-    provider_lines_to_lyrics(parse_timed_provider_lines(text, |body| {
-        tagged_line_text(body, '(', ')', 3)
+    // YRC 音节标签 `(start,dur,0)` 是绝对毫秒，行 start 只用于行级时间
+    provider_lines_to_lyrics(parse_timed_provider_lines(text, |body, _| {
+        tagged_body(body, '(', ')', 3, 0)
     }))
 }
 
+/// 逐行解析 `[start,dur]行体`，`body_to_parts(body, start_ms)` 负责拆出整行文本与音节。
+/// 整行清洗为空的行丢弃；有音节但整行为空不会发生（音节文本非空即整行非空）。
 pub(crate) fn parse_timed_provider_lines(
     text: &str,
-    body_to_text: impl Fn(&str) -> String,
-) -> Vec<ProviderLyricLine> {
+    body_to_parts: impl Fn(&str, u64) -> ProviderBody,
+) -> Vec<ProviderWordLine> {
     normalized_lyric_lines(text)
         .filter_map(|raw_line| {
             let line = raw_line.trim();
-            let (start_ms, _, body) = split_provider_timed_line(line)?;
-            clean_lyric_text(&body_to_text(body)).map(|text| ProviderLyricLine { start_ms, text })
+            let (start_ms, duration_ms, body) = split_provider_timed_line(line)?;
+            let parsed = body_to_parts(body, start_ms);
+            clean_lyric_text(&parsed.text).map(|text| ProviderWordLine {
+                base: ProviderLyricLine { start_ms, text },
+                end_ms: Some(start_ms.saturating_add(duration_ms)),
+                words: parsed.words,
+            })
         })
         .collect()
 }
 
-pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderLyricLine>) -> Vec<LyricLine> {
-    lines.sort_by_key(|line| line.start_ms);
+pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderWordLine>) -> Vec<LyricLine> {
+    lines.sort_by_key(|line| line.base.start_ms);
     let mut lyrics = lines
         .into_iter()
-        .map(|line| LyricLine::new(line.start_ms as f64 / 1000.0, line.text))
+        .map(|line| {
+            let mut lyric = LyricLine::new(line.base.start_ms as f64 / 1000.0, line.base.text);
+            // dur 为 0 的行头（部分源用 0 占位）不给 end，交给前端按下一行推算
+            lyric.end = line
+                .end_ms
+                .filter(|end| *end > line.base.start_ms)
+                .map(|end| end as f64 / 1000.0);
+            if !line.words.is_empty() {
+                lyric.words = Some(line.words);
+            }
+            lyric
+        })
         .collect::<Vec<_>>();
     lyrics.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
     lyrics
+}
+
+/// 把 `(起始毫秒, 时长毫秒, 原文片段)` 序列收成音节：纯空白片段并入前一音节
+/// （词间空格属前一音节，与 TTML / 增强 LRC 口径一致；开头的空白直接丢弃），
+/// 文本经 `strip_inline_time_tags` + 全角空格归一，音节全部无效时返回空。
+fn collect_provider_words(segments: Vec<(u64, u64, &str)>) -> Vec<LyricWord> {
+    let mut words: Vec<LyricWord> = Vec::new();
+    for (start_ms, duration_ms, raw) in segments {
+        let text = strip_inline_time_tags(raw).replace(['\u{3000}', '\t'], " ");
+        if text.trim().is_empty() {
+            if let Some(last) = words.last_mut() {
+                if !text.is_empty() && !last.text.ends_with(' ') {
+                    last.text.push(' ');
+                }
+                // 空白音节的时间并入前一音节，保证时间轴连续
+                last.end = last
+                    .end
+                    .max(start_ms.saturating_add(duration_ms) as f64 / 1000.0);
+            }
+            continue;
+        }
+        words.push(LyricWord {
+            start: start_ms as f64 / 1000.0,
+            end: start_ms.saturating_add(duration_ms) as f64 / 1000.0,
+            text,
+        });
+    }
+    words
 }
 
 pub(crate) fn normalized_lyric_lines(text: &str) -> impl Iterator<Item = &str> {
@@ -302,7 +421,10 @@ pub(crate) fn extract_qrc_lyric_content(text: &str) -> Option<String> {
         .map(|content| content.as_str().to_string())
 }
 
-pub(crate) fn qrc_line_text(body: &str) -> String {
+/// QRC 行体：`文本(start,dur)文本(start,dur)…`，标签在文本**后**，start 为绝对毫秒。
+/// 没有任何 2 元组标签时整行按行级输出（words 为空）。
+pub(crate) fn qrc_body(body: &str) -> ProviderBody {
+    let mut segments: Vec<(u64, u64, &str)> = Vec::new();
     let mut output = String::new();
     let mut cursor = 0;
     let mut matched = false;
@@ -314,9 +436,10 @@ pub(crate) fn qrc_line_text(body: &str) -> String {
         };
         let close = open + 1 + relative_close;
         let token = &body[open + 1..close];
-        if is_numeric_tuple(token, 2) {
+        if let Some(numbers) = parse_numeric_tuple(token, 2) {
             let content = strip_provider_prefix_timestamp(&body[cursor..open]);
             output.push_str(content);
+            segments.push((numbers[0], numbers[1], content));
             matched = true;
             cursor = close + 1;
         } else {
@@ -325,29 +448,68 @@ pub(crate) fn qrc_line_text(body: &str) -> String {
     }
 
     if matched {
-        output
+        ProviderBody {
+            text: output,
+            words: collect_provider_words(segments),
+        }
     } else {
-        body.to_string()
+        ProviderBody {
+            text: body.to_string(),
+            words: Vec::new(),
+        }
     }
 }
 
-pub(crate) fn tagged_line_text(body: &str, open: char, close: char, tuple_len: usize) -> String {
+/// KRC / YRC 行体：`<offset,dur,0>文本` 或 `(start,dur,0)文本`，标签在文本**前**，
+/// 标签到下一个标签之间是一个音节；`base_ms` 加到首元素上（KRC 传行 start，YRC 传 0）。
+/// 没有标签时整行按行级输出（words 为空）。
+pub(crate) fn tagged_body(
+    body: &str,
+    open: char,
+    close: char,
+    tuple_len: usize,
+    base_ms: u64,
+) -> ProviderBody {
     let markers = find_tuple_markers(body, open, close, tuple_len);
     if markers.is_empty() {
-        return body.to_string();
+        return ProviderBody {
+            text: body.to_string(),
+            words: Vec::new(),
+        };
     }
 
     let mut output = String::new();
-    for (index, (_, marker_end)) in markers.iter().enumerate() {
+    let mut segments: Vec<(u64, u64, &str)> = Vec::new();
+    for (index, (marker_start, marker_end)) in markers.iter().enumerate() {
         let content_start = *marker_end;
         let content_end = markers
             .get(index + 1)
             .map(|(next_start, _)| *next_start)
             .unwrap_or(body.len());
-        output.push_str(&body[content_start..content_end]);
+        let content = &body[content_start..content_end];
+        output.push_str(content);
+        let token = &body[marker_start + open.len_utf8()..marker_end - close.len_utf8()];
+        if let Some(numbers) = parse_numeric_tuple(token, tuple_len) {
+            segments.push((base_ms.saturating_add(numbers[0]), numbers[1], content));
+        }
     }
 
-    output
+    ProviderBody {
+        text: output,
+        words: collect_provider_words(segments),
+    }
+}
+
+/// `is_numeric_tuple` 的取值版：形如 `a,b[,c]` 的纯数字元组解析成数字；
+/// 任一段溢出 u64 视为无效（不让畸形输入 panic 或绕过）。
+pub(crate) fn parse_numeric_tuple(token: &str, expected_len: usize) -> Option<Vec<u64>> {
+    if !is_numeric_tuple(token, expected_len) {
+        return None;
+    }
+    token
+        .split(',')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
 }
 
 pub(crate) fn find_tuple_markers(

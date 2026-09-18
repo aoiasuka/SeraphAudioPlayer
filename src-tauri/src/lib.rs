@@ -64,6 +64,7 @@ pub fn run() {
             ipc::library::apply_online_lyrics,
             ipc::library::fetch_online_lyrics,
             ipc::library::find_local_lyrics,
+            ipc::library::test_amll_ttml_db,
             ipc::library::set_lyrics_exclude_rules,
             ipc::library::validate_lyrics_exclude_rules,
             ipc::library::fetch_online_cover,

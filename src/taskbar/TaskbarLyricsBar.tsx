@@ -4,11 +4,10 @@ import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
 import {
-  activeGroupIndex,
-  groupLyricsByTime,
+  activeVisibleIndex,
   hasWordTiming,
+  resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
-import { visibleLyrics } from "@/lib/lyrics/exclude";
 import {
   coverSrc,
   emitToMain,
@@ -330,14 +329,18 @@ export function TaskbarLyricsBar() {
     };
   }, []);
 
-  const lyricGroups = useMemo(
-    () => groupLyricsByTime(visibleLyrics(track?.lyrics ?? [])),
+  // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
+  const resolvedGroups = useMemo(
+    () => resolveVisibleGroups(track?.lyrics ?? []),
     [track]
   );
+  const lyricGroups = resolvedGroups.visible;
   const activeIdx = useMemo(
-    () => activeGroupIndex(lyricGroups, seconds),
-    [lyricGroups, seconds]
+    () => activeVisibleIndex(resolvedGroups, seconds),
+    [resolvedGroups, seconds]
   );
+  // 原始歌词非空但全部被排除规则隐藏
+  const allHiddenByRules = (track?.lyrics.length ?? 0) > 0 && lyricGroups.length === 0;
   const activeLineEntry =
     activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeLine = activeLineEntry?.text ?? "";
@@ -443,7 +446,11 @@ export function TaskbarLyricsBar() {
             )
           ) : (
             <span className="font-tw text-[10px] font-medium text-ink3">
-              {track ? "— 暂无歌词稿 —" : "— 未在播放 —"}
+              {track
+                ? allHiddenByRules
+                  ? "— 歌词已被排除规则隐藏 —"
+                  : "— 暂无歌词稿 —"
+                : "— 未在播放 —"}
             </span>
           )}
         </div>

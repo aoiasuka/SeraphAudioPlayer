@@ -39,7 +39,7 @@ beforeEach(() => {
   HTMLElement.prototype.scrollTo = vi.fn();
   HTMLElement.prototype.setPointerCapture = vi.fn();
   useImmersiveStore.setState({ isOpen: false, mode: "lyrics" });
-  usePlayerStore.setState({ playlist: [track, { ...track, id: "immersive-b", title: "下一张唱片" }], currentTrackIndex: 0, currentTime: 15, isPlaying: true, liked: {}, shuffleMode: false, loopMode: false });
+  usePlayerStore.setState({ playlist: [track, { ...track, id: "immersive-b", title: "下一张唱片" }], currentTrackIndex: 0, currentTime: 15, isPlaying: true, liked: {}, shuffleMode: false, loopMode: false, showLyricsTranslation: true });
 });
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -85,12 +85,27 @@ describe("沉浸播放的会话与交互", () => {
     expect(screen.getByRole("button", { name: /First line/ })).toHaveAttribute("aria-current", "true");
     await user.click(screen.getByRole("button", { name: "显示译文" }));
     expect(screen.queryByText("第一句译文")).not.toBeInTheDocument();
+    // 译文开关写入 store（与设置页「显示译文」共用）
+    expect(usePlayerStore.getState().showLyricsTranslation).toBe(false);
     await user.click(screen.getByRole("button", { name: "放大歌词字号" }));
     expect(screen.getByRole("button", { name: "放大歌词字号" })).toHaveAttribute("aria-pressed", "true");
     expect(usePlayerStore.getState().currentTime).toBe(15);
     await user.click(screen.getByRole("button", { name: /Second line/ }));
     expect(usePlayerStore.getState().currentTime).toBe(20);
     expect(screen.getByRole("button", { name: /Second line/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("译文开关读写 store：设置页关掉译文后沉浸页同步隐藏，沉浸页再开回写 store", async () => {
+    const user = userEvent.setup();
+    useImmersiveStore.getState().open();
+    render(<PlayerHarness />);
+    expect(screen.getByText("第一句译文")).toBeInTheDocument();
+    act(() => usePlayerStore.getState().setShowLyricsTranslation(false));
+    expect(screen.queryByText("第一句译文")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "显示译文" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(screen.getByRole("button", { name: "显示译文" }));
+    expect(usePlayerStore.getState().showLyricsTranslation).toBe(true);
+    expect(screen.getByText("第一句译文")).toBeInTheDocument();
   });
 
   it("进度拖动只在松开时定位；取消拖动保持原进度，键盘输入直接定位", () => {

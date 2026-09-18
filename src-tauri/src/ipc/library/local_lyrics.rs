@@ -4,8 +4,8 @@
 //! 元数据归一化比对（去括号版本后缀、大小写、全半角、空白），括号里的纯数字视为
 //! 网易云歌曲 ID → 记为 `ncm-lyrics/<id>` 查找键，供 AMLL TTML 直取。
 //!
-//! 只扫一层目录、只看歌词扩展名、文件大小沿用 4 MB 上限；目录本身必须是用户在设置里
-//! 选过的绝对路径且不含 `..` 点段。
+//! 扫顶层 + 直接子目录（深度 1，跳过符号链接目录）、只看歌词扩展名、文件大小沿用 4 MB
+//! 上限；目录本身必须是用户在设置里选过的绝对路径且不含 `..` 点段。
 
 use super::prelude::*;
 
@@ -171,7 +171,8 @@ fn match_score(
     }
 }
 
-/// 在目录里找最匹配的歌词文件。
+/// 在目录里找最匹配的歌词文件：扫顶层 + 直接子目录（深度 1，不再往下），
+/// 跳过符号链接目录（不跟着链接跑出用户选的目录），总条目受 `MAX_DIR_ENTRIES` 封顶。
 pub(crate) fn find_in_folder(
     folder: &Path,
     track_title: &str,
@@ -179,38 +180,86 @@ pub(crate) fn find_in_folder(
 ) -> Option<(PathBuf, Vec<String>)> {
     let entries = fs::read_dir(folder).ok()?;
     let mut best: Option<(u8, PathBuf, Vec<String>)> = None;
-    for entry in entries.flatten().take(MAX_DIR_ENTRIES) {
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+    let mut budget = MAX_DIR_ENTRIES;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+
+    for entry in entries.flatten() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        // `entry.file_type()` 不跟随符号链接：链接目录直接跳过，链接文件也不认
+        let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if !LYRIC_EXTENSIONS
-            .iter()
-            .any(|allowed| ext.eq_ignore_ascii_case(allowed))
-        {
+        if file_type.is_symlink() {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        let Some((artist, title, ncm_id)) = parse_lyrics_file_stem(stem) else {
-            continue;
-        };
-        let score = match_score(artist.as_deref(), &title, track_title, track_artist);
-        if score == 0 {
+        if file_type.is_dir() {
+            subdirs.push(entry.path());
             continue;
         }
-        // 同分时优先 .ttml（逐字），其次先见者
-        let ext_bonus = u8::from(ext.eq_ignore_ascii_case("ttml"));
-        let total = score * 2 + ext_bonus;
-        if best.as_ref().is_none_or(|(current, ..)| total > *current) {
-            let keys = ncm_id
-                .map(|id| vec![format!("ncm-lyrics/{id}")])
-                .unwrap_or_default();
-            best = Some((total, path, keys));
+        consider_lyrics_file(entry.path(), track_title, track_artist, &mut best);
+    }
+
+    for subdir in subdirs {
+        if budget == 0 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&subdir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            // 子目录里只看普通文件，不再下钻
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            consider_lyrics_file(entry.path(), track_title, track_artist, &mut best);
         }
     }
+
     best.map(|(_, path, keys)| (path, keys))
+}
+
+/// 单个候选文件：扩展名过滤 → 文件名解析 → 打分，比当前最优高则替换。
+fn consider_lyrics_file(
+    path: PathBuf,
+    track_title: &str,
+    track_artist: &str,
+    best: &mut Option<(u8, PathBuf, Vec<String>)>,
+) {
+    let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+        return;
+    };
+    if !LYRIC_EXTENSIONS
+        .iter()
+        .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+    {
+        return;
+    }
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let Some((artist, title, ncm_id)) = parse_lyrics_file_stem(stem) else {
+        return;
+    };
+    let score = match_score(artist.as_deref(), &title, track_title, track_artist);
+    if score == 0 {
+        return;
+    }
+    // 同分时优先 .ttml（逐字），其次先见者（顶层先于子目录）
+    let ext_bonus = u8::from(ext.eq_ignore_ascii_case("ttml"));
+    let total = score * 2 + ext_bonus;
+    if best.as_ref().is_none_or(|(current, ..)| total > *current) {
+        let keys = ncm_id
+            .map(|id| vec![format!("ncm-lyrics/{id}")])
+            .unwrap_or_default();
+        *best = Some((total, path, keys));
+    }
 }
 
 pub(crate) fn read_local_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
@@ -221,15 +270,8 @@ pub(crate) fn read_local_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
         return None;
     }
     let bytes = fs::read(path).ok()?;
-    let is_ttml = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ttml"));
-    let lyrics = if is_ttml {
-        clamp_lyrics(super::ttml::parse_ttml_lyrics(&decode_lyric_bytes(&bytes)))
-    } else {
-        parse_lyrics_bytes(&bytes)
-    };
+    let ext = path.extension().and_then(|value| value.to_str());
+    let lyrics = parse_lyrics_file_bytes(ext, &bytes);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
@@ -306,6 +348,27 @@ mod tests {
 
         let lyrics = read_local_lyrics(&path).unwrap();
         assert_eq!(lyrics[0].text, "a");
+
+        // 直接子目录命中（深度 1）；孙目录不扫
+        fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
+        fs::write(
+            dir.join("sub").join("周杰伦 - 晴天 (186016).lrc"),
+            "[00:02.00]c",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("sub").join("deeper").join("周杰伦 - 稻香.lrc"),
+            "[00:03.00]d",
+        )
+        .unwrap();
+        let (path, keys) = find_in_folder(&dir, "晴天", "周杰伦").expect("subdir match");
+        assert!(path.ends_with("周杰伦 - 晴天 (186016).lrc"));
+        assert_eq!(keys, ["ncm-lyrics/186016"]);
+        assert!(find_in_folder(&dir, "稻香", "周杰伦").is_none());
+        // 顶层与子目录同分时顶层先见者胜
+        fs::write(dir.join("sub").join("王力宏 - 唯一.lrc"), "[00:01.00]e").unwrap();
+        let (path, _) = find_in_folder(&dir, "唯一", "王力宏").expect("match");
+        assert!(path.ends_with("王力宏 - 唯一 (65923804).lrc"));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -262,7 +262,10 @@ export interface PlayerStore {
   fetchOnlineLyricsForCurrentTrack: (
     query?: string
   ) => Promise<OnlineLyricsCandidate[]>;
-  applyOnlineLyricsForCurrentTrack: (lyrics: LyricLine[]) => Promise<boolean>;
+  applyOnlineLyricsForCurrentTrack: (
+    lyrics: LyricLine[],
+    lookupKeys?: string[]
+  ) => Promise<boolean>;
   loadDevices: () => Promise<void>;
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;
@@ -283,6 +286,8 @@ export interface PlayerStore {
   setShowLyricsTranslation: (enabled: boolean) => void;
   setShowLyricsRoman: (enabled: boolean) => void;
   setLyricsFolder: (folder: string) => void;
+  /** 把 9 个歌词设置字段恢复默认；排除规则经 setLyricsExcludeRules 清空以同步后端。 */
+  resetLyricsSettings: () => void;
   /** 在本地歌词目录里匹配并写入该曲目的歌词；命中返回 true */
   findLocalLyricsForTrack: (track: Track) => Promise<boolean>;
   toggleDeviceMenu: () => void;
@@ -290,6 +295,26 @@ export interface PlayerStore {
   toggleSettings: () => void;
   showNotification: (text: string) => void;
   dismissNotification: () => void;
+}
+
+/** `test_amll_ttml_db` 命令的结果分类。 */
+export type AmllTtmlDbTestKind =
+  | "invalid_url"
+  | "unreachable"
+  | "not_found"
+  | "http_error"
+  | "html"
+  | "invalid_xml"
+  | "unsupported_ttml"
+  | "ok";
+
+/** `test_amll_ttml_db({ template, custom, sampleKey? })` 的返回值。 */
+export interface AmllTtmlDbTestResult {
+  ok: boolean;
+  kind: AmllTtmlDbTestKind;
+  message: string;
+  url: string;
+  lines: number;
 }
 
 export type PlayerStoreSet = (

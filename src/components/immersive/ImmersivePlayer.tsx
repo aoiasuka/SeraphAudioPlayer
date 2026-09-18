@@ -49,7 +49,10 @@ export function ImmersivePlayer() {
   const closeRef = useRef<HTMLButtonElement>(null);
   const queueTriggerRef = useRef<HTMLButtonElement>(null);
   const [queueOpen, setQueueOpen] = useState(false);
-  const [showTranslation, setShowTranslation] = useState(true);
+  // 译文开关与设置页共用 store 字段（持久化），不再是沉浸页私有状态
+  const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
+  const setShowLyricsTranslation = usePlayerStore((s) => s.setShowLyricsTranslation);
+  const toggleTranslation = () => setShowLyricsTranslation(!showTranslation);
   const [largeLyrics, setLargeLyrics] = useState(false);
 
   useEffect(() => {
@@ -117,12 +120,12 @@ export function ImmersivePlayer() {
               <p title={track.album}>{track.album || "未知专辑"}</p>
             </div>
           </div>
-          {mode === "analysis" && <ImmersiveLyrics compact track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={() => setShowTranslation((value) => !value)} onToggleSize={() => setLargeLyrics((value) => !value)} />}
+          {mode === "analysis" && <ImmersiveLyrics compact track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={() => setLargeLyrics((value) => !value)} />}
         </aside>
 
         <div className="immersive-mode-panel" role="tabpanel" id={`immersive-panel-${mode}`} aria-labelledby={`immersive-tab-${mode}`}>
           {mode === "lyrics" ? (
-            <ImmersiveLyrics track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={() => setShowTranslation((value) => !value)} onToggleSize={() => setLargeLyrics((value) => !value)} />
+            <ImmersiveLyrics track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={() => setLargeLyrics((value) => !value)} />
           ) : (
             <Suspense fallback={<div className="immersive-empty" role="status">正在打开声学分析…</div>}>
               <LazyImmersiveAnalysis key={track.id} />

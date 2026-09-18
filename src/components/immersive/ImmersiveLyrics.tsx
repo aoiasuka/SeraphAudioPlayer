@@ -3,19 +3,20 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
-import { activeGroupIndex, groupLyricsByTime, hasWordTiming } from "@/lib/lyrics/activeLine";
-import { visibleLyrics } from "@/lib/lyrics/exclude";
+import { activeVisibleIndex, hasWordTiming, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
 function useLyricGroups(track: Track) {
-  // 排除规则由后端打 hidden 标记，这里只过滤
-  const lyrics = useMemo(() => visibleLyrics(track.lyrics), [track.lyrics]);
-  const groups = useMemo(() => groupLyricsByTime(lyrics), [lyrics]);
+  // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
+  const resolved = useMemo(() => resolveVisibleGroups(track.lyrics), [track.lyrics]);
+  const groups = resolved.visible;
   // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。
-  const activeIndex = usePlayerStore((s) => activeGroupIndex(groups, s.currentTime));
-  return { groups, activeIndex };
+  const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, s.currentTime));
+  // 原始歌词非空但全部被排除规则隐藏
+  const allHiddenByRules = track.lyrics.length > 0 && groups.length === 0;
+  return { groups, activeIndex, allHiddenByRules };
 }
 
 interface LyricsProps {
@@ -28,7 +29,7 @@ interface LyricsProps {
 }
 
 export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact = false, onToggleTranslation, onToggleSize }: LyricsProps) {
-  const { groups, activeIndex } = useLyricGroups(track);
+  const { groups, activeIndex, allHiddenByRules } = useLyricGroups(track);
   const seek = usePlayerStore((s) => s.seek);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -141,7 +142,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
           </div>
         </div>
       ) : (
-        <div className="immersive-empty" role="status"><Music2 size={26} strokeWidth={1} /><p>{track.lyricsLoaded === false ? "正在读取歌词…" : "暂无歌词"}</p><small>{track.lyricsLoaded === false ? "即将与播放同步" : "此刻，听音乐。"}</small></div>
+        <div className="immersive-empty" role="status"><Music2 size={26} strokeWidth={1} /><p>{track.lyricsLoaded === false ? "正在读取歌词…" : allHiddenByRules ? "歌词已被排除规则全部隐藏" : "暂无歌词"}</p><small>{track.lyricsLoaded === false ? "即将与播放同步" : allHiddenByRules ? "可在设置 → 歌词设置里调整排除规则" : "此刻，听音乐。"}</small></div>
       )}
     </section>
   );

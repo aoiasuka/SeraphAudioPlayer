@@ -162,7 +162,7 @@ export function createLyricsActions(
       get().showNotification(
         custom
           ? "地址无效：需为公网 HTTPS 域名（不接受 IP 直连、localhost 或内网主机）"
-          : "地址不在预设镜像列表内（仅 GitHub Raw / jsDelivr）；如需其它域名请切换到自定义模式"
+          : "地址不在预设镜像列表内（仅 amlldb.bikonoo.com）；如需其它域名请切换到自定义模式"
       );
       return false;
     }
@@ -281,7 +281,7 @@ export function createLyricsActions(
     }
   },
 
-  applyOnlineLyricsForCurrentTrack: async (lyrics) => {
+  applyOnlineLyricsForCurrentTrack: async (lyrics, lookupKeys) => {
     const track = get().currentTrack();
     if (!track) {
       get().showNotification("请先选择曲目");
@@ -293,11 +293,13 @@ export function createLyricsActions(
       return false;
     }
 
+    const keys = (lookupKeys ?? []).filter((key) => typeof key === "string" && key);
     try {
       const savedLyrics = await invoke<LyricLine[]>("apply_online_lyrics", {
         trackId: track.id,
         trackPath: track.path,
         lyrics,
+        lookupKeys: keys,
       });
 
       if (!Array.isArray(savedLyrics) || savedLyrics.length === 0) {
@@ -305,8 +307,20 @@ export function createLyricsActions(
         return false;
       }
 
+      // 后端已把查找键写进曲库，前端同步合并进 track，下次在线匹配直接带上
       set((state) => ({
-        playlist: replaceTrackLyrics(state.playlist, track.id, savedLyrics),
+        playlist: state.playlist.map((item) =>
+          item.id === track.id
+            ? {
+                ...item,
+                lyrics: savedLyrics,
+                lyricsLoaded: true,
+                lyricsLookupKeys: Array.from(
+                  new Set([...(item.lyricsLookupKeys ?? []), ...keys])
+                ),
+              }
+            : item
+        ),
       }));
       get().showNotification(`已应用 ${savedLyrics.length} 行在线歌词`);
       return true;

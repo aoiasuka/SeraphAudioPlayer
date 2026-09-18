@@ -82,3 +82,72 @@ describe("歌词滚动跟随", () => {
     expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "instant" });
   });
 });
+
+describe("排除规则隐藏行", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class {
+      observe() {}
+      disconnect() {}
+    });
+    Element.prototype.scrollTo = vi.fn();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("隐藏句的时间区间不并入上一句：该区间内不高亮任何行，下一句到点正常高亮", () => {
+    usePlayerStore.setState({
+      ...usePlayerStore.getInitialState(),
+      playlist: [{
+        id: "h", duration: 180,
+        lyrics: [
+          { time: 0, text: "第一句" },
+          { time: 10, text: "作词：某人", hidden: true },
+          { time: 20, text: "第三句" },
+        ],
+      }] as Track[],
+      currentTime: 5,
+    });
+    render(<LyricsPanel />);
+    expect(screen.queryByText("作词：某人")).toBeNull();
+    const first = () => screen.getByText("第一句").closest(".origin-left")!;
+    const third = () => screen.getByText("第三句").closest(".origin-left")!;
+    expect(first().className).toContain("opacity-100");
+
+    act(() => usePlayerStore.setState({ currentTime: 15 }));
+    expect(first().className).toContain("opacity-40");
+    expect(third().className).toContain("opacity-40");
+
+    act(() => usePlayerStore.setState({ currentTime: 20 }));
+    expect(third().className).toContain("opacity-100");
+  });
+
+  it("歌词全部被隐藏时显示专用空状态，按钮打开设置并派发切标签事件", () => {
+    usePlayerStore.setState({
+      ...usePlayerStore.getInitialState(),
+      playlist: [{
+        id: "all-hidden", duration: 180,
+        lyrics: [{ time: 0, text: "作词：某人", hidden: true }, { time: 5, text: "作曲：某人", hidden: true }],
+      }] as Track[],
+      settingsOpen: false,
+    });
+    const onOpenTab = vi.fn();
+    window.addEventListener("seraph:open-settings-tab", onOpenTab);
+    render(<LyricsPanel />);
+    expect(screen.getByText("歌词已被排除规则全部隐藏")).toBeTruthy();
+    expect(screen.queryByText("暂无歌词稿")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开歌词设置" }));
+    expect(usePlayerStore.getState().settingsOpen).toBe(true);
+    expect(onOpenTab).toHaveBeenCalledTimes(1);
+    expect((onOpenTab.mock.calls[0][0] as CustomEvent).detail).toBe("lyrics");
+    window.removeEventListener("seraph:open-settings-tab", onOpenTab);
+
+    // 真正没有歌词时仍是原文案
+    act(() => usePlayerStore.setState({ playlist: [{ id: "none", duration: 180, lyrics: [] as Track["lyrics"] }] as Track[] }));
+    expect(screen.getByText("暂无歌词稿")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "打开歌词设置" })).toBeNull();
+  });
+});

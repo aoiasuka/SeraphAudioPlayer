@@ -121,6 +121,18 @@ export function SettingsModal() {
   const [autoCleanup, setAutoCleanup] = useState(true);
   const [cacheBusy, setCacheBusy] = useState(false);
 
+  // 歌词稿「打开歌词设置」等入口派发该事件直达指定标签页（v0.6.0）
+  useEffect(() => {
+    const onOpenTab = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (SETTINGS_TABS.some((tab) => tab.value === detail)) {
+        setActiveTab(detail as SettingsTab);
+      }
+    };
+    window.addEventListener("seraph:open-settings-tab", onOpenTab);
+    return () => window.removeEventListener("seraph:open-settings-tab", onOpenTab);
+  }, []);
+
   const currentDevice = devices.find((device) => device.id === currentDeviceId);
   const currentDriver = drivers.find((driver) => driver.value === driverKind);
   const usagePercent = Math.min(cacheStatus?.usagePercent ?? 0, 100);

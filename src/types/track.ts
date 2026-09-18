@@ -37,6 +37,8 @@ export interface OnlineLyricsCandidate {
   album?: string | null;
   duration?: number | null;
   lyrics: LyricLine[];
+  /** AMLL TTML 候选携带的查找键（如 `ncm-lyrics/123`），应用后回写进曲目 `lyricsLookupKeys` */
+  lookupKeys?: string[];
 }
 
 export interface Track {

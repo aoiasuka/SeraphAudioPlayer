@@ -1152,13 +1152,18 @@ pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
     {
         return None;
     }
-    let bytes = fs::read(lyrics_path).ok()?;
-    let lyrics = parse_lyrics_bytes(&bytes);
+    let bytes = fs::read(&lyrics_path).ok()?;
+    // `.ttml` sidecar 走 TTML 解析（逐字），其余仍按字节内容嗅探
+    let ext = lyrics_path.extension().and_then(|value| value.to_str());
+    let lyrics = parse_lyrics_file_bytes(ext, &bytes);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
+/// 同名歌词 sidecar 的扩展名，按优先级排列：`.ttml` 逐字优先于行级格式。
+const SIDECAR_LYRIC_EXTENSIONS: [&str; 5] = ["ttml", "lrc", "qrc", "krc", "yrc"];
+
 pub(crate) fn find_lyrics_file(path: &Path) -> Option<PathBuf> {
-    for extension in ["lrc", "qrc", "krc", "yrc"] {
+    for extension in SIDECAR_LYRIC_EXTENSIONS {
         let exact = path.with_extension(extension);
         if exact.is_file() {
             return Some(exact);
@@ -1169,25 +1174,30 @@ pub(crate) fn find_lyrics_file(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let entries = fs::read_dir(parent).ok()?;
 
+    // 大小写不敏感兜底：同 stem 多个候选时仍按扩展名优先级取，不受目录枚举顺序影响
+    let mut best: Option<(usize, PathBuf)> = None;
     for entry in entries.flatten() {
         let candidate = entry.path();
-        let is_lyrics = candidate
+        let Some(rank) = candidate
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|ext| {
-                ["lrc", "qrc", "krc", "yrc"]
+            .and_then(|ext| {
+                SIDECAR_LYRIC_EXTENSIONS
                     .iter()
-                    .any(|lyrics_ext| ext.eq_ignore_ascii_case(lyrics_ext))
-            });
+                    .position(|lyrics_ext| ext.eq_ignore_ascii_case(lyrics_ext))
+            })
+        else {
+            continue;
+        };
         let same_stem = candidate
             .file_stem()
             .map(|value| value.to_string_lossy().to_lowercase() == expected_stem)
             .unwrap_or(false);
 
-        if is_lyrics && same_stem {
-            return Some(candidate);
+        if same_stem && best.as_ref().is_none_or(|(current, _)| rank < *current) {
+            best = Some((rank, candidate));
         }
     }
 
-    None
+    best.map(|(_, candidate)| candidate)
 }

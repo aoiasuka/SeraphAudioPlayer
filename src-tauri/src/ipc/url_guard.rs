@@ -33,6 +33,10 @@ pub(crate) const LYRICS_HOST_SUFFIXES: &[&str] = &[".163.com", ".kugou.com", ".q
 /// `is_public_https_url` + 禁重定向。
 pub(crate) const AMLL_TTML_HOST_SUFFIXES: &[&str] = &["amlldb.bikonoo.com"];
 
+/// AMLL 官方索引 API(api.amll.dev,2026-09-18 实测的 `/v1/lyrics/search|get`)。
+/// 与镜像 DB 分表:API 走官方域,不受用户 DB 地址模式影响;正常零重定向。
+pub(crate) const AMLL_API_HOST_SUFFIXES: &[&str] = &["api.amll.dev"];
+
 /// GitHub 更新检查(check_for_update 只请求 api.github.com,正常零重定向;
 /// 出现 302 时也只许留在同 host)。
 pub(crate) const GITHUB_API_HOST_SUFFIXES: &[&str] = &["api.github.com"];
@@ -95,6 +99,11 @@ pub(crate) fn is_safe_lyrics_url(raw: &str) -> bool {
 /// AMLL TTML DB 请求与重定向白名单(base URL 校验与逐跳复验共用)。
 pub(crate) fn is_safe_amll_ttml_url(raw: &str) -> bool {
     is_https_url_with_host_suffix(raw, AMLL_TTML_HOST_SUFFIXES)
+}
+
+/// AMLL 官方索引 API 请求与重定向白名单。
+pub(crate) fn is_safe_amll_api_url(raw: &str) -> bool {
+    is_https_url_with_host_suffix(raw, AMLL_API_HOST_SUFFIXES)
 }
 
 /// 「自定义地址」模式的底线:https、无 userinfo、host 是带点的公网域名——
@@ -260,6 +269,17 @@ mod tests {
             "https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/x"
         ));
         assert!(!is_safe_amll_ttml_url("https://bikonoo.com/x"));
+        // 官方索引 API：只认 api.amll.dev，镜像域与裸 amll.dev 都不放行
+        assert!(is_safe_amll_api_url(
+            "https://api.amll.dev/v1/lyrics/search?musicName=a"
+        ));
+        assert!(!is_safe_amll_api_url("https://amll.dev/v1/lyrics/search"));
+        assert!(!is_safe_amll_api_url(
+            "https://amlldb.bikonoo.com/ncm-lyrics/1.ttml"
+        ));
+        assert!(!is_safe_amll_api_url(
+            "http://api.amll.dev/v1/lyrics/get?id=1"
+        ));
 
         // 自定义模式守卫：公网域名放行，其余拒
         assert!(is_public_https_url(
@@ -294,6 +314,7 @@ mod tests {
         ] {
             assert!(!is_safe_lyrics_url(url), "lyrics should reject {url}");
             assert!(!is_safe_amll_ttml_url(url), "amll should reject {url}");
+            assert!(!is_safe_amll_api_url(url), "amll api should reject {url}");
             assert!(!is_safe_github_api_url(url), "github should reject {url}");
             assert!(
                 !is_safe_bilibili_site_url(url),

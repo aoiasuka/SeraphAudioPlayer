@@ -292,6 +292,7 @@ pub async fn fetch_online_lyrics(
     // TTML 二次查找：曲目已知的查找键（本地歌词文件名里的网易云 ID）排最前直取，
     // 再用网易云/QQ 候选的平台 ID 试取；命中一律 splice 到候选最前
     if options.ttml_enabled {
+        let mut ttml_hit = false;
         if let Some(template) = normalize_amll_db_url(&options.ttml_db_url, options.ttml_db_custom)
         {
             let mut seeds = Vec::with_capacity(candidates.len() + 1);
@@ -310,10 +311,20 @@ pub async fn fetch_online_lyrics(
             seeds.extend(candidates.iter().cloned());
             let ttml = fetch_amll_ttml_candidates(&template, options.ttml_db_custom, &seeds).await;
             if !ttml.is_empty() {
+                ttml_hit = true;
                 candidates.splice(0..0, ttml);
             }
         } else {
             tracing::warn!("AMLL TTML DB 地址不在白名单内，已跳过 TTML 查找");
+        }
+        // DB 直取一无所获时再问官方索引（固定走 api.amll.dev，与用户 DB 地址模式无关）；
+        // 只有高置信度匹配才会返回，任何失败都只记 debug、不影响三源结果
+        if !ttml_hit {
+            if let Some(candidate) =
+                fetch_amll_api_candidate(&title, &artist, (duration > 0).then_some(duration)).await
+            {
+                candidates.insert(0, candidate);
+            }
         }
     }
 
@@ -451,10 +462,17 @@ pub async fn apply_online_lyrics(
     track_id: String,
     lyrics: Vec<LyricLine>,
     track_path: Option<String>,
+    lookup_keys: Option<Vec<String>>,
 ) -> IpcResult<Vec<LyricLine>> {
     // H-1：持锁 + 可能的 lofty/ffprobe 探测都是阻塞操作，放 spawn_blocking。
     tauri::async_runtime::spawn_blocking(move || {
-        apply_online_lyrics_inner(&app, &track_id, lyrics, track_path.as_deref())
+        apply_online_lyrics_inner(
+            &app,
+            &track_id,
+            lyrics,
+            track_path.as_deref(),
+            lookup_keys.unwrap_or_default(),
+        )
     })
     .await
     .map_err(|err| {
@@ -465,11 +483,30 @@ pub async fn apply_online_lyrics(
     })?
 }
 
+/// 回写曲目的 AMLL 查找键上限（一个候选正常只有 1~2 个平台 ID）。
+const MAX_APPLIED_LOOKUP_KEYS: usize = 8;
+
+/// 前端回传的查找键先过字符集校验（`dir/id`，与 `lookup_url` 同口径），非法丢弃、去重、封顶。
+fn sanitize_lookup_keys(keys: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        if is_valid_lookup_key(key) && !out.iter().any(|k| k == key) {
+            out.push(key.to_string());
+            if out.len() >= MAX_APPLIED_LOOKUP_KEYS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn apply_online_lyrics_inner(
     app: &AppHandle,
     track_id: &str,
     lyrics: Vec<LyricLine>,
     track_path: Option<&str>,
+    lookup_keys: Vec<String>,
 ) -> IpcResult<Vec<LyricLine>> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
@@ -477,6 +514,7 @@ fn apply_online_lyrics_inner(
     if lyrics.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
+    let lookup_keys = sanitize_lookup_keys(lookup_keys);
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
@@ -488,8 +526,50 @@ fn apply_online_lyrics_inner(
         track_path,
         covers_dir_path(app).ok().as_deref(),
     )?;
+    // AMLL 命中的候选自带查找键：合并进曲目，下次在线匹配可直取 TTML
+    if !lookup_keys.is_empty() {
+        if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
+            for key in &lookup_keys {
+                if !track.lyrics_lookup_keys.contains(key) {
+                    track.lyrics_lookup_keys.push(key.clone());
+                }
+            }
+        }
+    }
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
     Ok(marked(lyrics))
+}
+
+/// 歌词设置页「测试连接」：对模板真发一次样例 GET，返回分类结果（不改任何状态）。
+#[tauri::command]
+pub async fn test_amll_ttml_db(
+    template: String,
+    custom: bool,
+    sample_key: Option<String>,
+) -> IpcResult<AmllTestResult> {
+    Ok(run_amll_ttml_db_test(&template, custom, sample_key.as_deref()).await)
+}
+
+#[cfg(test)]
+mod lookup_key_tests {
+    use super::sanitize_lookup_keys;
+
+    #[test]
+    fn sanitize_lookup_keys_filters_dedups_and_caps() {
+        let keys = vec![
+            " ncm-lyrics/1 ".to_string(),
+            "ncm-lyrics/1".to_string(),
+            "ncm-lyrics/../x".to_string(),
+            "bare".to_string(),
+            "qq-lyrics/2".to_string(),
+        ];
+        assert_eq!(
+            sanitize_lookup_keys(keys),
+            vec!["ncm-lyrics/1".to_string(), "qq-lyrics/2".to_string()]
+        );
+        let many = (0..20).map(|i| format!("ncm-lyrics/{i}")).collect();
+        assert_eq!(sanitize_lookup_keys(many).len(), 8);
+    }
 }

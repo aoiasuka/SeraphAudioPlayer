@@ -111,7 +111,8 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     await screen.findByRole("heading", { name: "选择在线歌词" });
     expect(bridge.invoke).toHaveBeenLastCalledWith("fetch_online_lyrics", { trackId: track.id, title: "another song", artist: "", duration: 180, options: lyricsOptions });
     await user.click(within(dialog).getByRole("button", { name: "使用这份歌词" }));
-    expect(bridge.invoke).toHaveBeenLastCalledWith("apply_online_lyrics", { trackId: track.id, trackPath: track.path, lyrics: candidate.lyrics });
+    // 候选未携带 lookupKeys 时仍以空数组随请求发出（查找键回写由后端处理）
+    expect(bridge.invoke).toHaveBeenLastCalledWith("apply_online_lyrics", { trackId: track.id, trackPath: track.path, lyrics: candidate.lyrics, lookupKeys: [] });
     expect(immersive.getByRole("button", { name: /Matched line/ })).toHaveAttribute("aria-current", "true");
     expect(usePlayerStore.getState()).toMatchObject({ currentTime: 15, isPlaying: true });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -136,5 +137,25 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     expect(usePlayerStore.getState().currentTrack()?.lyrics).toEqual(track.lyrics);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(useImmersiveStore.getState().isOpen).toBe(true);
+  });
+
+  it("隐藏句区间不高亮任何行；歌词全部被规则隐藏时显示专用空状态", () => {
+    usePlayerStore.setState({
+      playlist: [{ ...track, lyrics: [{ time: 10, text: "First line" }, { time: 20, text: "作词：某人", hidden: true }, { time: 30, text: "Third line" }] }],
+      currentTime: 25,
+    });
+    render(<Harness />);
+    const immersive = within(screen.getByRole("region", { name: "沉浸播放" }));
+    expect(immersive.queryByRole("button", { name: /作词/ })).not.toBeInTheDocument();
+    expect(immersive.getByRole("button", { name: /First line/ })).not.toHaveAttribute("aria-current");
+    expect(immersive.getByRole("button", { name: /Third line/ })).not.toHaveAttribute("aria-current");
+    act(() => usePlayerStore.setState({ currentTime: 30 }));
+    expect(immersive.getByRole("button", { name: /Third line/ })).toHaveAttribute("aria-current", "true");
+
+    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: [{ time: 0, text: "作曲：某人", hidden: true }] }] }));
+    expect(immersive.getByText("歌词已被排除规则全部隐藏")).toBeInTheDocument();
+    expect(immersive.queryByText("暂无歌词")).not.toBeInTheDocument();
+    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: [] }] }));
+    expect(immersive.getByText("暂无歌词")).toBeInTheDocument();
   });
 });

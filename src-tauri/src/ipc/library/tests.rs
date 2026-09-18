@@ -808,6 +808,45 @@ fn parses_qq_qrc_lyric_content() {
     assert_eq!(lyrics[0].text, "hello");
     assert!((lyrics[1].time - 3.0).abs() < 0.001);
     assert_eq!(lyrics[1].text, "world");
+
+    // QRC 逐字：`(start,dur)` 绝对毫秒、标签在文本后；行 end = start + dur
+    assert_eq!(lyrics[0].end, Some(3.0));
+    let words = lyrics[0].words.as_ref().expect("qrc words");
+    assert_eq!(
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.start, w.end))
+            .collect::<Vec<_>>(),
+        [("he", 1.0, 1.5), ("llo", 1.5, 2.0)]
+    );
+    // 只有一个音节且等于整行也保留
+    let words = lyrics[1].words.as_ref().expect("single word");
+    assert_eq!(words.len(), 1);
+    assert_eq!(
+        (words[0].text.as_str(), words[0].start, words[0].end),
+        ("world", 3.0, 4.0)
+    );
+    assert_eq!(lyrics[1].end, Some(4.0));
+}
+
+#[test]
+fn qrc_words_merge_whitespace_syllables_and_keep_plain_lines_line_level() {
+    // 空白音节并入前一音节（词间空格属前一音节）；没有标签的行按行级输出
+    let text = "[1000,2000]he(1000,500) (1500,100)llo(1600,400)\n[3000,1000]plain line";
+    let lyrics = parse_lyrics_bytes(text.as_bytes());
+    assert_eq!(lyrics.len(), 2);
+    assert_eq!(lyrics[0].text, "he llo");
+    let words = lyrics[0].words.as_ref().expect("words");
+    assert_eq!(
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.start, w.end))
+            .collect::<Vec<_>>(),
+        [("he ", 1.0, 1.6), ("llo", 1.6, 2.0)]
+    );
+    assert_eq!(lyrics[1].text, "plain line");
+    assert!(lyrics[1].words.is_none());
+    assert_eq!(lyrics[1].end, Some(4.0));
 }
 
 #[test]
@@ -820,6 +859,22 @@ fn parses_netease_yrc_word_lines() {
     assert_eq!(lyrics[0].text, "hello");
     assert!((lyrics[1].time - 2.5).abs() < 0.001);
     assert_eq!(lyrics[1].text, "world");
+
+    // YRC 逐字：`(start,dur,0)` 绝对毫秒、标签在文本前
+    assert_eq!(lyrics[0].end, Some(2.0));
+    let words = lyrics[0].words.as_ref().expect("yrc words");
+    assert_eq!(
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.start, w.end))
+            .collect::<Vec<_>>(),
+        [("he", 1.2, 1.4), ("llo", 1.4, 1.6)]
+    );
+    let words = lyrics[1].words.as_ref().expect("single yrc word");
+    assert_eq!(
+        (words[0].text.as_str(), words[0].start, words[0].end),
+        ("world", 2.5, 3.0)
+    );
 }
 
 #[test]
@@ -839,6 +894,100 @@ fn parses_kugou_krc_word_lines_and_translation() {
     assert!((lyrics[2].time - 3.0).abs() < 0.001);
     assert_eq!(lyrics[2].text, "world");
     assert_eq!(lyrics[3].text, "planet");
+
+    // KRC 逐字：`<offset,dur,0>` offset 相对行 start；译文行不带 words/end
+    assert_eq!(lyrics[0].end, Some(3.0));
+    let words = lyrics[0].words.as_ref().expect("krc words");
+    assert_eq!(
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.start, w.end))
+            .collect::<Vec<_>>(),
+        [("he", 1.0, 1.5), ("llo", 1.5, 2.0)]
+    );
+    assert!(lyrics[1].words.is_none());
+    assert!(lyrics[1].end.is_none());
+    let words = lyrics[2].words.as_ref().expect("single krc word");
+    assert_eq!(
+        (words[0].text.as_str(), words[0].start, words[0].end),
+        ("world", 3.0, 4.0)
+    );
+    assert!(lyrics[3].words.is_none());
+}
+
+#[test]
+fn parses_ttml_bytes_without_extension_by_content_sniffing() {
+    // 手动导入只有裸字节：以 `<?xml`/`<tt` 开头且含 `<tt` 即走 TTML 解析
+    let ttml = "\u{feff}  <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"00:01.000\" end=\"00:03.000\"><span begin=\"00:01.000\" end=\"00:01.500\">Hel</span><span begin=\"00:01.500\" end=\"00:03.000\">lo</span></p></div></body></tt>";
+    let lyrics = parse_lyrics_bytes(ttml.as_bytes());
+    assert_eq!(lyrics.len(), 1);
+    assert_eq!(lyrics[0].text, "Hello");
+    assert_eq!(lyrics[0].end, Some(3.0));
+    let words = lyrics[0].words.as_ref().expect("ttml words");
+    assert_eq!(
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.start, w.end))
+            .collect::<Vec<_>>(),
+        [("Hel", 1.0, 1.5), ("lo", 1.5, 3.0)]
+    );
+
+    // 大小写不敏感的 `<TT`；不是 TTML 的 XML 走后续解析而不是返回空
+    assert!(looks_like_ttml("<TT xmlns=\"x\"></TT>"));
+    assert!(!looks_like_ttml("[00:01.00]<tt>"));
+    let not_ttml = "<?xml version=\"1.0\"?><root>x</root>";
+    assert!(!looks_like_ttml(not_ttml));
+}
+
+#[test]
+fn detects_unsynced_plain_text_lyrics() {
+    // 纯文本兜底：index * 4s 等差、无 words/end
+    let plain = parse_lyrics_bytes("first line\nsecond line\nthird line".as_bytes());
+    assert_eq!(plain.len(), 3);
+    assert!(lyrics_are_unsynced(&plain));
+
+    let timed = parse_lyrics_bytes(b"[00:00.00]a\n[00:04.00]b\n[00:09.00]c");
+    assert!(!lyrics_are_unsynced(&timed));
+    assert!(!lyrics_are_unsynced(&[]));
+
+    // 恰好 4 秒等差但带 words → 是真时间轴
+    let mut karaoke = LyricLine::new(0.0, "a");
+    karaoke.words = Some(vec![LyricWord {
+        start: 0.0,
+        end: 1.0,
+        text: "a".into(),
+    }]);
+    assert!(!lyrics_are_unsynced(&[karaoke]));
+}
+
+#[test]
+fn sidecar_lookup_prefers_ttml_over_lrc() {
+    let dir = std::env::temp_dir().join(format!("seraph-sidecar-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let audio = dir.join("song.flac");
+    fs::write(&audio, b"").unwrap();
+    fs::write(dir.join("song.lrc"), "[00:01.00]line level").unwrap();
+    assert!(find_lyrics_file(&audio).unwrap().ends_with("song.lrc"));
+
+    fs::write(
+        dir.join("song.ttml"),
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"00:01.000\" end=\"00:02.000\"><span begin=\"00:01.000\" end=\"00:02.000\">word</span></p></div></body></tt>",
+    )
+    .unwrap();
+    assert!(find_lyrics_file(&audio).unwrap().ends_with("song.ttml"));
+    let lyrics = external_lrc_lyrics(&audio).expect("ttml sidecar");
+    assert_eq!(lyrics[0].text, "word");
+    assert!(lyrics[0].words.is_some());
+
+    // 大小写不同的 stem（Windows 上精确分支即命中，返回 `SONG.ttml`）同样按 ttml 优先
+    let mixed = dir.join("SONG.mp3");
+    fs::write(&mixed, b"").unwrap();
+    let found = find_lyrics_file(&mixed).unwrap();
+    assert!(found
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ttml")));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
