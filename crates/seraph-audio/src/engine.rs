@@ -285,6 +285,10 @@ struct PlaybackShared {
     frame_position: AtomicU64,
     volume_bits: AtomicU32,
     buffer_generation: AtomicU32,
+    /// 输出延迟（秒，f64 bits）：`frame_position` 按送入设备缓冲的帧数累加，比可听音频
+    /// 领先「设备缓冲里尚未播出的量」。共享模式由 cpal 回调的时间戳给出，独占模式由
+    /// 渲染循环按缓冲填充量算出；`Progress` 事件携带它，歌词定位据此回拨。
+    output_latency_bits: AtomicU64,
     output_rate: u32,
     output_channels: usize,
     max_buffer_samples: usize,
@@ -610,6 +614,7 @@ impl PlaybackEngine {
             track_id: session.track_id.clone(),
             seconds,
             total: session.duration_seconds,
+            output_latency: session.shared.output_latency_seconds(),
         });
         Ok(())
     }
@@ -756,6 +761,7 @@ impl PlaybackShared {
             frame_position: AtomicU64::new(0),
             volume_bits: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
             buffer_generation: AtomicU32::new(0),
+            output_latency_bits: AtomicU64::new(0.0_f64.to_bits()),
             output_rate,
             output_channels,
             max_buffer_samples,
@@ -770,6 +776,26 @@ impl PlaybackShared {
     fn set_volume(&self, volume: f32) {
         self.volume_bits
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    fn output_latency_seconds(&self) -> f64 {
+        f64::from_bits(self.output_latency_bits.load(Ordering::Relaxed))
+    }
+
+    /// 渲染侧写入；非有限或负值一律按 0（不让坏时间戳污染歌词定位）。
+    fn set_output_latency_seconds(&self, seconds: f64) {
+        let seconds = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
+        self.output_latency_bits
+            .store(seconds.to_bits(), Ordering::Relaxed);
+    }
+
+    /// 独占模式：设备缓冲里尚未播出的帧数 → 秒。
+    fn set_output_latency_frames(&self, queued_frames: u64) {
+        self.set_output_latency_seconds(queued_frames as f64 / f64::from(self.output_rate.max(1)));
     }
 
     fn buffer_generation(&self) -> u32 {
@@ -802,6 +828,15 @@ fn report_render_failure(event_bus: &EventBus, shared: &PlaybackShared, err: &Ba
     }
 }
 
+/// 共享模式输出延迟：cpal 给出的 `playback − callback`（本次回调写入的音频预计何时发声）。
+/// 每次回调刷新一次，Progress 事件读取最近值；时间戳倒挂（None）时保持上一次的值。
+fn record_output_latency(shared: &PlaybackShared, info: &cpal::OutputCallbackInfo) {
+    let timestamp = info.timestamp();
+    if let Some(latency) = timestamp.playback.duration_since(&timestamp.callback) {
+        shared.set_output_latency_seconds(latency.as_secs_f64());
+    }
+}
+
 fn build_output_stream(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -825,7 +860,8 @@ fn build_output_stream(
         SampleFormat::F32 => device
             .build_output_stream(
                 config,
-                move |data: &mut [f32], _| {
+                move |data: &mut [f32], info| {
+                    record_output_latency(&shared, info);
                     render_output_f32(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -835,7 +871,8 @@ fn build_output_stream(
         SampleFormat::I16 => device
             .build_output_stream(
                 config,
-                move |data: &mut [i16], _| {
+                move |data: &mut [i16], info| {
+                    record_output_latency(&shared, info);
                     render_output_i16(data, &shared, &mut consumer, &mut state, &mut dither)
                 },
                 err_fn,
@@ -845,7 +882,8 @@ fn build_output_stream(
         SampleFormat::U16 => device
             .build_output_stream(
                 config,
-                move |data: &mut [u16], _| {
+                move |data: &mut [u16], info| {
+                    record_output_latency(&shared, info);
                     render_output_u16(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -855,7 +893,8 @@ fn build_output_stream(
         SampleFormat::F64 => device
             .build_output_stream(
                 config,
-                move |data: &mut [f64], _| {
+                move |data: &mut [f64], info| {
+                    record_output_latency(&shared, info);
                     render_output_f64(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -865,7 +904,8 @@ fn build_output_stream(
         SampleFormat::I8 => device
             .build_output_stream(
                 config,
-                move |data: &mut [i8], _| {
+                move |data: &mut [i8], info| {
+                    record_output_latency(&shared, info);
                     render_output_i8(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -875,7 +915,8 @@ fn build_output_stream(
         SampleFormat::U8 => device
             .build_output_stream(
                 config,
-                move |data: &mut [u8], _| {
+                move |data: &mut [u8], info| {
+                    record_output_latency(&shared, info);
                     render_output_u8(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -885,7 +926,8 @@ fn build_output_stream(
         SampleFormat::I32 => device
             .build_output_stream(
                 config,
-                move |data: &mut [i32], _| {
+                move |data: &mut [i32], info| {
+                    record_output_latency(&shared, info);
                     render_output_i32(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -895,7 +937,8 @@ fn build_output_stream(
         SampleFormat::U32 => device
             .build_output_stream(
                 config,
-                move |data: &mut [u32], _| {
+                move |data: &mut [u32], info| {
+                    record_output_latency(&shared, info);
                     render_output_u32(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -905,7 +948,8 @@ fn build_output_stream(
         SampleFormat::I64 => device
             .build_output_stream(
                 config,
-                move |data: &mut [i64], _| {
+                move |data: &mut [i64], info| {
+                    record_output_latency(&shared, info);
                     render_output_i64(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -915,7 +959,8 @@ fn build_output_stream(
         SampleFormat::U64 => device
             .build_output_stream(
                 config,
-                move |data: &mut [u64], _| {
+                move |data: &mut [u64], info| {
+                    record_output_latency(&shared, info);
                     render_output_u64(data, &shared, &mut consumer, &mut state)
                 },
                 err_fn,
@@ -1262,6 +1307,11 @@ fn run_wasapi_exclusive_render_worker(
                     report_render_failure(&event_bus, &shared, &err);
                     return Err(err);
                 }
+                // 写入后设备缓冲里尚未播出的帧数 = 原有填充量 + 本次写入量：
+                // frame_position 刚推进到的位置要等这么多帧播完才发声。
+                let queued = u64::from(buffer_frames.saturating_sub(frames))
+                    .saturating_add(u64::from(writable));
+                shared.set_output_latency_frames(queued);
             }
         }
         thread::sleep(sleep_period);
@@ -1384,6 +1434,7 @@ fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
                 track_id: track_id.clone(),
                 seconds: info.duration_seconds,
                 total: info.duration_seconds,
+                output_latency: shared.output_latency_seconds(),
             });
             event_bus.publish(PlayerEvent::PlaybackEnded {
                 track_id: track_id.clone(),
@@ -1721,6 +1772,7 @@ fn publish_progress_if_due(
             progress
         },
         total: total_seconds,
+        output_latency: shared.output_latency_seconds(),
     });
 }
 
@@ -2303,6 +2355,22 @@ mod tests {
         let worst = PlaybackShared::new(768_000, 32, 0.7, SpectrumTap::new());
         assert_eq!(worst.max_buffer_samples, 768_000 * 32);
         assert_eq!(worst.max_buffer_samples, MAX_RING_BUFFER_SAMPLES);
+    }
+
+    #[test]
+    fn output_latency_is_clamped_and_converted_from_frames() {
+        let shared = PlaybackShared::new(48_000, 2, 0.7, SpectrumTap::new());
+        assert_eq!(shared.output_latency_seconds(), 0.0);
+        // 独占模式：设备缓冲里尚未播出的帧数 → 秒
+        shared.set_output_latency_frames(4_800);
+        assert!((shared.output_latency_seconds() - 0.1).abs() < 1e-9);
+        // 坏值（NaN / 负数）一律归零，不让歌词定位被污染
+        shared.set_output_latency_seconds(f64::NAN);
+        assert_eq!(shared.output_latency_seconds(), 0.0);
+        shared.set_output_latency_seconds(-0.5);
+        assert_eq!(shared.output_latency_seconds(), 0.0);
+        shared.set_output_latency_seconds(0.25);
+        assert_eq!(shared.output_latency_seconds(), 0.25);
     }
 
     #[test]

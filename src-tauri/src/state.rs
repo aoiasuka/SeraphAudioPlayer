@@ -268,6 +268,7 @@ impl AppState {
             track_id: track.id.clone(),
             seconds: 0.0,
             total: track.duration as f64,
+            output_latency: 0.0,
         });
         if should_play {
             let result = self

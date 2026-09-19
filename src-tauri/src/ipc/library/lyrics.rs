@@ -1,8 +1,9 @@
 use super::prelude::*;
+use super::qq_des::QqTripleDes;
 
 pub(crate) const QRC_MAGIC_HEADER: &[u8] = b"\x98%\xb0\xac\xe3\x02\x83h\xe8\xfcl";
 pub(crate) const KRC_MAGIC_HEADER: &[u8] = b"krc18";
-pub(crate) const QRC_KEY: &[u8] = b"!@#)(*$%123ZXC!@!@#)(NHL";
+pub(crate) const QRC_KEY: &[u8; 24] = b"!@#)(*$%123ZXC!@!@#)(NHL";
 pub(crate) const KRC_KEY: &[u8] = b"@Gaw^2tGQ61-\xce\xd2ni";
 pub(crate) const QMC1_PRIVKEY: [u8; 128] = [
     0xc3, 0x4a, 0xd6, 0xca, 0x90, 0x67, 0xf7, 0x52, 0xd8, 0xa1, 0x66, 0x62, 0x9f, 0x5b, 0x09, 0x00,
@@ -96,8 +97,7 @@ pub(crate) fn parse_lyrics_file_bytes(path_ext: Option<&str>, bytes: &[u8]) -> V
 /// 判定一组歌词是否是「纯文本合成」的假时间轴：`parse_lyrics_text` 对无时间戳歌词
 /// 按 `index * 4s` 铺时间，因此全部行恰为 4 秒等差、且没有 words/end 即视为未同步。
 /// 空列表返回 false；单行 `[00:00.00]` 的真 LRC 与单行纯文本无法区分，一律按未同步算。
-// 供后续「纯文本歌词不滚动/提示」逻辑调用，目前只有测试引用。
-#[allow(dead_code)]
+/// `parse_netease_lyric_payload` 据此丢弃没有时间戳的译文 / 音译轨（假时间轴对不上任何原文）。
 pub(crate) fn lyrics_are_unsynced(lyrics: &[LyricLine]) -> bool {
     !lyrics.is_empty()
         && lyrics.iter().enumerate().all(|(index, line)| {
@@ -107,9 +107,12 @@ pub(crate) fn lyrics_are_unsynced(lyrics: &[LyricLine]) -> bool {
         })
 }
 
+/// 本地加密 `.qrc`：解密后可能是 `<Lyric_1 …>` QRC 容器（原文 / 音译），也可能是普通 LRC
+/// （QQ 客户端存的 `_qmts.qrc` 译文），统一交给内容嗅探；解不开或没内容返回 None，
+/// 调用方再按原始字节走普通文本路径。
 pub(crate) fn parse_encrypted_qrc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
     let text = decrypt_qrc(bytes).ok()?;
-    let lyrics = parse_qrc_text(&text);
+    let lyrics = parse_lyrics_bytes_inner(text.as_bytes());
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
@@ -119,21 +122,70 @@ pub(crate) fn parse_encrypted_krc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>>
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
+/// 本地 `.qrc` 文件：QMC1 XOR → 去 11 字节魔数 → 3DES-ECB → zlib。
 pub(crate) fn decrypt_qrc(bytes: &[u8]) -> Result<String, String> {
     let mut data = bytes.to_vec();
     qmc1_decrypt(&mut data);
     let encrypted = data
         .get(QRC_MAGIC_HEADER.len()..)
         .ok_or_else(|| "invalid qrc data".to_string())?;
-    if encrypted.len() % 8 != 0 {
+    tdes_decrypt_inflate(encrypted)
+}
+
+/// QQ 云端 QRC 载荷（`GetPlayLyricInfo` 的 `lyric` / `trans` / `roma`）的 hex 文本上限：
+/// 2 MB 文本 → 1 MB 密文，正常整首歌逐字 QRC 只有几 KB。
+pub(crate) const MAX_QRC_HEX_CHARS: usize = 2 * 1024 * 1024;
+
+/// QQ 云端 QRC：hex 文本 → 3DES-ECB（同 `QRC_KEY`）→ zlib。与本地 `.qrc` 相比**没有**
+/// QMC1 XOR 层与 11 字节魔数（2026-09-19 实测）。解出来可能是 `<Lyric_1 …>` QRC 容器，
+/// 也可能是普通 LRC（`trans` 字段），调用方统一交给 `parse_lyrics_bytes` 嗅探。
+pub(crate) fn decrypt_qrc_cloud(hex: &str) -> Result<String, String> {
+    let hex = hex.trim();
+    if hex.is_empty() {
+        return Err("empty qrc payload".into());
+    }
+    if hex.len() > MAX_QRC_HEX_CHARS {
+        return Err(format!(
+            "qrc payload too large: {} hex chars (limit {MAX_QRC_HEX_CHARS})",
+            hex.len()
+        ));
+    }
+    let encrypted = decode_hex(hex)?;
+    tdes_decrypt_inflate(&encrypted)
+}
+
+fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("invalid hex length".into());
+    }
+    let (pairs, _remainder) = hex.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|pair| Ok((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        other => Err(format!("invalid hex digit {other:#04x}")),
+    }
+}
+
+/// QQ 变体 3DES-ECB（`QRC_KEY`，见 `qq_des.rs`：S 盒两处与标准不同，标准 3DES 解不开）
+/// 解密后 zlib 解压：本地 / 云端两种 QRC 的公共尾段。
+fn tdes_decrypt_inflate(encrypted: &[u8]) -> Result<String, String> {
+    if !encrypted.len().is_multiple_of(8) {
         return Err("invalid qrc block length".into());
     }
 
-    let cipher = TdesEde3::new_from_slice(QRC_KEY).map_err(|err| err.to_string())?;
+    let cipher = QqTripleDes::new(QRC_KEY);
     let mut decrypted = Vec::with_capacity(encrypted.len());
     let (blocks, _remainder) = encrypted.as_chunks::<8>();
     for chunk in blocks {
-        let mut block = *GenericArray::from_slice(chunk);
+        let mut block = *chunk;
         cipher.decrypt_block(&mut block);
         decrypted.extend_from_slice(&block);
     }
@@ -1341,6 +1393,78 @@ mod enhanced_lrc_tests {
             "[00:01.000]a\n[00:02.995]<00:02.995>x<00:03.500>\n[00:03.000]<00:03.000>y<00:04.000>\n",
         );
         assert_eq!(ms(lines[1].time), 2995);
+    }
+}
+
+#[cfg(test)]
+mod qrc_cloud_tests {
+    use super::*;
+
+    // 向量由独立的 3DES 实现生成（明文 → zlib → 3DES-ECB(QRC_KEY) → hex，尾部零填充到 8 字节倍数）
+    const LYRIC_HEX: &str = "0C8D67DD3E549974B64ED2680459F13881AA15D10DB4CC8324B86311D0D741BD6AF5D8724F2B75716C3A763AFD2E1295440B85EA0FE0BC84E3E9E35CF02D8CD9378E8568C45FC144C4C8D9B70CB163DA9D4A809AAEFBF861B197F5DCA6E03F41736731C3D41C7E266E5814A0D03DE379888D35B887555E4B0071C0D3B0E905C62A3F74AD8F130BFB27146FA8698F33C051931B38F140BAC2E68F117802E7391771B7F807A965691B30A74940C000AD63";
+
+    #[test]
+    fn decrypts_cloud_qrc_hex_into_qrc_container() {
+        let text = decrypt_qrc_cloud(LYRIC_HEX).expect("decrypt");
+        assert!(text.starts_with("<?xml"), "got {text:?}");
+        assert!(text.contains(r#"LyricContent="[ti:唯一]&#10;[offset:0]&#10;[1000,2000]he(1000,500)llo(1500,500)&#10;[3000,1000]world(3000,1000)&#10;""#));
+
+        // 小写 hex 与首尾空白同样接受
+        let lower =
+            decrypt_qrc_cloud(&format!(" {}\n", LYRIC_HEX.to_ascii_lowercase())).expect("lower");
+        assert_eq!(lower, text);
+
+        // 解出的容器直接喂 parse_lyrics_bytes 即得逐字
+        let lyrics = parse_lyrics_bytes(text.as_bytes());
+        assert_eq!(lyrics.len(), 2);
+        assert_eq!(lyrics[0].text, "hello");
+        assert_eq!(lyrics[0].words.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn rejects_malformed_or_oversized_hex() {
+        assert!(decrypt_qrc_cloud("").is_err());
+        assert!(decrypt_qrc_cloud("ABC").is_err(), "odd length");
+        assert!(
+            decrypt_qrc_cloud("ZZZZZZZZZZZZZZZZ").is_err(),
+            "non-hex digit"
+        );
+        assert!(
+            decrypt_qrc_cloud("0011223344").is_err(),
+            "not a multiple of 8 bytes"
+        );
+        assert!(decrypt_qrc_cloud(&"0".repeat(MAX_QRC_HEX_CHARS + 2)).is_err());
+        // 长度合法但不是有效密文：解出来不是 zlib 流 → 报错而非 panic
+        assert!(decrypt_qrc_cloud(&"00".repeat(16)).is_err());
+    }
+
+    /// 把云端密文包成本地 `.qrc`：明文魔数 + 按整文件下标 QMC1 XOR 过的密文（`decrypt_qrc`
+    /// 对整个缓冲做一次 XOR 后再丢前 11 字节，所以魔数本身不参与 XOR）。本地路径同样能解，
+    /// 且解出普通 LRC（QQ 客户端的 `_qmts.qrc` 译文文件）时不再静默退回按原始字节当文本。
+    fn wrap_as_local_qrc(hex: &str) -> Vec<u8> {
+        let mut file = QRC_MAGIC_HEADER.to_vec();
+        file.extend(decode_hex(hex).expect("hex"));
+        qmc1_decrypt(&mut file);
+        file[..QRC_MAGIC_HEADER.len()].copy_from_slice(QRC_MAGIC_HEADER);
+        file
+    }
+
+    #[test]
+    fn local_qrc_wrapper_decrypts_container_and_plain_lrc_variants() {
+        let container = wrap_as_local_qrc(LYRIC_HEX);
+        assert!(container.starts_with(QRC_MAGIC_HEADER));
+        let lyrics = parse_lyrics_bytes(&container);
+        assert_eq!(lyrics.len(), 2);
+        assert_eq!(lyrics[0].text, "hello");
+        assert_eq!(lyrics[0].words.as_ref().map(Vec::len), Some(2));
+
+        // 与 online_lyrics 测试共用的译文向量：`[kana:…]` + `[00:01.00]你好` + `[00:03.00]//`
+        const TRANS_HEX: &str = "5DCFF376CA238C449DE4FDFD218DED2DC7021FC49908B1705AEFCD2F5DC3BE203D86DAAA19A8A112FAF102C0711469CEA9FB2C68ACBB21FE6F91F68DF6EC9B76C28178FBC9F3F6306B45F5D20B39CDCCC9A522C835CA20C0B7C6B0DBE1505374";
+        let plain = wrap_as_local_qrc(TRANS_HEX);
+        let lyrics = parse_lyrics_bytes(&plain);
+        assert_eq!(lyrics[0].text, "你好");
+        assert!((lyrics[0].time - 1.0).abs() < 1e-6);
+        assert!(lyrics.iter().all(|line| line.words.is_none()));
     }
 }
 

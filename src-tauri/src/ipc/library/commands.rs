@@ -282,7 +282,8 @@ pub async fn fetch_online_lyrics(
     let client = online_lyrics_client().map_err(IpcError::network)?;
     let fetch = fetch_online_lyrics_from_sources(
         &client,
-        &query,
+        &title,
+        &artist,
         duration,
         LyricsSourcePriority::parse(&options.source_priority),
     )

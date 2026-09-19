@@ -239,6 +239,8 @@ mod tests {
         assert!(is_safe_lyrics_url(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
         ));
+        // QQ 客户端取词接口（逐字 QRC）也在 .qq.com 子域内
+        assert!(is_safe_lyrics_url("https://u.y.qq.com/cgi-bin/musicu.fcg"));
         assert!(is_safe_github_api_url(
             "https://api.github.com/repos/aoiasuka/SeraphAudioPlayer/releases/latest"
         ));

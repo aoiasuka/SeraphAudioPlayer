@@ -163,6 +163,8 @@ export interface PlayerStore {
   recentTrackIds: string[];
   isPlaying: boolean;
   currentTime: number;
+  /** 引擎输出延迟（秒，Progress 事件携带）：歌词定位用 currentTime − outputLatency。不持久化。 */
+  outputLatency: number;
   volume: number;
   isMuted: boolean;
   previousVolume: number;

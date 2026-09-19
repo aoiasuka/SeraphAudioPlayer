@@ -18,6 +18,7 @@ import {
   activeVisibleIndex,
   hasWordTiming,
   isInIntermission,
+  lyricsPosition,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
 import { cn } from "@/lib/utils";
@@ -45,7 +46,8 @@ function lyricPreview(lyrics: LyricLine[]) {
 
 export function LyricsPanel() {
   const track = usePlayerStore((s) => s.currentTrack());
-  const currentTime = usePlayerStore((s) => s.currentTime);
+  // 歌词定位按可听位置：引擎进度减去输出延迟（进度条等仍用原始 currentTime）
+  const currentTime = usePlayerStore((s) => lyricsPosition(s.currentTime, s.outputLatency));
   const seek = usePlayerStore((s) => s.seek);
   const importLyricsForCurrentTrack = usePlayerStore(
     (s) => s.importLyricsForCurrentTrack

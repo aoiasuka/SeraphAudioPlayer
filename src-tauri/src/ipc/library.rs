@@ -16,6 +16,7 @@ mod metadata;
 mod online_covers;
 mod online_lyrics;
 mod prelude;
+mod qq_des;
 mod snapshot;
 mod storage;
 #[cfg(test)]

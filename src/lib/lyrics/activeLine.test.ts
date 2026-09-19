@@ -8,6 +8,7 @@ import {
   INTERMISSION_DELAY_SECONDS,
   INTERMISSION_MIN_GAP_SECONDS,
   isInIntermission,
+  lyricsPosition,
   resolveVisibleGroups,
   wordProgress,
 } from "./activeLine";
@@ -190,5 +191,16 @@ describe("间奏判定（行结束时间）", () => {
       timed(20, 24, "第二句"),
     ]);
     expect(isInIntermission(resolved, 0, 10)).toBe(true);
+  });
+});
+
+describe("lyricsPosition", () => {
+  it("按输出延迟回拨播放位置，坏值按 0 处理且结果不小于 0", () => {
+    expect(lyricsPosition(10, 0.15)).toBeCloseTo(9.85);
+    expect(lyricsPosition(10, 0)).toBe(10);
+    expect(lyricsPosition(10, -1)).toBe(10);
+    expect(lyricsPosition(10, Number.NaN)).toBe(10);
+    expect(lyricsPosition(10, Number.POSITIVE_INFINITY)).toBe(10);
+    expect(lyricsPosition(0.05, 0.2)).toBe(0);
   });
 });

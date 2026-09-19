@@ -188,6 +188,7 @@ export const usePlayerStore = create<PlayerStore>()(
         recentTrackIds: [],
         isPlaying: false,
         currentTime: 0,
+        outputLatency: 0,
         volume: 0.7,
         isMuted: false,
         previousVolume: 0.7,

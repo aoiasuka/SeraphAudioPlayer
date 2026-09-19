@@ -58,17 +58,21 @@ impl LyricsSourcePriority {
     }
 }
 
+/// `title` / `artist` 分开传：网易云与 QQ 用 `online_lyrics_query` 拼成一句，酷狗歌词搜索
+/// 对关键词格式敏感，另走 `kugou_lyrics_keyword`（手动搜索时前端把整句放在 title、artist 传空）。
 pub(crate) async fn fetch_online_lyrics_from_sources(
     client: &Client,
-    query: &str,
+    title: &str,
+    artist: &str,
     duration: u64,
     priority: LyricsSourcePriority,
 ) -> OnlineLyricsFetch {
+    let query = online_lyrics_query(title, artist);
     // 三源并发：此前串行 await，半死接口的超时会逐源叠加（最坏数分钟）
     let (netease, kugou, qq) = tokio::join!(
-        fetch_netease_lyrics(client, query, duration),
-        fetch_kugou_lyrics(client, query, duration),
-        fetch_qq_lyrics(client, query, duration),
+        fetch_netease_lyrics(client, &query, duration),
+        fetch_kugou_lyrics(client, title, artist, duration),
+        fetch_qq_lyrics(client, &query, duration),
     );
     let mut ordered = vec![
         (LyricsSourcePriority::Netease, netease),
@@ -135,6 +139,8 @@ pub(crate) async fn fetch_netease_lyrics(
         let Some(song_id) = song.get("id").and_then(Value::as_u64) else {
             continue;
         };
+        // lv/tv/yv = 逐行 / 译文 / 逐字（yrc）；rv/ytv/yrv = 音译 / 与 yrc 对齐的译文 / 与 yrc
+        // 对齐的音译（2026-09-19 实测 Web 端匿名可取）。
         let Ok(lyric_data) = client
             .get("https://music.163.com/api/song/lyric")
             .query(&[
@@ -142,7 +148,10 @@ pub(crate) async fn fetch_netease_lyrics(
                 ("lv", "-1".to_string()),
                 ("kv", "-1".to_string()),
                 ("tv", "-1".to_string()),
+                ("rv", "-1".to_string()),
                 ("yv", "-1".to_string()),
+                ("ytv", "-1".to_string()),
+                ("yrv", "-1".to_string()),
             ])
             .send()
             .await
@@ -175,11 +184,57 @@ pub(crate) async fn fetch_netease_lyrics(
     Ok(results)
 }
 
-pub(crate) async fn fetch_kugou_lyrics(
-    client: &Client,
-    query: &str,
-    duration: u64,
-) -> Result<Vec<OnlineLyricsCandidate>, ()> {
+/// 酷狗歌词搜索关键词。`lyrics.kugou.com/search` 对格式极其敏感（2026-09-19 实测）：
+/// `唯一 王力宏` 返回 0 候选，`王力宏 - 唯一`（LDDC `get_lyricslist` 的拼法）返回 11 个，
+/// 中 / 英 / 日三种语言同样规律——酷狗是逐字 KRC 覆盖最广的源，此前几乎从不命中。
+/// 多艺术家按 `、` 连接（LDDC 口径）；艺术家为空 / Unknown 时只用曲名。
+pub(crate) fn kugou_lyrics_keyword(title: &str, artist: &str) -> String {
+    let title = title.trim();
+    let artists = artist
+        .split(['/', '&', ',', '，', '、', ';'])
+        .map(str::trim)
+        .filter(|part| {
+            !part.is_empty()
+                && !matches!(
+                    part.to_ascii_lowercase().as_str(),
+                    "unknown" | "unknown artist"
+                )
+        })
+        .collect::<Vec<_>>();
+    if artists.is_empty() || title.is_empty() {
+        return title.to_string();
+    }
+    format!("{} - {title}", artists.join("、"))
+}
+
+/// 酷狗候选排序：接口自带 `score` 降序（LDDC 直接取首个 = 最高分）；同分按与本地时长的
+/// 接近度；时长未知（0）时不参与（M-13 同型）。稳定排序，其余保持接口原序。
+pub(crate) fn ranked_kugou_candidates(items: &[Value], duration: u64) -> Vec<&Value> {
+    let target_ms = duration.saturating_mul(1000);
+    let mut ranked = items.iter().collect::<Vec<_>>();
+    ranked.sort_by_key(|item| {
+        let score = item
+            .get("score")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+            })
+            .unwrap_or(0);
+        let diff = if duration == 0 {
+            0
+        } else {
+            provider_duration_ms(item)
+                .map(|item_ms| item_ms.abs_diff(target_ms))
+                .unwrap_or(u64::MAX)
+        };
+        (std::cmp::Reverse(score), diff)
+    });
+    ranked
+}
+
+/// 一次酷狗歌词搜索；Err = 请求 / 解析失败，Ok(空) = 正常返回但没有候选。
+async fn kugou_search(client: &Client, keyword: &str, duration: u64) -> Result<Vec<Value>, ()> {
     let duration_ms = duration.saturating_mul(1000).to_string();
     let Ok(response) = client
         .get("https://lyrics.kugou.com/search")
@@ -187,7 +242,7 @@ pub(crate) async fn fetch_kugou_lyrics(
             ("ver", "1"),
             ("man", "yes"),
             ("client", "pc"),
-            ("keyword", query),
+            ("keyword", keyword),
             ("duration", duration_ms.as_str()),
             ("hash", ""),
         ])
@@ -202,12 +257,33 @@ pub(crate) async fn fetch_kugou_lyrics(
         return Err(());
     };
 
-    let Some(candidates) = response.get("candidates").and_then(Value::as_array) else {
+    Ok(response
+        .get("candidates")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+pub(crate) async fn fetch_kugou_lyrics(
+    client: &Client,
+    title: &str,
+    artist: &str,
+    duration: u64,
+) -> Result<Vec<OnlineLyricsCandidate>, ()> {
+    let keyword = kugou_lyrics_keyword(title, artist);
+    if keyword.is_empty() {
         return Ok(Vec::new());
-    };
+    }
+    let mut candidates = kugou_search(client, &keyword, duration).await?;
+    // 「艺术家 - 曲名」零命中（艺术家写法与酷狗库不一致）时退回只用曲名；时长照传，
+    // 不传时长的纯曲名搜索会撞到同名歌手 / 无关短片段
+    let title_only = title.trim();
+    if candidates.is_empty() && !title_only.is_empty() && keyword != title_only {
+        candidates = kugou_search(client, title_only, duration).await?;
+    }
 
     let mut results = Vec::new();
-    for candidate in ranked_provider_items(candidates, duration)
+    for candidate in ranked_kugou_candidates(&candidates, duration)
         .into_iter()
         .take(5)
     {
@@ -252,7 +328,7 @@ pub(crate) async fn fetch_kugou_lyrics(
 
         let title = value_string(candidate, "song")
             .or_else(|| value_string(candidate, "filename"))
-            .unwrap_or_else(|| query.into());
+            .unwrap_or_else(|| keyword.clone());
         results.push(OnlineLyricsCandidate {
             id: format!("kugou-{id}"),
             source: "酷狗音乐".into(),
@@ -312,22 +388,23 @@ pub(crate) async fn fetch_qq_lyrics(
         else {
             continue;
         };
-        let Ok(lyric_data) = client
-            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
-            .header(REFERER, "https://y.qq.com/")
-            .query(&[("format", "json"), ("nobase64", "1"), ("songmid", song_mid)])
-            .send()
-            .await
-            .and_then(|response| response.error_for_status())
-        else {
-            continue;
+        // 数字 songid：客户端取词接口与 AMLL qq-lyrics 目录都按它索引（非 songmid）
+        let song_id = song
+            .get("songid")
+            .or_else(|| song.get("id"))
+            .and_then(Value::as_u64);
+        // 逐字 QRC + 译文 + 音译走客户端取词接口；请求失败或没内容时退回网页端逐行接口，
+        // 保证不比此前差
+        let lyrics = match song_id {
+            Some(song_id) => fetch_qq_play_lyric(client, song_id).await,
+            None => None,
         };
-        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
-        else {
-            continue;
-        };
-        let Some(lyrics) = parse_qq_lyric_payload(&lyric_data) else {
-            continue;
+        let lyrics = match lyrics {
+            Some(lyrics) => lyrics,
+            None => match fetch_qq_web_lyric(client, song_mid).await {
+                Some(lyrics) => lyrics,
+                None => continue,
+            },
         };
 
         results.push(OnlineLyricsCandidate {
@@ -340,11 +417,7 @@ pub(crate) async fn fetch_qq_lyrics(
             album: value_string(song, "albumname"),
             duration: provider_duration_ms(song).map(|ms| ms / 1000),
             lyrics,
-            // AMLL 的 qq-lyrics 目录按数字 songid 命名（非 songmid）
-            ttml_lookup_keys: song
-                .get("songid")
-                .or_else(|| song.get("id"))
-                .and_then(Value::as_u64)
+            ttml_lookup_keys: song_id
                 .map(|id| vec![format!("qq-lyrics/{id}")])
                 .unwrap_or_default(),
         });
@@ -353,35 +426,249 @@ pub(crate) async fn fetch_qq_lyrics(
     Ok(results)
 }
 
-pub(crate) fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
-    if let Some(yrc) = payload
-        .get("yrc")
-        .and_then(|value| value.get("lyric"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+/// QQ 客户端取词接口 `music.musichallSong.PlayLyricInfo`（2026-09-19 实测匿名可用）：
+/// 网页端 `fcg_query_lyric_new.fcg` 只给逐行 LRC，逐字 QRC、译文与音译只有这里有。
+/// 返回体三段都是 hex 密文（见 `decrypt_qrc_cloud`）。失败 / 无内容返回 None，由调用方退回旧接口。
+/// 同一 `online_lyrics_client`（逐跳白名单 `.qq.com` 已覆盖 `u.y.qq.com`），响应经 `read_json_capped`。
+async fn fetch_qq_play_lyric(client: &Client, song_id: u64) -> Option<Vec<LyricLine>> {
+    let body = serde_json::json!({
+        "comm": { "ct": 19, "cv": "2111" },
+        "req": {
+            "method": "GetPlayLyricInfo",
+            "module": "music.musichallSong.PlayLyricInfo",
+            "param": {
+                "songID": song_id,
+                "crypt": 1,
+                "qrc": 1,
+                "qrc_t": 0,
+                "roma": 1,
+                "roma_t": 0,
+                "trans": 1,
+                "trans_t": 0,
+                "lrc_t": 0,
+                "ct": 19,
+                "cv": 2111,
+                "type": 0
+            }
+        }
+    });
+    let response = client
+        .post("https://u.y.qq.com/cgi-bin/musicu.fcg")
+        .header(REFERER, "https://y.qq.com/")
+        .json(&body)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .ok()?;
+    let payload = read_json_capped::<Value>(response, MAX_EXTERNAL_JSON_BYTES)
+        .await
+        .ok()?;
+    let data = payload.get("req")?.get("data")?;
+    parse_qq_play_lyric_payload(data)
+}
+
+/// 网页端逐行接口（旧路径，作为客户端接口失败时的回退）。
+async fn fetch_qq_web_lyric(client: &Client, song_mid: &str) -> Option<Vec<LyricLine>> {
+    let response = client
+        .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+        .header(REFERER, "https://y.qq.com/")
+        .query(&[("format", "json"), ("nobase64", "1"), ("songmid", song_mid)])
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .ok()?;
+    let payload = read_json_capped::<Value>(response, MAX_EXTERNAL_JSON_BYTES)
+        .await
+        .ok()?;
+    parse_qq_lyric_payload(&payload)
+}
+
+/// `GetPlayLyricInfo` 的 `data`：`lyric` / `trans` / `roma` 是 hex 密文（空字符串 = 无该项）。
+/// 原文通常是 `<Lyric_1 …>` QRC 容器（逐字），也可能是普通 LRC，交给 `parse_lyrics_bytes` 嗅探；
+/// 译文是逐行 LRC，无原文的行写 `//` 占位、头部带 QQ 私有 `[kana:…]` 注音标签，都剔除；
+/// 音译是逐字 QRC，按行取音节拼接后写进原文行的 `roman` 字段。
+pub(crate) fn parse_qq_play_lyric_payload(data: &Value) -> Option<Vec<LyricLine>> {
+    let decrypted = |key: &str| -> Option<String> {
+        let hex = data
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        match decrypt_qrc_cloud(hex) {
+            Ok(text) => Some(text),
+            Err(err) => {
+                tracing::debug!(key, %err, "QQ 歌词字段解密失败");
+                None
+            }
+        }
+    };
+    let original = decrypted("lyric")
+        .map(|text| parse_lyrics_bytes(text.as_bytes()))
+        .unwrap_or_default();
+    let translations = decrypted("trans")
+        .map(|text| parse_qq_translation_text(&text))
+        .unwrap_or_default();
+    let romans = decrypted("roma")
+        .map(|text| parse_lyrics_bytes(text.as_bytes()))
+        .unwrap_or_default();
+    normalize_lyric_lines(attach_lyric_tracks(original, translations, romans)).map(clamp_lyrics)
+}
+
+/// QQ `trans`（解密后）：普通 LRC，但带 `[kana:…]` 注音行，没有原文的行写 `//` 占位
+/// （LDDC `has_content` 同样把 `//` 视为空）。
+pub(crate) fn parse_qq_translation_text(text: &str) -> Vec<LyricLine> {
+    let cleaned = text
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start_matches('\u{feff}')
+                .trim_start()
+                .starts_with("[kana:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut lines = parse_lyrics_bytes(cleaned.as_bytes());
+    lines.retain(|line| line.text.trim() != "//");
+    lines
+}
+
+/// 译文 / 音译轨与原文对齐的最大起点差（秒）：同一份歌词的不同轨起点通常完全相等或只差
+/// 几十毫秒（网易云 tlyric 与 yrc 差 ~40 ms），1 s 已足够宽松，又不会把相邻两句串起来。
+pub(crate) const TRACK_ALIGN_TOLERANCE_SECONDS: f64 = 1.0;
+
+/// 把独立的译文轨与音译轨并入原文：按「起点差最小的一对一匹配」（LDDC `find_closest_match`
+/// 的语义，本项目独立实现，每行只看最近的两个原文起点，O(n log n)）。匹配上的译文行时间改为
+/// 原文起点并紧随其后——即前端 `groupLyricsByTime` 认的「相邻同时间戳行」形态，与 LRC 双语
+/// 文件、KRC 译文一致；音译写进原文行的 `roman` 字段。差距超过容差或原文已被占用的译文行
+/// 保持原时间独立存在（与此前「拼接后排序」行为一致，不丢内容），落单的音译行丢弃。
+pub(crate) fn attach_lyric_tracks(
+    mut original: Vec<LyricLine>,
+    translations: Vec<LyricLine>,
+    romans: Vec<LyricLine>,
+) -> Vec<LyricLine> {
+    if translations.is_empty() && romans.is_empty() {
+        return original;
+    }
+    original.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for (roman_index, matched) in match_tracks_by_start(&original, &romans)
+        .into_iter()
+        .enumerate()
     {
-        let lyrics = parse_lyrics_bytes(yrc.as_bytes());
-        if !lyrics.is_empty() {
-            return Some(lyrics);
+        if let Some(original_index) = matched {
+            original[original_index].roman = Some(romans[roman_index].text.clone());
         }
     }
 
-    let mut lyrics = Vec::new();
-    if let Some(lrc) = payload
-        .get("lrc")
-        .and_then(|value| value.get("lyric"))
-        .and_then(Value::as_str)
+    let mut attached: Vec<Vec<usize>> = vec![Vec::new(); original.len()];
+    let mut standalone = Vec::new();
+    for (translation_index, matched) in match_tracks_by_start(&original, &translations)
+        .into_iter()
+        .enumerate()
     {
-        lyrics.extend(parse_lyrics_text(lrc));
+        match matched {
+            Some(original_index) => attached[original_index].push(translation_index),
+            None => standalone.push(translation_index),
+        }
     }
-    if let Some(tlyric) = payload
-        .get("tlyric")
-        .and_then(|value| value.get("lyric"))
-        .and_then(Value::as_str)
-    {
-        lyrics.extend(parse_lyrics_text(tlyric));
+
+    let mut translations = translations.into_iter().map(Some).collect::<Vec<_>>();
+    let mut merged = Vec::with_capacity(original.len() + translations.len());
+    for (original_index, line) in original.into_iter().enumerate() {
+        let time = line.time;
+        merged.push(line);
+        for translation_index in &attached[original_index] {
+            if let Some(mut translation) = translations[*translation_index].take() {
+                translation.time = time;
+                merged.push(translation);
+            }
+        }
     }
-    normalize_lyric_lines(lyrics)
+    for translation_index in standalone {
+        if let Some(translation) = translations[translation_index].take() {
+            merged.push(translation);
+        }
+    }
+    // 稳定排序：落单译文按自身时间归位，已并入的译文仍紧跟其原文
+    merged.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged
+}
+
+/// 返回 `tracks[j]` 匹配到的 `original` 下标（None = 落单）。候选对只取每行前后最近的两个
+/// 原文起点，按差值升序贪心一对一分配；`original` 须已按时间排序。
+fn match_tracks_by_start(original: &[LyricLine], tracks: &[LyricLine]) -> Vec<Option<usize>> {
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (track_index, line) in tracks.iter().enumerate() {
+        let upper = original.partition_point(|candidate| candidate.time < line.time);
+        let nearest = [
+            upper.checked_sub(1),
+            (upper < original.len()).then_some(upper),
+        ];
+        for original_index in nearest.into_iter().flatten() {
+            let diff = (original[original_index].time - line.time).abs();
+            if diff <= TRACK_ALIGN_TOLERANCE_SECONDS {
+                pairs.push((diff, original_index, track_index));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+
+    let mut taken = vec![false; original.len()];
+    let mut matched = vec![None; tracks.len()];
+    for (_, original_index, track_index) in pairs {
+        if taken[original_index] || matched[track_index].is_some() {
+            continue;
+        }
+        taken[original_index] = true;
+        matched[track_index] = Some(original_index);
+    }
+    matched
+}
+
+/// 网易云 `song/lyric`：原文优先 `yrc`（逐字），空则 `lrc`（逐行）。译文 / 音译不再因为拿到
+/// yrc 就丢弃（此前 yrc 命中即返回，bad guy 这类同时有 yrc + ytlrc + tlyric 的歌只剩原文）：
+/// 逐字来源优先与 yrc 行对齐的 `ytlrc` / `yromalrc`，其次 `tlyric` / `romalrc`（与 lrc 对齐，
+/// 起点可能差几十毫秒，由 `attach_lyric_tracks` 按最近起点并入）。没有时间戳的译文轨是
+/// 4 秒等差的假时间轴，对不上任何原文，直接丢弃。
+pub(crate) fn parse_netease_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
+    let field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.get("lyric"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let yrc = field("yrc")
+        .map(|yrc| parse_lyrics_bytes(yrc.as_bytes()))
+        .filter(|lines| !lines.is_empty());
+    let word_synced = yrc.is_some();
+    let original = yrc.unwrap_or_else(|| field("lrc").map(parse_lyrics_text).unwrap_or_default());
+    let side_track = |aligned: &str, plain: &str| {
+        word_synced
+            .then(|| field(aligned))
+            .flatten()
+            .or_else(|| field(plain))
+            .map(parse_lyrics_text)
+            .filter(|lines| !lyrics_are_unsynced(lines))
+            .unwrap_or_default()
+    };
+    let translations = side_track("ytlrc", "tlyric");
+    let romans = side_track("yromalrc", "romalrc");
+    normalize_lyric_lines(attach_lyric_tracks(original, translations, romans)).map(clamp_lyrics)
 }
 
 pub(crate) fn parse_qq_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> {
@@ -392,7 +679,7 @@ pub(crate) fn parse_qq_lyric_payload(payload: &Value) -> Option<Vec<LyricLine>> 
     if let Some(trans) = payload.get("trans").and_then(Value::as_str) {
         lyrics.extend(parse_online_lyric_text(trans));
     }
-    normalize_lyric_lines(lyrics)
+    normalize_lyric_lines(lyrics).map(clamp_lyrics)
 }
 
 pub(crate) fn parse_online_lyric_text(value: &str) -> Vec<LyricLine> {
@@ -536,4 +823,220 @@ pub(crate) fn provider_duration_ms(item: &Value) -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ms(value: f64) -> i64 {
+        (value * 1000.0).round() as i64
+    }
+
+    fn texts(lines: &[LyricLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    #[test]
+    fn kugou_keyword_is_artist_dash_title() {
+        assert_eq!(kugou_lyrics_keyword("唯一", "王力宏"), "王力宏 - 唯一");
+        // 多艺术家：任一常见分隔符 → 顿号（LDDC 口径）
+        assert_eq!(
+            kugou_lyrics_keyword("唯一", "王力宏 / 张三 & 李四"),
+            "王力宏、张三、李四 - 唯一"
+        );
+        // 艺术家缺失 / Unknown → 只用曲名；手动搜索把整句放在 title、artist 传空
+        assert_eq!(kugou_lyrics_keyword("唯一", ""), "唯一");
+        assert_eq!(kugou_lyrics_keyword("唯一", "Unknown"), "唯一");
+        assert_eq!(kugou_lyrics_keyword(" 王力宏 唯一 ", ""), "王力宏 唯一");
+        assert_eq!(kugou_lyrics_keyword("", "王力宏"), "");
+    }
+
+    fn ids<'a>(ranked: &[&'a Value]) -> Vec<&'a str> {
+        ranked
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn kugou_candidates_rank_by_score_then_duration() {
+        let items = vec![
+            json!({ "id": "a", "score": 40, "duration": 262_000 }),
+            json!({ "id": "b", "score": 60, "duration": 30_000 }),
+            json!({ "id": "c", "score": 60, "duration": 262_000 }),
+            json!({ "id": "d", "score": "50", "duration": 262_000 }),
+        ];
+        // 分数优先；同分按时长接近度；字符串分数也认
+        assert_eq!(
+            ids(&ranked_kugou_candidates(&items, 262)),
+            ["c", "b", "d", "a"]
+        );
+        // 时长未知：同分保持接口原序
+        assert_eq!(
+            ids(&ranked_kugou_candidates(&items, 0)),
+            ["b", "c", "d", "a"]
+        );
+    }
+
+    #[test]
+    fn attach_snaps_translation_to_nearest_original_and_sets_roman() {
+        let mut first = LyricLine::new(14.1, "White shirt");
+        first.end = Some(17.67);
+        first.words = Some(vec![LyricWord {
+            start: 14.1,
+            end: 17.67,
+            text: "White shirt".into(),
+        }]);
+        let original = vec![first, LyricLine::new(17.67, "Sleeping")];
+        // 译文起点与原文差 40 ms / 10 ms；音译只给第一句
+        let translations = vec![
+            LyricLine::new(14.06, "白色的衬衫"),
+            LyricLine::new(17.68, "沉睡着"),
+        ];
+        let romans = vec![LyricLine::new(14.1, "waito shaatsu")];
+
+        let merged = attach_lyric_tracks(original, translations, romans);
+        assert_eq!(
+            texts(&merged),
+            ["White shirt", "白色的衬衫", "Sleeping", "沉睡着"]
+        );
+        // 译文时间改成原文起点（前端按相邻同时间戳分组）
+        assert_eq!(ms(merged[1].time), 14_100);
+        assert_eq!(ms(merged[3].time), 17_670);
+        assert_eq!(merged[0].roman.as_deref(), Some("waito shaatsu"));
+        assert!(merged[2].roman.is_none());
+        // 原文自身的 words / end 原样保留
+        assert_eq!(merged[0].words.as_ref().map(Vec::len), Some(1));
+        assert_eq!(merged[0].end, Some(17.67));
+    }
+
+    #[test]
+    fn attach_keeps_unmatched_translation_standalone_and_drops_unmatched_roman() {
+        let original = vec![LyricLine::new(10.0, "a"), LyricLine::new(12.0, "b")];
+        // 50.0 离任何原文都超过容差；两条 10.0 译文只有一条能配上，另一条按自身时间独立存在
+        let translations = vec![
+            LyricLine::new(50.0, "far"),
+            LyricLine::new(10.0, "t1"),
+            LyricLine::new(10.0, "t2"),
+        ];
+        let romans = vec![LyricLine::new(30.0, "orphan")];
+        let merged = attach_lyric_tracks(original, translations, romans);
+        assert_eq!(texts(&merged), ["a", "t1", "t2", "b", "far"]);
+        assert_eq!(ms(merged[4].time), 50_000);
+        assert!(merged.iter().all(|line| line.roman.is_none()));
+        // 没有副轨时原样返回
+        let plain = vec![LyricLine::new(1.0, "x")];
+        assert_eq!(
+            attach_lyric_tracks(plain.clone(), Vec::new(), Vec::new()),
+            plain
+        );
+    }
+
+    #[test]
+    fn netease_payload_keeps_translation_and_roman_alongside_yrc() {
+        let payload = json!({
+            "lrc": { "lyric": "[00:14.06]White shirt\n[00:17.68]Sleeping\n" },
+            "yrc": { "lyric": "[14100,3570](14100,420,0)White (14520,480,0)shirt\n[17670,3600](17670,600,0)Sleeping\n" },
+            "ytlrc": { "lyric": "[00:14.100]白色的衬衫\n[00:17.670]沉睡着\n" },
+            "tlyric": { "lyric": "[by:某人]\n[00:14.06]旧译文\n" },
+            "romalrc": { "lyric": "[00:14.06]waito shaatsu\n" }
+        });
+        let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
+        assert_eq!(
+            texts(&lines),
+            ["White shirt", "白色的衬衫", "Sleeping", "沉睡着"]
+        );
+        // 原文来自 yrc（逐字）；译文优先 ytlrc（与 yrc 对齐），tlyric 不再重复并入
+        assert_eq!(lines[0].words.as_ref().map(Vec::len), Some(2));
+        assert_eq!(ms(lines[1].time), 14_100);
+        assert!(lines[1].words.is_none());
+        // 只有 romalrc（对齐 lrc，差 40 ms）时也能并到 yrc 行
+        assert_eq!(lines[0].roman.as_deref(), Some("waito shaatsu"));
+    }
+
+    #[test]
+    fn netease_payload_line_level_still_pairs_lrc_with_tlyric() {
+        let payload = json!({
+            "lrc": { "lyric": "[00:00.000] 作词 : 某人\n[00:30.542]故事的小黄花\n[00:34.000]从出生那年就飘着\n" },
+            "tlyric": { "lyric": "[00:00.950]\n[00:30.542]Little yellow flower\n" }
+        });
+        let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
+        assert_eq!(
+            texts(&lines),
+            [
+                "作词 : 某人",
+                "故事的小黄花",
+                "Little yellow flower",
+                "从出生那年就飘着"
+            ]
+        );
+        assert_eq!(ms(lines[2].time), 30_542);
+        assert!(lines.iter().all(|line| line.words.is_none()));
+    }
+
+    #[test]
+    fn netease_payload_drops_unsynced_translation_track() {
+        let payload = json!({
+            "lrc": { "lyric": "[00:01.00]a\n[00:05.00]b\n" },
+            "tlyric": { "lyric": "无时间戳的译文\n第二行\n" }
+        });
+        let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
+        assert_eq!(texts(&lines), ["a", "b"]);
+    }
+
+    #[test]
+    fn qq_translation_text_drops_kana_tag_and_placeholder_lines() {
+        let text = "[ti:水中リフレクション]\n[offset:0]\n[kana:1す(201,159)い(360,121)1ちゅう]\n[00:00.20]TME享有本翻译作品的著作权\n[00:02.16]//\n[00:29.44]朝着遥远深邃之处缓缓下沉\n";
+        let lines = parse_qq_translation_text(text);
+        assert_eq!(
+            texts(&lines),
+            ["TME享有本翻译作品的著作权", "朝着遥远深邃之处缓缓下沉"]
+        );
+        assert_eq!(ms(lines[1].time), 29_440);
+        // 只有 kana 与标签、没有任何歌词行 → 空，而不是把注音串当歌词
+        assert!(parse_qq_translation_text("[ti:x]\n[kana:1す(201,159)]\n").is_empty());
+    }
+
+    // 三段向量由独立 3DES 实现生成（明文 → zlib → 3DES-ECB(QRC_KEY) → hex）：
+    // lyric = QRC 容器 `[1000,2000]he(1000,500)llo(1500,500)` / `[3000,1000]world(3000,1000)`
+    // trans = `[kana:…]` + `[00:01.00]你好` + `[00:03.00]//`
+    // roma  = QRC 容器 `he (1000,500)llo (1500,500)` / `wo (3000,500)rld (3500,500)`
+    const QQ_LYRIC_HEX: &str = "0C8D67DD3E549974B64ED2680459F13881AA15D10DB4CC8324B86311D0D741BD6AF5D8724F2B75716C3A763AFD2E1295440B85EA0FE0BC84E3E9E35CF02D8CD9378E8568C45FC144C4C8D9B70CB163DA9D4A809AAEFBF861B197F5DCA6E03F41736731C3D41C7E266E5814A0D03DE379888D35B887555E4B0071C0D3B0E905C62A3F74AD8F130BFB27146FA8698F33C051931B38F140BAC2E68F117802E7391771B7F807A965691B30A74940C000AD63";
+    const QQ_TRANS_HEX: &str = "5DCFF376CA238C449DE4FDFD218DED2DC7021FC49908B1705AEFCD2F5DC3BE203D86DAAA19A8A112FAF102C0711469CEA9FB2C68ACBB21FE6F91F68DF6EC9B76C28178FBC9F3F6306B45F5D20B39CDCCC9A522C835CA20C0B7C6B0DBE1505374";
+    const QQ_ROMA_HEX: &str = "C90DB2E3F6940A43538B45865EB6753863C981F936A71A093B450246D48B65F00E18C3F4862A65A8A2740777BCE486B09E770AF59C690B9B68D63C8D2E4A5A8C137A4C08D9091DA0C893EB6BD001D984D54352C2541EABA651FE5BC686117BF7";
+
+    #[test]
+    fn qq_play_lyric_payload_yields_words_translation_and_roman() {
+        let data = json!({
+            "lyric": QQ_LYRIC_HEX, "qrc": 1, "qrc_t": 1571572791, "lrc_t": 0,
+            "trans": QQ_TRANS_HEX, "trans_t": 1571572791,
+            "roma": QQ_ROMA_HEX, "roma_t": 1466496774
+        });
+        let lines = parse_qq_play_lyric_payload(&data).expect("lyrics");
+        assert_eq!(texts(&lines), ["hello", "你好", "world"]);
+        let words = lines[0].words.as_ref().expect("qrc words");
+        assert_eq!(
+            words
+                .iter()
+                .map(|word| (word.text.as_str(), ms(word.start), ms(word.end)))
+                .collect::<Vec<_>>(),
+            [("he", 1000, 1500), ("llo", 1500, 2000)]
+        );
+        assert_eq!(lines[0].end, Some(3.0));
+        // 译文并到原文起点后面；`//` 占位与 [kana:] 已剔除
+        assert_eq!(ms(lines[1].time), 1000);
+        assert!(lines[1].words.is_none());
+        // 音译按行拼音节写进 roman
+        assert_eq!(lines[0].roman.as_deref(), Some("he llo"));
+        assert_eq!(lines[2].roman.as_deref(), Some("wo rld"));
+
+        // 空字段 / 坏密文只让该项缺席，不影响其余
+        let partial = json!({ "lyric": QQ_LYRIC_HEX, "trans": "", "roma": "ZZZZ" });
+        let lines = parse_qq_play_lyric_payload(&partial).expect("lyrics");
+        assert_eq!(texts(&lines), ["hello", "world"]);
+        assert!(lines.iter().all(|line| line.roman.is_none()));
+        assert!(parse_qq_play_lyric_payload(&json!({ "lyric": "" })).is_none());
+    }
 }

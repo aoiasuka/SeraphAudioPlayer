@@ -136,4 +136,18 @@ describe("切歌时的歌词时间轴", () => {
     emit({ type: "playback_started", track_id: "b" });
     expect(usePlayerStore.getState().currentTime).toBe(0.3);
   });
+
+  it("进度事件携带的输出延迟写入 store，缺省时沿用上一次的值", () => {
+    renderHook(usePlayback);
+    emit({ type: "track_changed", track_id: "b" });
+    emit({ type: "progress", track_id: "b", seconds: 1, output_latency: 0.12 });
+    expect(usePlayerStore.getState().outputLatency).toBeCloseTo(0.12);
+    // 旧载荷没有该字段：保持上一次的延迟；坏值同样忽略
+    emit({ type: "progress", track_id: "b", seconds: 2 });
+    expect(usePlayerStore.getState().outputLatency).toBeCloseTo(0.12);
+    emit({ type: "progress", track_id: "b", seconds: 3, output_latency: Number.NaN });
+    expect(usePlayerStore.getState().outputLatency).toBeCloseTo(0.12);
+    emit({ type: "progress", track_id: "b", seconds: 4, output_latency: -1 });
+    expect(usePlayerStore.getState()).toMatchObject({ currentTime: 4, outputLatency: 0 });
+  });
 });

@@ -13,10 +13,6 @@ pub(crate) use std::{
 };
 
 pub(crate) use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-pub(crate) use des::{
-    cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit},
-    TdesEde3,
-};
 pub(crate) use encoding_rs::GBK;
 pub(crate) use flate2::read::ZlibDecoder;
 pub(crate) use lofty::{

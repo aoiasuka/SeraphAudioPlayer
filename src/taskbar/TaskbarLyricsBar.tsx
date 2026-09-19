@@ -7,6 +7,7 @@ import {
   activeVisibleIndex,
   hasWordTiming,
   isInIntermission,
+  lyricsPosition,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
 import {
@@ -56,6 +57,8 @@ interface PlayerEventPayload {
   track_id?: string;
   seconds?: number;
   total?: number;
+  /** 引擎输出延迟（秒）：歌词定位用 seconds − output_latency */
+  output_latency?: number;
 }
 
 /**
@@ -78,6 +81,8 @@ export function TaskbarLyricsBar() {
   const [playing, setPlaying] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [total, setTotal] = useState(0);
+  // 引擎输出延迟（Progress 事件携带），歌词定位按可听位置回拨
+  const [outputLatency, setOutputLatency] = useState(0);
   const [hovered, setHovered] = useState(false);
   // 墨签配色：深色任务栏 → 墨底纸字（快照初始化 + 主题切换事件热更新）
   const [dark, setDark] = useState(false);
@@ -171,6 +176,9 @@ export function TaskbarLyricsBar() {
           receivedSnapshotFieldsRef.current.progress = true;
           setSeconds(event.seconds ?? 0);
           setTotal(event.total ?? 0);
+          if (typeof event.output_latency === "number" && Number.isFinite(event.output_latency)) {
+            setOutputLatency(Math.max(0, event.output_latency));
+          }
           // 窗口刚创建、尚无当前曲目时按 Progress 初始化；已切歌则拒绝旧进度。
           if (event.track_id && !trackIdRef.current) {
             receivedSnapshotFieldsRef.current.track = true;
@@ -336,9 +344,11 @@ export function TaskbarLyricsBar() {
     [track]
   );
   const lyricGroups = resolvedGroups.visible;
+  // 歌词定位按可听位置（进度条 / seek 仍用原始 seconds）
+  const lyricsSeconds = lyricsPosition(seconds, outputLatency);
   const activeIdx = useMemo(
-    () => activeVisibleIndex(resolvedGroups, seconds),
-    [resolvedGroups, seconds]
+    () => activeVisibleIndex(resolvedGroups, lyricsSeconds),
+    [resolvedGroups, lyricsSeconds]
   );
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = (track?.lyrics.length ?? 0) > 0 && lyricGroups.length === 0;
@@ -346,9 +356,9 @@ export function TaskbarLyricsBar() {
     activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeLine = activeLineEntry?.text ?? "";
   const activeHasWords = hasWordTiming(activeLineEntry);
-  const smoothSeconds = useSmoothTime(seconds, playing, activeHasWords);
+  const smoothSeconds = useSmoothTime(lyricsSeconds, playing, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
-  const intermission = isInIntermission(resolvedGroups, activeIdx, seconds);
+  const intermission = isInIntermission(resolvedGroups, activeIdx, lyricsSeconds);
 
   const effectiveTotal = total > 0 ? total : (track?.duration ?? 0);
   const progressRatio =

@@ -98,4 +98,18 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
     const plain = screen.getByText("Plain line").closest(".flex.items-start") as HTMLElement;
     expect(plain.className).toContain("opacity-100");
   });
+
+  it("逐字进度按引擎输出延迟回拨：按可听位置而不是引擎位置填色", () => {
+    // 引擎位置 11s、输出延迟 0.5s → 可听位置 10.5s：首音节（10–12s）只唱了四分之一
+    usePlayerStore.setState({ currentTime: 11, outputLatency: 0.5 });
+    render(<LyricsPanel />);
+    const karaoke = screen.getByTestId("karaoke-line");
+    expect(karaoke.querySelectorAll(".karaoke-word")[0]).toHaveAttribute("data-progress", "0.25");
+    // 延迟归零后恢复到 11s 的进度（首音节唱到一半）
+    act(() => usePlayerStore.setState({ outputLatency: 0 }));
+    expect(karaoke.querySelectorAll(".karaoke-word")[0]).toHaveAttribute("data-progress", "0.50");
+    // 延迟大到可听位置退回上一句（9.5s < 10s）：当前行切回行级歌词，不再有逐字节点
+    act(() => usePlayerStore.setState({ outputLatency: 1.5 }));
+    expect(screen.queryByTestId("karaoke-line")).toBeNull();
+  });
 });

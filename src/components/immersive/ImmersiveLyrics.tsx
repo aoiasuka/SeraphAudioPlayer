@@ -3,7 +3,7 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
-import { activeVisibleIndex, hasWordTiming, isInIntermission, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { activeVisibleIndex, hasWordTiming, isInIntermission, lyricsPosition, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
@@ -12,10 +12,10 @@ function useLyricGroups(track: Track) {
   // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
   const resolved = useMemo(() => resolveVisibleGroups(track.lyrics), [track.lyrics]);
   const groups = resolved.visible;
-  // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。
-  const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, s.currentTime));
+  // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。定位按可听位置（减输出延迟）。
+  const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, lyricsPosition(s.currentTime, s.outputLatency)));
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（布尔选择器，只在翻转时重渲染）
-  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, s.currentTime));
+  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, lyricsPosition(s.currentTime, s.outputLatency)));
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = track.lyrics.length > 0 && groups.length === 0;
   return { groups, activeIndex, intermission, allHiddenByRules };
@@ -45,7 +45,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
   const hasTranslation = groups.some((group) => group.lines.length > 1 || !!group.lines[0]?.translation);
   const activeLine = activeIndex >= 0 ? groups[activeIndex]?.lines[0] : undefined;
   const activeHasWords = hasWordTiming(activeLine);
-  const currentTime = usePlayerStore((s) => (activeHasWords ? s.currentTime : 0));
+  const currentTime = usePlayerStore((s) => (activeHasWords ? lyricsPosition(s.currentTime, s.outputLatency) : 0));
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
 

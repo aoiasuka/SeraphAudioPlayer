@@ -182,6 +182,7 @@ mod tests {
             track_id: "t1".into(),
             seconds,
             total,
+            output_latency: 0.0,
         }
     }
 

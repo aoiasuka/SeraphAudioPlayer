@@ -85,7 +85,13 @@ export function usePlayback() {
         const duration = track?.duration;
         const clamped =
           duration && duration > 0 ? Math.min(seconds, duration) : seconds;
-        return { currentTime: Math.max(0, clamped) };
+        // 输出延迟随每次进度事件刷新（旧载荷没有该字段时保持上一次的值）
+        const rawLatency = event.output_latency ?? event.outputLatency;
+        const outputLatency =
+          typeof rawLatency === "number" && Number.isFinite(rawLatency)
+            ? Math.max(0, rawLatency)
+            : state.outputLatency;
+        return { currentTime: Math.max(0, clamped), outputLatency };
       });
       return;
     }

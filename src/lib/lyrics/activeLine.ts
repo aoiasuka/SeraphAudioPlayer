@@ -105,6 +105,17 @@ export function activeVisibleIndex(
   return resolved.visibleIndexOfAll[index] ?? -1;
 }
 
+/**
+ * 歌词定位用的播放位置：引擎上报的 `currentTime` 是已送入设备缓冲的位置，比可听音频
+ * 领先 `outputLatency`（Progress 事件携带，共享模式约一次回调缓冲、独占模式约缓冲深度）。
+ * 三处歌词组件都用它做行定位、逐字锚定与间奏判定；进度条仍显示原始 `currentTime`。
+ * 坏值（NaN / 负数）按 0 处理，结果不小于 0。
+ */
+export function lyricsPosition(currentTime: number, outputLatency: number): number {
+  const latency = Number.isFinite(outputLatency) && outputLatency > 0 ? outputLatency : 0;
+  return Math.max(0, currentTime - latency);
+}
+
 /** 该行是否带可用的逐字时间轴。 */
 export function hasWordTiming(
   line: LyricLine | undefined
