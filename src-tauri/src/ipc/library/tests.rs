@@ -916,6 +916,38 @@ fn parses_kugou_krc_word_lines_and_translation() {
 }
 
 #[test]
+fn krc_language_type0_becomes_line_level_roman_skipping_empty_lines() {
+    // 酷狗 [language:] 的 type 0 是逐字罗马音，表项只覆盖非空原文行（空占位行被跳过）；
+    // 按顺序对回原文，拼成行级 roman；type 1 译文照旧成相邻行
+    let language = BASE64_STANDARD.encode(
+        r#"{"content":[{"type":0,"language":0,"lyricContent":[["he ","llo "],["wo ","rld "]]},{"type":1,"language":0,"lyricContent":[["greeting"],[""],["planet"]]}]}"#,
+    );
+    let text = format!(
+        "[language:{language}]
+[1000,2000]<0,500,0>he<500,500,0>llo
+[2000,500]<0,500,0>
+[3000,1000]<0,1000,0>world"
+    );
+    let lyrics = parse_lyrics_bytes(text.as_bytes());
+    let texts: Vec<&str> = lyrics.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["hello", "greeting", "world", "planet"]);
+    assert_eq!(lyrics[0].roman.as_deref(), Some("he llo"));
+    assert_eq!(lyrics[2].roman.as_deref(), Some("wo rld"));
+    assert!(lyrics[1].roman.is_none() && lyrics[3].roman.is_none());
+    // 罗马音表比原文行少时不 panic、多余原文行没有 roman
+    let language =
+        BASE64_STANDARD.encode(r#"{"content":[{"type":0,"lyricContent":[["he ","llo "]]}]}"#);
+    let text = format!(
+        "[language:{language}]
+[1000,2000]<0,500,0>he<500,500,0>llo
+[3000,1000]<0,1000,0>world"
+    );
+    let lyrics = parse_lyrics_bytes(text.as_bytes());
+    assert_eq!(lyrics[0].roman.as_deref(), Some("he llo"));
+    assert!(lyrics[1].roman.is_none());
+}
+
+#[test]
 fn parses_ttml_bytes_without_extension_by_content_sniffing() {
     // 手动导入只有裸字节：以 `<?xml`/`<tt` 开头且含 `<tt` 即走 TTML 解析
     let ttml = "\u{feff}  <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"00:01.000\" end=\"00:03.000\"><span begin=\"00:01.000\" end=\"00:01.500\">Hel</span><span begin=\"00:01.500\" end=\"00:03.000\">lo</span></p></div></body></tt>";

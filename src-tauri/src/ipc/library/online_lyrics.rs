@@ -91,10 +91,69 @@ pub(crate) async fn fetch_online_lyrics_from_sources(
             Err(()) => failed_sources += 1,
         }
     }
+    let candidates = rank_online_lyrics_candidates(
+        dedupe_online_lyrics_candidates(candidates),
+        duration,
+        priority,
+    );
     OnlineLyricsFetch {
-        candidates: dedupe_online_lyrics_candidates(candidates),
+        candidates,
         failed_sources,
     }
+}
+
+/// 候选能力分档（越小越好）：逐字 + 译文 < 逐字 < 译文 < 逐行（LDDC `auto_fetch` 的取舍顺序）。
+/// 译文两种形态都算：`translation` 字段或相邻同时间戳行。
+pub(crate) fn candidate_capability_tier(lyrics: &[LyricLine]) -> u8 {
+    let word_synced = lyrics.iter().any(|line| line.words.is_some());
+    let has_translation = lyrics.iter().any(|line| line.translation.is_some())
+        || lyrics
+            .windows(2)
+            .any(|pair| (pair[0].time - pair[1].time).abs() < 0.01 && pair[0].text != pair[1].text);
+    match (word_synced, has_translation) {
+        (true, true) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    }
+}
+
+/// 与本地时长相差超过这么多秒的候选（Live / 试听片段 / 另一版本）沉底；LDDC 直接丢弃，
+/// 这里保留在列表末尾供手动挑选，但不会被自动选中。
+pub(crate) const CANDIDATE_DURATION_TOLERANCE_SECONDS: u64 = 4;
+
+/// 三源候选排序（稳定，源内原序不变）：时长明显不符的沉底；「自动」优先级下按能力分档，
+/// 逐字候选排最前；用户指定了首选源时尊重设置——源顺序优先、档次其次。
+pub(crate) fn rank_online_lyrics_candidates(
+    mut candidates: Vec<OnlineLyricsCandidate>,
+    duration: u64,
+    priority: LyricsSourcePriority,
+) -> Vec<OnlineLyricsCandidate> {
+    let mismatch = |candidate: &OnlineLyricsCandidate| -> bool {
+        match candidate.duration {
+            Some(theirs) if duration > 0 && theirs > 0 => {
+                theirs.abs_diff(duration) > CANDIDATE_DURATION_TOLERANCE_SECONDS
+            }
+            _ => false,
+        }
+    };
+    let source_rank = |candidate: &OnlineLyricsCandidate| -> u8 {
+        let source = match candidate.id.split('-').next() {
+            Some("netease") => LyricsSourcePriority::Netease,
+            Some("kugou") => LyricsSourcePriority::Kugou,
+            Some("qq") => LyricsSourcePriority::Qq,
+            _ => LyricsSourcePriority::Auto,
+        };
+        u8::from(priority != LyricsSourcePriority::Auto && source != priority)
+    };
+    candidates.sort_by_key(|candidate| {
+        (
+            mismatch(candidate),
+            source_rank(candidate),
+            candidate_capability_tier(&candidate.lyrics),
+        )
+    });
+    candidates
 }
 
 /// Err(()) = 搜索请求本身失败（网络/HTTP/解析错误）；
@@ -836,6 +895,72 @@ mod tests {
 
     fn texts(lines: &[LyricLine]) -> Vec<&str> {
         lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn candidate(id: &str, duration: Option<u64>, lyrics: Vec<LyricLine>) -> OnlineLyricsCandidate {
+        OnlineLyricsCandidate {
+            id: id.into(),
+            source: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            album: None,
+            duration,
+            lyrics,
+            ttml_lookup_keys: Vec::new(),
+        }
+    }
+
+    fn word_line(time: f64, text: &str) -> LyricLine {
+        let mut line = LyricLine::new(time, text);
+        line.words = Some(vec![LyricWord {
+            start: time,
+            end: time + 1.0,
+            text: text.into(),
+        }]);
+        line
+    }
+
+    #[test]
+    fn capability_tier_orders_word_and_translation_forms() {
+        let plain = vec![LyricLine::new(1.0, "a"), LyricLine::new(2.0, "b")];
+        assert_eq!(candidate_capability_tier(&plain), 3);
+        // LRC 形态译文：相邻同时间戳行
+        let bilingual = vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "甲")];
+        assert_eq!(candidate_capability_tier(&bilingual), 2);
+        assert_eq!(candidate_capability_tier(&[word_line(1.0, "a")]), 1);
+        let mut ttml = word_line(1.0, "a");
+        ttml.translation = Some("甲".into());
+        assert_eq!(candidate_capability_tier(&[ttml]), 0);
+        // 同时间戳但同文本（去重残留）不算译文
+        let dup = vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "a")];
+        assert_eq!(candidate_capability_tier(&dup), 3);
+    }
+
+    #[test]
+    fn ranking_sinks_duration_mismatch_and_prefers_word_synced_in_auto_mode() {
+        let list = vec![
+            candidate("netease-1", Some(262), vec![LyricLine::new(1.0, "line")]),
+            candidate("kugou-2", Some(261), vec![word_line(1.0, "word")]),
+            candidate("qq-3", Some(30), vec![word_line(1.0, "snippet")]),
+            candidate(
+                "qq-4",
+                None,
+                vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "甲")],
+            ),
+        ];
+        let ids = |ranked: &[OnlineLyricsCandidate]| {
+            ranked.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+        };
+        // 自动：逐字 > 译文 > 逐行；30 秒片段沉底但不丢
+        let ranked = rank_online_lyrics_candidates(list.clone(), 262, LyricsSourcePriority::Auto);
+        assert_eq!(ids(&ranked), ["kugou-2", "qq-4", "netease-1", "qq-3"]);
+        // 指定网易云优先：源顺序压过档次
+        let ranked =
+            rank_online_lyrics_candidates(list.clone(), 262, LyricsSourcePriority::Netease);
+        assert_eq!(ids(&ranked), ["netease-1", "kugou-2", "qq-4", "qq-3"]);
+        // 本地时长未知：不做时长判断
+        let ranked = rank_online_lyrics_candidates(list, 0, LyricsSourcePriority::Auto);
+        assert_eq!(ids(&ranked), ["kugou-2", "qq-3", "qq-4", "netease-1"]);
     }
 
     #[test]

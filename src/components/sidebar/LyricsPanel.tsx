@@ -14,6 +14,7 @@ import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { copyText } from "@/lib/clipboard";
+import { candidateBadges } from "@/lib/lyrics/candidate";
 import {
   activeVisibleIndex,
   hasWordTiming,
@@ -624,17 +625,33 @@ export function LyricsPanel() {
                       )}
                     >
                       <span className="flex items-center justify-between gap-2">
-                        <span
-                          className={cn(
-                            "border px-1.5 py-0.5 font-tw text-[10px] font-bold",
-                            candidate.id.startsWith("ttml-")
-                              ? "border-stamp bg-stamp-soft text-stamp"
-                              : "border-brown bg-paper2 text-brown"
-                          )}
-                        >
-                          {candidate.source}
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span
+                            className={cn(
+                              "truncate border px-1.5 py-0.5 font-tw text-[10px] font-bold",
+                              candidate.id.startsWith("ttml-")
+                                ? "border-stamp bg-stamp-soft text-stamp"
+                                : "border-brown bg-paper2 text-brown"
+                            )}
+                          >
+                            {candidate.source}
+                          </span>
+                          {candidateBadges(candidate.lyrics).map((badge) => (
+                            <span
+                              key={badge}
+                              data-testid="candidate-badge"
+                              className={cn(
+                                "shrink-0 border px-1 py-0.5 font-tw text-[10px]",
+                                badge === "逐字"
+                                  ? "border-ink bg-ink text-paper"
+                                  : "border-line text-ink3"
+                              )}
+                            >
+                              {badge}
+                            </span>
+                          ))}
                         </span>
-                        <span className="font-tw text-[10px] text-ink3">
+                        <span className="shrink-0 font-tw text-[10px] text-ink3">
                           {duration || `${candidate.lyrics.length} 行`}
                         </span>
                       </span>

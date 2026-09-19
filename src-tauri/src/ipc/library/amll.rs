@@ -50,10 +50,11 @@ const CACHE_TTL_MISS: Duration = Duration::from_secs(5 * 60);
 /// 容量上限，满了清最老的一条。
 const CACHE_CAPACITY: usize = 256;
 
-/// 缓存命中的内容：DB 直取只有歌词；API 路径还带索引条目（构造候选要用）。
+/// 缓存命中的内容：DB 直取带歌词 + 文件头元数据（用来核对曲目身份）；API 路径还带索引条目。
 #[derive(Debug, Clone)]
 pub(crate) struct CachedHit {
     pub(crate) lyrics: Vec<LyricLine>,
+    pub(crate) meta: super::ttml::TtmlMetadata,
     pub(crate) item: Option<AmllApiItem>,
 }
 
@@ -176,10 +177,13 @@ pub(crate) fn lookup_url(template: &str, key: &str, custom: bool) -> Option<Stri
     url_guard_for(custom)(&url).then_some(url)
 }
 
-async fn fetch_ttml(client: &Client, url: &str) -> Option<Vec<LyricLine>> {
+async fn fetch_ttml(
+    client: &Client,
+    url: &str,
+) -> Option<(Vec<LyricLine>, super::ttml::TtmlMetadata)> {
     // 缓存键 = 完整请求 URL（模板/模式不同即不同 URL，天然隔离）
     if let Some(cached) = cache_get(url) {
-        return cached.map(|hit| hit.lyrics);
+        return cached.map(|hit| (hit.lyrics, hit.meta));
     }
     let response = client.get(url).send().await.ok()?;
     let status = response.status();
@@ -199,14 +203,58 @@ async fn fetch_ttml(client: &Client, url: &str) -> Option<Vec<LyricLine>> {
     if lyrics.is_empty() {
         return None;
     }
+    let meta = super::ttml::parse_ttml_metadata(&text);
     cache_put(
         url,
         Some(CachedHit {
             lyrics: lyrics.clone(),
+            meta: meta.clone(),
             item: None,
         }),
     );
-    Some(lyrics)
+    Some((lyrics, meta))
+}
+
+/// DB 直取命中后核对文件头身份（2026-09-19）：查找键可能来自本地歌词文件名里的括号数字，
+/// 而 LDDC 写的是**来源平台**的 ID（酷狗 album_audio_id / QQ songid 都可能被当成网易云 ID），
+/// 同一个数字在 ncm 目录里可能是完全无关的歌——不核对就会把别人的歌词以「逐字」排到候选最前。
+/// 规则：文件头没写曲名时无法核对，放行；写了曲名则归一化后须相等或互相包含（`唯一 (国语)` vs
+/// `唯一`）；双方都有艺术家时须任一相符（多艺术家按常见分隔符拆开比对）。
+pub(crate) fn ttml_meta_matches(
+    meta: &super::ttml::TtmlMetadata,
+    title: &str,
+    artist: &str,
+) -> bool {
+    let title_norm = normalize_for_match(title);
+    if meta.music_names.is_empty() || title_norm.is_empty() {
+        return true;
+    }
+    let title_ok = meta.music_names.iter().any(|name| {
+        let norm = normalize_for_match(name);
+        !norm.is_empty()
+            && (norm == title_norm || norm.contains(&title_norm) || title_norm.contains(&norm))
+    });
+    if !title_ok {
+        return false;
+    }
+    let seed_artists = artist
+        .split(['/', '&', ',', '，', '、', ';'])
+        .map(normalize_for_match)
+        .filter(|part| !part.is_empty() && part != "unknown")
+        .collect::<Vec<_>>();
+    if meta.artists.is_empty() || seed_artists.is_empty() {
+        return true;
+    }
+    meta.artists.iter().any(|name| {
+        name.split(['/', '&', ',', '，', '、', ';'])
+            .map(normalize_for_match)
+            .filter(|part| !part.is_empty())
+            .any(|part| {
+                seed_artists
+                    .iter()
+                    .any(|seed| *seed == part || seed.contains(&part) || part.contains(seed))
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +423,7 @@ pub(crate) async fn search_amll_api(
         &cache_key,
         picked.clone().map(|item| CachedHit {
             lyrics: Vec::new(),
+            meta: Default::default(),
             item: Some(item),
         }),
     );
@@ -442,6 +491,7 @@ pub(crate) async fn fetch_amll_api_lyrics(id: u64) -> Option<(AmllApiItem, Vec<L
         &cache_key,
         Some(CachedHit {
             lyrics: lyrics.clone(),
+            meta: super::ttml::parse_ttml_metadata(&data.lyrics),
             item: Some(item.clone()),
         }),
     );
@@ -463,15 +513,10 @@ pub(crate) async fn fetch_amll_api_candidate(
     };
     let picked = items.into_iter().next()?;
     let (item, lyrics) = fetch_amll_api_lyrics(picked.id).await?;
-    let word_synced = lyrics.iter().any(|line| line.words.is_some());
     let first = |names: &[String]| names.first().cloned().unwrap_or_default();
     Some(OnlineLyricsCandidate {
         id: format!("ttml-api-{}", item.id),
-        source: if word_synced {
-            format!("{AMLL_SOURCE_LABEL} · 逐字")
-        } else {
-            AMLL_SOURCE_LABEL.to_string()
-        },
+        source: AMLL_SOURCE_LABEL.to_string(),
         title: {
             let name = first(&item.music_names);
             if name.is_empty() {
@@ -710,18 +755,23 @@ pub(crate) async fn fetch_amll_ttml_candidates(
     let results = join_all(futures).await;
 
     let mut candidates = Vec::new();
-    for ((seed, key, _), lyrics) in jobs.into_iter().zip(results) {
-        let Some(lyrics) = lyrics else {
+    for ((seed, key, _), fetched) in jobs.into_iter().zip(results) {
+        let Some((lyrics, meta)) = fetched else {
             continue;
         };
-        let word_synced = lyrics.iter().any(|line| line.words.is_some());
+        if !ttml_meta_matches(&meta, &seed.title, &seed.artist) {
+            tracing::debug!(
+                key,
+                seed_title = %seed.title,
+                ttml_title = ?meta.music_names,
+                "AMLL TTML 文件头与曲目不符，丢弃（查找键可能是别的平台的 ID）"
+            );
+            continue;
+        }
+        // 逐字 / 译文 / 音译由前端候选卡片按歌词内容标注，来源标签不再重复带「· 逐字」
         candidates.push(OnlineLyricsCandidate {
             id: format!("ttml-{}", key.replace('/', "-")),
-            source: if word_synced {
-                format!("{AMLL_SOURCE_LABEL} · 逐字")
-            } else {
-                AMLL_SOURCE_LABEL.to_string()
-            },
+            source: AMLL_SOURCE_LABEL.to_string(),
             title: seed.title.clone(),
             artist: seed.artist.clone(),
             album: seed.album.clone(),
@@ -865,8 +915,51 @@ mod tests {
     fn hit(text: &str) -> CachedHit {
         CachedHit {
             lyrics: vec![LyricLine::new(1.0, text)],
+            meta: Default::default(),
             item: None,
         }
+    }
+
+    #[test]
+    fn ttml_meta_check_rejects_other_songs_but_tolerates_missing_or_suffixed_fields() {
+        use super::super::ttml::TtmlMetadata;
+        let meta = |names: &[&str], artists: &[&str]| TtmlMetadata {
+            music_names: names.iter().map(|s| s.to_string()).collect(),
+            artists: artists.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        // 文件头没写曲名：无法核对，放行
+        assert!(ttml_meta_matches(&meta(&[], &["谁"]), "唯一", "王力宏"));
+        // 完全相等 / 版本后缀 / 全半角与大小写差异
+        assert!(ttml_meta_matches(
+            &meta(&["唯一"], &["王力宏"]),
+            "唯一 (国语)",
+            "王力宏"
+        ));
+        assert!(ttml_meta_matches(
+            &meta(&["Bad Guy"], &["Billie Eilish"]),
+            "bad guy",
+            "Billie Eilish / FINNEAS"
+        ));
+        // 艺术家一方缺失或 Unknown 时只看曲名
+        assert!(ttml_meta_matches(&meta(&["唯一"], &[]), "唯一", "王力宏"));
+        assert!(ttml_meta_matches(
+            &meta(&["唯一"], &["王力宏"]),
+            "唯一",
+            "Unknown"
+        ));
+        // 曲名对不上（错平台的 ID 指向了另一首歌）→ 拒
+        assert!(!ttml_meta_matches(
+            &meta(&["为什么我好想告诉他我是谁"], &["张碧晨"]),
+            "水中リフレクション",
+            "美波"
+        ));
+        // 曲名相同但艺术家完全不符（翻唱）→ 拒
+        assert!(!ttml_meta_matches(
+            &meta(&["唯一"], &["周杰伦"]),
+            "唯一",
+            "王力宏"
+        ));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! 本地歌词目录匹配（设置 → 歌词设置 → 本地歌词目录）。
 //!
 //! 目标文件形如 LDDC 导出的 `艺术家 - 曲名 (65923804).lrc`：按「艺术家 - 曲名」与曲目
-//! 元数据归一化比对（去括号版本后缀、大小写、全半角、空白），括号里的纯数字视为
-//! 网易云歌曲 ID → 记为 `ncm-lyrics/<id>` 查找键，供 AMLL TTML 直取。
+//! 元数据归一化比对（去括号版本后缀、大小写、全半角、空白），括号里的纯数字是 LDDC 写的
+//! **来源平台**歌曲 ID（网易云 / QQ / 酷狗都可能）→ 记为 `ncm-lyrics/<id>` 与 `qq-lyrics/<id>`
+//! 两个查找键，供 AMLL TTML 直取，命中后由文件头元数据核对曲目身份。
 //!
 //! 扫顶层 + 直接子目录（深度 1，跳过符号链接目录）、只看歌词扩展名、文件大小沿用 4 MB
 //! 上限；目录本身必须是用户在设置里选过的绝对路径且不含 `..` 点段。
@@ -255,11 +256,18 @@ fn consider_lyrics_file(
     let ext_bonus = u8::from(ext.eq_ignore_ascii_case("ttml"));
     let total = score * 2 + ext_bonus;
     if best.as_ref().is_none_or(|(current, ..)| total > *current) {
-        let keys = ncm_id
-            .map(|id| vec![format!("ncm-lyrics/{id}")])
-            .unwrap_or_default();
-        *best = Some((total, path, keys));
+        *best = Some((total, path, lookup_keys_for_platform_id(ncm_id.as_deref())));
     }
+}
+
+/// 文件名括号里的数字是 LDDC `%<id>`——**歌词来源平台**的歌曲 ID，文件头不记来源：
+/// 同一目录里既有网易云 id、也有 QQ songid 与酷狗 album_audio_id（2026-09-19 用户目录实测两份
+/// 文件分别是酷狗与 QQ 的 ID）。所以对 AMLL 两个目录各生成一个查找键，命中后由
+/// `amll::ttml_meta_matches` 用文件头曲名 / 艺术家核对，错平台的键要么 404 要么被拒。
+/// 酷狗 ID 在 AMLL 没有目录，只能靠标题匹配。
+pub(crate) fn lookup_keys_for_platform_id(id: Option<&str>) -> Vec<String> {
+    id.map(|id| vec![format!("ncm-lyrics/{id}"), format!("qq-lyrics/{id}")])
+        .unwrap_or_default()
 }
 
 pub(crate) fn read_local_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
@@ -343,7 +351,8 @@ mod tests {
 
         let (path, keys) = find_in_folder(&dir, "唯一 (国语)", "王力宏").expect("match");
         assert!(path.ends_with("王力宏 - 唯一 (65923804).lrc"));
-        assert_eq!(keys, ["ncm-lyrics/65923804"]);
+        // 括号数字的平台未知：网易云 / QQ 两个目录各一个键（酷狗 ID 无目录）
+        assert_eq!(keys, ["ncm-lyrics/65923804", "qq-lyrics/65923804"]);
         assert!(find_in_folder(&dir, "别的歌", "王力宏").is_none());
 
         let lyrics = read_local_lyrics(&path).unwrap();
@@ -363,7 +372,7 @@ mod tests {
         .unwrap();
         let (path, keys) = find_in_folder(&dir, "晴天", "周杰伦").expect("subdir match");
         assert!(path.ends_with("周杰伦 - 晴天 (186016).lrc"));
-        assert_eq!(keys, ["ncm-lyrics/186016"]);
+        assert_eq!(keys, ["ncm-lyrics/186016", "qq-lyrics/186016"]);
         assert!(find_in_folder(&dir, "稻香", "周杰伦").is_none());
         // 顶层与子目录同分时顶层先见者胜
         fs::write(dir.join("sub").join("王力宏 - 唯一.lrc"), "[00:01.00]e").unwrap();

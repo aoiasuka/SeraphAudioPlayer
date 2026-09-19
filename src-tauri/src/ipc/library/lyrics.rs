@@ -334,12 +334,31 @@ pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
             .collect(),
     );
     if let Some(language_tag) = language_tag {
-        // 译文行只需行级时间，不带 words
         let bases = original
             .iter()
             .map(|line| line.base.clone())
             .collect::<Vec<_>>();
-        lyrics.extend(parse_krc_translation_lines(&language_tag, &bases));
+        let tracks = parse_krc_language_tracks(&language_tag, &bases);
+        // 逐字罗马音（type 0）：按行号对回原文，拼成行级 roman；空占位行不在罗马音表里，
+        // 其时间对应的主歌词行本就被过滤，直接跳过
+        if !tracks.romans.is_empty() {
+            let mut roman_by_start: HashMap<u64, String> = HashMap::new();
+            for (index, roman) in tracks.romans {
+                if let Some(base) = bases.get(index) {
+                    roman_by_start.entry(base.start_ms).or_insert(roman);
+                }
+            }
+            for line in &mut lyrics {
+                let start_ms = (line.time * 1000.0).round() as u64;
+                if line.words.is_some() && line.roman.is_none() {
+                    if let Some(roman) = roman_by_start.get(&start_ms) {
+                        line.roman = Some(roman.clone());
+                    }
+                }
+            }
+        }
+        // 译文行只需行级时间，不带 words
+        lyrics.extend(tracks.translations);
         lyrics.sort_by(|a, b| {
             a.time
                 .partial_cmp(&b.time)
@@ -625,43 +644,79 @@ pub(crate) fn strip_provider_prefix_timestamp(value: &str) -> &str {
     }
 }
 
-pub(crate) fn parse_krc_translation_lines(
+/// KRC `[language:]`（base64 JSON）里的两类副轨。
+#[derive(Debug, Default)]
+pub(crate) struct KrcLanguageTracks {
+    /// `type == 1` 逐行译文：已按原文行号换成行级 `LyricLine`（时间 = 对应原文行起点）
+    pub(crate) translations: Vec<LyricLine>,
+    /// `type == 0` 逐字罗马音：`(原文行号, 该行音节拼接后的罗马音)`。酷狗罗马音表**不含**
+    /// 全空音节的行（LDDC `krc.py` 用 offset 跳过），这里按顺序把非空原文行与表项对齐。
+    pub(crate) romans: Vec<(usize, String)>,
+}
+
+pub(crate) fn parse_krc_language_tracks(
     language_tag: &str,
     original: &[ProviderLyricLine],
-) -> Vec<LyricLine> {
+) -> KrcLanguageTracks {
+    let mut tracks = KrcLanguageTracks::default();
     let Ok(decoded) = BASE64_STANDARD.decode(language_tag.trim()) else {
-        return Vec::new();
+        return tracks;
     };
     let Ok(json) = serde_json::from_slice::<Value>(&decoded) else {
-        return Vec::new();
+        return tracks;
+    };
+    let Some(languages) = json.get("content").and_then(Value::as_array) else {
+        return tracks;
     };
 
-    json.get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|language| language.get("type").and_then(Value::as_i64) == Some(1))
-        .flat_map(|language| {
-            language
-                .get("lyricContent")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .enumerate()
-                .filter_map(|(index, line)| {
-                    let original_line = original.get(index)?;
-                    let text = line
-                        .as_array()?
+    for language in languages {
+        let Some(content) = language.get("lyricContent").and_then(Value::as_array) else {
+            continue;
+        };
+        match language.get("type").and_then(Value::as_i64) {
+            Some(1) => {
+                for (index, line) in content.iter().enumerate() {
+                    let Some(original_line) = original.get(index) else {
+                        break;
+                    };
+                    let Some(parts) = line.as_array() else {
+                        continue;
+                    };
+                    let text = parts
                         .iter()
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(" ");
-                    clean_lyric_text(&text)
-                        .map(|text| LyricLine::new(original_line.start_ms as f64 / 1000.0, text))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+                    if let Some(text) = clean_lyric_text(&text) {
+                        tracks
+                            .translations
+                            .push(LyricLine::new(original_line.start_ms as f64 / 1000.0, text));
+                    }
+                }
+            }
+            Some(0) if tracks.romans.is_empty() => {
+                // 只取第一份罗马音；表项按「非空原文行」顺序排列
+                let mut entries = content.iter();
+                for (index, original_line) in original.iter().enumerate() {
+                    if original_line.text.is_empty() {
+                        continue;
+                    }
+                    let Some(entry) = entries.next() else {
+                        break;
+                    };
+                    let Some(parts) = entry.as_array() else {
+                        continue;
+                    };
+                    let text = parts.iter().filter_map(Value::as_str).collect::<String>();
+                    if let Some(text) = clean_lyric_text(&text) {
+                        tracks.romans.push((index, text));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    tracks
 }
 
 pub(crate) fn decode_xml_entities(value: &str) -> String {

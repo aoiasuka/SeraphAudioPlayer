@@ -84,6 +84,69 @@ impl LineBuilder {
     }
 }
 
+/// AMLL TTML 文件头 `<head><metadata><amll:meta key="…" value="…"/>` 里的曲目身份。
+/// 同一 key 可重复出现（多个艺术家 / 多个平台 ID），按出现顺序收集；缺失即空。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TtmlMetadata {
+    pub(crate) music_names: Vec<String>,
+    pub(crate) artists: Vec<String>,
+    pub(crate) albums: Vec<String>,
+    pub(crate) ncm_music_ids: Vec<String>,
+    pub(crate) qq_music_ids: Vec<String>,
+}
+
+impl TtmlMetadata {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.music_names.is_empty()
+            && self.artists.is_empty()
+            && self.albums.is_empty()
+            && self.ncm_music_ids.is_empty()
+            && self.qq_music_ids.is_empty()
+    }
+}
+
+/// 只读 `<head>` 里的 `amll:meta`（本地名 `meta`，属性 `key` / `value`），到 `<body>` 即停；
+/// 不是 XML 或没有元数据时返回空结构。与 `parse_ttml_lyrics` 分开走一遍，读头部很快。
+pub(crate) fn parse_ttml_metadata(text: &str) -> TtmlMetadata {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut meta = TtmlMetadata::default();
+    // 解析错误与 EOF 都直接停：头部读到哪算哪，歌词本身另由 `parse_ttml_lyrics` 判定
+    while let Ok(event) = reader.read_event() {
+        match event {
+            Event::Eof => break,
+            Event::Start(start) if local_name(start.name().as_ref()) == b"body" => break,
+            Event::Start(start) | Event::Empty(start)
+                if local_name(start.name().as_ref()) == b"meta" =>
+            {
+                let (Some(key), Some(value)) =
+                    (attr_value(&start, b"key"), attr_value(&start, b"value"))
+                else {
+                    continue;
+                };
+                let value = value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                let bucket = match key.trim() {
+                    "musicName" => &mut meta.music_names,
+                    "artists" => &mut meta.artists,
+                    "album" => &mut meta.albums,
+                    "ncmMusicId" => &mut meta.ncm_music_ids,
+                    "qqMusicId" => &mut meta.qq_music_ids,
+                    _ => continue,
+                };
+                if bucket.len() < 16 {
+                    bucket.push(value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    meta
+}
+
 /// 解析 TTML 文本；不是 TTML 或没有可用行时返回空。
 pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
     let mut reader = Reader::from_str(text);
@@ -381,6 +444,32 @@ mod tests {
         assert_eq!(third.text, "Plain line & text");
         assert!(third.words.is_none());
         assert!(third.translation.is_none());
+    }
+
+    #[test]
+    fn reads_amll_metadata_from_head_only() {
+        let meta = parse_ttml_metadata(SAMPLE);
+        assert_eq!(meta.ncm_music_ids, ["123"]);
+        assert!(meta.music_names.is_empty());
+
+        // 真实 amll-ttml-db 文件头形态（2026-09-19 取自镜像 ncm-lyrics/1901371647）
+        let real = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:amll="http://www.example.com/ns/amll"><head><metadata xmlns=""><ttm:agent type="person" xml:id="v1"/><amll:meta key="ncmMusicId" value="1901371647"/><amll:meta key="ttmlAuthorGithub" value="34237075"/><amll:meta key="album" value="孤勇者"/><amll:meta key="musicName" value="孤勇者"/><amll:meta key="artists" value="陈奕迅"/><amll:meta key="artists" value="  "/></metadata></head><body><div><p begin="1s" end="2s"><span ttm:role="x-translation">x</span><meta key="musicName" value="body 里的不算"/></p></div></body></tt>"#;
+        let meta = parse_ttml_metadata(real);
+        assert_eq!(
+            meta,
+            TtmlMetadata {
+                music_names: vec!["孤勇者".into()],
+                artists: vec!["陈奕迅".into()],
+                albums: vec!["孤勇者".into()],
+                ncm_music_ids: vec!["1901371647".into()],
+                qq_music_ids: Vec::new(),
+            }
+        );
+        assert!(parse_ttml_metadata("[00:01.00]not ttml").is_empty());
+        assert!(parse_ttml_metadata(
+            "<tt><head><metadata><meta key=\"musicName\"/></metadata></head></tt>"
+        )
+        .is_empty());
     }
 
     #[test]
