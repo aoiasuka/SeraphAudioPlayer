@@ -6,7 +6,7 @@ Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器
 
 Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudioPlayer/releases/latest) 下载，支持 EXE 安装器及中英文 MSI。
 
-当前代码版本：**v0.6.1**。这是一个**逐字歌词专版**：收尾增强型 LRC（ESLyric）并支持导出为 LRC；修正在线三源取词管线（酷狗关键词、QQ 加密 QRC、网易云译文）并按可听位置定位；歌词数据模型重构为 `LyricDocument`（毫秒整数、结构化译文、来源身份，曲库清单升到版本 2）；渲染和声 / 制作信息 / 对唱角色，支持同一时刻多句活动，并加入固定来源策略与两个显示选项，详见 [版本说明](docs/releases/v0.6.1.md)。v0.6.0 引入歌词设置（源优先级、繁体转换、AMLL TTML 逐字歌词、排除规则），见 [GitHub Release](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.0)。
+当前代码版本：**v0.6.1**。这是一个**逐字歌词专版**：收尾增强型 LRC（ESLyric）并支持导出为 LRC；修正在线三源取词管线（酷狗关键词、QQ 加密 QRC、网易云译文）并按可听位置定位；歌词数据模型重构为 `LyricDocument`（毫秒整数、结构化译文、来源身份，曲库清单升到版本 2）；渲染和声 / 制作信息 / 对唱角色，支持同一时刻多句活动，并加入固定来源策略与两个显示选项，详见 [GitHub Release](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.1)。v0.6.0 引入歌词设置（源优先级、繁体转换、AMLL TTML 逐字歌词、排除规则），见 [GitHub Release](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.0)。
 
 **升级注意**：曲库存储从 v0.5.12 起改为新格式，2026-09 歌词模型重构后曲库清单再升到版本 2；旧版本程序读不到迁移后的曲库变更；回退前请先备份应用数据目录（见下文「曲库数据文件与诊断日志」）。
 
@@ -280,7 +280,7 @@ target/release/bundle/msi/
 
 ### v0.6.1
 
-逐字歌词专版：增强型 LRC 收尾与 LRC 导出、在线三源取词管线修正与可听位置定位、歌词数据模型重构（曲库清单 v2）、和声 / 制作信息 / 对唱角色渲染与多活动区间、固定来源策略与显示选项。详见 [v0.6.1 发布说明](docs/releases/v0.6.1.md)。
+逐字歌词专版：增强型 LRC 收尾与 LRC 导出、在线三源取词管线修正与可听位置定位、歌词数据模型重构（曲库清单 v2）、和声 / 制作信息 / 对唱角色渲染与多活动区间、固定来源策略与显示选项。详见 [v0.6.1 发布说明](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.1)。
 
 - **增强型 LRC 收尾**：逐字 `[t]` 变体与增强型 `<t>` 共用一套音节算法；首标签前文字并入首音节、末音节终点由下一句起点推导并标记、LDDC 译文减 1 ms 写法并回原文句、音节文本与整行同一套清洗。
 - **导出歌词**：歌词稿右键「导出歌词…」→ 增强型 / 逐字 / 逐行 LRC，共享标签、推导终点不写、译文 / 音译按显示开关成行；路径走 `validate_export_path`，字段换行与半角括号归一防注入，往返测试锁定。
