@@ -514,6 +514,13 @@ pub(crate) async fn fetch_amll_api_candidate(
     let picked = items.into_iter().next()?;
     let (item, lyrics) = fetch_amll_api_lyrics(picked.id).await?;
     let first = |names: &[String]| names.first().cloned().unwrap_or_default();
+    // 只映射网易云 ID；qqMusicIds 是 songmid，与 DB 目录键不同，不混用
+    let ttml_lookup_keys = item
+        .ncm_music_ids
+        .iter()
+        .filter(|id| is_valid_lookup_key_segment(id))
+        .map(|id| format!("ncm-lyrics/{id}"))
+        .collect::<Vec<_>>();
     Some(OnlineLyricsCandidate {
         id: format!("ttml-api-{}", item.id),
         source: AMLL_SOURCE_LABEL.to_string(),
@@ -535,14 +542,12 @@ pub(crate) async fn fetch_amll_api_candidate(
         },
         album: item.album_names.first().cloned().filter(|s| !s.is_empty()),
         duration,
-        lyrics,
-        // 只映射网易云 ID；qqMusicIds 是 songmid，与 DB 目录键不同，不混用
-        ttml_lookup_keys: item
-            .ncm_music_ids
-            .iter()
-            .filter(|id| is_valid_lookup_key_segment(id))
-            .map(|id| format!("ncm-lyrics/{id}"))
-            .collect(),
+        lyrics: LyricDocument::from_lines(
+            lyrics,
+            LyricSource::ttml(format!("api:{}", item.id))
+                .with_lookup_keys(ttml_lookup_keys.clone()),
+        ),
+        ttml_lookup_keys,
     })
 }
 
@@ -776,7 +781,10 @@ pub(crate) async fn fetch_amll_ttml_candidates(
             artist: seed.artist.clone(),
             album: seed.album.clone(),
             duration: seed.duration,
-            lyrics,
+            lyrics: LyricDocument::from_lines(
+                lyrics,
+                LyricSource::ttml(key.clone()).with_lookup_keys(vec![key.clone()]),
+            ),
             ttml_lookup_keys: Vec::new(),
         });
     }
@@ -914,7 +922,7 @@ mod tests {
 
     fn hit(text: &str) -> CachedHit {
         CachedHit {
-            lyrics: vec![LyricLine::new(1.0, text)],
+            lyrics: vec![LyricLine::new(1000, text)],
             meta: Default::default(),
             item: None,
         }

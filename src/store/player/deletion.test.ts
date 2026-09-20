@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { invoke } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { DeleteTracksResult, Track } from "@/types/track";
@@ -15,7 +16,7 @@ const initialState = usePlayerStore.getInitialState();
 const tracks: Track[] = ["a", "b", "c"].map((id) => ({
   id, title: id.toUpperCase(), artist: "测试", album: "测试", cover: "", format: "FLAC",
   bitdepth: "16-bit", bitrate: "", channels: "Stereo", size: "1 MB",
-  path: `C:/test/${id}.flac`, duration: 180, glowColor: "#fff", lyrics: [],
+  path: `C:/test/${id}.flac`, duration: 180, glowColor: "#fff", lyrics: lyricDocument([]),
 }));
 
 function deleted(ids: string[]): DeleteTracksResult {

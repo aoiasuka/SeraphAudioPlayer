@@ -3,21 +3,23 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
-import { activeVisibleIndex, hasWordTiming, isInIntermission, lyricsPosition, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { activeVisibleIndex, hasWordTiming, isInIntermission, lyricsPositionMs, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { lyricLines } from "@/lib/lyrics/document";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 
 function useLyricGroups(track: Track) {
   // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
-  const resolved = useMemo(() => resolveVisibleGroups(track.lyrics), [track.lyrics]);
+  const lines = lyricLines(track);
+  const resolved = useMemo(() => resolveVisibleGroups(lines), [lines]);
   const groups = resolved.visible;
   // 只在当前句变化时重渲染，不把高频播放进度传播到整篇歌词。定位按可听位置（减输出延迟）。
-  const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, lyricsPosition(s.currentTime, s.outputLatency)));
+  const activeIndex = usePlayerStore((s) => activeVisibleIndex(resolved, lyricsPositionMs(s.currentTime, s.outputLatency)));
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（布尔选择器，只在翻转时重渲染）
-  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, lyricsPosition(s.currentTime, s.outputLatency)));
+  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, lyricsPositionMs(s.currentTime, s.outputLatency)));
   // 原始歌词非空但全部被排除规则隐藏
-  const allHiddenByRules = track.lyrics.length > 0 && groups.length === 0;
+  const allHiddenByRules = lines.length > 0 && groups.length === 0;
   return { groups, activeIndex, intermission, allHiddenByRules };
 }
 
@@ -42,12 +44,12 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
   const [following, setFollowing] = useState(true);
   const lastContext = useRef<{ id: string; groups: typeof groups; viewport: typeof viewport }>();
   // 译文两种形态：LRC 类的相邻同时间戳行，或 TTML 的 translation 字段
-  const hasTranslation = groups.some((group) => group.lines.length > 1 || !!group.lines[0]?.translation);
+  const hasTranslation = groups.some((group) => group.lines.length > 1 || (group.lines[0]?.translations?.length ?? 0) > 0);
   const activeLine = activeIndex >= 0 ? groups[activeIndex]?.lines[0] : undefined;
   const activeHasWords = hasWordTiming(activeLine);
-  const currentTime = usePlayerStore((s) => (activeHasWords ? lyricsPosition(s.currentTime, s.outputLatency) : 0));
+  const currentMs = usePlayerStore((s) => (activeHasWords ? lyricsPositionMs(s.currentTime, s.outputLatency) : 0));
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
+  const smoothMs = useSmoothTime(currentMs, isPlaying, activeHasWords);
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -106,16 +108,16 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
               const isCurrent = index === activeIndex;
               return (
                 <button
-                  key={`${track.id}-${group.time}-${index}`}
+                  key={`${track.id}-${group.startMs}-${index}`}
                   ref={(element) => { lineRefs.current[index] = element; }}
                   className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${isCurrent && intermission ? " is-intermission" : ""}${Math.abs(index - activeIndex) > 1 ? " is-distant" : ""}`}
                   aria-current={isCurrent ? "true" : undefined}
-                  aria-label={`${formatSeconds(group.time)} · ${main?.text}`}
-                  disabled={!canSeek || group.time > track.duration}
+                  aria-label={`${formatSeconds(group.startMs / 1000)} · ${main?.text}`}
+                  disabled={!canSeek || group.startMs / 1000 > track.duration}
                   onClick={() => {
                     clearTimeout(resumeTimer.current);
                     setFollowing(true);
-                    seek(Math.max(0, group.time));
+                    seek(Math.max(0, group.startMs / 1000));
                   }}
                 >
                   <span className="immersive-lyric-text">
@@ -123,7 +125,8 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                       hasWordTiming(main) ? (
                         <KaraokeLine
                           words={main.words}
-                          currentTime={smoothTime}
+                          currentMs={smoothMs}
+                          lineEndMs={main.endMs}
                           sungColor="var(--stamp)"
                           unsungColor="rgba(181, 72, 42, 0.32)"
                         />
@@ -135,8 +138,8 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                       )
                     ) : main?.text}
                   </span>
-                  {showRoman && main?.roman ? <small className="immersive-lyric-roman">{main.roman}</small> : null}
-                  {showTranslation && main?.translation ? <small>{main.translation}</small> : null}
+                  {showRoman && main?.roman ? <small className="immersive-lyric-roman">{main.roman.text}</small> : null}
+                  {showTranslation && (main?.translations ?? []).map((translation, translationIndex) => <small key={`t-${translationIndex}`}>{translation.text}</small>)}
                   {showTranslation && group.lines.slice(1).map((line, translationIndex) => <small key={translationIndex}>{line.text}</small>)}
                 </button>
               );

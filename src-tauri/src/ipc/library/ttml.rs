@@ -32,10 +32,11 @@ struct LineBuilder {
     plain: String,
     translation: String,
     roman: String,
+    agent: Option<String>,
 }
 
 impl LineBuilder {
-    fn new(begin: Option<f64>, end: Option<f64>) -> Self {
+    fn new(begin: Option<f64>, end: Option<f64>, agent: Option<String>) -> Self {
         Self {
             begin,
             end,
@@ -43,6 +44,7 @@ impl LineBuilder {
             plain: String::new(),
             translation: String::new(),
             roman: String::new(),
+            agent,
         }
     }
 
@@ -64,21 +66,28 @@ impl LineBuilder {
                 .filter(|word| !word.text.trim().is_empty())
                 .collect::<Vec<_>>()
         });
-        let begin = self.begin.or_else(|| {
+        let begin_ms = self.begin.map(seconds_to_ms).or_else(|| {
             words
                 .as_ref()
-                .and_then(|words| words.first().map(|w| w.start))
+                .and_then(|words| words.first().map(|w| w.start_ms))
         })?;
-        let end = self
-            .end
-            .or_else(|| words.as_ref().and_then(|words| words.last().map(|w| w.end)));
+        let end_ms = self.end.map(seconds_to_ms).or_else(|| {
+            words
+                .as_ref()
+                .and_then(|words| words.last().and_then(|w| w.end_ms))
+        });
         Some(LyricLine {
-            time: begin,
+            start_ms: begin_ms,
+            end_ms,
+            end_inferred: false,
             text,
-            end,
             words: words.filter(|words| !words.is_empty()),
-            translation: clean_lyric_text(&self.translation),
-            roman: clean_lyric_text(&self.roman),
+            translations: clean_lyric_text(&self.translation)
+                .map(|text| vec![LyricText::new(text)])
+                .unwrap_or_default(),
+            roman: clean_lyric_text(&self.roman).map(LyricText::new),
+            role: LyricRole::Main,
+            agent: self.agent,
             hidden: false,
         })
     }
@@ -179,7 +188,8 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
             }
             Event::Start(start) if in_body && local_name(start.name().as_ref()) == b"p" => {
                 let (begin, end) = time_attrs(&start);
-                current = Some(LineBuilder::new(begin, end));
+                let agent = attr_value(&start, b"agent").filter(|value| !value.trim().is_empty());
+                current = Some(LineBuilder::new(begin, end, agent));
                 span_stack.clear();
             }
             Event::End(end) if local_name(end.name().as_ref()) == b"p" => {
@@ -215,11 +225,12 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                                     }
                                 }
                             }
-                            line.words.push(LyricWord {
-                                start,
-                                end: finish.max(start),
+                            let start_ms = seconds_to_ms(start);
+                            line.words.push(LyricWord::new(
+                                start_ms,
+                                Some(seconds_to_ms(finish).max(start_ms)),
                                 text,
-                            });
+                            ));
                         } else if let Some(parent) = span_stack.last_mut() {
                             parent.3.push_str(&text);
                         } else {
@@ -238,11 +249,12 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                                 }
                             }
                             if let (Some(start), Some(finish)) = (begin, span_end) {
-                                line.words.push(LyricWord {
-                                    start,
-                                    end: finish.max(start),
+                                let start_ms = seconds_to_ms(start);
+                                line.words.push(LyricWord::new(
+                                    start_ms,
+                                    Some(seconds_to_ms(finish).max(start_ms)),
                                     text,
-                                });
+                                ));
                             } else {
                                 line.plain.push_str(&text);
                             }
@@ -311,12 +323,8 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
         return Vec::new();
     }
 
-    lines.sort_by(|a, b| {
-        a.time
-            .partial_cmp(&b.time)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    lines.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
+    lines.sort_by_key(|line| line.start_ms);
+    lines.dedup_by(|a, b| a.start_ms.abs_diff(b.start_ms) < 10 && a.text == b.text);
     clamp_lyrics(lines)
 }
 
@@ -422,15 +430,15 @@ mod tests {
         assert_eq!(lines.len(), 3);
 
         let first = &lines[0];
-        assert!((first.time - 1.0).abs() < 1e-9);
-        assert_eq!(first.end, Some(3.0));
+        assert_eq!((first.start_ms, first.end_ms), (1000, Some(3000)));
         assert_eq!(first.text, "Hello world");
-        assert_eq!(first.translation.as_deref(), Some("你好，世界"));
-        assert_eq!(first.roman.as_deref(), Some("ha-ro wa-ru-do"));
+        assert_eq!(first.translation_text(), Some("你好，世界"));
+        assert_eq!(first.roman_text(), Some("ha-ro wa-ru-do"));
+        assert_eq!(first.agent.as_deref(), Some("v1"));
         let words = first.words.as_ref().expect("words");
         assert_eq!(words.len(), 3);
         assert_eq!(words[1].text, "lo ");
-        assert!((words[1].start - 1.5).abs() < 1e-9 && (words[1].end - 2.0).abs() < 1e-9);
+        assert_eq!((words[1].start_ms, words[1].end_ms), (1500, Some(2000)));
 
         let second = &lines[1];
         assert_eq!(second.text, "Second line (oh)");
@@ -438,12 +446,13 @@ mod tests {
         // p 内的词间空白并入上一个音节；和声音节并入本行
         assert_eq!(words[0].text, "Second ");
         assert_eq!(words.last().map(|w| w.text.as_str()), Some("(oh)"));
-        assert!((words[0].start - 4.0).abs() < 1e-9 && (words[0].end - 4.5).abs() < 1e-9);
+        assert_eq!((words[0].start_ms, words[0].end_ms), (4000, Some(4500)));
 
         let third = &lines[2];
         assert_eq!(third.text, "Plain line & text");
         assert!(third.words.is_none());
-        assert!(third.translation.is_none());
+        assert!(third.translations.is_empty());
+        assert!(third.agent.is_none());
     }
 
     #[test]

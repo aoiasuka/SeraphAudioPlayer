@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { invoke } from "@/lib/tauri";
 import { DEFAULT_AMLL_TTML_DB_URL } from "@/lib/lyrics/settings";
 import {
@@ -51,7 +52,7 @@ function testTrack(overrides: Partial<Track>): Track {
     glowColor: "#fff",
     glow1: "#fff",
     glow2: "#000",
-    lyrics: [],
+    lyrics: lyricDocument([]),
     ...overrides,
   };
 }
@@ -250,7 +251,7 @@ describe("player store startup and persistence", () => {
     invokeMock.mockClear();
     invokeMock.mockResolvedValueOnce([]);
     usePlayerStore.setState({
-      playlist: [testTrack({ id: "t", lyricsLookupKeys: ["ncm-lyrics/65923804"] })],
+      playlist: [testTrack({ id: "t", lyrics: lyricDocument([], { lookupKeys: ["ncm-lyrics/65923804"] }) })],
       currentTrackIndex: 0,
     });
     await usePlayerStore.getState().fetchOnlineLyricsForCurrentTrack();
@@ -269,23 +270,24 @@ describe("player store startup and persistence", () => {
     expect(await usePlayerStore.getState().findLocalLyricsForTrack(track)).toBe(false);
 
     usePlayerStore.setState({ lyricsFolder: "C:/Users/me/Lyrics" });
+    const found = lyricDocument([{ startMs: 1000, text: "a" }], { kind: "folder", lookupKeys: ["ncm-lyrics/65923804"] });
     invokeMock.mockResolvedValueOnce({
       path: "C:/Users/me/Lyrics/王力宏 - 唯一 (65923804).lrc",
-      lyrics: [{ time: 1, text: "a" }],
+      lyrics: found,
       lookupKeys: ["ncm-lyrics/65923804"],
     });
     expect(await usePlayerStore.getState().findLocalLyricsForTrack(track)).toBe(true);
     const updated = usePlayerStore.getState().playlist[0];
-    expect(updated.lyrics).toEqual([{ time: 1, text: "a" }]);
+    expect(updated.lyrics).toEqual(found);
     expect(updated.lyricsLoaded).toBe(true);
-    expect(updated.lyricsLookupKeys).toEqual(["ncm-lyrics/65923804"]);
+    expect(updated.lyrics.source.lookupKeys).toEqual(["ncm-lyrics/65923804"]);
     expect(invokeMock).toHaveBeenCalledWith("find_local_lyrics", expect.objectContaining({
       trackId: "t", title: "唯一", artist: "王力宏", folder: "C:/Users/me/Lyrics",
     }));
   });
 
   it("exportLyricsForCurrentTrack：无歌词不弹框；取消保存不调命令；选路径后按格式与显示开关导出", async () => {
-    const track = testTrack({ id: "t", title: "唯一", artist: "王力宏", lyrics: [] });
+    const track = testTrack({ id: "t", title: "唯一", artist: "王力宏", lyrics: lyricDocument([]) });
     usePlayerStore.setState({
       playlist: [track],
       currentTrackIndex: 0,
@@ -298,7 +300,7 @@ describe("player store startup and persistence", () => {
     expect(saveDialogMock).not.toHaveBeenCalled();
 
     usePlayerStore.setState({
-      playlist: [{ ...track, lyrics: [{ time: 1, text: "a" }] }],
+      playlist: [{ ...track, lyrics: lyricDocument([{ startMs: 1000, text: "a" }]) }],
     });
     saveDialogMock.mockResolvedValueOnce(null);
     expect(await usePlayerStore.getState().exportLyricsForCurrentTrack("enhanced")).toBe(false);

@@ -1,23 +1,72 @@
-/** 逐字歌词的一个音节（秒）。 */
+/** 逐字歌词的一个音节（毫秒整数）。`endMs` 缺省 = 终点未知，渲染时用下一音节起点或行终点兜底。 */
 export interface LyricWord {
-  start: number;
-  end: number;
+  startMs: number;
+  endMs?: number;
   text: string;
+  /** 逐字音译（暂只存不渲染）。 */
+  roman?: string;
 }
 
-export interface LyricLine {
-  time: number;
+/** 译文 / 音译这类副轨文本，可带自己的逐字时间轴与语言标记。 */
+export interface LyricText {
   text: string;
-  /** 行结束时间（秒），仅逐字来源提供。 */
-  end?: number;
-  /** 逐字时间轴（AMLL TTML）；缺省按整行处理。 */
   words?: LyricWord[];
-  /** 译文字段（TTML）。LRC 类来源的译文仍是相邻同时间戳行。 */
-  translation?: string;
-  /** 音译 / 罗马音（TTML）。 */
-  roman?: string;
+  lang?: string;
+}
+
+export type LyricRole = "main" | "background" | "credit";
+
+export interface LyricLine {
+  startMs: number;
+  /** 行结束时间（毫秒）；缺省 = 来源没给。 */
+  endMs?: number;
+  /** `endMs` 是解析后处理用下一句起点推导的。 */
+  endInferred?: boolean;
+  text: string;
+  /** 逐字时间轴；缺省按整行处理。 */
+  words?: LyricWord[];
+  /** 译文（TTML / KRC / 网易云 / QQ 都进这里）。来源不明的双语 LRC 仍是相邻同起点的两行。 */
+  translations?: LyricText[];
+  /** 音译 / 罗马音。 */
+  roman?: LyricText;
+  /** 行角色：主唱 / 和声 / 制作信息（缺省 main；暂只存不渲染）。 */
+  role?: LyricRole;
+  /** TTML 对唱 agent。 */
+  agent?: string;
   /** 被歌词排除规则命中（后端打标，仅显示层使用）。 */
   hidden?: boolean;
+}
+
+export type LyricSourceKind =
+  | "unknown"
+  | "embedded"
+  | "sidecar"
+  | "folder"
+  | "manual"
+  | "online"
+  | "ttml"
+  | "legacy";
+
+export interface LyricSource {
+  kind: LyricSourceKind;
+  provider?: string;
+  providerTrackId?: string;
+  /** AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`）。 */
+  lookupKeys?: string[];
+  /** 用户手动导入 / 明确应用 = 固定选择。 */
+  pinned?: boolean;
+  fetchedAt?: number;
+}
+
+export type LyricSync = "none" | "line" | "word";
+
+/** 一首歌的歌词文档：行 + 来源 + 同步粒度（与 Rust `LyricDocument` 同形）。 */
+export interface LyricDocument {
+  schema: number;
+  source: LyricSource;
+  sync: LyricSync;
+  offsetMs: number;
+  lines: LyricLine[];
 }
 
 export type LyricsSourcePriority = "auto" | "netease" | "kugou" | "qq";
@@ -39,8 +88,8 @@ export interface OnlineLyricsCandidate {
   artist: string;
   album?: string | null;
   duration?: number | null;
-  lyrics: LyricLine[];
-  /** AMLL TTML 候选携带的查找键（如 `ncm-lyrics/123`），应用后回写进曲目 `lyricsLookupKeys` */
+  lyrics: LyricDocument;
+  /** AMLL TTML 候选携带的查找键（如 `ncm-lyrics/123`），应用后并入曲目歌词文档的来源 */
   lookupKeys?: string[];
 }
 
@@ -65,11 +114,10 @@ export interface Track {
   glowColor: string;
   glow1?: string;
   glow2?: string;
-  lyrics: LyricLine[];
+  /** 歌词文档；曲库摘要里是空文档，当前曲目按 ID 读取后才完整。 */
+  lyrics: LyricDocument;
   /** false 表示来自曲库摘要，当前曲目需要再按 ID 读取歌词。 */
   lyricsLoaded?: boolean;
-  /** AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`），来自本地歌词文件名等可靠来源。 */
-  lyricsLookupKeys?: string[];
 }
 
 export interface DeleteTrackFailure {

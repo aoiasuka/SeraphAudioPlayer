@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
@@ -13,21 +14,21 @@ vi.mock("@/components/ui/TypewriterText", () => ({
 const track = {
   id: "w",
   duration: 100,
-  lyrics: [
-    { time: 0, text: "作词：某人" },
+  lyrics: lyricDocument([
+    { startMs: 0, text: "作词：某人" },
     {
-      time: 10,
-      end: 14,
+      startMs: 10000,
+      endMs: 14000,
       text: "Hello world",
-      translation: "你好世界",
-      roman: "ha-ro",
+      translations: [{ text: "你好世界" }],
+      roman: { text: "ha-ro" },
       words: [
-        { start: 10, end: 12, text: "Hello " },
-        { start: 12, end: 14, text: "world" },
+        { startMs: 10000, endMs: 12000, text: "Hello " },
+        { startMs: 12000, endMs: 14000, text: "world" },
       ],
     },
-    { time: 20, text: "Plain line" },
-  ],
+    { startMs: 20000, text: "Plain line" },
+  ]),
 } as Track;
 
 describe("歌词稿：排除规则与逐字/译文/音译", () => {
@@ -71,7 +72,7 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
       usePlayerStore.setState((state) => ({
         playlist: state.playlist.map((item) =>
           item.id === "w"
-            ? { ...item, lyrics: item.lyrics.map((line) => line.text.startsWith("作词") ? { ...line, hidden: true } : line) }
+            ? { ...item, lyrics: { ...item.lyrics, lines: item.lyrics.lines.map((line) => line.text.startsWith("作词") ? { ...line, hidden: true } : line) } }
             : item
         ),
         showLyricsRoman: false,

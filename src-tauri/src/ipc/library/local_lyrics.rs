@@ -270,7 +270,7 @@ pub(crate) fn lookup_keys_for_platform_id(id: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn read_local_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
+pub(crate) fn read_local_lyrics(path: &Path) -> Option<LyricDocument> {
     if fs::metadata(path)
         .map(|meta| meta.len() > MAX_LOCAL_LYRICS_BYTES)
         .unwrap_or(true)
@@ -280,7 +280,8 @@ pub(crate) fn read_local_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
     let bytes = fs::read(path).ok()?;
     let ext = path.extension().and_then(|value| value.to_str());
     let lyrics = parse_lyrics_file_bytes(ext, &bytes);
-    (!lyrics.is_empty()).then_some(lyrics)
+    (!lyrics.is_empty())
+        .then(|| LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Folder)))
 }
 
 #[cfg(test)]
@@ -356,7 +357,8 @@ mod tests {
         assert!(find_in_folder(&dir, "别的歌", "王力宏").is_none());
 
         let lyrics = read_local_lyrics(&path).unwrap();
-        assert_eq!(lyrics[0].text, "a");
+        assert_eq!(lyrics.lines[0].text, "a");
+        assert_eq!(lyrics.source.kind, LyricSourceKind::Folder);
 
         // 直接子目录命中（深度 1）；孙目录不扫
         fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();

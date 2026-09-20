@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // 2026-09-12 审查的持久化、启动及异步竞态回归。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { cleanup, renderHook } from "@testing-library/react";
 import { invoke } from "@/lib/tauri";
 import { migratePersistedPlayerState, usePlayerStore } from "@/store/player";
@@ -30,7 +31,7 @@ function track(id: string, overrides: Partial<Track> = {}): Track {
     id, title: id, artist: "测试", album: "测试", cover: "", format: "FLAC",
     bitdepth: "16-bit", sampleRate: "44.1 kHz", bitrate: "", channels: "Stereo",
     size: "1 MB", path: `C:/audit/${id}.flac`, duration: 180, glowColor: "#fff",
-    lyrics: [], ...overrides,
+    lyrics: lyricDocument([]), ...overrides,
   };
 }
 

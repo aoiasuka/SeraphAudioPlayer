@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
@@ -110,9 +111,9 @@ describe("歌词设置标签页", () => {
   });
 
   it("排除规则弹窗：制作信息预设一键加入且不重复；命中预览按当前曲目 hidden 标记列出", () => {
-    const hiddenLines = Array.from({ length: 32 }, (_, i) => ({ time: i, text: `作词：第${i}行`, hidden: true }));
+    const hiddenLines = Array.from({ length: 32 }, (_, i) => ({ startMs: i * 1000, text: `作词：第${i}行`, hidden: true }));
     usePlayerStore.setState({
-      playlist: [{ id: "t", duration: 180, lyrics: [{ time: 100, text: "正文" }, ...hiddenLines] }] as Track[],
+      playlist: [{ id: "t", duration: 180, lyrics: lyricDocument([{ startMs: 100000, text: "正文" }, ...hiddenLines]) }] as Track[],
       currentTrackIndex: 0,
     });
     render(<LyricsSettingsTab />);
@@ -142,7 +143,7 @@ describe("歌词设置标签页", () => {
     expect(within(screen.getByRole("dialog")).getByText("当前没有播放曲目")).toBeInTheDocument();
     first.unmount();
 
-    usePlayerStore.setState({ playlist: [{ id: "t", duration: 180, lyrics: [{ time: 0, text: "正文" }] }] as Track[] });
+    usePlayerStore.setState({ playlist: [{ id: "t", duration: 180, lyrics: lyricDocument([{ startMs: 0, text: "正文" }]) }] as Track[] });
     render(<LyricsSettingsTab />);
     fireEvent.click(screen.getAllByRole("button", { name: "配置" })[1]);
     expect(within(screen.getByRole("dialog")).getByText("当前曲目没有被隐藏的行")).toBeInTheDocument();

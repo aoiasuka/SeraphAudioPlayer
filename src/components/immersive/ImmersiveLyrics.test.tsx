@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,11 +21,11 @@ const track: Track = {
   id: "typing-a", title: "同一首旋律", artist: "演奏者", album: "歌词档案", path: "C:/Music/a.flac",
   cover: "", format: "FLAC", bitdepth: "24-bit", bitrate: "", channels: "Stereo", size: "",
   duration: 180, glowColor: "", lyricsLoaded: true,
-  lyrics: [{ time: 10, text: "First line" }, { time: 10, text: "第一句译文" }, { time: 20, text: "Second line" }],
+  lyrics: lyricDocument([{ startMs: 10000, text: "First line" }, { startMs: 10000, text: "第一句译文" }, { startMs: 20000, text: "Second line" }]),
 };
 const candidate: OnlineLyricsCandidate = {
   id: "matched", source: "QQ 音乐", title: "搜索匹配结果", artist: "演奏者", duration: 180,
-  lyrics: [{ time: 10, text: "Matched line" }, { time: 10, text: "匹配后的译文" }],
+  lyrics: lyricDocument([{ startMs: 10000, text: "Matched line" }, { startMs: 10000, text: "匹配后的译文" }]),
 };
 // store 默认歌词设置 → fetch_online_lyrics 的 options
 const lyricsOptions = expect.objectContaining({ sourcePriority: "auto", preferTraditional: false, ttmlEnabled: true });
@@ -141,7 +142,7 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
 
   it("隐藏句区间不高亮任何行；歌词全部被规则隐藏时显示专用空状态", () => {
     usePlayerStore.setState({
-      playlist: [{ ...track, lyrics: [{ time: 10, text: "First line" }, { time: 20, text: "作词：某人", hidden: true }, { time: 30, text: "Third line" }] }],
+      playlist: [{ ...track, lyrics: lyricDocument([{ startMs: 10000, text: "First line" }, { startMs: 20000, text: "作词：某人", hidden: true }, { startMs: 30000, text: "Third line" }]) }],
       currentTime: 25,
     });
     render(<Harness />);
@@ -152,10 +153,10 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     act(() => usePlayerStore.setState({ currentTime: 30 }));
     expect(immersive.getByRole("button", { name: /Third line/ })).toHaveAttribute("aria-current", "true");
 
-    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: [{ time: 0, text: "作曲：某人", hidden: true }] }] }));
+    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: lyricDocument([{ startMs: 0, text: "作曲：某人", hidden: true }]) }] }));
     expect(immersive.getByText("歌词已被排除规则全部隐藏")).toBeInTheDocument();
     expect(immersive.queryByText("暂无歌词")).not.toBeInTheDocument();
-    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: [] }] }));
+    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: lyricDocument([]) }] }));
     expect(immersive.getByText("暂无歌词")).toBeInTheDocument();
   });
 });

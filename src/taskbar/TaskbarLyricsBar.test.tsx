@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { FRONTEND_EVENT, invoke } from "@/lib/tauri";
 import { TaskbarLyricsBar } from "./TaskbarLyricsBar";
@@ -21,8 +22,8 @@ vi.mock("@/lib/tauri", async (importOriginal) => ({
 }));
 
 const invokeMock = invoke as Mock;
-const trackA = { id: "a", title: "A", artist: "", cover: "", duration: 180, lyrics: [{ time: 0, text: "旧歌歌词" }] };
-const trackB = { id: "b", title: "B", artist: "", cover: "", duration: 180, lyrics: [{ time: 0, text: "新歌歌词" }] };
+const trackA = { id: "a", title: "A", artist: "", cover: "", duration: 180, lyrics: lyricDocument([{ startMs: 0, text: "旧歌歌词" }]) };
+const trackB = { id: "b", title: "B", artist: "", cover: "", duration: 180, lyrics: lyricDocument([{ startMs: 0, text: "新歌歌词" }]) };
 const snapshotA = { trackId: "a", playing: true, seconds: 40, total: 180, darkTaskbar: false };
 
 function deferred<T>() {
@@ -130,13 +131,13 @@ describe("任务栏歌词排除规则", () => {
   it("隐藏句区间不延长上一句，显示占位；全部隐藏时显示专用文案", async () => {
     const withHidden = {
       ...trackA,
-      lyrics: [
-        { time: 0, text: "第一句" },
-        { time: 10, text: "作词：某人", hidden: true },
-        { time: 20, text: "第三句" },
-      ],
+      lyrics: lyricDocument([
+        { startMs: 0, text: "第一句" },
+        { startMs: 10000, text: "作词：某人", hidden: true },
+        { startMs: 20000, text: "第三句" },
+      ]),
     };
-    const allHidden = { ...trackB, lyrics: [{ time: 0, text: "作曲：某人", hidden: true }] };
+    const allHidden = { ...trackB, lyrics: lyricDocument([{ startMs: 0, text: "作曲：某人", hidden: true }]) };
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "get_playback_snapshot") return { ...snapshotA, seconds: 5 };
       if (command === "get_track_info") return args.trackId === "a" ? withHidden : allHidden;

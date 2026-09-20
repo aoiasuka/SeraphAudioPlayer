@@ -83,14 +83,12 @@ pub(crate) fn sanitize_lrc_text(value: &str) -> String {
         .collect()
 }
 
-/// 秒 → 按位数取整的毫秒（2 位模式先四舍五入到 10 ms，时间轴仍单调）。
-fn quantize_ms(seconds: f64, ms_digits: u8) -> u64 {
-    // 先取整到毫秒，避免 1.005 × 1000 = 1004.999… 这类浮点误差影响 10 ms 四舍五入
-    let ms = (seconds.max(0.0) * 1000.0).round();
+/// 毫秒 → 按位数取整（2 位模式四舍五入到 10 ms，时间轴仍单调）。
+fn quantize_ms(ms: u64, ms_digits: u8) -> u64 {
     if ms_digits == 2 {
-        (ms / 10.0).round() as u64 * 10
+        (ms + 5) / 10 * 10
     } else {
-        ms as u64
+        ms
     }
 }
 
@@ -110,8 +108,8 @@ struct Formatter {
 }
 
 impl Formatter {
-    fn ms(&self, seconds: f64) -> u64 {
-        quantize_ms(seconds, self.ms_digits)
+    fn ms(&self, ms: u64) -> u64 {
+        quantize_ms(ms, self.ms_digits)
     }
 
     fn line_tag(&self, ms: u64) -> String {
@@ -132,10 +130,12 @@ fn line_to_lrc(line: &LyricLine, format: LrcExportFormat, fmt: &Formatter) -> St
     // 行起点取首音节起点（有 words 时），否则行时间
     let start_ms = words
         .first()
-        .map(|word| fmt.ms(word.start))
-        .unwrap_or_else(|| fmt.ms(line.time));
+        .map(|word| fmt.ms(word.start_ms))
+        .unwrap_or_else(|| fmt.ms(line.start_ms));
+    // 推导出来的行终点（`end_inferred`）不是文件里写的，不写终点标签
     let line_end_ms = line
-        .end
+        .end_ms
+        .filter(|_| !line.end_inferred)
         .map(|end| fmt.ms(end))
         .filter(|end| *end > start_ms);
 
@@ -155,19 +155,21 @@ fn line_to_lrc(line: &LyricLine, format: LrcExportFormat, fmt: &Formatter) -> St
         LrcExportFormat::Verbatim => Some(start_ms),
         _ => None,
     };
-    for word in words {
-        let word_start = fmt.ms(word.start);
+    for (index, word) in words.iter().enumerate() {
+        let word_start = fmt.ms(word.start_ms);
         if last_written_ms != Some(word_start) {
             out.push_str(&fmt.word_tag(word_start, format));
         }
         out.push_str(&sanitize_lrc_text(&word.text));
-        let word_end = fmt.ms(word.end);
-        // 零时长音节 = 终点未知（解析占位），不写终点标签
-        if word_end > word_start {
-            out.push_str(&fmt.word_tag(word_end, format));
-            last_written_ms = Some(word_end);
-        } else {
-            last_written_ms = Some(word_start);
+        // 终点未知不写；末音节的终点若是整行推导来的（等于推导行终点）也不写
+        let inferred_tail =
+            line.end_inferred && index + 1 == words.len() && word.end_ms == line.end_ms;
+        match word.end_ms.map(|end| fmt.ms(end)) {
+            Some(word_end) if word_end > word_start && !inferred_tail => {
+                out.push_str(&fmt.word_tag(word_end, format));
+                last_written_ms = Some(word_end);
+            }
+            _ => last_written_ms = Some(word_start),
         }
     }
     if let Some(end) = line_end_ms {
@@ -212,14 +214,10 @@ pub(crate) fn lyrics_to_lrc(
             .words
             .as_deref()
             .and_then(|words| words.first())
-            .map(|word| fmt.ms(word.start))
-            .unwrap_or_else(|| fmt.ms(line.time));
+            .map(|word| fmt.ms(word.start_ms))
+            .unwrap_or_else(|| fmt.ms(line.start_ms));
         if options.include_roman {
-            if let Some(roman) = line
-                .roman
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
+            if let Some(roman) = line.roman_text().filter(|value| !value.trim().is_empty()) {
                 out.push_str(&fmt.line_tag(start_ms));
                 out.push_str(&sanitize_lrc_text(roman.trim()));
                 out.push('\n');
@@ -228,9 +226,10 @@ pub(crate) fn lyrics_to_lrc(
         out.push_str(&line_to_lrc(line, format, &fmt));
         out.push('\n');
         if options.include_translation {
-            if let Some(translation) = line
-                .translation
-                .as_deref()
+            for translation in line
+                .translations
+                .iter()
+                .map(|text| text.text.as_str())
                 .filter(|value| !value.trim().is_empty())
             {
                 out.push_str(&fmt.line_tag(start_ms));
@@ -246,17 +245,13 @@ pub(crate) fn lyrics_to_lrc(
 mod tests {
     use super::*;
 
-    fn word(start: f64, end: f64, text: &str) -> LyricWord {
-        LyricWord {
-            start,
-            end,
-            text: text.to_string(),
-        }
+    fn word(start: u64, end: u64, text: &str) -> LyricWord {
+        LyricWord::new(start, (end > start).then_some(end), text)
     }
 
-    fn word_line(time: f64, end: f64, text: &str, words: Vec<LyricWord>) -> LyricLine {
-        let mut line = LyricLine::new(time, text);
-        line.end = Some(end);
+    fn word_line(start: u64, end: u64, text: &str, words: Vec<LyricWord>) -> LyricLine {
+        let mut line = LyricLine::new(start, text);
+        line.end_ms = Some(end);
         line.words = Some(words);
         line
     }
@@ -264,16 +259,16 @@ mod tests {
     fn sample() -> Vec<LyricLine> {
         vec![
             word_line(
-                18.459,
-                23.097,
+                18_459,
+                23_097,
                 "我的 天",
                 vec![
-                    word(18.459, 18.814, "我"),
-                    word(18.814, 19.284, "的 "),
-                    word(19.284, 23.097, "天"),
+                    word(18_459, 18_814, "我"),
+                    word(18_814, 19_284, "的 "),
+                    word(19_284, 23_097, "天"),
                 ],
             ),
-            LyricLine::new(26.712, "普通行"),
+            LyricLine::new(26_712, "普通行"),
         ]
     }
 
@@ -343,16 +338,17 @@ mod tests {
             text,
             "[00:18.46]<00:18.46>我<00:18.81>的 <00:19.28>天<00:23.10>\n[00:26.71]普通行\n"
         );
-        assert_eq!(quantize_ms(1.005, 2), 1010);
-        assert_eq!(quantize_ms(1.004, 2), 1000);
-        assert_eq!(quantize_ms(1.010, 2), 1010);
+        assert_eq!(quantize_ms(1005, 2), 1010);
+        assert_eq!(quantize_ms(1004, 2), 1000);
+        assert_eq!(quantize_ms(1010, 2), 1010);
+        assert_eq!(quantize_ms(1005, 3), 1005);
     }
 
     #[test]
     fn translation_and_roman_fields_become_adjacent_lines() {
-        let mut line = word_line(1.0, 2.0, "Hello", vec![word(1.0, 2.0, "Hello")]);
-        line.translation = Some("你好".into());
-        line.roman = Some("ha-ro".into());
+        let mut line = word_line(1000, 2000, "Hello", vec![word(1000, 2000, "Hello")]);
+        line.translations = vec![LyricText::new("你好")];
+        line.roman = Some(LyricText::new("ha-ro"));
         let text = lyrics_to_lrc(
             &[line.clone()],
             LrcExportFormat::Enhanced,
@@ -374,29 +370,41 @@ mod tests {
 
     #[test]
     fn unknown_word_end_is_left_untagged_and_line_end_wins() {
-        // 零时长末音节（解析占位）不写终点；行 end 大于最后写出的标签才补
+        // 终点未知的末音节不写终点；行 end 大于最后写出的标签才补
         let line = word_line(
-            1.0,
-            3.0,
+            1000,
+            3000,
             "ab",
-            vec![word(1.0, 1.5, "a"), word(1.5, 1.5, "b")],
+            vec![word(1000, 1500, "a"), word(1500, 1500, "b")],
         );
         let text = lyrics_to_lrc(
-            &[line],
+            std::slice::from_ref(&line),
             LrcExportFormat::Enhanced,
             &LrcExportOptions::default(),
             &NO_META,
         );
         assert_eq!(text, "[00:01.000]<00:01.000>a<00:01.500>b<00:03.000>\n");
+
+        // 推导出来的行终点（末音节终点也是它）不是文件里写的，导出时不写
+        let mut inferred = line;
+        inferred.end_inferred = true;
+        inferred.words.as_mut().unwrap()[1].end_ms = Some(3000);
+        let text = lyrics_to_lrc(
+            &[inferred],
+            LrcExportFormat::Enhanced,
+            &LrcExportOptions::default(),
+            &NO_META,
+        );
+        assert_eq!(text, "[00:01.000]<00:01.000>a<00:01.500>b\n");
     }
 
     #[test]
     fn injected_newlines_and_brackets_are_neutralized() {
         let line = word_line(
-            1.0,
-            2.0,
+            1000,
+            2000,
             "x",
-            vec![word(1.0, 2.0, "a\n<00:99.00>b[00:10.00]c")],
+            vec![word(1000, 2000, "a\n<00:99.00>b[00:10.00]c")],
         );
         let meta = LrcExportMeta {
             title: "t]\n[00:00.00]evil",
@@ -427,10 +435,11 @@ mod tests {
             assert_eq!(words.len(), expected.len());
             for (got, want) in words.iter().zip(expected) {
                 assert_eq!(got.text, want.text);
-                assert!((got.start - want.start).abs() < 0.0015, "{format:?}");
-                assert!((got.end - want.end).abs() < 0.0015, "{format:?}");
+                assert_eq!(got.start_ms, want.start_ms, "{format:?}");
+                assert_eq!(got.end_ms, want.end_ms, "{format:?}");
             }
-            assert!((parsed[0].end.unwrap() - 23.097).abs() < 0.0015);
+            assert_eq!(parsed[0].end_ms, Some(23_097));
+            assert!(!parsed[0].end_inferred);
             assert!(parsed[1].words.is_none());
         }
     }

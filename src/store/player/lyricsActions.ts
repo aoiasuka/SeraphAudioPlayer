@@ -1,14 +1,15 @@
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
-import type { LrcExportFormat, LyricLine, OnlineLyricsCandidate, Track } from "@/types/track";
+import { emptyLyricDocument } from "@/lib/lyrics/document";
+import type { LrcExportFormat, LyricDocument, OnlineLyricsCandidate, Track } from "@/types/track";
 import { sendCommand } from "./commands";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
 /** `find_local_lyrics` 的返回。 */
 interface LocalLyricsMatch {
   path: string;
-  lyrics: LyricLine[];
+  lyrics: LyricDocument;
   lookupKeys: string[];
 }
 
@@ -34,7 +35,7 @@ function lyricsExportFileName(track: Track) {
 function replaceTrackLyrics(
   playlist: Track[],
   trackId: string,
-  lyrics: LyricLine[]
+  lyrics: LyricDocument
 ) {
   return playlist.map((track) =>
     track.id === trackId ? { ...track, lyrics, lyricsLoaded: true } : track
@@ -133,20 +134,10 @@ export function createLyricsActions(
         folder,
         preferTraditional: get().preferTraditionalLyrics,
       });
-      if (!result || result.lyrics.length === 0) return false;
+      if (!result || (result.lyrics?.lines.length ?? 0) === 0) return false;
+      // 后端返回的文档已带并入的查找键
       set((state) => ({
-        playlist: state.playlist.map((item) =>
-          item.id === track.id
-            ? {
-                ...item,
-                lyrics: result.lyrics,
-                lyricsLoaded: true,
-                lyricsLookupKeys: Array.from(
-                  new Set([...(item.lyricsLookupKeys ?? []), ...result.lookupKeys])
-                ),
-              }
-            : item
-        ),
+        playlist: replaceTrackLyrics(state.playlist, track.id, result.lyrics),
       }));
       return true;
     } catch (err) {
@@ -226,14 +217,14 @@ export function createLyricsActions(
 
     try {
       const lyricsBytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-      const lyrics = await invoke<LyricLine[]>("save_track_lyrics", {
+      const lyrics = await invoke<LyricDocument>("save_track_lyrics", {
         trackId: track.id,
         trackPath: track.path,
         lyricsBytes,
         preferTraditional: get().preferTraditionalLyrics,
       });
 
-      if (!Array.isArray(lyrics) || lyrics.length === 0) {
+      if (!lyrics || !Array.isArray(lyrics.lines) || lyrics.lines.length === 0) {
         get().showNotification("歌词文件没有可用内容");
         return;
       }
@@ -241,7 +232,7 @@ export function createLyricsActions(
       set((state) => ({
         playlist: replaceTrackLyrics(state.playlist, track.id, lyrics),
       }));
-      get().showNotification(`已导入 ${lyrics.length} 行歌词`);
+      get().showNotification(`已导入 ${lyrics.lines.length} 行歌词`);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("Tauri command failed: save_track_lyrics", err);
@@ -279,7 +270,7 @@ export function createLyricsActions(
             ttmlEnabled: ttmlLyricsEnabled,
             ttmlDbUrl: amllTtmlDbUrl,
             ttmlDbCustom: amllTtmlDbCustom,
-            lookupKeys: track.lyricsLookupKeys ?? [],
+            lookupKeys: track.lyrics?.source?.lookupKeys ?? [],
           },
         }
       );
@@ -306,41 +297,30 @@ export function createLyricsActions(
       return false;
     }
 
-    if (lyrics.length === 0) {
+    if (!lyrics || lyrics.lines.length === 0) {
       get().showNotification("歌词内容为空");
       return false;
     }
 
     const keys = (lookupKeys ?? []).filter((key) => typeof key === "string" && key);
     try {
-      const savedLyrics = await invoke<LyricLine[]>("apply_online_lyrics", {
+      const savedLyrics = await invoke<LyricDocument>("apply_online_lyrics", {
         trackId: track.id,
         trackPath: track.path,
         lyrics,
         lookupKeys: keys,
       });
 
-      if (!Array.isArray(savedLyrics) || savedLyrics.length === 0) {
+      if (!savedLyrics || !Array.isArray(savedLyrics.lines) || savedLyrics.lines.length === 0) {
         get().showNotification("歌词内容为空");
         return false;
       }
 
-      // 后端已把查找键写进曲库，前端同步合并进 track，下次在线匹配直接带上
+      // 后端返回的文档已把查找键并进来源，下次在线匹配直接带上
       set((state) => ({
-        playlist: state.playlist.map((item) =>
-          item.id === track.id
-            ? {
-                ...item,
-                lyrics: savedLyrics,
-                lyricsLoaded: true,
-                lyricsLookupKeys: Array.from(
-                  new Set([...(item.lyricsLookupKeys ?? []), ...keys])
-                ),
-              }
-            : item
-        ),
+        playlist: replaceTrackLyrics(state.playlist, track.id, savedLyrics),
       }));
-      get().showNotification(`已应用 ${savedLyrics.length} 行在线歌词`);
+      get().showNotification(`已应用 ${savedLyrics.lines.length} 行在线歌词`);
       return true;
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -356,7 +336,7 @@ export function createLyricsActions(
       get().showNotification("请先选择曲目");
       return false;
     }
-    if (track.lyrics.length === 0) {
+    if ((track.lyrics?.lines.length ?? 0) === 0) {
       get().showNotification("当前曲目没有歌词可导出");
       return false;
     }
@@ -370,6 +350,7 @@ export function createLyricsActions(
       if (!target) return false;
 
       // 导出的是曲库原始歌词（后端读取），不受排除规则影响
+      void emptyLyricDocument;
       const written = await invoke<number>("export_track_lyrics", {
         trackId: track.id,
         path: target,

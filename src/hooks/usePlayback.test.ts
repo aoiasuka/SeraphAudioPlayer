@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
 import { seekGuard } from "@/store/player/playbackActions";
@@ -28,7 +29,7 @@ describe("切歌时的歌词时间轴", () => {
     usePlayerStore.setState({
       ...usePlayerStore.getInitialState(),
       playlist: ["a", "b"].map((id): Track => ({
-        id, title: id, path: `C:/Music/${id}.flac`, duration: 180, lyrics: [],
+        id, title: id, path: `C:/Music/${id}.flac`, duration: 180, lyrics: lyricDocument([]),
         artist: "Artist", album: "Album", cover: "", format: "FLAC",
         bitdepth: "16-bit", bitrate: "Unknown", channels: "Stereo", size: "1 MB", glowColor: "#fff",
       })),
@@ -50,10 +51,10 @@ describe("切歌时的歌词时间轴", () => {
     renderHook(usePlayback);
     expect([...pending.keys()]).toEqual(["a"]);
     act(() => { usePlayerStore.setState({ currentTrackIndex: 1 }); });
-    await act(async () => { pending.get("a")!({ ...a, lyrics: [{ time: 1, text: "旧曲目" }] }); });
-    expect(usePlayerStore.getState().playlist[0].lyrics).toEqual([]);
-    await act(async () => { pending.get("b")!({ ...b, lyrics: [{ time: 2, text: "当前曲目" }] }); });
-    expect(usePlayerStore.getState().currentTrack()?.lyrics[0].text).toBe("当前曲目");
+    await act(async () => { pending.get("a")!({ ...a, lyrics: lyricDocument([{ startMs: 1000, text: "旧曲目" }]) }); });
+    expect(usePlayerStore.getState().playlist[0].lyrics.lines).toEqual([]);
+    await act(async () => { pending.get("b")!({ ...b, lyrics: lyricDocument([{ startMs: 2000, text: "当前曲目" }]) }); });
+    expect(usePlayerStore.getState().currentTrack()?.lyrics.lines[0].text).toBe("当前曲目");
     expect(usePlayerStore.getState().currentTrack()?.lyricsLoaded).toBe(true);
     expect([...pending.keys()]).toEqual(["a", "b"]);
   });
@@ -66,9 +67,9 @@ describe("切歌时的歌词时间轴", () => {
     const old = usePlayerStore.getState().currentTrack()!;
     renderHook(usePlayback);
     act(() => { usePlayerStore.setState((state) => ({ playlist: state.playlist.map((track) =>
-      track === old ? { ...track, lyrics: [{ time: 1, text: "用户版本" }], lyricsLoaded: true } : track) })); });
-    await act(async () => { complete({ ...old, lyrics: [{ time: 1, text: "迟到版本" }] }); });
-    expect(usePlayerStore.getState().currentTrack()?.lyrics[0].text).toBe("用户版本");
+      track === old ? { ...track, lyrics: lyricDocument([{ startMs: 1000, text: "用户版本" }]), lyricsLoaded: true } : track) })); });
+    await act(async () => { complete({ ...old, lyrics: lyricDocument([{ startMs: 1000, text: "迟到版本" }]) }); });
+    expect(usePlayerStore.getState().currentTrack()?.lyrics.lines[0].text).toBe("用户版本");
   });
 
   it("跳转失败保留播放态并立即回滚进度", () => {

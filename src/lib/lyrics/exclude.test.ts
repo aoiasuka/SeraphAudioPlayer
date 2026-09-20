@@ -22,9 +22,9 @@ describe("sanitizeExcludeRules", () => {
 
 describe("visibleLyrics", () => {
   const lyrics: LyricLine[] = [
-    { time: 0, text: "作词：某人", hidden: true },
-    { time: 1, text: "Hello" },
-    { time: 2, text: "第二句", hidden: false },
+    { startMs: 0, text: "作词：某人", hidden: true },
+    { startMs: 1000, text: "Hello" },
+    { startMs: 2000, text: "第二句", hidden: false },
   ];
 
   it("按后端 hidden 标记过滤；无隐藏行时原引用返回", () => {

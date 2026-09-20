@@ -5,8 +5,10 @@ import type { LyricWord } from "@/types/track";
 
 interface KaraokeLineProps {
   words: LyricWord[];
-  /** 平滑后的播放时间（秒） */
-  currentTime: number;
+  /** 平滑后的播放位置（毫秒） */
+  currentMs: number;
+  /** 行终点（毫秒）：末音节终点未知时的兜底 */
+  lineEndMs?: number;
   className?: string;
   /**
    * 已唱 / 未唱颜色。**必须是具体颜色值，不能用 currentColor**：
@@ -19,16 +21,20 @@ interface KaraokeLineProps {
 
 /**
  * 逐字歌词行：每个音节用 background-clip 渐变按进度从左到右“填色”。
- * 只依赖 currentTime 与 words，父组件只在当前行挂载它。
+ * 只依赖 currentMs 与 words，父组件只在当前行挂载它。
  */
 export function KaraokeLine({
   words,
-  currentTime,
+  currentMs,
+  lineEndMs,
   className,
   sungColor = "var(--ink)",
   unsungColor = "rgba(43, 39, 34, 0.35)",
 }: KaraokeLineProps) {
-  const progress = useMemo(() => wordProgress(words, currentTime), [words, currentTime]);
+  const progress = useMemo(
+    () => wordProgress(words, currentMs, lineEndMs),
+    [words, currentMs, lineEndMs]
+  );
   return (
     <span className={cn("karaoke-line", className)} data-testid="karaoke-line">
       {words.map((word, index) => {
@@ -36,7 +42,7 @@ export function KaraokeLine({
         const percent = `${Math.round(ratio * 100)}%`;
         return (
           <span
-            key={`${word.start}-${index}`}
+            key={`${word.startMs}-${index}`}
             className={cn(
               "karaoke-word",
               ratio >= 1 && "is-sung",

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,7 +38,7 @@ function makeTrack(id: string, title: string, artist: string, duration: number):
     path: `C:/Music/${id}.flac`,
     duration,
     glowColor: "#fff",
-    lyrics: [],
+    lyrics: lyricDocument([]),
   } as Track;
 }
 

@@ -33,7 +33,7 @@ export function TrackInfoDialog() {
         ["声道", track.channels],
         ["文件大小", track.size],
         ["时长", formatSeconds(track.duration)],
-        ["歌词", track.lyrics.length > 0 ? `${track.lyrics.length} 行` : "无"],
+        ["歌词", (track.lyrics?.lines.length ?? 0) > 0 ? `${track.lyrics.lines.length} 行` : "无"],
         [
           "来源",
           track.sourceUrl || track.sourceId ? "Bilibili 缓存" : "本地文件",

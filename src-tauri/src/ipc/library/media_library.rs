@@ -159,7 +159,7 @@ pub(crate) fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> 
 #[cfg(test)]
 pub(crate) fn split_lyrics_for_storage(
     tracks: &[ImportedTrack],
-) -> (Vec<ImportedTrack>, HashMap<String, Vec<LyricLine>>) {
+) -> (Vec<ImportedTrack>, HashMap<String, LyricDocument>) {
     let mut lyrics_by_id = HashMap::new();
     let stripped = tracks
         .iter()
@@ -168,7 +168,7 @@ pub(crate) fn split_lyrics_for_storage(
                 lyrics_by_id.insert(track.id.clone(), track.lyrics.clone());
             }
             ImportedTrack {
-                lyrics: Vec::new(),
+                lyrics: LyricDocument::EMPTY,
                 ..track.clone()
             }
         })
@@ -180,7 +180,7 @@ pub(crate) fn split_lyrics_for_storage(
 #[cfg(test)]
 pub(crate) fn merge_lyrics_from_storage(
     mut tracks: Vec<ImportedTrack>,
-    lyrics_by_id: &HashMap<String, Vec<LyricLine>>,
+    lyrics_by_id: &HashMap<String, LyricDocument>,
 ) -> Vec<ImportedTrack> {
     for track in &mut tracks {
         if let Some(lyrics) = lyrics_by_id.get(&track.id) {
@@ -417,15 +417,19 @@ pub(crate) fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<Str
     }
 }
 
+/// 写入歌词文档。曲目原有的 AMLL 查找键（来自更早的本地文件名 / 候选）并入新文档的来源，
+/// 不因换一份歌词而丢失。
 pub(crate) fn apply_track_lyrics(
     tracks: &mut Vec<ImportedTrack>,
     track_id: &str,
-    lyrics: Vec<LyricLine>,
+    mut lyrics: LyricDocument,
     track_path: Option<&str>,
     covers_dir: Option<&Path>,
 ) -> Result<(), String> {
     let index = ensure_track_for_lyrics(tracks, track_id, track_path, covers_dir)?;
     let track = &mut tracks[index];
+    let previous_keys = std::mem::take(&mut track.lyrics.source.lookup_keys);
+    lyrics.source = std::mem::take(&mut lyrics.source).with_lookup_keys(previous_keys);
     track.lyrics = lyrics;
     Ok(())
 }
@@ -611,7 +615,12 @@ pub(crate) fn track_from_path(
         .map(is_dsd_format)
         .unwrap_or_else(|| ext_format.is_some_and(is_dsd_format));
     let audio_metadata = parse_audio_metadata_with_dsd_hint(path, is_dsd);
-    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| audio_metadata.lyrics.clone());
+    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| {
+        LyricDocument::from_lines(
+            audio_metadata.lyrics.clone(),
+            LyricSource::of(LyricSourceKind::Embedded),
+        )
+    });
     let filename_metadata = parse_filename_metadata(stem);
     let title = audio_metadata
         .title
@@ -662,7 +671,6 @@ pub(crate) fn track_from_path(
         glow1,
         glow2,
         lyrics,
-        lyrics_lookup_keys: Vec::new(),
     })
 }
 
@@ -1143,7 +1151,7 @@ pub(crate) fn is_dsd_file(path: &Path) -> bool {
 /// 原先这里是裸 `fs::read`，共享目录里放个 GB 级 `.lrc` 就能在导入时把内存吃满。
 const MAX_EXTERNAL_LYRICS_BYTES: u64 = 4 * 1024 * 1024;
 
-pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
+pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<LyricDocument> {
     let lyrics_path = find_lyrics_file(path)?;
     // 先看 metadata 再读，避免为了判大小把整个文件读进来
     if fs::metadata(&lyrics_path)
@@ -1156,7 +1164,8 @@ pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<Vec<LyricLine>> {
     // `.ttml` sidecar 走 TTML 解析（逐字），其余仍按字节内容嗅探
     let ext = lyrics_path.extension().and_then(|value| value.to_str());
     let lyrics = parse_lyrics_file_bytes(ext, &bytes);
-    (!lyrics.is_empty()).then_some(lyrics)
+    (!lyrics.is_empty())
+        .then(|| LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Sidecar)))
 }
 
 /// 同名歌词 sidecar 的扩展名，按优先级排列：`.ttml` 逐字优先于行级格式。

@@ -639,7 +639,7 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
   };
 
   // 当前曲目命中预览：hidden 标记由后端在回传时打好，规则变更后会重拉，这里不自己匹配
-  const hiddenLines = currentTrack?.lyrics.filter((line) => line.hidden === true) ?? [];
+  const hiddenLines = (currentTrack?.lyrics?.lines ?? []).filter((line) => line.hidden === true);
   const hiddenOverflow = Math.max(0, hiddenLines.length - HIDDEN_PREVIEW_LIMIT);
 
   return (
@@ -737,7 +737,7 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
           <ul className="max-h-[20vh] space-y-0.5 overflow-y-auto pr-1" aria-label="被隐藏的歌词行">
             {hiddenLines.slice(0, HIDDEN_PREVIEW_LIMIT).map((line, index) => (
               <li
-                key={`${line.time}-${index}`}
+                key={`${line.startMs}-${index}`}
                 className="truncate font-tw text-[11px] text-ink2 line-through decoration-stamp/70"
                 title={line.text}
               >

@@ -7,9 +7,10 @@ import {
   activeVisibleIndex,
   hasWordTiming,
   isInIntermission,
-  lyricsPosition,
+  lyricsPositionMs,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
+import { lyricLines } from "@/lib/lyrics/document";
 import {
   coverSrc,
   emitToMain,
@@ -18,7 +19,7 @@ import {
   listen,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { LyricLine } from "@/types/track";
+import type { LyricDocument } from "@/types/track";
 
 /** 本窗口 label,窗口事件(tauri://move)据此收窄,免收主窗口的同名事件。 */
 const WINDOW_LABEL = "taskbar-lyrics";
@@ -49,7 +50,7 @@ interface BarTrack {
   artist: string;
   cover: string;
   duration: number;
-  lyrics: LyricLine[];
+  lyrics: LyricDocument;
 }
 
 interface PlayerEventPayload {
@@ -340,25 +341,25 @@ export function TaskbarLyricsBar() {
 
   // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
   const resolvedGroups = useMemo(
-    () => resolveVisibleGroups(track?.lyrics ?? []),
+    () => resolveVisibleGroups(lyricLines(track)),
     [track]
   );
   const lyricGroups = resolvedGroups.visible;
-  // 歌词定位按可听位置（进度条 / seek 仍用原始 seconds）
-  const lyricsSeconds = lyricsPosition(seconds, outputLatency);
+  // 歌词定位按可听位置（毫秒；进度条 / seek 仍用原始 seconds）
+  const lyricsMs = lyricsPositionMs(seconds, outputLatency);
   const activeIdx = useMemo(
-    () => activeVisibleIndex(resolvedGroups, lyricsSeconds),
-    [resolvedGroups, lyricsSeconds]
+    () => activeVisibleIndex(resolvedGroups, lyricsMs),
+    [resolvedGroups, lyricsMs]
   );
   // 原始歌词非空但全部被排除规则隐藏
-  const allHiddenByRules = (track?.lyrics.length ?? 0) > 0 && lyricGroups.length === 0;
+  const allHiddenByRules = lyricLines(track).length > 0 && lyricGroups.length === 0;
   const activeLineEntry =
     activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeLine = activeLineEntry?.text ?? "";
   const activeHasWords = hasWordTiming(activeLineEntry);
-  const smoothSeconds = useSmoothTime(lyricsSeconds, playing, activeHasWords);
+  const smoothMs = useSmoothTime(lyricsMs, playing, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
-  const intermission = isInIntermission(resolvedGroups, activeIdx, lyricsSeconds);
+  const intermission = isInIntermission(resolvedGroups, activeIdx, lyricsMs);
 
   const effectiveTotal = total > 0 ? total : (track?.duration ?? 0);
   const progressRatio =
@@ -452,7 +453,8 @@ export function TaskbarLyricsBar() {
             activeHasWords && activeLineEntry ? (
               <KaraokeLine
                 words={activeLineEntry.words}
-                currentTime={smoothSeconds}
+                currentMs={smoothMs}
+                lineEndMs={activeLineEntry.endMs}
                 sungColor={dark ? "#f5f1e8" : "#2b2722"}
                 unsungColor={dark ? "rgba(245, 241, 232, 0.4)" : "rgba(43, 39, 34, 0.35)"}
               />

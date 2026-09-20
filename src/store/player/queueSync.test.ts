@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { invoke } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
@@ -13,7 +14,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => ({
 }));
 
 const tracks: Track[] = ["a", "b", "c"].map((id) => ({
-  id, title: id, path: `C:/Music/${id}.flac`, duration: 180, lyrics: [],
+  id, title: id, path: `C:/Music/${id}.flac`, duration: 180, lyrics: lyricDocument([]),
   artist: "Artist", album: "Album", cover: "", format: "FLAC",
   bitdepth: "16-bit", bitrate: "Unknown", channels: "Stereo", size: "1 MB", glowColor: "#fff",
 }));
@@ -138,7 +139,7 @@ describe("后端下一首预览", () => {
     await syncPlaybackQueue(get, set);
     const initial = invokeMock.mock.calls[0][1]!;
     set({ playlist: tracks.map((track, index) => index === 0
-      ? { ...track, lyrics: [{ time: 1, text: "已加载歌词" }], lyricsLoaded: true } : track) });
+      ? { ...track, lyrics: lyricDocument([{ startMs: 1000, text: "已加载歌词" }]), lyricsLoaded: true } : track) });
     await syncPlaybackQueue(get, set);
     expect(invokeMock.mock.calls[1][1]).not.toHaveProperty("tracks");
     expect(invokeMock.mock.calls[1][1]?.sync).toMatchObject({ revision: (initial.sync as { revision: string }).revision });

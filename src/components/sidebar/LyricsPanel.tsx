@@ -19,9 +19,10 @@ import {
   activeVisibleIndex,
   hasWordTiming,
   isInIntermission,
-  lyricsPosition,
+  lyricsPositionMs,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
+import { lyricLines } from "@/lib/lyrics/document";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -47,8 +48,8 @@ function lyricPreview(lyrics: LyricLine[]) {
 
 export function LyricsPanel() {
   const track = usePlayerStore((s) => s.currentTrack());
-  // 歌词定位按可听位置：引擎进度减去输出延迟（进度条等仍用原始 currentTime）
-  const currentTime = usePlayerStore((s) => lyricsPosition(s.currentTime, s.outputLatency));
+  // 歌词定位按可听位置（毫秒）：引擎进度减去输出延迟（进度条等仍用原始 currentTime）
+  const currentMs = usePlayerStore((s) => lyricsPositionMs(s.currentTime, s.outputLatency));
   const seek = usePlayerStore((s) => s.seek);
   const importLyricsForCurrentTrack = usePlayerStore(
     (s) => s.importLyricsForCurrentTrack
@@ -87,7 +88,7 @@ export function LyricsPanel() {
   const [onlineDialogOpen, setOnlineDialogOpen] = useState(false);
   const [manualSearchQuery, setManualSearchQuery] = useState("");
   const [centerPadding, setCenterPadding] = useState(0);
-  const rawLyrics = track?.lyrics ?? [];
+  const rawLyrics = useMemo(() => lyricLines(track), [track]);
   const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -109,16 +110,16 @@ export function LyricsPanel() {
     null;
 
   const activeIdx = useMemo(
-    () => activeVisibleIndex(resolvedGroups, currentTime),
-    [resolvedGroups, currentTime]
+    () => activeVisibleIndex(resolvedGroups, currentMs),
+    [resolvedGroups, currentMs]
   );
   const activeLine = activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeHasWords = hasWordTiming(activeLine);
-  const smoothTime = useSmoothTime(currentTime, isPlaying, activeHasWords);
+  const smoothMs = useSmoothTime(currentMs, isPlaying, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
   const intermission = useMemo(
-    () => isInIntermission(resolvedGroups, activeIdx, currentTime),
-    [resolvedGroups, activeIdx, currentTime]
+    () => isInIntermission(resolvedGroups, activeIdx, currentMs),
+    [resolvedGroups, activeIdx, currentMs]
   );
 
   useLayoutEffect(() => {
@@ -451,7 +452,7 @@ export function LyricsPanel() {
                         lineRefs.current[idx] = el;
                       }}
                       onClick={() => {
-                        if (canSeek) seek(group.time);
+                        if (canSeek) seek(group.startMs / 1000);
                       }}
                       onContextMenu={(event) => {
                         // 阻断冒泡：外层歌词稿容器也挂了菜单，避免二次打开覆盖行级条目
@@ -489,7 +490,11 @@ export function LyricsPanel() {
                             >
                               {active && lineIdx === 0 ? (
                                 hasWordTiming(line) ? (
-                                  <KaraokeLine words={line.words} currentTime={smoothTime} />
+                                  <KaraokeLine
+                                    words={line.words}
+                                    currentMs={smoothMs}
+                                    lineEndMs={line.endMs}
+                                  />
                                 ) : (
                                   <TypewriterText text={line.text} />
                                 )
@@ -497,16 +502,19 @@ export function LyricsPanel() {
                                 line.text
                               )}
                             </p>
-                            {showTranslation && line.translation ? (
-                              <p
-                                className={cn(
-                                  "break-words font-tw leading-[22px]",
-                                  active ? "text-[12px] text-ink2" : "text-[11px] text-ink3"
-                                )}
-                              >
-                                {line.translation}
-                              </p>
-                            ) : null}
+                            {showTranslation
+                              ? (line.translations ?? []).map((translation, translationIndex) => (
+                                  <p
+                                    key={`t-${translationIndex}`}
+                                    className={cn(
+                                      "break-words font-tw leading-[22px]",
+                                      active ? "text-[12px] text-ink2" : "text-[11px] text-ink3"
+                                    )}
+                                  >
+                                    {translation.text}
+                                  </p>
+                                ))
+                              : null}
                             {showRoman && line.roman ? (
                               <p
                                 className={cn(
@@ -514,7 +522,7 @@ export function LyricsPanel() {
                                   active ? "text-[11px] text-ink3" : "text-[10px] text-ink3/80"
                                 )}
                               >
-                                {line.roman}
+                                {line.roman.text}
                               </p>
                             ) : null}
                           </div>
@@ -636,7 +644,7 @@ export function LyricsPanel() {
                           >
                             {candidate.source}
                           </span>
-                          {candidateBadges(candidate.lyrics).map((badge) => (
+                          {candidateBadges(candidate.lyrics.lines).map((badge) => (
                             <span
                               key={badge}
                               data-testid="candidate-badge"
@@ -652,7 +660,7 @@ export function LyricsPanel() {
                           ))}
                         </span>
                         <span className="shrink-0 font-tw text-[10px] text-ink3">
-                          {duration || `${candidate.lyrics.length} 行`}
+                          {duration || `${candidate.lyrics.lines.length} 行`}
                         </span>
                       </span>
                       <span className="mt-2 block truncate font-serif text-xs font-bold text-ink">
@@ -662,7 +670,7 @@ export function LyricsPanel() {
                         {candidate.artist || "Unknown Artist"}
                       </span>
                       <span className="mt-2 line-clamp-2 font-tw text-[11px] leading-relaxed text-ink3">
-                        {lyricPreview(candidate.lyrics)}
+                        {lyricPreview(candidate.lyrics.lines)}
                       </span>
                     </button>
                   );
@@ -721,24 +729,27 @@ export function LyricsPanel() {
                 </div>
               ) : selectedCandidate ? (
                 <div className="space-y-1">
-                  {selectedCandidate.lyrics.map((line, index) => (
+                  {selectedCandidate.lyrics.lines.map((line, index) => (
                     <div
                       key={`${selectedCandidate.id}-${index}`}
                       className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 px-2 py-1.5 text-left hover:bg-paper2"
                     >
                       <span className="font-tw text-[11px] text-ink3">
-                        {formatCandidateDuration(line.time)}
+                        {formatCandidateDuration(line.startMs / 1000)}
                       </span>
                       <span className="font-serif text-xs leading-relaxed text-ink">
                         {line.text}
-                        {line.translation ? (
-                          <span className="mt-0.5 block font-tw text-[11px] text-ink2">
-                            {line.translation}
+                        {(line.translations ?? []).map((translation, translationIndex) => (
+                          <span
+                            key={`t-${translationIndex}`}
+                            className="mt-0.5 block font-tw text-[11px] text-ink2"
+                          >
+                            {translation.text}
                           </span>
-                        ) : null}
+                        ))}
                         {line.roman ? (
                           <span className="block font-tw text-[10px] italic text-ink3">
-                            {line.roman}
+                            {line.roman.text}
                           </span>
                         ) : null}
                       </span>

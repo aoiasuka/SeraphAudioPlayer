@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { filterAndSortTracks } from "./trackFilters";
 import type { Track } from "@/types/track";
 
@@ -16,7 +17,7 @@ function makeTrack(overrides: Partial<Track> & { id: string }): Track {
     path: `C:/Music/${overrides.id}.flac`,
     duration: 100,
     glowColor: "#fff",
-    lyrics: [],
+    lyrics: lyricDocument([]),
     ...overrides,
   } as Track;
 }

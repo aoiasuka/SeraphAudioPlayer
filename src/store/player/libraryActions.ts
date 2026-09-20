@@ -1,4 +1,5 @@
 import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
+import { emptyLyricDocument } from "@/lib/lyrics/document";
 import type { DeleteTracksResult, Track } from "@/types/track";
 import { resetNextIndexCache } from "./playbackActions";
 import { bumpPlayEpoch } from "./playEpoch";
@@ -115,15 +116,15 @@ export function mergeTracksByPathWithStats(existing: Track[], incoming: Track[])
 }
 
 export function mergeIncomingTrack(existing: Track, incoming: Track) {
-  const incomingLyrics = incoming.lyrics ?? [];
-  const existingLyrics = existing.lyrics ?? [];
+  const incomingLyrics = incoming.lyrics ?? emptyLyricDocument();
+  const existingLyrics = existing.lyrics ?? emptyLyricDocument();
   const merged = {
     ...incoming,
     sourceUrl: incoming.sourceUrl ?? existing.sourceUrl,
     sourceId: incoming.sourceId ?? existing.sourceId,
     cacheMissing: incoming.cacheMissing ?? false,
   };
-  if (incomingLyrics.length === 0 && existingLyrics.length > 0) {
+  if (incomingLyrics.lines.length === 0 && existingLyrics.lines.length > 0) {
     return { ...merged, lyrics: existingLyrics, lyricsLoaded: true };
   }
   return { ...merged, lyrics: incomingLyrics };
@@ -459,7 +460,13 @@ export function createLibraryActions(
     try {
       const response = await invoke<Track[]>("get_playlist", { includeLyrics: false });
       if (request !== libraryLoadSequence) return;
-      const cached = Array.isArray(response) ? response.map((track) => ({ ...track, lyricsLoaded: (track.lyrics?.length ?? 0) > 0 })) : response;
+      const cached = Array.isArray(response)
+        ? response.map((track) => ({
+            ...track,
+            lyrics: track.lyrics ?? emptyLyricDocument(),
+            lyricsLoaded: (track.lyrics?.lines.length ?? 0) > 0,
+          }))
+        : response;
       if (!Array.isArray(cached) || cached.length === 0) return;
 
       set((state) => {

@@ -1,7 +1,7 @@
 //! 元数据与歌词用不可变文件保存，最后一次原子替换清单才代表提交成功。
 //! 保留上一份清单及其文件；旧版 library-cache.json / library-lyrics.json 保留作迁移备份。
 
-use super::types::{ImportedTrack, LyricLine};
+use super::types::{ImportedTrack, LyricDocument, EMPTY_LYRICS};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -53,7 +53,7 @@ pub(crate) struct TrackMetadata<'a> {
     glow_color: &'a str,
     glow1: &'a str,
     glow2: &'a str,
-    lyrics: &'a [LyricLine],
+    lyrics: &'a LyricDocument,
 }
 
 impl<'a> From<&'a ImportedTrack> for TrackMetadata<'a> {
@@ -79,10 +79,16 @@ impl<'a> From<&'a ImportedTrack> for TrackMetadata<'a> {
             glow_color: &track.glow_color,
             glow1: &track.glow1,
             glow2: &track.glow2,
-            lyrics: &[],
+            lyrics: &EMPTY_LYRICS,
         }
     }
 }
+
+/// 清单版本：1 = 歌词文件是 `{id: [旧格式行数组]}`（v0.5.12–v0.6.1）；
+/// 2 = `{id: LyricDocument}`（2026-09-20 模型重构）。读时两者都接受（`LyricDocument`
+/// 的反序列化兼容旧数组），写时一律 2；旧程序遇到 2 会拒绝读写（不回滚数据）。
+const MANIFEST_VERSION: u32 = 2;
+const SUPPORTED_MANIFEST_VERSIONS: [u32; 2] = [1, 2];
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -93,7 +99,10 @@ struct Manifest {
 
 impl Manifest {
     fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || !is_snapshot_name(&self.tracks) || !is_snapshot_name(&self.lyrics) {
+        if !SUPPORTED_MANIFEST_VERSIONS.contains(&self.version)
+            || !is_snapshot_name(&self.tracks)
+            || !is_snapshot_name(&self.lyrics)
+        {
             return Err("不支持的曲库快照清单或非法文件名".into());
         }
         Ok(())
@@ -138,7 +147,7 @@ impl LibraryStorage {
         let current = read_optional_json::<Manifest>(&path);
         if let Ok(Some(manifest)) = &current {
             // 旧程序遇到未来格式应停止，不能用旧备份覆盖新版本的数据。
-            if manifest.version != 1 {
+            if !SUPPORTED_MANIFEST_VERSIONS.contains(&manifest.version) {
                 return Err(format!("不支持的曲库快照版本：{}", manifest.version));
             }
             match self.read_snapshot(manifest) {
@@ -154,7 +163,7 @@ impl LibraryStorage {
                     &self.root.join("library-cache.json"),
                 )?
                 .unwrap_or_default();
-                let lyrics = read_optional_json::<BTreeMap<String, Vec<LyricLine>>>(
+                let lyrics = read_optional_json::<BTreeMap<String, LyricDocument>>(
                     &self.root.join("library-lyrics.json"),
                 )?
                 .unwrap_or_default();
@@ -228,6 +237,12 @@ impl LibraryStorage {
         let lyrics = lyrics_view(tracks);
         let lyrics_changed = current.is_none()
             || previous_tracks.is_none_or(|previous| lyrics != lyrics_view(previous));
+        // v1 清单升级：歌词文件格式变了，即使内容没变也要把元数据与歌词按新格式重写一遍
+        let upgrading = current
+            .as_ref()
+            .is_some_and(|manifest| manifest.version != MANIFEST_VERSION);
+        let metadata_changed = metadata_changed || upgrading;
+        let lyrics_changed = lyrics_changed || upgrading;
         let mut stats = SaveStats::default();
         if !metadata_changed && !lyrics_changed {
             return Ok(stats);
@@ -235,10 +250,11 @@ impl LibraryStorage {
 
         let generation = unique_suffix();
         let mut next = current.clone().unwrap_or(Manifest {
-            version: 1,
+            version: MANIFEST_VERSION,
             tracks: String::new(),
             lyrics: String::new(),
         });
+        next.version = MANIFEST_VERSION;
         if metadata_changed {
             let bytes = json_bytes(&tracks.iter().map(TrackMetadata::from).collect::<Vec<_>>())?;
             next.tracks = format!("{generation}-tracks.json");
@@ -280,17 +296,17 @@ impl LibraryStorage {
     }
 }
 
-fn lyrics_view(tracks: &[ImportedTrack]) -> BTreeMap<&str, &[LyricLine]> {
+fn lyrics_view(tracks: &[ImportedTrack]) -> BTreeMap<&str, &LyricDocument> {
     tracks
         .iter()
         .filter(|track| !track.lyrics.is_empty())
-        .map(|track| (track.id.as_str(), track.lyrics.as_slice()))
+        .map(|track| (track.id.as_str(), &track.lyrics))
         .collect()
 }
 
 fn merge_lyrics(
     mut tracks: Vec<ImportedTrack>,
-    mut lyrics: BTreeMap<String, Vec<LyricLine>>,
+    mut lyrics: BTreeMap<String, LyricDocument>,
 ) -> Vec<ImportedTrack> {
     // 正常曲库 ID 唯一。旧版重复 ID 仍取得同一份边车歌词。
     for track in &mut tracks {

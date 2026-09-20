@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +22,7 @@ const track: Track = {
   path: "C:/Music/a.flac", cover: "data:image/png;base64,AAAA", format: "FLAC",
   bitdepth: "FLAC 24-bit / 48 kHz", bitrate: "", channels: "Stereo", size: "", duration: 180,
   glowColor: "", lyricsLoaded: true,
-  lyrics: [{ time: 10, text: "First line" }, { time: 10, text: "第一句译文" }, { time: 20, text: "Second line" }, { time: 20, text: "第二句译文" }],
+  lyrics: lyricDocument([{ startMs: 10000, text: "First line" }, { startMs: 10000, text: "第一句译文" }, { startMs: 20000, text: "Second line" }, { startMs: 20000, text: "第二句译文" }]),
 };
 
 function PlayerHarness() {
@@ -174,14 +175,14 @@ describe("沉浸播放的会话与交互", () => {
 
   it("封面失败、歌词加载及无歌词各有回退；未知时长禁用定位", () => {
     useImmersiveStore.getState().open();
-    usePlayerStore.setState({ playlist: [{ ...track, lyrics: [], lyricsLoaded: false, duration: 0 }] });
+    usePlayerStore.setState({ playlist: [{ ...track, lyrics: lyricDocument([]), lyricsLoaded: false, duration: 0 }] });
     render(<PlayerHarness />);
     fireEvent.error(screen.getByRole("img", { name: /专辑封面/ }));
     expect(screen.getByRole("img", { name: "暂无专辑封面" })).toBeInTheDocument();
     expect(screen.getByText("正在读取歌词…")).toBeInTheDocument();
     expect(screen.getByRole("slider", { name: "播放进度" })).toBeDisabled();
     expect(within(screen.getByRole("region", { name: "沉浸播放" })).getByText("00:15")).toBeInTheDocument();
-    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: [] }] }));
+    act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: lyricDocument([]) }] }));
     expect(screen.getByText("暂无歌词")).toBeInTheDocument();
   });
 });

@@ -3,7 +3,7 @@ import type {
   DriverKind,
   LibraryView,
   LrcExportFormat,
-  LyricLine,
+  LyricDocument,
   LyricsExcludeRule,
   LyricsSourcePriority,
   OnlineLyricsCandidate,
@@ -266,7 +266,7 @@ export interface PlayerStore {
     query?: string
   ) => Promise<OnlineLyricsCandidate[]>;
   applyOnlineLyricsForCurrentTrack: (
-    lyrics: LyricLine[],
+    lyrics: LyricDocument,
     lookupKeys?: string[]
   ) => Promise<boolean>;
   /** 弹出保存对话框，把当前曲目歌词导出为 LRC（增强型 / 逐字 / 逐行）；成功返回 true */

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
@@ -10,8 +11,8 @@ vi.mock("@/components/ui/TypewriterText", () => ({
 }));
 
 const tracks = [
-  { id: "a", duration: 180, lyrics: [{ time: 0, text: "上一首开头" }, { time: 60, text: "上一首结尾" }] },
-  { id: "b", duration: 180, lyrics: [{ time: 10, text: "新歌第一句" }, { time: 20, text: "新歌第二句" }] },
+  { id: "a", duration: 180, lyrics: lyricDocument([{ startMs: 0, text: "上一首开头" }, { startMs: 60000, text: "上一首结尾" }]) },
+  { id: "b", duration: 180, lyrics: lyricDocument([{ startMs: 10000, text: "新歌第一句" }, { startMs: 20000, text: "新歌第二句" }]) },
 ] as Track[];
 
 describe("歌词滚动跟随", () => {
@@ -77,7 +78,7 @@ describe("歌词滚动跟随", () => {
     render(<LyricsPanel />);
     scrollTo.mockClear();
     act(() => usePlayerStore.setState({
-      playlist: [{ ...tracks[0], lyrics: [{ time: 0, text: "替换后的开头" }, { time: 60, text: "替换后的当前行" }] }, tracks[1]],
+      playlist: [{ ...tracks[0], lyrics: lyricDocument([{ startMs: 0, text: "替换后的开头" }, { startMs: 60000, text: "替换后的当前行" }]) }, tracks[1]],
     }));
     expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "instant" });
   });
@@ -102,11 +103,11 @@ describe("排除规则隐藏行", () => {
       ...usePlayerStore.getInitialState(),
       playlist: [{
         id: "h", duration: 180,
-        lyrics: [
-          { time: 0, text: "第一句" },
-          { time: 10, text: "作词：某人", hidden: true },
-          { time: 20, text: "第三句" },
-        ],
+        lyrics: lyricDocument([
+          { startMs: 0, text: "第一句" },
+          { startMs: 10000, text: "作词：某人", hidden: true },
+          { startMs: 20000, text: "第三句" },
+        ]),
       }] as Track[],
       currentTime: 5,
     });
@@ -129,7 +130,7 @@ describe("排除规则隐藏行", () => {
       ...usePlayerStore.getInitialState(),
       playlist: [{
         id: "all-hidden", duration: 180,
-        lyrics: [{ time: 0, text: "作词：某人", hidden: true }, { time: 5, text: "作曲：某人", hidden: true }],
+        lyrics: lyricDocument([{ startMs: 0, text: "作词：某人", hidden: true }, { startMs: 5000, text: "作曲：某人", hidden: true }]),
       }] as Track[],
       settingsOpen: false,
     });
@@ -146,7 +147,7 @@ describe("排除规则隐藏行", () => {
     window.removeEventListener("seraph:open-settings-tab", onOpenTab);
 
     // 真正没有歌词时仍是原文案
-    act(() => usePlayerStore.setState({ playlist: [{ id: "none", duration: 180, lyrics: [] as Track["lyrics"] }] as Track[] }));
+    act(() => usePlayerStore.setState({ playlist: [{ id: "none", duration: 180, lyrics: lyricDocument([]) }] as Track[] }));
     expect(screen.getByText("暂无歌词稿")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "打开歌词设置" })).toBeNull();
   });

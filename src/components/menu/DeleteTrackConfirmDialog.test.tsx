@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
+import { lyricDocument } from "@/lib/lyrics/document";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +13,7 @@ const initialState = usePlayerStore.getInitialState();
 const local: Track = {
   id: "local", title: "本地曲目", artist: "测试", album: "测试", cover: "", format: "FLAC",
   bitdepth: "16-bit", bitrate: "", channels: "Stereo", size: "1 MB", path: "C:/test/local.flac",
-  duration: 180, glowColor: "#fff", lyrics: [],
+  duration: 180, glowColor: "#fff", lyrics: lyricDocument([]),
 };
 const stream: Track = { ...local, id: "stream", title: "流媒体曲目", album: "Bilibili" };
 const deleteTracks = vi.fn<(ids: string[]) => Promise<DeleteTracksResult>>();

@@ -106,10 +106,10 @@ pub(crate) async fn fetch_online_lyrics_from_sources(
 /// 译文两种形态都算：`translation` 字段或相邻同时间戳行。
 pub(crate) fn candidate_capability_tier(lyrics: &[LyricLine]) -> u8 {
     let word_synced = lyrics.iter().any(|line| line.words.is_some());
-    let has_translation = lyrics.iter().any(|line| line.translation.is_some())
-        || lyrics
-            .windows(2)
-            .any(|pair| (pair[0].time - pair[1].time).abs() < 0.01 && pair[0].text != pair[1].text);
+    let has_translation = lyrics.iter().any(|line| !line.translations.is_empty())
+        || lyrics.windows(2).any(|pair| {
+            pair[0].start_ms.abs_diff(pair[1].start_ms) < 10 && pair[0].text != pair[1].text
+        });
     match (word_synced, has_translation) {
         (true, true) => 0,
         (true, false) => 1,
@@ -150,7 +150,7 @@ pub(crate) fn rank_online_lyrics_candidates(
         (
             mismatch(candidate),
             source_rank(candidate),
-            candidate_capability_tier(&candidate.lyrics),
+            candidate_capability_tier(&candidate.lyrics.lines),
         )
     });
     candidates
@@ -226,6 +226,7 @@ pub(crate) async fn fetch_netease_lyrics(
             continue;
         };
 
+        let ttml_lookup_keys = vec![format!("ncm-lyrics/{song_id}")];
         results.push(OnlineLyricsCandidate {
             id: format!("netease-{song_id}"),
             source: "网易云音乐".into(),
@@ -235,8 +236,12 @@ pub(crate) async fn fetch_netease_lyrics(
                 .get("album")
                 .and_then(|album| value_string(album, "name")),
             duration: provider_duration_ms(song).map(|ms| ms / 1000),
-            lyrics,
-            ttml_lookup_keys: vec![format!("ncm-lyrics/{song_id}")],
+            lyrics: LyricDocument::from_lines(
+                lyrics,
+                LyricSource::online("netease", song_id.to_string())
+                    .with_lookup_keys(ttml_lookup_keys.clone()),
+            ),
+            ttml_lookup_keys,
         });
     }
 
@@ -395,7 +400,7 @@ pub(crate) async fn fetch_kugou_lyrics(
             artist: value_string(candidate, "singer").unwrap_or_default(),
             album: value_string(candidate, "album"),
             duration: provider_duration_ms(candidate).map(|ms| ms / 1000),
-            lyrics,
+            lyrics: LyricDocument::from_lines(lyrics, LyricSource::online("kugou", id.clone())),
             ttml_lookup_keys: Vec::new(),
         });
     }
@@ -466,6 +471,9 @@ pub(crate) async fn fetch_qq_lyrics(
             },
         };
 
+        let ttml_lookup_keys = song_id
+            .map(|id| vec![format!("qq-lyrics/{id}")])
+            .unwrap_or_default();
         results.push(OnlineLyricsCandidate {
             id: format!("qq-{song_mid}"),
             source: "QQ音乐".into(),
@@ -475,10 +483,17 @@ pub(crate) async fn fetch_qq_lyrics(
             artist: qq_singers(song),
             album: value_string(song, "albumname"),
             duration: provider_duration_ms(song).map(|ms| ms / 1000),
-            lyrics,
-            ttml_lookup_keys: song_id
-                .map(|id| vec![format!("qq-lyrics/{id}")])
-                .unwrap_or_default(),
+            lyrics: LyricDocument::from_lines(
+                lyrics,
+                LyricSource::online(
+                    "qq",
+                    song_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| song_mid.to_string()),
+                )
+                .with_lookup_keys(ttml_lookup_keys.clone()),
+            ),
+            ttml_lookup_keys,
         });
     }
 
@@ -591,15 +606,14 @@ pub(crate) fn parse_qq_translation_text(text: &str) -> Vec<LyricLine> {
     lines
 }
 
-/// 译文 / 音译轨与原文对齐的最大起点差（秒）：同一份歌词的不同轨起点通常完全相等或只差
+/// 译文 / 音译轨与原文对齐的最大起点差（毫秒）：同一份歌词的不同轨起点通常完全相等或只差
 /// 几十毫秒（网易云 tlyric 与 yrc 差 ~40 ms），1 s 已足够宽松，又不会把相邻两句串起来。
-pub(crate) const TRACK_ALIGN_TOLERANCE_SECONDS: f64 = 1.0;
+pub(crate) const TRACK_ALIGN_TOLERANCE_MS: u64 = 1000;
 
 /// 把独立的译文轨与音译轨并入原文：按「起点差最小的一对一匹配」（LDDC `find_closest_match`
-/// 的语义，本项目独立实现，每行只看最近的两个原文起点，O(n log n)）。匹配上的译文行时间改为
-/// 原文起点并紧随其后——即前端 `groupLyricsByTime` 认的「相邻同时间戳行」形态，与 LRC 双语
-/// 文件、KRC 译文一致；音译写进原文行的 `roman` 字段。差距超过容差或原文已被占用的译文行
-/// 保持原时间独立存在（与此前「拼接后排序」行为一致，不丢内容），落单的音译行丢弃。
+/// 的语义，本项目独立实现，每行只看最近的两个原文起点，O(n log n)）。匹配上的译文写进原文行的
+/// `translations` 字段、音译写进 `roman` 字段（模型重构后译文统一是字段，不再拼相邻行）。
+/// 差距超过容差或原文已被占用的译文行按原时间作为独立行保留（不丢内容），落单的音译行丢弃。
 pub(crate) fn attach_lyric_tracks(
     mut original: Vec<LyricLine>,
     translations: Vec<LyricLine>,
@@ -608,82 +622,53 @@ pub(crate) fn attach_lyric_tracks(
     if translations.is_empty() && romans.is_empty() {
         return original;
     }
-    original.sort_by(|a, b| {
-        a.time
-            .partial_cmp(&b.time)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    original.sort_by_key(|line| line.start_ms);
 
     for (roman_index, matched) in match_tracks_by_start(&original, &romans)
         .into_iter()
         .enumerate()
     {
         if let Some(original_index) = matched {
-            original[original_index].roman = Some(romans[roman_index].text.clone());
+            original[original_index].roman = Some(LyricText::new(romans[roman_index].text.clone()));
         }
     }
 
-    let mut attached: Vec<Vec<usize>> = vec![Vec::new(); original.len()];
+    let matches = match_tracks_by_start(&original, &translations);
     let mut standalone = Vec::new();
-    for (translation_index, matched) in match_tracks_by_start(&original, &translations)
-        .into_iter()
-        .enumerate()
-    {
+    for (translation, matched) in translations.into_iter().zip(matches) {
         match matched {
-            Some(original_index) => attached[original_index].push(translation_index),
-            None => standalone.push(translation_index),
+            Some(original_index) => original[original_index]
+                .translations
+                .push(LyricText::new(translation.text)),
+            None => standalone.push(translation),
         }
     }
-
-    let mut translations = translations.into_iter().map(Some).collect::<Vec<_>>();
-    let mut merged = Vec::with_capacity(original.len() + translations.len());
-    for (original_index, line) in original.into_iter().enumerate() {
-        let time = line.time;
-        merged.push(line);
-        for translation_index in &attached[original_index] {
-            if let Some(mut translation) = translations[*translation_index].take() {
-                translation.time = time;
-                merged.push(translation);
-            }
-        }
+    if !standalone.is_empty() {
+        original.extend(standalone);
+        // 稳定排序：落单译文按自身时间归位
+        original.sort_by_key(|line| line.start_ms);
     }
-    for translation_index in standalone {
-        if let Some(translation) = translations[translation_index].take() {
-            merged.push(translation);
-        }
-    }
-    // 稳定排序：落单译文按自身时间归位，已并入的译文仍紧跟其原文
-    merged.sort_by(|a, b| {
-        a.time
-            .partial_cmp(&b.time)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    merged
+    original
 }
 
 /// 返回 `tracks[j]` 匹配到的 `original` 下标（None = 落单）。候选对只取每行前后最近的两个
 /// 原文起点，按差值升序贪心一对一分配；`original` 须已按时间排序。
 fn match_tracks_by_start(original: &[LyricLine], tracks: &[LyricLine]) -> Vec<Option<usize>> {
-    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    let mut pairs: Vec<(u64, usize, usize)> = Vec::new();
     for (track_index, line) in tracks.iter().enumerate() {
-        let upper = original.partition_point(|candidate| candidate.time < line.time);
+        let upper = original.partition_point(|candidate| candidate.start_ms < line.start_ms);
         let nearest = [
             upper.checked_sub(1),
             (upper < original.len()).then_some(upper),
         ];
         for original_index in nearest.into_iter().flatten() {
-            let diff = (original[original_index].time - line.time).abs();
-            if diff <= TRACK_ALIGN_TOLERANCE_SECONDS {
+            let diff = original[original_index].start_ms.abs_diff(line.start_ms);
+            if diff <= TRACK_ALIGN_TOLERANCE_MS {
                 pairs.push((diff, original_index, track_index));
             }
         }
     }
-    pairs.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.cmp(&b.1))
-            .then(a.2.cmp(&b.2))
-    });
+    pairs.sort();
 
     let mut taken = vec![false; original.len()];
     let mut matched = vec![None; tracks.len()];
@@ -759,12 +744,8 @@ pub(crate) fn parse_online_lyric_text(value: &str) -> Vec<LyricLine> {
 
 pub(crate) fn normalize_lyric_lines(mut lyrics: Vec<LyricLine>) -> Option<Vec<LyricLine>> {
     lyrics.retain(|line| !line.text.trim().is_empty());
-    lyrics.sort_by(|a, b| {
-        a.time
-            .partial_cmp(&b.time)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    lyrics.dedup_by(|a, b| (a.time - b.time).abs() < 0.01 && a.text == b.text);
+    lyrics.sort_by_key(|line| line.start_ms);
+    lyrics.dedup_by(|a, b| a.start_ms.abs_diff(b.start_ms) < 10 && a.text == b.text);
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
@@ -801,11 +782,12 @@ pub(crate) fn dedupe_online_lyrics_candidates(
         candidate.lyrics.len().hash(&mut hasher);
         let total_chars: usize = candidate
             .lyrics
+            .lines
             .iter()
             .map(|l| l.text.chars().count())
             .sum();
         total_chars.hash(&mut hasher);
-        for line in candidate.lyrics.iter().take(3) {
+        for line in candidate.lyrics.lines.iter().take(3) {
             normalize_text(&line.text).hash(&mut hasher);
         }
         candidate.duration.unwrap_or_default().hash(&mut hasher);
@@ -889,12 +871,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn ms(value: f64) -> i64 {
-        (value * 1000.0).round() as i64
-    }
-
     fn texts(lines: &[LyricLine]) -> Vec<&str> {
         lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn translation_texts(line: &LyricLine) -> Vec<&str> {
+        line.translations
+            .iter()
+            .map(|text| text.text.as_str())
+            .collect()
     }
 
     fn candidate(id: &str, duration: Option<u64>, lyrics: Vec<LyricLine>) -> OnlineLyricsCandidate {
@@ -905,47 +890,43 @@ mod tests {
             artist: String::new(),
             album: None,
             duration,
-            lyrics,
+            lyrics: LyricDocument::from_lines(lyrics, LyricSource::default()),
             ttml_lookup_keys: Vec::new(),
         }
     }
 
-    fn word_line(time: f64, text: &str) -> LyricLine {
-        let mut line = LyricLine::new(time, text);
-        line.words = Some(vec![LyricWord {
-            start: time,
-            end: time + 1.0,
-            text: text.into(),
-        }]);
+    fn word_line(start_ms: u64, text: &str) -> LyricLine {
+        let mut line = LyricLine::new(start_ms, text);
+        line.words = Some(vec![LyricWord::new(start_ms, Some(start_ms + 1000), text)]);
         line
     }
 
     #[test]
     fn capability_tier_orders_word_and_translation_forms() {
-        let plain = vec![LyricLine::new(1.0, "a"), LyricLine::new(2.0, "b")];
+        let plain = vec![LyricLine::new(1000, "a"), LyricLine::new(2000, "b")];
         assert_eq!(candidate_capability_tier(&plain), 3);
         // LRC 形态译文：相邻同时间戳行
-        let bilingual = vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "甲")];
+        let bilingual = vec![LyricLine::new(1000, "a"), LyricLine::new(1000, "甲")];
         assert_eq!(candidate_capability_tier(&bilingual), 2);
-        assert_eq!(candidate_capability_tier(&[word_line(1.0, "a")]), 1);
-        let mut ttml = word_line(1.0, "a");
-        ttml.translation = Some("甲".into());
+        assert_eq!(candidate_capability_tier(&[word_line(1000, "a")]), 1);
+        let mut ttml = word_line(1000, "a");
+        ttml.translations.push(LyricText::new("甲"));
         assert_eq!(candidate_capability_tier(&[ttml]), 0);
         // 同时间戳但同文本（去重残留）不算译文
-        let dup = vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "a")];
+        let dup = vec![LyricLine::new(1000, "a"), LyricLine::new(1000, "a")];
         assert_eq!(candidate_capability_tier(&dup), 3);
     }
 
     #[test]
     fn ranking_sinks_duration_mismatch_and_prefers_word_synced_in_auto_mode() {
         let list = vec![
-            candidate("netease-1", Some(262), vec![LyricLine::new(1.0, "line")]),
-            candidate("kugou-2", Some(261), vec![word_line(1.0, "word")]),
-            candidate("qq-3", Some(30), vec![word_line(1.0, "snippet")]),
+            candidate("netease-1", Some(262), vec![LyricLine::new(1000, "line")]),
+            candidate("kugou-2", Some(261), vec![word_line(1000, "word")]),
+            candidate("qq-3", Some(30), vec![word_line(1000, "snippet")]),
             candidate(
                 "qq-4",
                 None,
-                vec![LyricLine::new(1.0, "a"), LyricLine::new(1.0, "甲")],
+                vec![LyricLine::new(1000, "a"), LyricLine::new(1000, "甲")],
             ),
         ];
         let ids = |ranked: &[OnlineLyricsCandidate]| {
@@ -1006,53 +987,46 @@ mod tests {
     }
 
     #[test]
-    fn attach_snaps_translation_to_nearest_original_and_sets_roman() {
-        let mut first = LyricLine::new(14.1, "White shirt");
-        first.end = Some(17.67);
-        first.words = Some(vec![LyricWord {
-            start: 14.1,
-            end: 17.67,
-            text: "White shirt".into(),
-        }]);
-        let original = vec![first, LyricLine::new(17.67, "Sleeping")];
+    fn attach_puts_translation_and_roman_into_fields_of_nearest_original() {
+        let mut first = LyricLine::new(14_100, "White shirt");
+        first.end_ms = Some(17_670);
+        first.words = Some(vec![LyricWord::new(14_100, Some(17_670), "White shirt")]);
+        let original = vec![first, LyricLine::new(17_670, "Sleeping")];
         // 译文起点与原文差 40 ms / 10 ms；音译只给第一句
         let translations = vec![
-            LyricLine::new(14.06, "白色的衬衫"),
-            LyricLine::new(17.68, "沉睡着"),
+            LyricLine::new(14_060, "白色的衬衫"),
+            LyricLine::new(17_680, "沉睡着"),
         ];
-        let romans = vec![LyricLine::new(14.1, "waito shaatsu")];
+        let romans = vec![LyricLine::new(14_100, "waito shaatsu")];
 
         let merged = attach_lyric_tracks(original, translations, romans);
-        assert_eq!(
-            texts(&merged),
-            ["White shirt", "白色的衬衫", "Sleeping", "沉睡着"]
-        );
-        // 译文时间改成原文起点（前端按相邻同时间戳分组）
-        assert_eq!(ms(merged[1].time), 14_100);
-        assert_eq!(ms(merged[3].time), 17_670);
-        assert_eq!(merged[0].roman.as_deref(), Some("waito shaatsu"));
-        assert!(merged[2].roman.is_none());
+        assert_eq!(texts(&merged), ["White shirt", "Sleeping"]);
+        assert_eq!(translation_texts(&merged[0]), ["白色的衬衫"]);
+        assert_eq!(translation_texts(&merged[1]), ["沉睡着"]);
+        assert_eq!(merged[0].roman_text(), Some("waito shaatsu"));
+        assert!(merged[1].roman.is_none());
         // 原文自身的 words / end 原样保留
         assert_eq!(merged[0].words.as_ref().map(Vec::len), Some(1));
-        assert_eq!(merged[0].end, Some(17.67));
+        assert_eq!(merged[0].end_ms, Some(17_670));
     }
 
     #[test]
     fn attach_keeps_unmatched_translation_standalone_and_drops_unmatched_roman() {
-        let original = vec![LyricLine::new(10.0, "a"), LyricLine::new(12.0, "b")];
-        // 50.0 离任何原文都超过容差；两条 10.0 译文只有一条能配上，另一条按自身时间独立存在
+        let original = vec![LyricLine::new(10_000, "a"), LyricLine::new(12_000, "b")];
+        // 50.0 s 离任何原文都超过容差；两条 10.0 s 译文只有一条能配上，另一条按自身时间独立存在
         let translations = vec![
-            LyricLine::new(50.0, "far"),
-            LyricLine::new(10.0, "t1"),
-            LyricLine::new(10.0, "t2"),
+            LyricLine::new(50_000, "far"),
+            LyricLine::new(10_000, "t1"),
+            LyricLine::new(10_000, "t2"),
         ];
-        let romans = vec![LyricLine::new(30.0, "orphan")];
+        let romans = vec![LyricLine::new(30_000, "orphan")];
         let merged = attach_lyric_tracks(original, translations, romans);
-        assert_eq!(texts(&merged), ["a", "t1", "t2", "b", "far"]);
-        assert_eq!(ms(merged[4].time), 50_000);
+        assert_eq!(texts(&merged), ["a", "t2", "b", "far"]);
+        assert_eq!(translation_texts(&merged[0]), ["t1"]);
+        assert_eq!(merged[3].start_ms, 50_000);
         assert!(merged.iter().all(|line| line.roman.is_none()));
         // 没有副轨时原样返回
-        let plain = vec![LyricLine::new(1.0, "x")];
+        let plain = vec![LyricLine::new(1000, "x")];
         assert_eq!(
             attach_lyric_tracks(plain.clone(), Vec::new(), Vec::new()),
             plain
@@ -1069,16 +1043,13 @@ mod tests {
             "romalrc": { "lyric": "[00:14.06]waito shaatsu\n" }
         });
         let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
-        assert_eq!(
-            texts(&lines),
-            ["White shirt", "白色的衬衫", "Sleeping", "沉睡着"]
-        );
+        assert_eq!(texts(&lines), ["White shirt", "Sleeping"]);
         // 原文来自 yrc（逐字）；译文优先 ytlrc（与 yrc 对齐），tlyric 不再重复并入
         assert_eq!(lines[0].words.as_ref().map(Vec::len), Some(2));
-        assert_eq!(ms(lines[1].time), 14_100);
-        assert!(lines[1].words.is_none());
+        assert_eq!(translation_texts(&lines[0]), ["白色的衬衫"]);
+        assert_eq!(translation_texts(&lines[1]), ["沉睡着"]);
         // 只有 romalrc（对齐 lrc，差 40 ms）时也能并到 yrc 行
-        assert_eq!(lines[0].roman.as_deref(), Some("waito shaatsu"));
+        assert_eq!(lines[0].roman_text(), Some("waito shaatsu"));
     }
 
     #[test]
@@ -1090,14 +1061,10 @@ mod tests {
         let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
         assert_eq!(
             texts(&lines),
-            [
-                "作词 : 某人",
-                "故事的小黄花",
-                "Little yellow flower",
-                "从出生那年就飘着"
-            ]
+            ["作词 : 某人", "故事的小黄花", "从出生那年就飘着"]
         );
-        assert_eq!(ms(lines[2].time), 30_542);
+        assert_eq!(translation_texts(&lines[1]), ["Little yellow flower"]);
+        assert!(lines[0].translations.is_empty() && lines[2].translations.is_empty());
         assert!(lines.iter().all(|line| line.words.is_none()));
     }
 
@@ -1109,6 +1076,7 @@ mod tests {
         });
         let lines = parse_netease_lyric_payload(&payload).expect("lyrics");
         assert_eq!(texts(&lines), ["a", "b"]);
+        assert!(lines.iter().all(|line| line.translations.is_empty()));
     }
 
     #[test]
@@ -1119,7 +1087,7 @@ mod tests {
             texts(&lines),
             ["TME享有本翻译作品的著作权", "朝着遥远深邃之处缓缓下沉"]
         );
-        assert_eq!(ms(lines[1].time), 29_440);
+        assert_eq!(lines[1].start_ms, 29_440);
         // 只有 kana 与标签、没有任何歌词行 → 空，而不是把注音串当歌词
         assert!(parse_qq_translation_text("[ti:x]\n[kana:1す(201,159)]\n").is_empty());
     }
@@ -1140,22 +1108,22 @@ mod tests {
             "roma": QQ_ROMA_HEX, "roma_t": 1466496774
         });
         let lines = parse_qq_play_lyric_payload(&data).expect("lyrics");
-        assert_eq!(texts(&lines), ["hello", "你好", "world"]);
+        assert_eq!(texts(&lines), ["hello", "world"]);
         let words = lines[0].words.as_ref().expect("qrc words");
         assert_eq!(
             words
                 .iter()
-                .map(|word| (word.text.as_str(), ms(word.start), ms(word.end)))
+                .map(|word| (word.text.as_str(), word.start_ms, word.end_ms))
                 .collect::<Vec<_>>(),
-            [("he", 1000, 1500), ("llo", 1500, 2000)]
+            [("he", 1000, Some(1500)), ("llo", 1500, Some(2000))]
         );
-        assert_eq!(lines[0].end, Some(3.0));
-        // 译文并到原文起点后面；`//` 占位与 [kana:] 已剔除
-        assert_eq!(ms(lines[1].time), 1000);
-        assert!(lines[1].words.is_none());
+        assert_eq!(lines[0].end_ms, Some(3000));
+        // 译文进原文行的字段；`//` 占位与 [kana:] 已剔除
+        assert_eq!(translation_texts(&lines[0]), ["你好"]);
+        assert!(lines[1].translations.is_empty());
         // 音译按行拼音节写进 roman
-        assert_eq!(lines[0].roman.as_deref(), Some("he llo"));
-        assert_eq!(lines[2].roman.as_deref(), Some("wo rld"));
+        assert_eq!(lines[0].roman_text(), Some("he llo"));
+        assert_eq!(lines[1].roman_text(), Some("wo rld"));
 
         // 空字段 / 坏密文只让该项缺席，不影响其余
         let partial = json!({ "lyric": QQ_LYRIC_HEX, "trans": "", "roma": "ZZZZ" });

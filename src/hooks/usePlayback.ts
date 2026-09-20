@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { invoke, isTauriRuntime, listen } from "@/lib/tauri";
+import { emptyLyricDocument } from "@/lib/lyrics/document";
 import type { Track } from "@/types/track";
 import { usePlayerStore } from "@/store/player";
 import { usePlayerEvents } from "@/hooks/usePlayerEvents";
@@ -29,10 +30,10 @@ export function usePlayback() {
         // 同一曲目也可能已替换歌词；只合并本次请求看到的不可变记录。
         if (state.currentTrack() !== currentTrack) return {};
         return { playlist: state.playlist.map((track) => track === currentTrack
-          ? { ...track, lyrics: details.lyrics, lyricsLoaded: true, lyricsLookupKeys: details.lyricsLookupKeys ?? track.lyricsLookupKeys } : track) };
+          ? { ...track, lyrics: details.lyrics ?? emptyLyricDocument(), lyricsLoaded: true } : track) };
       });
       // 曲库里没歌词 → 到用户的本地歌词目录按「艺术家 - 曲名」找一次（v0.6.0）
-      if (details.lyrics.length === 0) {
+      if ((details.lyrics?.lines.length ?? 0) === 0) {
         const state = usePlayerStore.getState();
         if (state.lyricsFolder && state.currentTrack()?.id === currentTrack.id) {
           void state.findLocalLyricsForTrack(currentTrack);

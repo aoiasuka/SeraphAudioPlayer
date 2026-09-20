@@ -122,18 +122,22 @@ pub(crate) fn mark_hidden(lyrics: &mut [LyricLine]) {
     for line in lyrics.iter_mut() {
         line.hidden = matches_any(&compiled, &line.text)
             || line
-                .translation
-                .as_deref()
-                .is_some_and(|value| matches_any(&compiled, value))
+                .translations
+                .iter()
+                .any(|value| matches_any(&compiled, &value.text))
             || line
-                .roman
-                .as_deref()
+                .roman_text()
                 .is_some_and(|value| matches_any(&compiled, value));
     }
 }
 
-pub(crate) fn marked(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine> {
-    mark_hidden(&mut lyrics);
+/// 给整份文档打标（回传前）。
+pub(crate) fn mark_hidden_document(document: &mut LyricDocument) {
+    mark_hidden(&mut document.lines);
+}
+
+pub(crate) fn marked(mut lyrics: LyricDocument) -> LyricDocument {
+    mark_hidden(&mut lyrics.lines);
     lyrics
 }
 
@@ -163,14 +167,14 @@ mod tests {
         assert!(statuses.iter().all(|s| s.error.is_none()));
 
         let mut lines = vec![
-            LyricLine::new(0.0, "作词：某人"),
+            LyricLine::new(0, "作词：某人"),
             LyricLine {
-                translation: Some("say hello".into()),
-                ..LyricLine::new(1.0, "第二句")
+                translations: vec![LyricText::new("say hello")],
+                ..LyricLine::new(1000, "第二句")
             },
             LyricLine {
-                roman: Some("ta ci".into()),
-                ..LyricLine::new(2.0, "第三句")
+                roman: Some(LyricText::new("ta ci")),
+                ..LyricLine::new(2000, "第三句")
             },
         ];
         mark_hidden(&mut lines);
@@ -208,7 +212,7 @@ mod tests {
         let _guard = SERIAL.lock().unwrap();
         let statuses = replace_rules(&[rule("regex", "("), rule("keyword", "跳过我")]);
         assert!(statuses[0].error.is_some() && statuses[1].error.is_none());
-        let mut lines = vec![LyricLine::new(0.0, "请跳过我"), LyricLine::new(1.0, "留下")];
+        let mut lines = vec![LyricLine::new(0, "请跳过我"), LyricLine::new(1000, "留下")];
         mark_hidden(&mut lines);
         assert_eq!(
             lines.iter().map(|l| l.hidden).collect::<Vec<_>>(),

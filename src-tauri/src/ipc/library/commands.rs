@@ -51,7 +51,7 @@ pub async fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Optio
         read_cached_track(&app, &track_id).map(|track| {
             track.map(|mut track| {
                 // 排除规则只在回传前打标，不落缓存
-                mark_hidden(&mut track.lyrics);
+                mark_hidden_document(&mut track.lyrics);
                 track
             })
         })
@@ -195,7 +195,7 @@ pub async fn save_track_lyrics(
     lyrics_bytes: Vec<u8>,
     track_path: Option<String>,
     prefer_traditional: Option<bool>,
-) -> IpcResult<Vec<LyricLine>> {
+) -> IpcResult<LyricDocument> {
     // H-1：持锁 + 可能的 lofty/ffprobe 探测（未入库曲目）都是阻塞操作，放 spawn_blocking。
     tauri::async_runtime::spawn_blocking(move || {
         save_track_lyrics_inner(
@@ -221,7 +221,7 @@ fn save_track_lyrics_inner(
     lyrics_bytes: &[u8],
     track_path: Option<&str>,
     prefer_traditional: bool,
-) -> IpcResult<Vec<LyricLine>> {
+) -> IpcResult<LyricDocument> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
     }
@@ -241,10 +241,14 @@ fn save_track_lyrics_inner(
         )));
     }
 
-    let mut lyrics = parse_lyrics_bytes(lyrics_bytes);
-    if lyrics.is_empty() {
+    let lines = parse_lyrics_bytes(lyrics_bytes);
+    if lines.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
+    // 用户手动导入 = 固定选择
+    let mut source = LyricSource::of(LyricSourceKind::Manual);
+    source.pinned = true;
+    let mut lyrics = LyricDocument::from_lines(lines, source);
     if prefer_traditional {
         lyrics = lyrics_to_traditional(lyrics);
     }
@@ -255,14 +259,24 @@ fn save_track_lyrics_inner(
     apply_track_lyrics(
         &mut tracks,
         track_id,
-        lyrics.clone(),
+        lyrics,
         track_path,
         covers_dir_path(app).ok().as_deref(),
     )?;
+    let stored = stored_lyrics(&tracks, track_id);
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(marked(lyrics))
+    Ok(marked(stored))
+}
+
+/// 写库后回读该曲目的文档（含并入的查找键），作为命令返回值。
+fn stored_lyrics(tracks: &[ImportedTrack], track_id: &str) -> LyricDocument {
+    tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .map(|track| track.lyrics.clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -305,7 +319,7 @@ pub async fn fetch_online_lyrics(
                     artist: artist.clone(),
                     album: None,
                     duration: (duration > 0).then_some(duration),
-                    lyrics: Vec::new(),
+                    lyrics: LyricDocument::EMPTY,
                     ttml_lookup_keys: options.lookup_keys.clone(),
                 });
             }
@@ -344,7 +358,7 @@ pub async fn fetch_online_lyrics(
         if options.prefer_traditional {
             candidate.lyrics = lyrics_to_traditional(std::mem::take(&mut candidate.lyrics));
         }
-        mark_hidden(&mut candidate.lyrics);
+        mark_hidden_document(&mut candidate.lyrics);
     }
 
     Ok(candidates)
@@ -430,29 +444,25 @@ fn find_local_lyrics_inner(
     if prefer_traditional {
         lyrics = lyrics_to_traditional(lyrics);
     }
+    // 文件名括号里的平台 ID 记进文档来源，下次在线匹配直取 AMLL
+    lyrics.source = std::mem::take(&mut lyrics.source).with_lookup_keys(lookup_keys.clone());
 
     let _guard = LIBRARY_LOCK.lock();
     let mut tracks = read_cached_tracks_for_update(app)?;
     apply_track_lyrics(
         &mut tracks,
         track_id,
-        lyrics.clone(),
+        lyrics,
         track_path,
         covers_dir_path(app).ok().as_deref(),
     )?;
-    if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
-        for key in &lookup_keys {
-            if !track.lyrics_lookup_keys.contains(key) {
-                track.lyrics_lookup_keys.push(key.clone());
-            }
-        }
-    }
+    let stored = stored_lyrics(&tracks, track_id);
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
     Ok(Some(LocalLyricsMatch {
         path: path.to_string_lossy().into_owned(),
-        lyrics: marked(lyrics),
+        lyrics: marked(stored),
         lookup_keys,
     }))
 }
@@ -461,10 +471,10 @@ fn find_local_lyrics_inner(
 pub async fn apply_online_lyrics(
     app: AppHandle,
     track_id: String,
-    lyrics: Vec<LyricLine>,
+    lyrics: LyricDocument,
     track_path: Option<String>,
     lookup_keys: Option<Vec<String>>,
-) -> IpcResult<Vec<LyricLine>> {
+) -> IpcResult<LyricDocument> {
     // H-1：持锁 + 可能的 lofty/ffprobe 探测都是阻塞操作，放 spawn_blocking。
     tauri::async_runtime::spawn_blocking(move || {
         apply_online_lyrics_inner(
@@ -505,17 +515,27 @@ fn sanitize_lookup_keys(keys: Vec<String>) -> Vec<String> {
 fn apply_online_lyrics_inner(
     app: &AppHandle,
     track_id: &str,
-    lyrics: Vec<LyricLine>,
+    mut lyrics: LyricDocument,
     track_path: Option<&str>,
     lookup_keys: Vec<String>,
-) -> IpcResult<Vec<LyricLine>> {
+) -> IpcResult<LyricDocument> {
     if track_id.trim().is_empty() {
         return Err(IpcError::invalid_input("missing track id"));
     }
     if lyrics.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
+    // 前端传回的文档来源自候选（已带 provider / 查找键）；显式传入的查找键（AMLL 命中的候选
+    // 携带的）经清洗后并入；用户明确应用 = 固定选择。hidden 是显示层标记，不落盘。
     let lookup_keys = sanitize_lookup_keys(lookup_keys);
+    lyrics.source = std::mem::take(&mut lyrics.source).with_lookup_keys(lookup_keys);
+    lyrics.source.pinned = true;
+    lyrics.source.lookup_keys =
+        sanitize_lookup_keys(std::mem::take(&mut lyrics.source.lookup_keys));
+    for line in &mut lyrics.lines {
+        line.hidden = false;
+    }
+    let lyrics = LyricDocument::from_lines(lyrics.lines, lyrics.source);
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
@@ -523,24 +543,15 @@ fn apply_online_lyrics_inner(
     apply_track_lyrics(
         &mut tracks,
         track_id,
-        lyrics.clone(),
+        lyrics,
         track_path,
         covers_dir_path(app).ok().as_deref(),
     )?;
-    // AMLL 命中的候选自带查找键：合并进曲目，下次在线匹配可直取 TTML
-    if !lookup_keys.is_empty() {
-        if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
-            for key in &lookup_keys {
-                if !track.lyrics_lookup_keys.contains(key) {
-                    track.lyrics_lookup_keys.push(key.clone());
-                }
-            }
-        }
-    }
+    let stored = stored_lyrics(&tracks, track_id);
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(marked(lyrics))
+    Ok(marked(stored))
 }
 
 /// 歌词设置页「测试连接」：对模板真发一次样例 GET，返回分类结果（不改任何状态）。
@@ -604,7 +615,7 @@ fn export_track_lyrics_inner(
         album: &track.album,
         tool: &tool,
     };
-    let content = lyrics_to_lrc(&track.lyrics, format, options, &meta);
+    let content = lyrics_to_lrc(&track.lyrics.lines, format, options, &meta);
     let written = content
         .lines()
         .filter(|line| line.starts_with('[') && line.as_bytes().get(3) == Some(&b':'))

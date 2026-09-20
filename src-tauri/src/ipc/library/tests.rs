@@ -16,7 +16,8 @@ fn playlist_summary_keeps_metadata_without_cloning_or_serializing_lyrics() {
     let mut track = test_imported_track("a", "C:/a.flac", "A");
     track
         .lyrics
-        .push(LyricLine::new(1.0, "long lyric".repeat(1000)));
+        .lines
+        .push(LyricLine::new(1000, "long lyric".repeat(1000)));
     let snapshot = std::sync::Arc::new(LibrarySnapshot::new(vec![track.clone()]));
     let summary = PlaylistSnapshot {
         snapshot: snapshot.clone(),
@@ -25,7 +26,7 @@ fn playlist_summary_keeps_metadata_without_cloning_or_serializing_lyrics() {
     let encoded = serde_json::to_vec(&summary).unwrap();
     let restored: Vec<ImportedTrack> = serde_json::from_slice(&encoded).unwrap();
     let mut expected = track.clone();
-    expected.lyrics.clear();
+    expected.lyrics = LyricDocument::EMPTY;
     assert_eq!(restored, vec![expected]);
     assert!(encoded.len() < 1000);
     assert_eq!(snapshot.get("a").unwrap().lyrics, track.lyrics);
@@ -61,7 +62,7 @@ fn snapshot_storage_reuses_unchanged_components_and_keeps_legacy_backup() {
     let dir = TestLibraryDir::new();
     let storage = dir.storage();
     let mut tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
-    tracks[0].lyrics.push(LyricLine::new(1.0, "第一行"));
+    tracks[0].lyrics.lines.push(LyricLine::new(1000, "第一行"));
     let legacy_bytes = serde_json::to_vec(&tracks).unwrap();
     fs::write(dir.0.join("library-cache.json"), &legacy_bytes).unwrap();
     assert_eq!(storage.load().unwrap(), tracks);
@@ -80,7 +81,7 @@ fn snapshot_storage_reuses_unchanged_components_and_keeps_legacy_backup() {
     assert_eq!(storage.load().unwrap(), updated);
 
     tracks = updated.clone();
-    updated[0].lyrics[0].text = "新的歌词".into();
+    updated[0].lyrics.lines[0].text = "新的歌词".into();
     let stats = storage.save(&updated, Some(&tracks)).unwrap();
     assert_eq!(stats.metadata_bytes, 0, "只改歌词不能重写元数据");
     assert!(stats.lyrics_bytes > 0);
@@ -94,7 +95,7 @@ fn snapshot_storage_reuses_unchanged_components_and_keeps_legacy_backup() {
     );
 
     let original = updated.clone();
-    updated[0].lyrics.clear();
+    updated[0].lyrics = LyricDocument::EMPTY;
     storage.save(&updated, Some(&original)).unwrap();
     assert!(
         storage.load().unwrap()[0].lyrics.is_empty(),
@@ -108,11 +109,11 @@ fn snapshot_storage_survives_failure_at_every_commit_stage() {
         let dir = TestLibraryDir::new();
         let storage = dir.storage();
         let mut old = vec![test_imported_track("a", "C:/a.flac", "old")];
-        old[0].lyrics.push(LyricLine::new(1.0, "old lyric"));
+        old[0].lyrics.lines.push(LyricLine::new(1000, "old lyric"));
         storage.save(&old, None).unwrap();
         let mut updated = old.clone();
         updated[0].title = "new".into();
-        updated[0].lyrics[0].text = "new lyric".into();
+        updated[0].lyrics.lines[0].text = "new lyric".into();
         let mut stage = 0;
         let result = storage.save_with(&updated, Some(&old), |path, bytes| {
             stage += 1;
@@ -147,7 +148,10 @@ fn snapshot_storage_recovers_a_complete_previous_generation() {
         storage.save(&old, None).unwrap();
         let mut updated = old.clone();
         updated[0].title = "new".into();
-        updated[0].lyrics.push(LyricLine::new(1.0, "new lyric"));
+        updated[0]
+            .lyrics
+            .lines
+            .push(LyricLine::new(1000, "new lyric"));
         storage.save(&updated, Some(&old)).unwrap();
         let manifest_path = dir.0.join("library-snapshot.json");
         let corrupt_path = if corrupt_manifest {
@@ -196,12 +200,64 @@ fn future_snapshot_version_never_rolls_back_or_overwrites_data() {
     storage.save(&updated, Some(&old)).unwrap();
     let path = dir.0.join("library-snapshot.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manifest["version"] = json!(2);
+    manifest["version"] = json!(3);
     let future = serde_json::to_vec(&manifest).unwrap();
     fs::write(&path, &future).unwrap();
     assert!(storage.load().unwrap_err().contains("版本"));
     assert!(storage.save(&old, Some(&updated)).is_err());
     assert_eq!(fs::read(path).unwrap(), future);
+}
+
+#[test]
+fn v1_manifest_with_legacy_lyrics_loads_and_upgrades_on_next_save() {
+    let dir = TestLibraryDir::new();
+    let snapshots = dir.0.join("library-snapshots");
+    fs::create_dir_all(&snapshots).unwrap();
+    // v0.6.1 落盘形态：tracks 文件带 `lyrics: []`，lyrics 文件是 `{id: [秒制行数组]}`
+    let track = test_imported_track("a", "C:/a.flac", "A");
+    let mut tracks_json = serde_json::to_value(vec![track.clone()]).unwrap();
+    tracks_json[0]["lyrics"] = json!([]);
+    fs::write(
+        snapshots.join("1-2-3-tracks.json"),
+        serde_json::to_vec(&tracks_json).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        snapshots.join("1-2-3-lyrics.json"),
+        r#"{"a":[{"time":1.5,"text":"old","end":2.0,"words":[{"start":1.5,"end":1.5,"text":"old"}],"translation":"旧"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.0.join("library-snapshot.json"),
+        r#"{"version":1,"tracks":"1-2-3-tracks.json","lyrics":"1-2-3-lyrics.json"}"#,
+    )
+    .unwrap();
+
+    let storage = dir.storage();
+    let loaded = storage.load().unwrap();
+    let lyrics = &loaded[0].lyrics;
+    assert_eq!(lyrics.source.kind, LyricSourceKind::Legacy);
+    assert_eq!(lyrics.sync, LyricSync::Word);
+    assert_eq!(
+        (lyrics.lines[0].start_ms, lyrics.lines[0].end_ms),
+        (1500, Some(2000))
+    );
+    assert_eq!(lyrics.lines[0].words.as_ref().unwrap()[0].end_ms, None);
+    assert_eq!(lyrics.lines[0].translation_text(), Some("旧"));
+
+    // 内容没变也要提交一次：清单升到 2，歌词文件改成新格式
+    let stats = storage.save(&loaded, Some(&loaded)).unwrap();
+    assert!(stats.lyrics_bytes > 0 && stats.metadata_bytes > 0);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(dir.0.join("library-snapshot.json")).unwrap()).unwrap();
+    assert_eq!(manifest["version"], 2);
+    let lyrics_file: Value = serde_json::from_slice(
+        &fs::read(snapshots.join(manifest["lyrics"].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lyrics_file["a"]["schema"], 2);
+    assert_eq!(lyrics_file["a"]["lines"][0]["startMs"], 1500);
+    assert_eq!(dir.storage().load().unwrap(), loaded);
 }
 
 #[test]
@@ -628,7 +684,10 @@ fn merges_cached_tracks_by_path() {
 #[test]
 fn merge_preserves_cached_lyrics_when_reimport_has_none() {
     let mut cached_track = test_imported_track("old", "C:/Music/a.flac", "Old");
-    cached_track.lyrics = vec![LyricLine::new(1.5, "cached line")];
+    cached_track.lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(1500, "cached line")],
+        LyricSource::default(),
+    );
     let imported = vec![test_imported_track("new", "c:/music/a.flac", "Updated")];
 
     let merged = merge_cached_tracks(vec![cached_track], &imported);
@@ -637,8 +696,8 @@ fn merge_preserves_cached_lyrics_when_reimport_has_none() {
     assert_eq!(merged[0].id, "new");
     assert_eq!(merged[0].title, "Updated");
     assert_eq!(merged[0].lyrics.len(), 1);
-    assert!((merged[0].lyrics[0].time - 1.5).abs() < 0.001);
-    assert_eq!(merged[0].lyrics[0].text, "cached line");
+    assert_eq!(merged[0].lyrics.lines[0].start_ms, 1500);
+    assert_eq!(merged[0].lyrics.lines[0].text, "cached line");
 }
 
 #[test]
@@ -679,7 +738,10 @@ fn matches_legacy_delete_request_by_streaming_source_key() {
 #[test]
 fn imported_tracks_from_cache_returns_preserved_lyrics() {
     let mut cached_track = test_imported_track("new", "c:/music/a.flac", "Updated");
-    cached_track.lyrics = vec![LyricLine::new(1.5, "cached line")];
+    cached_track.lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(1500, "cached line")],
+        LyricSource::default(),
+    );
     let imported = vec![test_imported_track("new", "C:/Music/a.flac", "Updated")];
 
     let returned = imported_tracks_from_cache(&[cached_track], &imported);
@@ -687,7 +749,7 @@ fn imported_tracks_from_cache_returns_preserved_lyrics() {
     assert_eq!(returned.len(), 1);
     assert_eq!(returned[0].id, "new");
     assert_eq!(returned[0].lyrics.len(), 1);
-    assert_eq!(returned[0].lyrics[0].text, "cached line");
+    assert_eq!(returned[0].lyrics.lines[0].text, "cached line");
 }
 
 #[test]
@@ -696,19 +758,29 @@ fn applies_track_lyrics_by_id() {
         test_imported_track("a", "C:/Music/a.flac", "A"),
         test_imported_track("b", "C:/Music/b.flac", "B"),
     ];
-    let lyrics = vec![LyricLine::new(2.0, "imported line")];
+    // 曲目原有的查找键并入新文档的来源
+    tracks[1].lyrics.source.lookup_keys = vec!["ncm-lyrics/1".into()];
+    let lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(2000, "imported line")],
+        LyricSource::of(LyricSourceKind::Manual).with_lookup_keys(vec!["qq-lyrics/2".into()]),
+    );
 
     apply_track_lyrics(&mut tracks, "b", lyrics, None, None).expect("apply lyrics");
 
     assert!(tracks[0].lyrics.is_empty());
     assert_eq!(tracks[1].lyrics.len(), 1);
-    assert_eq!(tracks[1].lyrics[0].text, "imported line");
+    assert_eq!(tracks[1].lyrics.lines[0].text, "imported line");
+    assert_eq!(tracks[1].lyrics.source.kind, LyricSourceKind::Manual);
+    assert_eq!(
+        tracks[1].lyrics.source.lookup_keys,
+        ["qq-lyrics/2", "ncm-lyrics/1"]
+    );
 }
 
 #[test]
 fn errors_when_applying_lyrics_to_missing_track() {
     let mut tracks = vec![test_imported_track("a", "C:/Music/a.flac", "A")];
-    let lyrics = vec![LyricLine::new(0.0, "line")];
+    let lyrics = LyricDocument::from_lines(vec![LyricLine::new(0, "line")], LyricSource::default());
 
     let err =
         apply_track_lyrics(&mut tracks, "missing", lyrics, None, None).expect_err("missing track");
@@ -739,8 +811,7 @@ fn test_imported_track(id: &str, path: &str, title: &str) -> ImportedTrack {
         glow_color: "#fff".into(),
         glow1: "#fff".into(),
         glow2: "#000".into(),
-        lyrics: Vec::new(),
-        lyrics_lookup_keys: Vec::new(),
+        lyrics: LyricDocument::EMPTY,
     }
 }
 
@@ -749,11 +820,11 @@ fn parses_timestamped_lrc_lines() {
     let lyrics = parse_lyrics_text("[ti:Test]\n[00:01.20]第一句\n[00:03.40][00:05.00]重复一句");
 
     assert_eq!(lyrics.len(), 3);
-    assert!((lyrics[0].time - 1.2).abs() < 0.001);
+    assert_eq!(lyrics[0].start_ms, 1200);
     assert_eq!(lyrics[0].text, "第一句");
-    assert!((lyrics[1].time - 3.4).abs() < 0.001);
+    assert_eq!(lyrics[1].start_ms, 3400);
     assert_eq!(lyrics[1].text, "重复一句");
-    assert!((lyrics[2].time - 5.0).abs() < 0.001);
+    assert_eq!(lyrics[2].start_ms, 5000);
 }
 
 #[test]
@@ -789,11 +860,11 @@ fn parses_common_lrc_time_variants() {
 
     assert_eq!(lyrics.len(), 3);
     // L-9：OFFSET:-500（负 offset）让歌词延后 0.5s（time - offset = time + 0.5）。
-    assert!((lyrics[0].time - 1.7).abs() < 0.001);
+    assert_eq!(lyrics[0].start_ms, 1700);
     assert_eq!(lyrics[0].text, "comma");
-    assert!((lyrics[1].time - 1.734).abs() < 0.001);
+    assert_eq!(lyrics[1].start_ms, 1734);
     assert_eq!(lyrics[1].text, "krc");
-    assert!((lyrics[2].time - 2.5).abs() < 0.001);
+    assert_eq!(lyrics[2].start_ms, 2500);
     assert_eq!(lyrics[2].text, "a b c");
 }
 
@@ -804,29 +875,29 @@ fn parses_qq_qrc_lyric_content() {
     let lyrics = parse_lyrics_bytes(text.as_bytes());
 
     assert_eq!(lyrics.len(), 2);
-    assert!((lyrics[0].time - 1.0).abs() < 0.001);
+    assert_eq!(lyrics[0].start_ms, 1000);
     assert_eq!(lyrics[0].text, "hello");
-    assert!((lyrics[1].time - 3.0).abs() < 0.001);
+    assert_eq!(lyrics[1].start_ms, 3000);
     assert_eq!(lyrics[1].text, "world");
 
     // QRC 逐字：`(start,dur)` 绝对毫秒、标签在文本后；行 end = start + dur
-    assert_eq!(lyrics[0].end, Some(3.0));
+    assert_eq!(lyrics[0].end_ms, Some(3000));
     let words = lyrics[0].words.as_ref().expect("qrc words");
     assert_eq!(
         words
             .iter()
-            .map(|w| (w.text.as_str(), w.start, w.end))
+            .map(|w| (w.text.as_str(), w.start_ms, w.end_ms))
             .collect::<Vec<_>>(),
-        [("he", 1.0, 1.5), ("llo", 1.5, 2.0)]
+        [("he", 1000, Some(1500)), ("llo", 1500, Some(2000))]
     );
     // 只有一个音节且等于整行也保留
     let words = lyrics[1].words.as_ref().expect("single word");
     assert_eq!(words.len(), 1);
     assert_eq!(
-        (words[0].text.as_str(), words[0].start, words[0].end),
-        ("world", 3.0, 4.0)
+        (words[0].text.as_str(), words[0].start_ms, words[0].end_ms),
+        ("world", 3000, Some(4000))
     );
-    assert_eq!(lyrics[1].end, Some(4.0));
+    assert_eq!(lyrics[1].end_ms, Some(4000));
 }
 
 #[test]
@@ -840,13 +911,13 @@ fn qrc_words_merge_whitespace_syllables_and_keep_plain_lines_line_level() {
     assert_eq!(
         words
             .iter()
-            .map(|w| (w.text.as_str(), w.start, w.end))
+            .map(|w| (w.text.as_str(), w.start_ms, w.end_ms))
             .collect::<Vec<_>>(),
-        [("he ", 1.0, 1.6), ("llo", 1.6, 2.0)]
+        [("he ", 1000, Some(1600)), ("llo", 1600, Some(2000))]
     );
     assert_eq!(lyrics[1].text, "plain line");
     assert!(lyrics[1].words.is_none());
-    assert_eq!(lyrics[1].end, Some(4.0));
+    assert_eq!(lyrics[1].end_ms, Some(4000));
 }
 
 #[test]
@@ -855,25 +926,25 @@ fn parses_netease_yrc_word_lines() {
         parse_lyrics_bytes(b"[1200,800](1200,200,0)he(1400,200,0)llo\n[2500,500](2500,500,0)world");
 
     assert_eq!(lyrics.len(), 2);
-    assert!((lyrics[0].time - 1.2).abs() < 0.001);
+    assert_eq!(lyrics[0].start_ms, 1200);
     assert_eq!(lyrics[0].text, "hello");
-    assert!((lyrics[1].time - 2.5).abs() < 0.001);
+    assert_eq!(lyrics[1].start_ms, 2500);
     assert_eq!(lyrics[1].text, "world");
 
     // YRC 逐字：`(start,dur,0)` 绝对毫秒、标签在文本前
-    assert_eq!(lyrics[0].end, Some(2.0));
+    assert_eq!(lyrics[0].end_ms, Some(2000));
     let words = lyrics[0].words.as_ref().expect("yrc words");
     assert_eq!(
         words
             .iter()
-            .map(|w| (w.text.as_str(), w.start, w.end))
+            .map(|w| (w.text.as_str(), w.start_ms, w.end_ms))
             .collect::<Vec<_>>(),
-        [("he", 1.2, 1.4), ("llo", 1.4, 1.6)]
+        [("he", 1200, Some(1400)), ("llo", 1400, Some(1600))]
     );
     let words = lyrics[1].words.as_ref().expect("single yrc word");
     assert_eq!(
-        (words[0].text.as_str(), words[0].start, words[0].end),
-        ("world", 2.5, 3.0)
+        (words[0].text.as_str(), words[0].start_ms, words[0].end_ms),
+        ("world", 2500, Some(3000))
     );
 }
 
@@ -887,32 +958,29 @@ fn parses_kugou_krc_word_lines_and_translation() {
 
     let lyrics = parse_lyrics_bytes(text.as_bytes());
 
-    assert_eq!(lyrics.len(), 4);
-    assert!((lyrics[0].time - 1.0).abs() < 0.001);
+    assert_eq!(lyrics.len(), 2);
+    assert_eq!(lyrics[0].start_ms, 1000);
     assert_eq!(lyrics[0].text, "hello");
-    assert_eq!(lyrics[1].text, "greeting");
-    assert!((lyrics[2].time - 3.0).abs() < 0.001);
-    assert_eq!(lyrics[2].text, "world");
-    assert_eq!(lyrics[3].text, "planet");
+    assert_eq!(lyrics[0].translation_text(), Some("greeting"));
+    assert_eq!(lyrics[1].start_ms, 3000);
+    assert_eq!(lyrics[1].text, "world");
+    assert_eq!(lyrics[1].translation_text(), Some("planet"));
 
-    // KRC 逐字：`<offset,dur,0>` offset 相对行 start；译文行不带 words/end
-    assert_eq!(lyrics[0].end, Some(3.0));
+    // KRC 逐字：`<offset,dur,0>` offset 相对行 start；译文进原文行的字段
+    assert_eq!(lyrics[0].end_ms, Some(3000));
     let words = lyrics[0].words.as_ref().expect("krc words");
     assert_eq!(
         words
             .iter()
-            .map(|w| (w.text.as_str(), w.start, w.end))
+            .map(|w| (w.text.as_str(), w.start_ms, w.end_ms))
             .collect::<Vec<_>>(),
-        [("he", 1.0, 1.5), ("llo", 1.5, 2.0)]
+        [("he", 1000, Some(1500)), ("llo", 1500, Some(2000))]
     );
-    assert!(lyrics[1].words.is_none());
-    assert!(lyrics[1].end.is_none());
-    let words = lyrics[2].words.as_ref().expect("single krc word");
+    let words = lyrics[1].words.as_ref().expect("single krc word");
     assert_eq!(
-        (words[0].text.as_str(), words[0].start, words[0].end),
-        ("world", 3.0, 4.0)
+        (words[0].text.as_str(), words[0].start_ms, words[0].end_ms),
+        ("world", 3000, Some(4000))
     );
-    assert!(lyrics[3].words.is_none());
 }
 
 #[test]
@@ -930,10 +998,11 @@ fn krc_language_type0_becomes_line_level_roman_skipping_empty_lines() {
     );
     let lyrics = parse_lyrics_bytes(text.as_bytes());
     let texts: Vec<&str> = lyrics.iter().map(|l| l.text.as_str()).collect();
-    assert_eq!(texts, ["hello", "greeting", "world", "planet"]);
-    assert_eq!(lyrics[0].roman.as_deref(), Some("he llo"));
-    assert_eq!(lyrics[2].roman.as_deref(), Some("wo rld"));
-    assert!(lyrics[1].roman.is_none() && lyrics[3].roman.is_none());
+    assert_eq!(texts, ["hello", "world"]);
+    assert_eq!(lyrics[0].translation_text(), Some("greeting"));
+    assert_eq!(lyrics[1].translation_text(), Some("planet"));
+    assert_eq!(lyrics[0].roman_text(), Some("he llo"));
+    assert_eq!(lyrics[1].roman_text(), Some("wo rld"));
     // 罗马音表比原文行少时不 panic、多余原文行没有 roman
     let language =
         BASE64_STANDARD.encode(r#"{"content":[{"type":0,"lyricContent":[["he ","llo "]]}]}"#);
@@ -943,7 +1012,7 @@ fn krc_language_type0_becomes_line_level_roman_skipping_empty_lines() {
 [3000,1000]<0,1000,0>world"
     );
     let lyrics = parse_lyrics_bytes(text.as_bytes());
-    assert_eq!(lyrics[0].roman.as_deref(), Some("he llo"));
+    assert_eq!(lyrics[0].roman_text(), Some("he llo"));
     assert!(lyrics[1].roman.is_none());
 }
 
@@ -954,14 +1023,14 @@ fn parses_ttml_bytes_without_extension_by_content_sniffing() {
     let lyrics = parse_lyrics_bytes(ttml.as_bytes());
     assert_eq!(lyrics.len(), 1);
     assert_eq!(lyrics[0].text, "Hello");
-    assert_eq!(lyrics[0].end, Some(3.0));
+    assert_eq!(lyrics[0].end_ms, Some(3000));
     let words = lyrics[0].words.as_ref().expect("ttml words");
     assert_eq!(
         words
             .iter()
-            .map(|w| (w.text.as_str(), w.start, w.end))
+            .map(|w| (w.text.as_str(), w.start_ms, w.end_ms))
             .collect::<Vec<_>>(),
-        [("Hel", 1.0, 1.5), ("lo", 1.5, 3.0)]
+        [("Hel", 1000, Some(1500)), ("lo", 1500, Some(3000))]
     );
 
     // 大小写不敏感的 `<TT`；不是 TTML 的 XML 走后续解析而不是返回空
@@ -983,12 +1052,8 @@ fn detects_unsynced_plain_text_lyrics() {
     assert!(!lyrics_are_unsynced(&[]));
 
     // 恰好 4 秒等差但带 words → 是真时间轴
-    let mut karaoke = LyricLine::new(0.0, "a");
-    karaoke.words = Some(vec![LyricWord {
-        start: 0.0,
-        end: 1.0,
-        text: "a".into(),
-    }]);
+    let mut karaoke = LyricLine::new(0, "a");
+    karaoke.words = Some(vec![LyricWord::new(0, Some(1000), "a")]);
     assert!(!lyrics_are_unsynced(&[karaoke]));
 }
 
@@ -1009,8 +1074,10 @@ fn sidecar_lookup_prefers_ttml_over_lrc() {
     .unwrap();
     assert!(find_lyrics_file(&audio).unwrap().ends_with("song.ttml"));
     let lyrics = external_lrc_lyrics(&audio).expect("ttml sidecar");
-    assert_eq!(lyrics[0].text, "word");
-    assert!(lyrics[0].words.is_some());
+    assert_eq!(lyrics.lines[0].text, "word");
+    assert!(lyrics.lines[0].words.is_some());
+    assert_eq!(lyrics.source.kind, LyricSourceKind::Sidecar);
+    assert_eq!(lyrics.sync, LyricSync::Word);
 
     // 大小写不同的 stem（Windows 上精确分支即命中，返回 `SONG.ttml`）同样按 ttml 优先
     let mixed = dir.join("SONG.mp3");
@@ -1035,17 +1102,17 @@ fn krc_translation_stays_aligned_when_original_line_is_cleaned_away() {
 
     let lyrics = parse_lyrics_bytes(text.as_bytes());
 
-    assert_eq!(lyrics.len(), 5);
-    assert!((lyrics[0].time - 1.0).abs() < 0.001);
+    assert_eq!(lyrics.len(), 3);
+    assert_eq!(lyrics[0].start_ms, 1000);
     assert_eq!(lyrics[0].text, "hello");
-    assert_eq!(lyrics[1].text, "greeting");
-    // 空原文行本身被过滤，但它的译文仍锚定在原始行的时间点。
-    assert!((lyrics[2].time - 2.0).abs() < 0.001);
-    assert_eq!(lyrics[2].text, "interlude");
-    assert!((lyrics[3].time - 3.0).abs() < 0.001);
-    assert_eq!(lyrics[3].text, "world");
-    assert!((lyrics[4].time - 3.0).abs() < 0.001);
-    assert_eq!(lyrics[4].text, "planet");
+    assert_eq!(lyrics[0].translation_text(), Some("greeting"));
+    // 空原文行本身被过滤，它的译文没有宿主行，按原始行的时间点作为独立行保留
+    assert_eq!(lyrics[1].start_ms, 2000);
+    assert_eq!(lyrics[1].text, "interlude");
+    assert!(lyrics[1].words.is_none());
+    assert_eq!(lyrics[2].start_ms, 3000);
+    assert_eq!(lyrics[2].text, "world");
+    assert_eq!(lyrics[2].translation_text(), Some("planet"));
 }
 
 #[test]
@@ -1070,7 +1137,7 @@ fn applies_lrc_offset() {
     let lyrics = parse_lyrics_text("[offset:500]\n[00:01.00]提前半秒");
 
     assert_eq!(lyrics.len(), 1);
-    assert!((lyrics[0].time - 0.5).abs() < 0.001);
+    assert_eq!(lyrics[0].start_ms, 500);
 }
 
 #[test]
@@ -1078,9 +1145,9 @@ fn converts_unsynced_lyrics_to_display_lines() {
     let lyrics = parse_lyrics_text("第一行\n\n第二行");
 
     assert_eq!(lyrics.len(), 2);
-    assert_eq!(lyrics[0].time, 0.0);
+    assert_eq!(lyrics[0].start_ms, 0);
     assert_eq!(lyrics[0].text, "第一行");
-    assert_eq!(lyrics[1].time, 4.0);
+    assert_eq!(lyrics[1].start_ms, 4000);
     assert_eq!(lyrics[1].text, "第二行");
 }
 
@@ -1126,7 +1193,10 @@ fn missing_library_cache_reads_as_empty() {
 #[test]
 fn splits_and_merges_lyrics_round_trip() {
     let mut with_lyrics = test_imported_track("a", "C:/Music/a.flac", "A");
-    with_lyrics.lyrics = vec![LyricLine::new(1.0, "line one")];
+    with_lyrics.lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(1000, "line one")],
+        LyricSource::default(),
+    );
     let without = test_imported_track("b", "C:/Music/b.flac", "B");
 
     let (stripped, sidecar) = split_lyrics_for_storage(&[with_lyrics.clone(), without.clone()]);
@@ -1135,13 +1205,13 @@ fn splits_and_merges_lyrics_round_trip() {
     assert!(stripped[0].lyrics.is_empty());
     assert!(stripped[1].lyrics.is_empty());
     assert_eq!(sidecar.len(), 1);
-    assert_eq!(sidecar.get("a").unwrap()[0].text, "line one");
+    assert_eq!(sidecar.get("a").unwrap().lines[0].text, "line one");
     assert!(!sidecar.contains_key("b"));
 
     // 合并回来后与原始曲目完全一致
     let restored = merge_lyrics_from_storage(stripped, &sidecar);
     assert_eq!(restored[0].lyrics.len(), 1);
-    assert_eq!(restored[0].lyrics[0].text, "line one");
+    assert_eq!(restored[0].lyrics.lines[0].text, "line one");
     assert!(restored[1].lyrics.is_empty());
 }
 
@@ -1149,11 +1219,14 @@ fn splits_and_merges_lyrics_round_trip() {
 fn merge_lyrics_keeps_inline_when_sidecar_absent() {
     // 旧格式迁移：主文件内联歌词、边车缺失时，内联歌词必须保留
     let mut inline = test_imported_track("a", "C:/Music/a.flac", "A");
-    inline.lyrics = vec![LyricLine::new(2.0, "legacy inline")];
+    inline.lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(2000, "legacy inline")],
+        LyricSource::default(),
+    );
 
     let restored = merge_lyrics_from_storage(vec![inline], &std::collections::HashMap::new());
     assert_eq!(restored[0].lyrics.len(), 1);
-    assert_eq!(restored[0].lyrics[0].text, "legacy inline");
+    assert_eq!(restored[0].lyrics.lines[0].text, "legacy inline");
 }
 
 #[test]

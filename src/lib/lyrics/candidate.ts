@@ -1,5 +1,5 @@
 import type { LyricLine } from "@/types/track";
-import { SAME_TIMESTAMP_EPSILON } from "./activeLine";
+import { SAME_TIMESTAMP_EPSILON_MS } from "./activeLine";
 
 /** 在线歌词候选的能力标签：是否逐字、是否带译文、是否带音译（供候选卡片标注）。 */
 export interface CandidateCapabilities {
@@ -9,8 +9,8 @@ export interface CandidateCapabilities {
 }
 
 /**
- * 从候选歌词本身推断能力。译文两种形态都算：TTML 的 `translation` 字段，或 LRC 类的
- * 相邻同时间戳、文本不同的两行；音译同理看 `roman` 字段。
+ * 从候选歌词行推断能力。译文两种形态都算：`translations` 字段，或来源不明的双语 LRC 里
+ * 相邻同起点、文本不同的两行；音译看 `roman` 字段。
  */
 export function describeCandidate(lyrics: LyricLine[]): CandidateCapabilities {
   let wordSynced = false;
@@ -19,12 +19,12 @@ export function describeCandidate(lyrics: LyricLine[]): CandidateCapabilities {
   for (let index = 0; index < lyrics.length; index += 1) {
     const line = lyrics[index];
     if (line.words && line.words.length > 0) wordSynced = true;
-    if (line.translation) translation = true;
+    if (line.translations && line.translations.length > 0) translation = true;
     if (line.roman) roman = true;
     const next = lyrics[index + 1];
     if (
       next &&
-      Math.abs(next.time - line.time) <= SAME_TIMESTAMP_EPSILON &&
+      Math.abs(next.startMs - line.startMs) <= SAME_TIMESTAMP_EPSILON_MS &&
       next.text !== line.text
     ) {
       translation = true;

@@ -21,11 +21,22 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
-pub(crate) fn lyrics_to_traditional(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine> {
-    for line in &mut lyrics {
+pub(crate) fn lyrics_to_traditional(mut lyrics: LyricDocument) -> LyricDocument {
+    lines_to_traditional(&mut lyrics.lines);
+    lyrics
+}
+
+/// 原文、译文、逐字音节都转；音译不动。
+pub(crate) fn lines_to_traditional(lines: &mut [LyricLine]) {
+    for line in lines {
         line.text = to_traditional(&line.text);
-        if let Some(translation) = line.translation.as_mut() {
-            *translation = to_traditional(translation);
+        for translation in &mut line.translations {
+            translation.text = to_traditional(&translation.text);
+            if let Some(words) = translation.words.as_mut() {
+                for word in words {
+                    word.text = to_traditional(&word.text);
+                }
+            }
         }
         if let Some(words) = line.words.as_mut() {
             for word in words {
@@ -33,7 +44,6 @@ pub(crate) fn lyrics_to_traditional(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine
             }
         }
     }
-    lyrics
 }
 
 #[cfg(test)]
@@ -50,23 +60,20 @@ mod tests {
     #[test]
     fn converts_text_translation_and_words() {
         let line = LyricLine {
-            time: 0.0,
-            text: "头发".into(),
-            end: None,
-            words: Some(vec![LyricWord {
-                start: 0.0,
-                end: 1.0,
-                text: "头发".into(),
-            }]),
-            translation: Some("发展".into()),
-            roman: Some("tou fa".into()),
-            hidden: false,
+            words: Some(vec![LyricWord::new(0, Some(1000), "头发")]),
+            translations: vec![LyricText::new("发展")],
+            roman: Some(LyricText::new("tou fa")),
+            ..LyricLine::new(0, "头发")
         };
-        let converted = lyrics_to_traditional(vec![line]);
+        let converted = lyrics_to_traditional(LyricDocument::from_lines(
+            vec![line],
+            LyricSource::default(),
+        ));
+        let converted = &converted.lines;
         assert_eq!(converted[0].text, "頭髮");
-        assert_eq!(converted[0].translation.as_deref(), Some("發展"));
+        assert_eq!(converted[0].translation_text(), Some("發展"));
         assert_eq!(converted[0].words.as_ref().unwrap()[0].text, "頭髮");
         // 音译不动
-        assert_eq!(converted[0].roman.as_deref(), Some("tou fa"));
+        assert_eq!(converted[0].roman_text(), Some("tou fa"));
     }
 }

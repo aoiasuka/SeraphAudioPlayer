@@ -35,4 +35,4 @@ pub(crate) use media_library::{
     replace_track_in_cache,
 };
 pub use online_covers::*;
-pub use types::ImportedTrack;
+pub use types::{ImportedTrack, LyricDocument};
