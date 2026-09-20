@@ -115,8 +115,8 @@ impl LyricText {
     }
 }
 
-/// 行的角色：主唱 / 和声（TTML `x-bg`）/ 制作信息（作词作曲等，`from_lines` 按模式识别）。
-/// 目前只存不渲染（方案 B2 再消费）。
+/// 行的角色：主唱 / 和声（TTML `x-bg`，独立成行、挂在所在主句下渲染）/ 制作信息（作词作曲等，
+/// `from_lines` 按模式识别，前端自成一组，可由显示选项整体隐藏）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LyricRole {
@@ -129,6 +129,30 @@ pub enum LyricRole {
 impl LyricRole {
     fn is_main(&self) -> bool {
         *self == Self::Main
+    }
+}
+
+/// 歌词**显示层**选项（前端 store 持久化，经 `set_lyrics_display_options` 同步到后端，
+/// 由 `display::project_document` 在回传前统一投影，主窗口与任务栏歌词条因此一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LyricsDisplayOptions {
+    /// 忽略歌词文件里的 `[offset:]` 标签：回传前把解析时折进去的偏移还原
+    pub ignore_file_offset: bool,
+    /// 显示制作信息行（`role == Credit`）；关闭即按 `hidden` 打标
+    pub show_credits: bool,
+}
+
+impl LyricsDisplayOptions {
+    pub const DEFAULT: Self = Self {
+        ignore_file_offset: false,
+        show_credits: true,
+    };
+}
+
+impl Default for LyricsDisplayOptions {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -229,7 +253,8 @@ pub struct LyricSource {
     /// AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lookup_keys: Vec<String>,
-    /// 用户手动导入 / 明确应用 = 固定选择，自动流程不得替换（B2 消费）。
+    /// 用户手动导入 / 明确应用 = 固定选择：重新导入（sidecar / 内嵌）与歌词目录匹配这类
+    /// 自动流程不得替换（`media_library::lyrics_replaceable_by_auto`）；歌词稿右键菜单可切换。
     pub pinned: bool,
     /// 在线获取的 Unix 秒。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,7 +326,9 @@ pub struct LyricDocument {
     pub schema: u32,
     pub source: LyricSource,
     pub sync: LyricSync,
-    /// 解析时已折进各行时间的 `[offset:]`（毫秒，记录以便日后「忽略文件 offset」重算）。
+    /// 解析时已折进各行时间的 `[offset:]`（毫秒；L-9 约定正值提前显示，即 `start = raw − offset`）。
+    /// 只有文件类来源（手动导入 / sidecar / 歌词目录 / 内嵌）记录，`display` 模块按
+    /// 「忽略文件 offset」选项在回传前还原。
     pub offset_ms: i32,
     pub lines: Vec<LyricLine>,
 }
@@ -353,6 +380,12 @@ impl LyricDocument {
             offset_ms: 0,
             lines,
         }
+    }
+
+    /// 记录解析时折进各行时间的 `[offset:]`（`parse_lyrics_bytes_with_offset` 的第二项）。
+    pub fn with_offset(mut self, offset_ms: i32) -> Self {
+        self.offset_ms = offset_ms;
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -594,7 +627,8 @@ pub(crate) struct ParsedAudioMetadata {
     pub(crate) sample_rate: Option<u32>,
     pub(crate) bit_depth: Option<u8>,
     pub(crate) channels: Option<u8>,
-    pub(crate) lyrics: Vec<LyricLine>,
+    /// 标签内嵌歌词（来源 `Embedded`，含折进去的 `[offset:]`）；没有即空文档。
+    pub(crate) lyrics: LyricDocument,
     pub(crate) cover: Option<CoverArt>,
 }
 
@@ -691,5 +725,22 @@ mod lyric_document_tests {
         assert_eq!(seconds_to_ms(1.0005), 1001);
         assert_eq!(seconds_to_ms(-1.0), 0);
         assert_eq!(seconds_to_ms(f64::NAN), 0);
+    }
+
+    #[test]
+    fn offset_and_display_options_round_trip() {
+        let doc = LyricDocument::from_lines(vec![LyricLine::new(500, "a")], LyricSource::default())
+            .with_offset(-196);
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["offsetMs"], -196);
+        let back: LyricDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(back.offset_ms, -196);
+
+        // 前端只传改动的字段也能读，缺省与 DEFAULT 一致
+        let options: LyricsDisplayOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options, LyricsDisplayOptions::DEFAULT);
+        let options: LyricsDisplayOptions =
+            serde_json::from_str(r#"{"ignoreFileOffset":true,"showCredits":false}"#).unwrap();
+        assert!(options.ignore_file_offset && !options.show_credits);
     }
 }

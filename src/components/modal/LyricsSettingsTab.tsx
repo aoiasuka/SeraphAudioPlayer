@@ -56,6 +56,10 @@ export function LyricsSettingsTab() {
   const setShowTranslation = usePlayerStore((s) => s.setShowLyricsTranslation);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const setShowRoman = usePlayerStore((s) => s.setShowLyricsRoman);
+  const showCredits = usePlayerStore((s) => s.showLyricsCredits);
+  const setShowCredits = usePlayerStore((s) => s.setShowLyricsCredits);
+  const ignoreFileOffset = usePlayerStore((s) => s.ignoreLyricsFileOffset);
+  const setIgnoreFileOffset = usePlayerStore((s) => s.setIgnoreLyricsFileOffset);
   const taskbarLyricsEnabled = usePlayerStore((s) => s.taskbarLyricsEnabled);
   const setTaskbarLyricsEnabled = usePlayerStore((s) => s.setTaskbarLyricsEnabled);
   const taskbarLyricsClickThrough = usePlayerStore((s) => s.taskbarLyricsClickThrough);
@@ -233,8 +237,30 @@ export function LyricsSettingsTab() {
       </SettingRow>
 
       <SettingRow
+        title="显示制作信息"
+        description="作词、作曲、编曲这类制作信息行（网易云逐字歌词开头常见）单独成块、弱化显示；关闭后三处歌词显示都不再出现它们，无需另写排除规则。"
+      >
+        <ToggleButton
+          pressed={showCredits}
+          onToggle={() => setShowCredits(!showCredits)}
+          label="显示制作信息"
+        />
+      </SettingRow>
+
+      <SettingRow
+        title="忽略歌词文件里的 offset"
+        description="LRC 文件头的 [offset:] 标签会整体提前或延后歌词；开启后按文件里写的原始时间显示（适用于 offset 写错、与本机不符的文件）。只影响显示，导出仍写曲库原始时间。"
+      >
+        <ToggleButton
+          pressed={ignoreFileOffset}
+          onToggle={() => setIgnoreFileOffset(!ignoreFileOffset)}
+          label="忽略文件 offset"
+        />
+      </SettingRow>
+
+      <SettingRow
         title="恢复歌词设置默认值"
-        description="把歌词源优先级、繁体转换、TTML 开关、AMLL 地址、排除规则、译文/音译显示与本地歌词目录全部恢复为默认；不影响任务栏歌词条设置。"
+        description="把歌词源优先级、繁体转换、TTML 开关、AMLL 地址、排除规则、译文/音译/制作信息显示、文件 offset 与本地歌词目录全部恢复为默认；不影响任务栏歌词条设置。"
       >
         <button
           type="button"

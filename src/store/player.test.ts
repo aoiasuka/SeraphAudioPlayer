@@ -94,11 +94,13 @@ describe("player store lyrics settings reset", () => {
       showLyricsTranslation: false,
       showLyricsRoman: true,
       lyricsFolder: "D:/lyrics",
+      showLyricsCredits: false,
+      ignoreLyricsFileOffset: true,
       taskbarLyricsEnabled: true,
     });
   });
 
-  it("resetLyricsSettings 恢复 9 个字段、经 setLyricsExcludeRules 同步后端并提示；不动任务栏设置", () => {
+  it("resetLyricsSettings 恢复 11 个字段、经 IPC 同步后端（规则与显示选项）并提示；不动任务栏设置", () => {
     usePlayerStore.getState().resetLyricsSettings();
 
     expect(usePlayerStore.getState()).toMatchObject({
@@ -111,10 +113,61 @@ describe("player store lyrics settings reset", () => {
       showLyricsTranslation: true,
       showLyricsRoman: false,
       lyricsFolder: "",
+      showLyricsCredits: true,
+      ignoreLyricsFileOffset: false,
       taskbarLyricsEnabled: true,
     });
     expect(invokeMock).toHaveBeenCalledWith("set_lyrics_exclude_rules", { rules: [] });
+    expect(invokeMock).toHaveBeenLastCalledWith("set_lyrics_display_options", {
+      options: { ignoreFileOffset: false, showCredits: true },
+    });
     expect(usePlayerStore.getState().notification?.text).toBe("歌词设置已恢复默认");
+  });
+
+  it("显示选项 setter：变化时同步后端一次，无变化不重复调用", () => {
+    invokeMock.mockClear();
+    usePlayerStore.getState().setShowLyricsCredits(true);
+    expect(invokeMock).toHaveBeenCalledWith("set_lyrics_display_options", {
+      options: { ignoreFileOffset: true, showCredits: true },
+    });
+    invokeMock.mockClear();
+    usePlayerStore.getState().setShowLyricsCredits(true);
+    expect(invokeMock).not.toHaveBeenCalled();
+    usePlayerStore.getState().setIgnoreLyricsFileOffset(false);
+    expect(invokeMock).toHaveBeenCalledWith("set_lyrics_display_options", {
+      options: { ignoreFileOffset: false, showCredits: true },
+    });
+  });
+});
+
+describe("player store lyrics pinning", () => {
+  it("setCurrentTrackLyricsPinned：无歌词提示并返回 false；成功后用后端返回的文档替换并提示", async () => {
+    invokeMock.mockClear();
+    usePlayerStore.setState({
+      playlist: [testTrack({ id: "t", lyrics: lyricDocument([]) })],
+      currentTrackIndex: 0,
+      notification: null,
+    });
+    expect(await usePlayerStore.getState().setCurrentTrackLyricsPinned(true)).toBe(false);
+    expect(invokeMock).not.toHaveBeenCalledWith("set_track_lyrics_pinned", expect.anything());
+    expect(usePlayerStore.getState().notification?.text).toBe("当前曲目没有歌词");
+
+    const stored = lyricDocument([{ startMs: 1000, text: "a" }], { kind: "sidecar" });
+    usePlayerStore.setState({ playlist: [testTrack({ id: "t", lyrics: stored })] });
+    const pinnedDoc = { ...stored, source: { ...stored.source, pinned: true } };
+    invokeMock.mockResolvedValueOnce(pinnedDoc);
+    expect(await usePlayerStore.getState().setCurrentTrackLyricsPinned(true)).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("set_track_lyrics_pinned", { trackId: "t", pinned: true });
+    expect(usePlayerStore.getState().playlist[0].lyrics.source.pinned).toBe(true);
+    expect(usePlayerStore.getState().playlist[0].lyricsLoaded).toBe(true);
+    expect(usePlayerStore.getState().notification?.text).toContain("已固定");
+
+    invokeMock.mockRejectedValueOnce(new Error("track has no lyrics"));
+    expect(await usePlayerStore.getState().setCurrentTrackLyricsPinned(false)).toBe(false);
+    expect(usePlayerStore.getState().playlist[0].lyrics.source.pinned).toBe(true);
+    expect(usePlayerStore.getState().notification?.text).toContain("修改歌词固定状态失败");
+    // 后面的启动断言依赖空曲库
+    usePlayerStore.setState({ playlist: [], currentTrackIndex: 0, notification: null });
   });
 });
 
@@ -169,6 +222,13 @@ describe("player store startup and persistence", () => {
     expect(migrated.showLyricsTranslation).toBe(true);
     expect(migrated.showLyricsRoman).toBe(false);
     expect(migrated.lyricsFolder).toBe("");
+    // B2：制作信息默认显示、忽略文件 offset 默认关；显式值保留
+    expect(migrated.showLyricsCredits).toBe(true);
+    expect(migrated.ignoreLyricsFileOffset).toBe(false);
+    expect(migratePersistedPlayerState({ showLyricsCredits: false, ignoreLyricsFileOffset: true })).toMatchObject({
+      showLyricsCredits: false,
+      ignoreLyricsFileOffset: true,
+    });
     expect(migratePersistedPlayerState({ lyricsFolder: " C:/L " }).lyricsFolder).toBe("C:/L");
     expect(migratePersistedPlayerState({ lyricsFolder: 5 }).lyricsFolder).toBe("");
   });

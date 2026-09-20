@@ -2,10 +2,12 @@
 //!
 //! 只认我们要的子集：`<p begin end>` 是一行，直接子 `<span begin end>` 是一个
 //! 音节，`ttm:role="x-translation"` / `x-roman` 是译文与音译，`x-bg` 是和声
-//! （其内层音节并入本行、原样保留括号）。命名空间前缀不可靠（有的文件写
+//! （独立成 `role: Background` 行：起止取容器属性、缺省取内层音节，agent 与主句相同，
+//! 容器内的译文 / 音译归和声行；文本原样保留括号）。命名空间前缀不可靠（有的文件写
 //! `ttm:role`，有的写默认前缀），一律按本地名比对。
 //!
-//! 输出仍走 `clamp_lyrics` 收口（行数/单行长度上限），并按行起始时间排序。
+//! 输出仍走 `clamp_lyrics` 收口（行数/单行长度上限），并按行起始时间排序（稳定，和声行
+//! 紧随所属主句之后）。
 
 use super::prelude::*;
 use quick_xml::events::{BytesStart, Event};
@@ -25,6 +27,7 @@ enum SpanRole {
 }
 
 struct LineBuilder {
+    role: LyricRole,
     begin: Option<f64>,
     end: Option<f64>,
     words: Vec<LyricWord>,
@@ -36,8 +39,9 @@ struct LineBuilder {
 }
 
 impl LineBuilder {
-    fn new(begin: Option<f64>, end: Option<f64>, agent: Option<String>) -> Self {
+    fn new(role: LyricRole, begin: Option<f64>, end: Option<f64>, agent: Option<String>) -> Self {
         Self {
+            role,
             begin,
             end,
             words: Vec::new(),
@@ -46,6 +50,16 @@ impl LineBuilder {
             roman: String::new(),
             agent,
         }
+    }
+
+    /// 有起止时间的音节；没有时间的文本交给调用方并入上层。
+    fn push_word(&mut self, begin: f64, end: f64, text: String) {
+        let start_ms = seconds_to_ms(begin);
+        self.words.push(LyricWord::new(
+            start_ms,
+            Some(seconds_to_ms(end).max(start_ms)),
+            text,
+        ));
     }
 
     fn finish(self) -> Option<LyricLine> {
@@ -86,7 +100,7 @@ impl LineBuilder {
                 .map(|text| vec![LyricText::new(text)])
                 .unwrap_or_default(),
             roman: clean_lyric_text(&self.roman).map(LyricText::new),
-            role: LyricRole::Main,
+            role: self.role,
             agent: self.agent,
             hidden: false,
         })
@@ -163,6 +177,9 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
 
     let mut lines: Vec<LyricLine> = Vec::new();
     let mut current: Option<LineBuilder> = None;
+    // 和声容器（`x-bg`）正在累积的一行；同一个 <p> 里可以有多个，收完的先放进 finished
+    let mut background: Option<LineBuilder> = None;
+    let mut finished_backgrounds: Vec<LineBuilder> = Vec::new();
     // span 嵌套栈：role + 起止时间 + 累积文本（Word 层在 End 时收成一个音节）
     let mut span_stack: Vec<(SpanRole, Option<f64>, Option<f64>, String)> = Vec::new();
     let mut in_body = false;
@@ -189,12 +206,20 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
             Event::Start(start) if in_body && local_name(start.name().as_ref()) == b"p" => {
                 let (begin, end) = time_attrs(&start);
                 let agent = attr_value(&start, b"agent").filter(|value| !value.trim().is_empty());
-                current = Some(LineBuilder::new(begin, end, agent));
+                current = Some(LineBuilder::new(LyricRole::Main, begin, end, agent));
+                background = None;
+                finished_backgrounds.clear();
                 span_stack.clear();
             }
             Event::End(end) if local_name(end.name().as_ref()) == b"p" => {
                 if let Some(line) = current.take().and_then(LineBuilder::finish) {
                     lines.push(line);
+                }
+                // 和声行紧随主句之后（稳定排序下同起点仍保持这个次序）
+                for builder in finished_backgrounds.drain(..).chain(background.take()) {
+                    if let Some(line) = builder.finish() {
+                        lines.push(line);
+                    }
                 }
                 span_stack.clear();
             }
@@ -203,70 +228,58 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
             {
                 let role = span_role(&start);
                 let (begin, end) = time_attrs(&start);
+                if role == SpanRole::Background {
+                    // 畸形嵌套（和声里再开和声）：先把上一个收掉
+                    if let Some(previous) = background.take() {
+                        finished_backgrounds.push(previous);
+                    }
+                    let agent = current.as_ref().and_then(|line| line.agent.clone());
+                    background = Some(LineBuilder::new(LyricRole::Background, begin, end, agent));
+                }
                 span_stack.push((role, begin, end, String::new()));
             }
             Event::End(end) if current.is_some() && local_name(end.name().as_ref()) == b"span" => {
                 let Some((role, begin, span_end, text)) = span_stack.pop() else {
                     continue;
                 };
-                let line = current.as_mut().expect("checked above");
-                match role {
-                    SpanRole::Word => {
-                        if let (Some(start), Some(finish)) = (begin, span_end) {
-                            // 和声容器内的首个音节与前面主唱音节之间补空格，避免 "line(oh)" 粘连
-                            let inside_bg =
-                                matches!(span_stack.last(), Some((SpanRole::Background, ..)));
-                            if inside_bg {
-                                if let Some(last) = line.words.last_mut() {
-                                    if !last.text.ends_with(char::is_whitespace)
-                                        && !text.starts_with(char::is_whitespace)
-                                    {
-                                        last.text.push(' ');
-                                    }
-                                }
-                            }
-                            let start_ms = seconds_to_ms(start);
-                            line.words.push(LyricWord::new(
-                                start_ms,
-                                Some(seconds_to_ms(finish).max(start_ms)),
-                                text,
-                            ));
-                        } else if let Some(parent) = span_stack.last_mut() {
-                            parent.3.push_str(&text);
-                        } else {
-                            line.plain.push_str(&text);
-                        }
-                    }
-                    SpanRole::Translation => line.translation.push_str(&text),
-                    SpanRole::Roman => line.roman.push_str(&text),
-                    SpanRole::Background => {
-                        // 和声容器自身的直接文本（无逐字子 span 时）。
-                        // 与前一个主唱音节之间补一个空格，避免 "line(oh)" 粘连。
+                if role == SpanRole::Background {
+                    // 容器自身的直接文本（无逐字子 span 时）：有起止时间当一个音节，否则整行文本
+                    if let Some(mut builder) = background.take() {
                         if !text.trim().is_empty() {
-                            if let Some(last) = line.words.last_mut() {
-                                if !last.text.ends_with(char::is_whitespace) {
-                                    last.text.push(' ');
+                            match (begin, span_end) {
+                                (Some(start), Some(finish)) => {
+                                    builder.push_word(start, finish, text)
                                 }
-                            }
-                            if let (Some(start), Some(finish)) = (begin, span_end) {
-                                let start_ms = seconds_to_ms(start);
-                                line.words.push(LyricWord::new(
-                                    start_ms,
-                                    Some(seconds_to_ms(finish).max(start_ms)),
-                                    text,
-                                ));
-                            } else {
-                                line.plain.push_str(&text);
+                                _ => builder.plain.push_str(&text),
                             }
                         }
+                        finished_backgrounds.push(builder);
                     }
-                    SpanRole::Other => {
-                        if let Some(parent) = span_stack.last_mut() {
-                            parent.3.push_str(&text);
-                        } else {
-                            line.plain.push_str(&text);
-                        }
-                    }
+                    continue;
+                }
+                // 和声容器内的音节 / 译文 / 音译记到和声行，容器外记到主句
+                let inside_background = span_stack
+                    .iter()
+                    .any(|(role, ..)| *role == SpanRole::Background);
+                let target = match (inside_background, background.as_mut()) {
+                    (true, Some(builder)) => builder,
+                    _ => current.as_mut().expect("checked above"),
+                };
+                match role {
+                    SpanRole::Word => match (begin, span_end) {
+                        (Some(start), Some(finish)) => target.push_word(start, finish, text),
+                        _ => match span_stack.last_mut() {
+                            Some(parent) => parent.3.push_str(&text),
+                            None => target.plain.push_str(&text),
+                        },
+                    },
+                    SpanRole::Translation => target.translation.push_str(&text),
+                    SpanRole::Roman => target.roman.push_str(&text),
+                    SpanRole::Other => match span_stack.last_mut() {
+                        Some(parent) => parent.3.push_str(&text),
+                        None => target.plain.push_str(&text),
+                    },
+                    SpanRole::Background => unreachable!("handled above"),
                 }
             }
             Event::Text(text) if current.is_some() => {
@@ -274,13 +287,25 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                     continue;
                 };
                 let decoded = decoded.into_owned();
-                if let Some(top) = span_stack.last_mut() {
-                    top.3.push_str(&decoded);
-                } else if let Some(line) = current.as_mut() {
-                    // p 直接文本：有逐字时视为词间空白并入上一个音节，否则是整行文本
-                    match line.words.last_mut() {
-                        Some(last) if decoded.trim().is_empty() => last.text.push_str(&decoded),
-                        _ => line.plain.push_str(&decoded),
+                match span_stack.last_mut() {
+                    // 和声容器内音节之间的空白并入前一个和声音节（与 p 直接文本同口径）
+                    Some((SpanRole::Background, .., buffer)) if decoded.trim().is_empty() => {
+                        match background.as_mut().and_then(|line| line.words.last_mut()) {
+                            Some(last) => last.text.push_str(&decoded),
+                            None => buffer.push_str(&decoded),
+                        }
+                    }
+                    Some(top) => top.3.push_str(&decoded),
+                    None => {
+                        if let Some(line) = current.as_mut() {
+                            // p 直接文本：有逐字时视为词间空白并入上一个音节，否则是整行文本
+                            match line.words.last_mut() {
+                                Some(last) if decoded.trim().is_empty() => {
+                                    last.text.push_str(&decoded)
+                                }
+                                _ => line.plain.push_str(&decoded),
+                            }
+                        }
                     }
                 }
             }
@@ -427,7 +452,7 @@ mod tests {
     #[test]
     fn parses_words_translation_and_roman() {
         let lines = parse_ttml_lyrics(SAMPLE);
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
 
         let first = &lines[0];
         assert_eq!((first.start_ms, first.end_ms), (1000, Some(3000)));
@@ -435,24 +460,68 @@ mod tests {
         assert_eq!(first.translation_text(), Some("你好，世界"));
         assert_eq!(first.roman_text(), Some("ha-ro wa-ru-do"));
         assert_eq!(first.agent.as_deref(), Some("v1"));
+        assert_eq!(first.role, LyricRole::Main);
         let words = first.words.as_ref().expect("words");
         assert_eq!(words.len(), 3);
         assert_eq!(words[1].text, "lo ");
         assert_eq!((words[1].start_ms, words[1].end_ms), (1500, Some(2000)));
 
+        // 和声不再并进主句：主句只剩主唱音节
         let second = &lines[1];
-        assert_eq!(second.text, "Second line (oh)");
+        assert_eq!(second.text, "Second line");
         let words = second.words.as_ref().expect("words");
-        // p 内的词间空白并入上一个音节；和声音节并入本行
+        // p 内的词间空白并入上一个音节
         assert_eq!(words[0].text, "Second ");
-        assert_eq!(words.last().map(|w| w.text.as_str()), Some("(oh)"));
+        assert_eq!(words.last().map(|w| w.text.as_str()), Some("line"));
         assert_eq!((words[0].start_ms, words[0].end_ms), (4000, Some(4500)));
 
-        let third = &lines[2];
-        assert_eq!(third.text, "Plain line & text");
-        assert!(third.words.is_none());
-        assert!(third.translations.is_empty());
-        assert!(third.agent.is_none());
+        // 和声独立成 Background 行，紧随主句、同 agent，起止取内层音节
+        let background = &lines[2];
+        assert_eq!(background.role, LyricRole::Background);
+        assert_eq!(background.text, "(oh)");
+        assert_eq!((background.start_ms, background.end_ms), (5000, Some(6000)));
+        assert_eq!(background.agent.as_deref(), Some("v1"));
+        let words = background.words.as_ref().expect("bg words");
+        assert_eq!((words[0].text.as_str(), words[0].start_ms), ("(oh)", 5000));
+
+        let fourth = &lines[3];
+        assert_eq!(fourth.text, "Plain line & text");
+        assert!(fourth.words.is_none());
+        assert!(fourth.translations.is_empty());
+        assert!(fourth.agent.is_none());
+    }
+
+    #[test]
+    fn background_container_keeps_its_own_timing_translation_and_multiplicity() {
+        // 容器自带起止 + 内层译文；同一 p 里两个和声容器；无子 span 的和声容器直接文本
+        let text = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><body><div>
+            <p begin="00:10.000" end="00:14.000" ttm:agent="v2"><span begin="00:10.000" end="00:11.000">Main</span><span ttm:role="x-bg" begin="00:10.500" end="00:13.000"><span begin="00:10.500" end="00:11.500">(ah</span> <span begin="00:11.500" end="00:12.000">ah)</span><span ttm:role="x-translation">（啊）</span></span> <span begin="00:11.000" end="00:14.000">line</span><span ttm:role="x-bg" begin="00:13.000" end="00:14.000">(hey)</span><span ttm:role="x-translation">主句译文</span></p>
+        </div></body></tt>"#;
+        let lines = parse_ttml_lyrics(text);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.role, line.text.as_str(), line.start_ms, line.end_ms))
+                .collect::<Vec<_>>(),
+            [
+                (LyricRole::Main, "Main line", 10_000, Some(14_000)),
+                (LyricRole::Background, "(ah ah)", 10_500, Some(13_000)),
+                (LyricRole::Background, "(hey)", 13_000, Some(14_000)),
+            ]
+        );
+        // 主句译文与和声译文各归各
+        assert_eq!(lines[0].translation_text(), Some("主句译文"));
+        assert_eq!(lines[1].translation_text(), Some("（啊）"));
+        assert_eq!(lines[1].agent.as_deref(), Some("v2"));
+        assert_eq!(lines[1].words.as_ref().map(Vec::len), Some(2));
+        // 无子 span 的容器：直接文本按容器起止成一个音节
+        let hey = lines[2]
+            .words
+            .as_ref()
+            .expect("container text becomes a word");
+        assert_eq!((hey[0].start_ms, hey[0].end_ms), (13_000, Some(14_000)));
+        // 主句音节不含和声
+        assert_eq!(lines[0].words.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]

@@ -1,8 +1,13 @@
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
-import { emptyLyricDocument } from "@/lib/lyrics/document";
-import type { LrcExportFormat, LyricDocument, OnlineLyricsCandidate, Track } from "@/types/track";
+import type {
+  LrcExportFormat,
+  LyricDocument,
+  LyricsDisplayOptions,
+  OnlineLyricsCandidate,
+  Track,
+} from "@/types/track";
 import { sendCommand } from "./commands";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -20,6 +25,16 @@ const LRC_EXPORT_FORMAT_LABEL: Record<LrcExportFormat, string> = {
   verbatim: "逐字 LRC",
   line: "逐行 LRC",
 };
+
+/** store 里两个显示选项 → 后端 `set_lyrics_display_options` 的参数。 */
+export function lyricsDisplayOptionsOf(
+  state: Pick<PlayerStore, "showLyricsCredits" | "ignoreLyricsFileOffset">
+): LyricsDisplayOptions {
+  return {
+    ignoreFileOffset: state.ignoreLyricsFileOffset,
+    showCredits: state.showLyricsCredits,
+  };
+}
 
 /** 导出文件名：`艺术家 - 曲名.lrc`，去掉文件系统不允许的字符。 */
 function lyricsExportFileName(track: Track) {
@@ -110,6 +125,9 @@ export function createLyricsActions(
   | "setShowLyricsTranslation"
   | "setShowLyricsRoman"
   | "setLyricsFolder"
+  | "setShowLyricsCredits"
+  | "setIgnoreLyricsFileOffset"
+  | "setCurrentTrackLyricsPinned"
   | "findLocalLyricsForTrack"
 > {
   return {
@@ -196,6 +214,50 @@ export function createLyricsActions(
   setShowLyricsRoman: (enabled) => {
     if (get().showLyricsRoman === enabled) return;
     set({ showLyricsRoman: enabled });
+  },
+
+  setShowLyricsCredits: (enabled) => {
+    if (get().showLyricsCredits === enabled) return;
+    set({ showLyricsCredits: enabled });
+    // 投影在 Rust 侧（回传前按 hidden 打标），后端变更后广播让主窗口与任务栏重拉
+    sendCommand("set_lyrics_display_options", { options: lyricsDisplayOptionsOf(get()) });
+  },
+
+  setIgnoreLyricsFileOffset: (enabled) => {
+    if (get().ignoreLyricsFileOffset === enabled) return;
+    set({ ignoreLyricsFileOffset: enabled });
+    sendCommand("set_lyrics_display_options", { options: lyricsDisplayOptionsOf(get()) });
+  },
+
+  setCurrentTrackLyricsPinned: async (pinned) => {
+    const track = get().currentTrack();
+    if (!track) {
+      get().showNotification("请先选择曲目");
+      return false;
+    }
+    if ((track.lyrics?.lines.length ?? 0) === 0) {
+      get().showNotification("当前曲目没有歌词");
+      return false;
+    }
+    try {
+      const lyrics = await invoke<LyricDocument>("set_track_lyrics_pinned", {
+        trackId: track.id,
+        pinned,
+      });
+      if (!lyrics || !Array.isArray(lyrics.lines)) return false;
+      set((state) => ({
+        playlist: replaceTrackLyrics(state.playlist, track.id, lyrics),
+      }));
+      get().showNotification(
+        pinned ? "已固定这份歌词，自动匹配不会替换它" : "已取消固定，重新导入或目录匹配可替换这份歌词"
+      );
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("Tauri command failed: set_track_lyrics_pinned", err);
+      get().showNotification(`修改歌词固定状态失败：${normalizeIpcError(err).message}`);
+      return false;
+    }
   },
 
   importLyricsForCurrentTrack: async (file) => {
@@ -349,8 +411,7 @@ export function createLyricsActions(
       });
       if (!target) return false;
 
-      // 导出的是曲库原始歌词（后端读取），不受排除规则影响
-      void emptyLyricDocument;
+      // 导出的是曲库原始歌词（后端读取），不受排除规则与显示选项影响
       const written = await invoke<number>("export_track_lyrics", {
         trackId: track.id,
         path: target,

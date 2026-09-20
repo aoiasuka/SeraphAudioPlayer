@@ -67,6 +67,8 @@ pub fn run() {
             ipc::library::test_amll_ttml_db,
             ipc::library::set_lyrics_exclude_rules,
             ipc::library::validate_lyrics_exclude_rules,
+            ipc::library::set_lyrics_display_options,
+            ipc::library::set_track_lyrics_pinned,
             ipc::library::fetch_online_cover,
             ipc::library::save_track_lyrics,
             ipc::library::export_track_lyrics,
@@ -196,6 +198,8 @@ mod tests {
             "delete_tracks",
             "save_track_lyrics",
             "export_track_lyrics",
+            "set_lyrics_display_options",
+            "set_track_lyrics_pinned",
             "bilibili_login_qrcode",
             "clear_cache",
         ] {

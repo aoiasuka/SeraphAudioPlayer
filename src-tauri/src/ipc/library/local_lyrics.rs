@@ -279,9 +279,11 @@ pub(crate) fn read_local_lyrics(path: &Path) -> Option<LyricDocument> {
     }
     let bytes = fs::read(path).ok()?;
     let ext = path.extension().and_then(|value| value.to_str());
-    let lyrics = parse_lyrics_file_bytes(ext, &bytes);
-    (!lyrics.is_empty())
-        .then(|| LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Folder)))
+    let (lyrics, offset_ms) = parse_lyrics_file_bytes_with_offset(ext, &bytes);
+    (!lyrics.is_empty()).then(|| {
+        LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Folder))
+            .with_offset(offset_ms)
+    })
 }
 
 #[cfg(test)]

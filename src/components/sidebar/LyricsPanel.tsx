@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { CloudDownload, Copy, Download, Loader2, Search, Upload } from "lucide-react";
+import { CloudDownload, Copy, Download, Loader2, Pin, PinOff, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
@@ -16,13 +16,14 @@ import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { copyText } from "@/lib/clipboard";
 import { candidateBadges } from "@/lib/lyrics/candidate";
 import {
-  activeVisibleIndex,
+  activeVisibleRange,
+  groupHasWordTiming,
   hasWordTiming,
   isInIntermission,
   lyricsPositionMs,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
-import { lyricLines } from "@/lib/lyrics/document";
+import { describeLyricSource, lyricLines } from "@/lib/lyrics/document";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -62,6 +63,9 @@ export function LyricsPanel() {
   );
   const exportLyricsForCurrentTrack = usePlayerStore(
     (s) => s.exportLyricsForCurrentTrack
+  );
+  const setCurrentTrackLyricsPinned = usePlayerStore(
+    (s) => s.setCurrentTrackLyricsPinned
   );
   const showNotification = usePlayerStore((s) => s.showNotification);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
@@ -109,12 +113,14 @@ export function LyricsPanel() {
     onlineCandidates[0] ??
     null;
 
-  const activeIdx = useMemo(
-    () => activeVisibleIndex(resolvedGroups, currentMs),
+  const activeRange = useMemo(
+    () => activeVisibleRange(resolvedGroups, currentMs),
     [resolvedGroups, currentMs]
   );
-  const activeLine = activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
-  const activeHasWords = hasWordTiming(activeLine);
+  // 主句（滚动与逐字锚定）+ 仍在唱的更早句（对唱重叠 / 和声延续）一起高亮
+  const activeIdx = activeRange.primary;
+  const activeSet = useMemo(() => new Set(activeRange.active), [activeRange]);
+  const activeHasWords = activeRange.active.some((index) => groupHasWordTiming(lyricGroups[index]));
   const smoothMs = useSmoothTime(currentMs, isPlaying, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
   const intermission = useMemo(
@@ -239,6 +245,7 @@ export function LyricsPanel() {
         onSelect: () => void copyLyricsText(line),
       });
     }
+    const pinned = track?.lyrics?.source?.pinned === true;
     entries.push(
       {
         key: "copy-all",
@@ -285,6 +292,16 @@ export function LyricsPanel() {
             onSelect: () => void exportLyricsForCurrentTrack("line"),
           },
         ],
+      },
+      { type: "separator", key: "sep-source" },
+      {
+        // 固定 = 重新导入 / 歌词目录匹配都不替换这份歌词（手动导入与在线应用默认固定）
+        key: "toggle-pinned",
+        label: pinned ? "取消固定歌词来源" : "固定歌词来源",
+        icon: pinned ? PinOff : Pin,
+        hint: describeLyricSource(track?.lyrics?.source),
+        disabled: rawLyrics.length === 0,
+        onSelect: () => void setCurrentTrackLyricsPinned(!pinned),
       }
     );
     return entries;
@@ -444,7 +461,9 @@ export function LyricsPanel() {
                   style={{ height: `${centerPadding}px` }}
                 />
                 {lyricGroups.map((group, idx) => {
-                  const active = idx === activeIdx;
+                  const active = activeSet.has(idx);
+                  const primary = idx === activeIdx;
+                  const credit = (group.lines[0]?.role ?? "main") === "credit";
                   return (
                     <div
                       key={`${track.id}-${idx}`}
@@ -460,7 +479,7 @@ export function LyricsPanel() {
                         showContextMenu(
                           event,
                           buildLyricsMenuEntries(
-                            group.lines.map((item) => item.text).join("\n")
+                            [...group.lines, ...group.background].map((item) => item.text).join("\n")
                           )
                         );
                       }}
@@ -468,27 +487,38 @@ export function LyricsPanel() {
                         "flex items-start gap-2 px-1 transition-all duration-300 ease-out origin-left",
                         canSeek ? "cursor-pointer" : "cursor-default",
                         active
-                          ? intermission
+                          ? primary && intermission
                             ? "opacity-55"
                             : "opacity-100"
                           : "opacity-40 hover:opacity-70"
                       )}
-                      data-intermission={active && intermission ? "true" : undefined}
+                      data-intermission={primary && intermission ? "true" : undefined}
+                      data-role={credit ? "credit" : undefined}
+                      data-active={active ? "true" : undefined}
                     >
                       <div className="min-w-0 space-y-0.5">
                         {group.lines.map((line, lineIdx) => (
                           <div key={`${track.id}-${idx}-${lineIdx}`}>
                             <p
                               className={cn(
-                                "break-words font-serif leading-[28px] transition-all duration-300 ease-out",
-                                active
-                                  ? lineIdx === 0
-                                    ? "text-[16.5px] font-semibold text-ink"
-                                    : "text-[13px] font-medium text-ink2"
-                                  : "text-[14px] text-ink3"
+                                "break-words transition-all duration-300 ease-out",
+                                credit
+                                  ? // 制作信息：小号等宽、弱化，不参与打字机与逐字
+                                    cn(
+                                      "font-tw leading-[20px] tracking-[1px]",
+                                      active ? "text-[11px] text-ink2" : "text-[10.5px] text-ink3"
+                                    )
+                                  : cn(
+                                      "font-serif leading-[28px]",
+                                      active
+                                        ? lineIdx === 0
+                                          ? "text-[16.5px] font-semibold text-ink"
+                                          : "text-[13px] font-medium text-ink2"
+                                        : "text-[14px] text-ink3"
+                                    )
                               )}
                             >
-                              {active && lineIdx === 0 ? (
+                              {active && lineIdx === 0 && !credit ? (
                                 hasWordTiming(line) ? (
                                   <KaraokeLine
                                     words={line.words}
@@ -525,6 +555,39 @@ export function LyricsPanel() {
                                 {line.roman.text}
                               </p>
                             ) : null}
+                          </div>
+                        ))}
+                        {/* 和声（TTML x-bg）：挂在主句下，活动时也按音节填色 */}
+                        {group.background.map((line, bgIdx) => (
+                          <div key={`${track.id}-${idx}-bg-${bgIdx}`} data-role="background">
+                            <p
+                              className={cn(
+                                "break-words font-serif italic leading-[22px] transition-all duration-300 ease-out",
+                                active ? "text-[13px] text-ink2" : "text-[12px] text-ink3/80"
+                              )}
+                            >
+                              {active && hasWordTiming(line) ? (
+                                <KaraokeLine
+                                  words={line.words}
+                                  currentMs={smoothMs}
+                                  lineEndMs={line.endMs}
+                                  sungColor="var(--ink2)"
+                                  unsungColor="rgba(43, 39, 34, 0.3)"
+                                />
+                              ) : (
+                                line.text
+                              )}
+                            </p>
+                            {showTranslation
+                              ? (line.translations ?? []).map((translation, translationIndex) => (
+                                  <p
+                                    key={`bt-${translationIndex}`}
+                                    className="break-words font-tw text-[11px] leading-[20px] text-ink3"
+                                  >
+                                    {translation.text}
+                                  </p>
+                                ))
+                              : null}
                           </div>
                         ))}
                       </div>
@@ -733,11 +796,18 @@ export function LyricsPanel() {
                     <div
                       key={`${selectedCandidate.id}-${index}`}
                       className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 px-2 py-1.5 text-left hover:bg-paper2"
+                      data-role={line.role && line.role !== "main" ? line.role : undefined}
                     >
                       <span className="font-tw text-[11px] text-ink3">
                         {formatCandidateDuration(line.startMs / 1000)}
                       </span>
-                      <span className="font-serif text-xs leading-relaxed text-ink">
+                      <span
+                        className={cn(
+                          "font-serif text-xs leading-relaxed text-ink",
+                          line.role === "background" && "italic text-ink2",
+                          line.role === "credit" && "font-tw text-[11px] text-ink3"
+                        )}
+                      >
                         {line.text}
                         {(line.translations ?? []).map((translation, translationIndex) => (
                           <span

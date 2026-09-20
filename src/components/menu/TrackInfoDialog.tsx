@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { copyText } from "@/lib/clipboard";
 import { formatSeconds } from "@/lib/format";
+import { describeLyricSource } from "@/lib/lyrics/document";
 import { revealTrackFile } from "@/lib/system";
 import { useContextMenuStore } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -33,7 +34,14 @@ export function TrackInfoDialog() {
         ["声道", track.channels],
         ["文件大小", track.size],
         ["时长", formatSeconds(track.duration)],
-        ["歌词", (track.lyrics?.lines.length ?? 0) > 0 ? `${track.lyrics.lines.length} 行` : "无"],
+        [
+          "歌词",
+          (track.lyrics?.lines.length ?? 0) > 0
+            ? `${track.lyrics.lines.length} 行 · ${describeLyricSource(track.lyrics.source)}${
+                track.lyrics.source?.pinned ? " · 已固定" : ""
+              }`
+            : "无",
+        ],
         [
           "来源",
           track.sourceUrl || track.sourceId ? "Bilibili 缓存" : "本地文件",

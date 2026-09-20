@@ -334,7 +334,9 @@ pub(crate) fn merge_imported_track(
     imported: &ImportedTrack,
 ) -> ImportedTrack {
     let mut merged = imported.clone();
-    if merged.lyrics.is_empty() && !cached.lyrics.is_empty() {
+    // 重新导入是自动流程：本次扫出的 sidecar / 内嵌歌词不得覆盖用户固定的选择；
+    // 本次没扫到歌词时也保留已缓存的一份。
+    if !lyrics_replaceable_by_auto(&cached.lyrics) || merged.lyrics.is_empty() {
         merged.lyrics = cached.lyrics.clone();
     }
     // M-4：重新导入同一文件时，若本次提取不到封面（内嵌封面缺失/covers 目录暂不可写/
@@ -415,6 +417,12 @@ pub(crate) fn delete_track_request_key(track: &DeleteTrackRequest) -> Option<Str
     } else {
         Some(import_dedupe_key(Path::new(path)))
     }
+}
+
+/// 自动流程（重新导入、歌词目录匹配）能否替换曲目现有歌词：空文档随便换；用户手动导入 /
+/// 明确应用的（`source.pinned`）不许。`find_local_lyrics` 与 `merge_imported_track` 共用。
+pub(crate) fn lyrics_replaceable_by_auto(current: &LyricDocument) -> bool {
+    current.is_empty() || !current.source.pinned
 }
 
 /// 写入歌词文档。曲目原有的 AMLL 查找键（来自更早的本地文件名 / 候选）并入新文档的来源，
@@ -615,12 +623,8 @@ pub(crate) fn track_from_path(
         .map(is_dsd_format)
         .unwrap_or_else(|| ext_format.is_some_and(is_dsd_format));
     let audio_metadata = parse_audio_metadata_with_dsd_hint(path, is_dsd);
-    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| {
-        LyricDocument::from_lines(
-            audio_metadata.lyrics.clone(),
-            LyricSource::of(LyricSourceKind::Embedded),
-        )
-    });
+    // 同名 sidecar 优先于标签内嵌歌词；两者都是文件类来源，`[offset:]` 已记进文档
+    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| audio_metadata.lyrics.clone());
     let filename_metadata = parse_filename_metadata(stem);
     let title = audio_metadata
         .title
@@ -1161,11 +1165,13 @@ pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<LyricDocument> {
         return None;
     }
     let bytes = fs::read(&lyrics_path).ok()?;
-    // `.ttml` sidecar 走 TTML 解析（逐字），其余仍按字节内容嗅探
+    // `.ttml` sidecar 走 TTML 解析（逐字），其余仍按字节内容嗅探；LRC 的 `[offset:]` 记进文档
     let ext = lyrics_path.extension().and_then(|value| value.to_str());
-    let lyrics = parse_lyrics_file_bytes(ext, &bytes);
-    (!lyrics.is_empty())
-        .then(|| LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Sidecar)))
+    let (lyrics, offset_ms) = parse_lyrics_file_bytes_with_offset(ext, &bytes);
+    (!lyrics.is_empty()).then(|| {
+        LyricDocument::from_lines(lyrics, LyricSource::of(LyricSourceKind::Sidecar))
+            .with_offset(offset_ms)
+    })
 }
 
 /// 同名歌词 sidecar 的扩展名，按优先级排列：`.ttml` 逐字优先于行级格式。

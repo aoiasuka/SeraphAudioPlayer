@@ -103,12 +103,16 @@ pub(crate) async fn fetch_online_lyrics_from_sources(
 }
 
 /// 候选能力分档（越小越好）：逐字 + 译文 < 逐字 < 译文 < 逐行（LDDC `auto_fetch` 的取舍顺序）。
-/// 译文两种形态都算：`translation` 字段或相邻同时间戳行。
+/// 译文两种形态都算：`translations` 字段或相邻同时间戳的两条 **Main** 行（和声 / 制作信息行
+/// 不参与这个启发式）。
 pub(crate) fn candidate_capability_tier(lyrics: &[LyricLine]) -> u8 {
     let word_synced = lyrics.iter().any(|line| line.words.is_some());
     let has_translation = lyrics.iter().any(|line| !line.translations.is_empty())
         || lyrics.windows(2).any(|pair| {
-            pair[0].start_ms.abs_diff(pair[1].start_ms) < 10 && pair[0].text != pair[1].text
+            pair[0].role == LyricRole::Main
+                && pair[1].role == LyricRole::Main
+                && pair[0].start_ms.abs_diff(pair[1].start_ms) < 10
+                && pair[0].text != pair[1].text
         });
     match (word_synced, has_translation) {
         (true, true) => 0,
@@ -915,6 +919,13 @@ mod tests {
         // 同时间戳但同文本（去重残留）不算译文
         let dup = vec![LyricLine::new(1000, "a"), LyricLine::new(1000, "a")];
         assert_eq!(candidate_capability_tier(&dup), 3);
+        // 同起点的和声行不是译文
+        let mut background = LyricLine::new(1000, "(oh)");
+        background.role = LyricRole::Background;
+        assert_eq!(
+            candidate_capability_tier(&[LyricLine::new(1000, "a"), background]),
+            3
+        );
     }
 
     #[test]

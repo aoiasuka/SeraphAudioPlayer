@@ -56,6 +56,9 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   showLyricsTranslation: "boolean",
   showLyricsRoman: "boolean",
   lyricsFolder: "string",
+  // B2 显示选项
+  showLyricsCredits: "boolean",
+  ignoreLyricsFileOffset: "boolean",
 };
 
 interface PersistedEnvelope {

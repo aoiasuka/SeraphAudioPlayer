@@ -25,7 +25,14 @@ pub(crate) const MAX_LYRIC_LINES: usize = 5_000;
 pub(crate) const MAX_LYRIC_LINE_CHARS: usize = 512;
 
 pub(crate) fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
-    clamp_lyrics(parse_lyrics_bytes_inner(bytes))
+    parse_lyrics_bytes_with_offset(bytes).0
+}
+
+/// 同 `parse_lyrics_bytes`，另带出折进各行时间的 `[offset:]`（毫秒；只有 LRC 家族有，
+/// QRC / KRC / YRC / TTML 一律 0），供文件类来源记进 `LyricDocument::offset_ms`。
+pub(crate) fn parse_lyrics_bytes_with_offset(bytes: &[u8]) -> (Vec<LyricLine>, i32) {
+    let (lines, offset_ms) = parse_lyrics_bytes_inner(bytes);
+    (clamp_lyrics(lines), offset_ms)
 }
 
 /// W-01：所有歌词来源（本地导入 / 在线抓取 / 外部 .lrc）都经 `parse_lyrics_bytes`
@@ -41,16 +48,16 @@ pub(crate) fn clamp_lyrics(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine> {
     lyrics
 }
 
-fn parse_lyrics_bytes_inner(bytes: &[u8]) -> Vec<LyricLine> {
+fn parse_lyrics_bytes_inner(bytes: &[u8]) -> (Vec<LyricLine>, i32) {
     if bytes.starts_with(QRC_MAGIC_HEADER) {
         if let Some(lyrics) = parse_encrypted_qrc_lyrics(bytes) {
-            return lyrics;
+            return (lyrics, 0);
         }
     }
 
     if bytes.starts_with(KRC_MAGIC_HEADER) {
         if let Some(lyrics) = parse_encrypted_krc_lyrics(bytes) {
-            return lyrics;
+            return (lyrics, 0);
         }
     }
 
@@ -61,16 +68,16 @@ fn parse_lyrics_bytes_inner(bytes: &[u8]) -> Vec<LyricLine> {
     if looks_like_ttml(&text) {
         let ttml_lyrics = super::ttml::parse_ttml_lyrics(&text);
         if !ttml_lyrics.is_empty() {
-            return ttml_lyrics;
+            return (ttml_lyrics, 0);
         }
     }
 
     let provider_lyrics = parse_provider_lyrics_text(&text);
     if !provider_lyrics.is_empty() {
-        return provider_lyrics;
+        return (provider_lyrics, 0);
     }
 
-    parse_lyrics_text(&text)
+    parse_lyrics_text_with_offset(&text)
 }
 
 /// TTML 内容嗅探：去 BOM/前导空白后以 `<?xml` 或 `<tt` 开头，且开头一段里含 `<tt`
@@ -86,12 +93,19 @@ pub(crate) fn looks_like_ttml(text: &str) -> bool {
 }
 
 /// 按扩展名分派的歌词文件解析：`.ttml` 走 TTML 解析（经 `clamp_lyrics` 收口），
-/// 其余交给 `parse_lyrics_bytes`。同名 sidecar 与本地歌词目录两处复用。
-pub(crate) fn parse_lyrics_file_bytes(path_ext: Option<&str>, bytes: &[u8]) -> Vec<LyricLine> {
+/// 其余交给 `parse_lyrics_bytes_with_offset`；第二项是 LRC 的 `[offset:]`（TTML 为 0）。
+/// 同名 sidecar 与本地歌词目录两处复用。
+pub(crate) fn parse_lyrics_file_bytes_with_offset(
+    path_ext: Option<&str>,
+    bytes: &[u8],
+) -> (Vec<LyricLine>, i32) {
     if path_ext.is_some_and(|ext| ext.eq_ignore_ascii_case("ttml")) {
-        return clamp_lyrics(super::ttml::parse_ttml_lyrics(&decode_lyric_bytes(bytes)));
+        return (
+            clamp_lyrics(super::ttml::parse_ttml_lyrics(&decode_lyric_bytes(bytes))),
+            0,
+        );
     }
-    parse_lyrics_bytes(bytes)
+    parse_lyrics_bytes_with_offset(bytes)
 }
 
 /// 判定一组歌词是否是「纯文本合成」的假时间轴：`parse_lyrics_text` 对无时间戳歌词
@@ -107,7 +121,7 @@ pub(crate) fn lyrics_are_unsynced(lyrics: &[LyricLine]) -> bool {
 /// 调用方再按原始字节走普通文本路径。
 pub(crate) fn parse_encrypted_qrc_lyrics(bytes: &[u8]) -> Option<Vec<LyricLine>> {
     let text = decrypt_qrc(bytes).ok()?;
-    let lyrics = parse_lyrics_bytes_inner(text.as_bytes());
+    let (lyrics, _offset) = parse_lyrics_bytes_inner(text.as_bytes());
     (!lyrics.is_empty()).then_some(lyrics)
 }
 
@@ -832,22 +846,34 @@ pub(crate) fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
     zero_count * 100 / pairs >= 60
 }
 
-pub(crate) fn lyrics_from_tags(tags: &[Tag]) -> Vec<LyricLine> {
+/// 标签内嵌歌词（`LYRICS` / `UNSYNCEDLYRICS`），取第一份能解析出内容的；来源标 `Embedded`，
+/// LRC 的 `[offset:]` 记进文档。没有即空文档。
+pub(crate) fn lyrics_from_tags(tags: &[Tag]) -> LyricDocument {
     for tag in tags {
         for key in [ItemKey::Lyrics, ItemKey::UnsyncLyrics] {
             for value in tag.get_strings(key) {
-                let lyrics = parse_lyrics_text(value);
+                let (lyrics, offset_ms) = parse_lyrics_text_with_offset(value);
                 if !lyrics.is_empty() {
-                    return lyrics;
+                    return LyricDocument::from_lines(
+                        lyrics,
+                        LyricSource::of(LyricSourceKind::Embedded),
+                    )
+                    .with_offset(offset_ms);
                 }
             }
         }
     }
 
-    Vec::new()
+    LyricDocument::EMPTY
 }
 
 pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
+    parse_lyrics_text_with_offset(text).0
+}
+
+/// LRC 家族解析；第二项是折进各行时间的 `[offset:]`（毫秒，钳到 i32；文件里没有即 0）。
+/// 多个 `[offset:]` 标签时逐行按当时生效值校正，记录最后一个——实际文件只在头部写一次。
+pub(crate) fn parse_lyrics_text_with_offset(text: &str) -> (Vec<LyricLine>, i32) {
     let normalized = text
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
@@ -893,19 +919,23 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
         }
     }
 
+    let recorded_offset = offset_ms.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     if !timed.is_empty() {
         timed.sort_by_key(|line| line.start_ms);
         timed.dedup_by(|a, b| a.start_ms.abs_diff(b.start_ms) < 10 && a.text == b.text);
         snap_lddc_translation_lines(&mut timed);
         infer_line_ends(&mut timed);
-        return timed;
+        return (timed, recorded_offset);
     }
 
-    unsynced
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| LyricLine::new(index as u64 * 4000, text))
-        .collect()
+    (
+        unsynced
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| LyricLine::new(index as u64 * 4000, text))
+            .collect(),
+        0,
+    )
 }
 
 /// LDDC「译文时间戳 = 下一句原文起点 − 1 ms」写法（`last_ref_line_time_sty=1`，
@@ -1260,8 +1290,15 @@ mod enhanced_lrc_tests {
     #[test]
     fn parses_lddc_enhanced_lrc_into_words_with_offset() {
         let text = "[offset:-196]\n[00:18.459]<00:18.459>我<00:18.814>的 <00:19.284>天<00:23.097>\n[00:24.116]<00:24.116>透<00:24.622>明\n[00:26.712]普通行\n";
-        let lines = parse_lyrics_text(text);
+        let (lines, offset_ms) = parse_lyrics_text_with_offset(text);
         assert_eq!(lines.len(), 3);
+        // 折进去的 offset 原样带出，供文档记录（「忽略文件 offset」据此还原）
+        assert_eq!(offset_ms, -196);
+        assert_eq!(parse_lyrics_text_with_offset("[00:01.00]a\n").1, 0);
+        assert_eq!(
+            parse_lyrics_bytes_with_offset(b"[offset:250]\n[00:01.00]a\n").1,
+            250
+        );
 
         let first = &lines[0];
         assert_eq!(first.text, "我的 天");

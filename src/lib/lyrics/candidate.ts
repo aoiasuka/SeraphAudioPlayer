@@ -10,7 +10,7 @@ export interface CandidateCapabilities {
 
 /**
  * 从候选歌词行推断能力。译文两种形态都算：`translations` 字段，或来源不明的双语 LRC 里
- * 相邻同起点、文本不同的两行；音译看 `roman` 字段。
+ * 相邻同起点、文本不同的两条**主唱**行（和声 / 制作信息行不参与）；音译看 `roman` 字段。
  */
 export function describeCandidate(lyrics: LyricLine[]): CandidateCapabilities {
   let wordSynced = false;
@@ -24,6 +24,8 @@ export function describeCandidate(lyrics: LyricLine[]): CandidateCapabilities {
     const next = lyrics[index + 1];
     if (
       next &&
+      (line.role ?? "main") === "main" &&
+      (next.role ?? "main") === "main" &&
       Math.abs(next.startMs - line.startMs) <= SAME_TIMESTAMP_EPSILON_MS &&
       next.text !== line.text
     ) {

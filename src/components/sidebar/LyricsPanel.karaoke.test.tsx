@@ -114,3 +114,91 @@ describe("歌词稿：排除规则与逐字/译文/音译", () => {
     expect(screen.queryByTestId("karaoke-line")).toBeNull();
   });
 });
+
+describe("歌词稿：角色渲染与多活动区间（B2）", () => {
+  const duet = {
+    id: "duet",
+    duration: 100,
+    lyrics: lyricDocument([
+      { startMs: 0, text: "作词：某人", role: "credit" },
+      { startMs: 0, text: "作曲：某人", role: "credit" },
+      {
+        startMs: 10000, endMs: 20000, text: "You sing first", agent: "v1",
+        words: [{ startMs: 10000, endMs: 15000, text: "You sing " }, { startMs: 15000, endMs: 20000, text: "first" }],
+      },
+      {
+        startMs: 12000, endMs: 16000, text: "(ooh)", role: "background", agent: "v1",
+        words: [{ startMs: 12000, endMs: 16000, text: "(ooh)" }],
+      },
+      {
+        startMs: 15000, endMs: 25000, text: "Then I join", agent: "v2",
+        words: [{ startMs: 15000, endMs: 25000, text: "Then I join" }],
+      },
+      { startMs: 40000, text: "Outro" },
+    ]),
+  } as Track;
+
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    Element.prototype.scrollTo = vi.fn();
+    usePlayerStore.setState({
+      ...usePlayerStore.getInitialState(),
+      playlist: [duet],
+      currentTime: 5,
+      isPlaying: false,
+      showLyricsTranslation: true,
+    });
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const rowOf = (text: string) => screen.getByText(text).closest(".origin-left") as HTMLElement;
+
+  it("制作信息并成一块、用 credit 样式且不逐字；和声挂在主句下；对唱重叠时两句同时高亮", () => {
+    const { container } = render(<LyricsPanel />);
+    // 制作信息：两行在同一组，data-role=credit，前奏期间它是当前组但不走逐字 / 打字机
+    const credits = rowOf("作词：某人");
+    expect(credits).toHaveAttribute("data-role", "credit");
+    expect(credits).toBe(rowOf("作曲：某人"));
+    expect(credits).toHaveAttribute("data-active", "true");
+    expect(container.querySelector("[data-testid='karaoke-line']")).toBeNull();
+    // 和声挂在第一句主句的组里，而不是自成一组
+    expect(rowOf("You sing first")).toBe(screen.getByText("(ooh)").closest(".origin-left"));
+    expect(screen.getByText("(ooh)").closest("[data-role='background']")).not.toBeNull();
+
+    // 16s：第一句（10–20）与第二句（15–25）都在唱 → 两组都活动，主句是先开始的第一句
+    act(() => usePlayerStore.setState({ currentTime: 16 }));
+    expect(rowOf("Outro")).not.toHaveAttribute("data-active");
+    const karaokes = container.querySelectorAll("[data-testid='karaoke-line']");
+    // 第一句主唱 + 其和声 + 第二句主唱三条逐字线都在填色
+    expect(karaokes).toHaveLength(3);
+    const activeRows = container.querySelectorAll("[data-active='true']");
+    expect(activeRows).toHaveLength(2);
+    expect(activeRows[0].textContent).toContain("You sing");
+    expect(activeRows[1].textContent).toContain("Then I join");
+    expect(credits).not.toHaveAttribute("data-active");
+
+    // 21s：第一句唱完，只剩第二句活动
+    act(() => usePlayerStore.setState({ currentTime: 21 }));
+    expect(container.querySelectorAll("[data-active='true']")).toHaveLength(1);
+    expect(container.querySelector("[data-active='true']")!.textContent).toContain("Then I join");
+  });
+
+  it("显示制作信息关闭（后端按 hidden 打标）时制作信息块不渲染，前奏期间不高亮任何句", () => {
+    usePlayerStore.setState({
+      playlist: [{
+        ...duet,
+        lyrics: { ...duet.lyrics, lines: duet.lyrics.lines.map((line) => line.role === "credit" ? { ...line, hidden: true } : line) },
+      }],
+    });
+    const { container } = render(<LyricsPanel />);
+    expect(screen.queryByText("作词：某人")).toBeNull();
+    expect(container.querySelector("[data-active='true']")).toBeNull();
+    act(() => usePlayerStore.setState({ currentTime: 11 }));
+    expect(container.querySelector("[data-active='true']")!.textContent).toContain("You sing");
+  });
+});

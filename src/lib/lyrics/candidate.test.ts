@@ -35,5 +35,17 @@ describe("describeCandidate / candidateBadges", () => {
     ];
     expect(candidateBadges(dup)).toEqual(["逐行"]);
     expect(candidateBadges([])).toEqual(["逐行"]);
+
+    // 同起点的和声 / 制作信息行不是译文
+    const withBackground: LyricLine[] = [
+      { startMs: 1000, text: "a", words: [{ startMs: 1000, endMs: 1500, text: "a" }] },
+      { startMs: 1000, text: "(oh)", role: "background" },
+    ];
+    expect(candidateBadges(withBackground)).toEqual(["逐字"]);
+    const withCredit: LyricLine[] = [
+      { startMs: 0, text: "作词：某人", role: "credit" },
+      { startMs: 0, text: "a" },
+    ];
+    expect(candidateBadges(withCredit)).toEqual(["逐行"]);
   });
 });

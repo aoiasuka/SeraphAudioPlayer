@@ -50,8 +50,8 @@ pub async fn get_track_info(app: AppHandle, track_id: String) -> IpcResult<Optio
     tauri::async_runtime::spawn_blocking(move || {
         read_cached_track(&app, &track_id).map(|track| {
             track.map(|mut track| {
-                // 排除规则只在回传前打标，不落缓存
-                mark_hidden_document(&mut track.lyrics);
+                // 排除规则 / 制作信息隐藏 / offset 还原只在回传前投影，不落缓存
+                project_document(&mut track.lyrics);
                 track
             })
         })
@@ -241,14 +241,14 @@ fn save_track_lyrics_inner(
         )));
     }
 
-    let lines = parse_lyrics_bytes(lyrics_bytes);
+    let (lines, offset_ms) = parse_lyrics_bytes_with_offset(lyrics_bytes);
     if lines.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
-    // 用户手动导入 = 固定选择
+    // 用户手动导入 = 固定选择；文件里的 `[offset:]` 记进文档（「忽略文件 offset」据此还原）
     let mut source = LyricSource::of(LyricSourceKind::Manual);
     source.pinned = true;
-    let mut lyrics = LyricDocument::from_lines(lines, source);
+    let mut lyrics = LyricDocument::from_lines(lines, source).with_offset(offset_ms);
     if prefer_traditional {
         lyrics = lyrics_to_traditional(lyrics);
     }
@@ -267,7 +267,7 @@ fn save_track_lyrics_inner(
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(marked(stored))
+    Ok(projected(stored))
 }
 
 /// 写库后回读该曲目的文档（含并入的查找键），作为命令返回值。
@@ -358,7 +358,8 @@ pub async fn fetch_online_lyrics(
         if options.prefer_traditional {
             candidate.lyrics = lyrics_to_traditional(std::mem::take(&mut candidate.lyrics));
         }
-        mark_hidden_document(&mut candidate.lyrics);
+        // 预览与应用后的显示一致：同一套投影（在线候选 offset 恒 0，只有打标生效）
+        project_document(&mut candidate.lyrics);
     }
 
     Ok(candidates)
@@ -388,6 +389,54 @@ pub fn validate_lyrics_exclude_rules(
     rules: Vec<LyricsExcludeRule>,
 ) -> IpcResult<Vec<LyricsExcludeRuleStatus>> {
     Ok(validate_rules(&rules))
+}
+
+/// 歌词显示选项（忽略文件 offset / 显示制作信息）同步到后端；与排除规则同一机制：
+/// 后端只在回传前投影，变了就广播让主窗口与任务栏重拉当前曲目。
+#[tauri::command]
+pub fn set_lyrics_display_options(app: AppHandle, options: LyricsDisplayOptions) -> IpcResult<()> {
+    if set_display_options(options) {
+        if let Err(err) = app.emit(LYRICS_RULES_UPDATED_EVENT, ()) {
+            tracing::warn!("emit {LYRICS_RULES_UPDATED_EVENT} failed: {err}");
+        }
+    }
+    Ok(())
+}
+
+/// 切换曲目歌词的「固定」标记（歌词稿右键菜单）。固定 = 重新导入与歌词目录匹配都不替换；
+/// 取消固定 = 允许自动流程换掉。返回投影后的文档。
+#[tauri::command]
+pub async fn set_track_lyrics_pinned(
+    app: AppHandle,
+    track_id: String,
+    pinned: bool,
+) -> IpcResult<LyricDocument> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if track_id.trim().is_empty() {
+            return Err(IpcError::invalid_input("missing track id"));
+        }
+        let _guard = LIBRARY_LOCK.lock();
+        let mut tracks = read_cached_tracks_for_update(&app)?;
+        let track = tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or_else(|| IpcError::not_found("track was not found"))?;
+        if track.lyrics.is_empty() {
+            return Err(IpcError::invalid_input("track has no lyrics"));
+        }
+        if track.lyrics.source.pinned != pinned {
+            track.lyrics.source.pinned = pinned;
+            write_cached_tracks(&app, &tracks)?;
+        }
+        Ok(projected(stored_lyrics(&tracks, &track_id)))
+    })
+    .await
+    .map_err(|err| {
+        IpcError::new(
+            crate::ipc::error::IpcErrorCode::Internal,
+            format!("set_track_lyrics_pinned task panicked: {err}"),
+        )
+    })?
 }
 
 /// 在用户指定的歌词目录里按「艺术家 - 曲名」匹配歌词文件，命中即写入曲库并返回。
@@ -449,6 +498,15 @@ fn find_local_lyrics_inner(
 
     let _guard = LIBRARY_LOCK.lock();
     let mut tracks = read_cached_tracks_for_update(app)?;
+    // 目录匹配是自动流程：用户手动导入 / 明确应用过的歌词（pinned）不替换。前端本就只在
+    // 没歌词时调用，这里是后端兜底，命中但被拒按「未找到」返回。
+    if tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .is_some_and(|track| !lyrics_replaceable_by_auto(&track.lyrics))
+    {
+        return Ok(None);
+    }
     apply_track_lyrics(
         &mut tracks,
         track_id,
@@ -462,7 +520,7 @@ fn find_local_lyrics_inner(
 
     Ok(Some(LocalLyricsMatch {
         path: path.to_string_lossy().into_owned(),
-        lyrics: marked(stored),
+        lyrics: projected(stored),
         lookup_keys,
     }))
 }
@@ -551,7 +609,7 @@ fn apply_online_lyrics_inner(
     write_cached_tracks(app, &tracks)?;
     emit_lyrics_updated(app, track_id);
 
-    Ok(marked(stored))
+    Ok(projected(stored))
 }
 
 /// 歌词设置页「测试连接」：对模板真发一次样例 GET，返回分类结果（不改任何状态）。

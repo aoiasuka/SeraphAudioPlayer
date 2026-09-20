@@ -3,6 +3,7 @@ import { runWhenIdle } from "@/lib/startup";
 import { invoke, isTauriRuntime, listen } from "@/lib/tauri";
 import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
+import { lyricsDisplayOptionsOf } from "@/store/player/lyricsActions";
 import { hydrationGate } from "@/store/player/persistStorage";
 
 export function useHydratePlayerStore() {
@@ -93,6 +94,12 @@ export function useHydratePlayerStore() {
         void invoke("set_lyrics_exclude_rules", { rules: state.lyricsExcludeRules }).catch(
           (err) => console.warn("同步歌词排除规则失败", err)
         );
+      }
+      // B2：显示选项（隐藏制作信息 / 忽略文件 offset）同样在 Rust 侧投影，非默认值才需同步
+      if (isTauriRuntime() && (!state.showLyricsCredits || state.ignoreLyricsFileOffset)) {
+        void invoke("set_lyrics_display_options", {
+          options: lyricsDisplayOptionsOf(state),
+        }).catch((err) => console.warn("同步歌词显示选项失败", err));
       }
     }).catch((err) => {
       if (cancelled) return;

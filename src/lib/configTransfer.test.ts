@@ -22,6 +22,8 @@ function seedPlayerState() {
         activeView: "analysis",
         smtcEnabled: true,
         rememberPlayback: false,
+        showLyricsCredits: false,
+        ignoreLyricsFileOffset: true,
         // 个人数据：不应进入导出
         liked: { "track-1": true },
         userPlaylists: [{ id: "p1", name: "歌单" }],
@@ -57,6 +59,9 @@ describe("config export / import (v0.4.8)", () => {
     const playerState = parsed.stores["seraph-player-state"].state;
     expect(playerState.volume).toBe(0.55);
     expect(playerState.shuffleMode).toBe(true);
+    // B2 显示选项随设置导出
+    expect(playerState.showLyricsCredits).toBe(false);
+    expect(playerState.ignoreLyricsFileOffset).toBe(true);
     expect(playerState).not.toHaveProperty("liked");
     expect(playerState).not.toHaveProperty("userPlaylists");
     expect(playerState).not.toHaveProperty("recentTrackIds");

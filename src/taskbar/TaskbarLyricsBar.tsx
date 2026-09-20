@@ -4,7 +4,7 @@ import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
 import { useSmoothTime } from "@/hooks/useSmoothTime";
 import {
-  activeVisibleIndex,
+  activeVisibleRange,
   hasWordTiming,
   isInIntermission,
   lyricsPositionMs,
@@ -345,10 +345,11 @@ export function TaskbarLyricsBar() {
     [track]
   );
   const lyricGroups = resolvedGroups.visible;
-  // 歌词定位按可听位置（毫秒；进度条 / seek 仍用原始 seconds）
+  // 歌词定位按可听位置（毫秒；进度条 / seek 仍用原始 seconds）。
+  // 单行条只展示主句（仍在唱的句子里最早开始的那句），对唱重叠时不切到后开始的句子。
   const lyricsMs = lyricsPositionMs(seconds, outputLatency);
   const activeIdx = useMemo(
-    () => activeVisibleIndex(resolvedGroups, lyricsMs),
+    () => activeVisibleRange(resolvedGroups, lyricsMs).primary,
     [resolvedGroups, lyricsMs]
   );
   // 原始歌词非空但全部被排除规则隐藏

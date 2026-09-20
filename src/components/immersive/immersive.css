@@ -85,6 +85,14 @@
 .immersive-lyric-typing { position: absolute; inset: 0; }
 .immersive-lyric-line small { display: block; font-size: 12px; line-height: 1.8; margin-top: 6px; font-family: var(--sans); }
 .immersive-lyric-line small.immersive-lyric-roman { font-style: italic; opacity: 0.75; margin-top: 2px; }
+/* 和声（TTML x-bg）：挂在主句下，衬线斜体、略小；活动时随主句一起按音节填色 */
+.immersive-lyric-line small.immersive-lyric-bg { font-family: var(--serif); font-style: italic; font-size: calc(var(--lyric-size) * 0.72); line-height: 1.5; margin-top: 4px; opacity: 0.8; }
+/* 制作信息块：整组小号等宽字、弱化，不参与打字机与逐字 */
+.immersive-lyric-line.is-credit { padding-block: 8px; }
+.immersive-lyric-credit { display: block; font-family: var(--tw); font-size: 11px; letter-spacing: 1px; line-height: 1.9; color: var(--ink3); }
+.immersive-lyric-line.is-credit.is-current { font-size: var(--lyric-size); }
+.immersive-lyric-line.is-credit.is-current .immersive-lyric-credit { color: var(--ink2); }
+.immersive-lyric-line.is-credit.is-current::before { display: none; }
 .immersive-lyric-line.is-distant { color: var(--ink3); }
 .immersive-lyric-line.is-current { font-size: calc(var(--lyric-size) + 4px); color: var(--stamp); transition: opacity 600ms ease; }
 /* 间奏：当前句唱完且距下一句尚远（逐字来源带行结束时间）时淡出，避免长间奏一直高亮 */

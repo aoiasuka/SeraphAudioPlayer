@@ -6,6 +6,7 @@
 mod amll;
 mod commands;
 mod deletion;
+mod display;
 mod dsd_tags;
 mod exclude;
 mod local_lyrics;

@@ -109,6 +109,7 @@ fn matches_any(compiled: &[Compiled], value: &str) -> bool {
 }
 
 /// 按当前规则给歌词打 `hidden` 标记（原地）。无规则时不动，O(1) 返回。
+/// 回传前的完整投影（含制作信息隐藏与 offset 还原）见 `display::project_document`。
 pub(crate) fn mark_hidden(lyrics: &mut [LyricLine]) {
     let compiled = RULES
         .read()
@@ -131,23 +132,19 @@ pub(crate) fn mark_hidden(lyrics: &mut [LyricLine]) {
     }
 }
 
-/// 给整份文档打标（回传前）。
-pub(crate) fn mark_hidden_document(document: &mut LyricDocument) {
-    mark_hidden(&mut document.lines);
-}
-
-pub(crate) fn marked(mut lyrics: LyricDocument) -> LyricDocument {
-    mark_hidden(&mut lyrics.lines);
-    lyrics
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // 规则是进程级全局，测试串行以免互相干扰
+    // 规则与显示选项都是进程级全局，涉及它们的测试串行以免互相干扰
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn rule(kind: &str, pattern: &str) -> LyricsExcludeRule {
         LyricsExcludeRule {
@@ -159,7 +156,7 @@ mod tests {
 
     #[test]
     fn keyword_is_case_insensitive_and_regex_uses_rust_syntax() {
-        let _guard = SERIAL.lock().unwrap();
+        let _guard = serial_guard();
         let statuses = replace_rules(&[
             rule("keyword", "HELLO"),
             rule("regex", r"^(作词|作曲)\s*[:：]"),
@@ -190,7 +187,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_lookaround_backrefs_and_empty() {
-        let _guard = SERIAL.lock().unwrap();
+        let _guard = serial_guard();
         let statuses = validate_rules(&[
             rule("regex", "(?=x)"),
             rule("regex", r"(a)\1"),
@@ -209,7 +206,7 @@ mod tests {
 
     #[test]
     fn bad_rules_are_skipped_not_fatal() {
-        let _guard = SERIAL.lock().unwrap();
+        let _guard = serial_guard();
         let statuses = replace_rules(&[rule("regex", "("), rule("keyword", "跳过我")]);
         assert!(statuses[0].error.is_some() && statuses[1].error.is_none());
         let mut lines = vec![LyricLine::new(0, "请跳过我"), LyricLine::new(1000, "留下")];

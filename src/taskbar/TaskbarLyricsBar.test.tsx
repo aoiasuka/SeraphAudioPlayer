@@ -157,4 +157,25 @@ describe("任务栏歌词排除规则", () => {
     expect(await screen.findByText("— 歌词已被排除规则隐藏 —")).toBeTruthy();
     expect(screen.queryByText("— 暂无歌词稿 —")).toBeNull();
   });
+
+  it("对唱重叠时单行条停留在先开始的主句，不切到后开始的句子", async () => {
+    const duet = {
+      ...trackA,
+      lyrics: lyricDocument([
+        { startMs: 10000, endMs: 20000, text: "You sing first", agent: "v1" },
+        { startMs: 15000, endMs: 25000, text: "Then I join", agent: "v2" },
+      ]),
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_playback_snapshot") return { ...snapshotA, seconds: 11 };
+      if (command === "get_track_info") return duet;
+    });
+    render(<TaskbarLyricsBar />);
+    await screen.findByText("You sing first");
+    emit({ type: "progress", track_id: "a", seconds: 16, total: 180 });
+    expect(screen.getByText("You sing first")).toBeTruthy();
+    expect(screen.queryByText("Then I join")).toBeNull();
+    emit({ type: "progress", track_id: "a", seconds: 21, total: 180 });
+    expect(screen.getByText("Then I join")).toBeTruthy();
+  });
 });

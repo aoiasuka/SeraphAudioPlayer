@@ -145,6 +145,10 @@ export interface PersistedPlayerState {
   showLyricsRoman: boolean;
   /** 本地歌词目录（绝对路径，空串 = 未设置）；切歌时按「艺术家 - 曲名」自动匹配 */
   lyricsFolder: string;
+  /** B2：显示制作信息行（作词 / 作曲…）；关闭后由后端按 hidden 打标，主窗口与任务栏一致 */
+  showLyricsCredits: boolean;
+  /** B2：忽略歌词文件里的 `[offset:]` 标签（后端回传前还原解析时折进去的偏移） */
+  ignoreLyricsFileOffset: boolean;
 }
 
 export interface PlaybackQueuePreview {
@@ -192,6 +196,8 @@ export interface PlayerStore {
   showLyricsTranslation: boolean;
   showLyricsRoman: boolean;
   lyricsFolder: string;
+  showLyricsCredits: boolean;
+  ignoreLyricsFileOffset: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -291,7 +297,13 @@ export interface PlayerStore {
   setShowLyricsTranslation: (enabled: boolean) => void;
   setShowLyricsRoman: (enabled: boolean) => void;
   setLyricsFolder: (folder: string) => void;
-  /** 把 9 个歌词设置字段恢复默认；排除规则经 setLyricsExcludeRules 清空以同步后端。 */
+  /** 显示制作信息行；经 set_lyrics_display_options 同步后端（后端广播重拉） */
+  setShowLyricsCredits: (enabled: boolean) => void;
+  /** 忽略歌词文件里的 [offset:]；同上 */
+  setIgnoreLyricsFileOffset: (enabled: boolean) => void;
+  /** 切换当前曲目歌词的「固定」标记（固定 = 自动流程不替换）；成功返回 true */
+  setCurrentTrackLyricsPinned: (pinned: boolean) => Promise<boolean>;
+  /** 把 11 个歌词设置字段恢复默认；排除规则经 setLyricsExcludeRules 清空、显示选项经 IPC 同步后端。 */
   resetLyricsSettings: () => void;
   /** 在本地歌词目录里匹配并写入该曲目的歌词；命中返回 true */
   findLocalLyricsForTrack: (track: Track) => Promise<boolean>;

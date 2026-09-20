@@ -23,3 +23,29 @@ export function lyricLines(track: Pick<Track, "lyrics"> | null | undefined): Lyr
 export function hasLyrics(track: Pick<Track, "lyrics"> | null | undefined): boolean {
   return lyricLines(track).length > 0;
 }
+
+const SOURCE_KIND_LABEL: Record<LyricSource["kind"], string> = {
+  unknown: "来源未知",
+  embedded: "音频内嵌",
+  sidecar: "同名歌词文件",
+  folder: "本地歌词目录",
+  manual: "手动导入",
+  online: "在线匹配",
+  ttml: "AMLL TTML",
+  legacy: "旧版曲库",
+};
+
+const PROVIDER_LABEL: Record<string, string> = {
+  netease: "网易云音乐",
+  kugou: "酷狗音乐",
+  qq: "QQ 音乐",
+  amll: "AMLL",
+};
+
+/** 来源的人类可读说明，如「在线匹配（网易云音乐）」；曲目信息弹窗与歌词稿菜单用。 */
+export function describeLyricSource(source: LyricSource | null | undefined): string {
+  if (!source) return SOURCE_KIND_LABEL.unknown;
+  const base = SOURCE_KIND_LABEL[source.kind] ?? SOURCE_KIND_LABEL.unknown;
+  const provider = source.provider ? PROVIDER_LABEL[source.provider] ?? source.provider : "";
+  return provider && source.kind !== "ttml" ? `${base}（${provider}）` : base;
+}

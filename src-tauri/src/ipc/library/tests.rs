@@ -701,6 +701,35 @@ fn merge_preserves_cached_lyrics_when_reimport_has_none() {
 }
 
 #[test]
+fn reimport_replaces_unpinned_lyrics_but_keeps_pinned_ones() {
+    let sidecar = LyricDocument::from_lines(
+        vec![LyricLine::new(1000, "fresh sidecar")],
+        LyricSource::of(LyricSourceKind::Sidecar),
+    );
+    let mut imported = test_imported_track("new", "c:/music/a.flac", "Updated");
+    imported.lyrics = sidecar.clone();
+
+    // 未固定（之前扫到的内嵌歌词）→ 本次扫出的 sidecar 替换
+    let mut cached = test_imported_track("old", "C:/Music/a.flac", "Old");
+    cached.lyrics = LyricDocument::from_lines(
+        vec![LyricLine::new(1500, "embedded")],
+        LyricSource::of(LyricSourceKind::Embedded),
+    );
+    let merged = merge_cached_tracks(vec![cached.clone()], std::slice::from_ref(&imported));
+    assert_eq!(merged[0].lyrics, sidecar);
+
+    // 用户手动导入 / 明确应用过（pinned）→ 重新导入不得覆盖
+    let mut manual = LyricSource::of(LyricSourceKind::Manual);
+    manual.pinned = true;
+    cached.lyrics = LyricDocument::from_lines(vec![LyricLine::new(1500, "user's choice")], manual);
+    let merged = merge_cached_tracks(vec![cached.clone()], std::slice::from_ref(&imported));
+    assert_eq!(merged[0].lyrics, cached.lyrics);
+    assert_eq!(merged[0].title, "Updated", "其余元数据照常更新");
+    assert!(!lyrics_replaceable_by_auto(&cached.lyrics));
+    assert!(lyrics_replaceable_by_auto(&LyricDocument::EMPTY));
+}
+
+#[test]
 fn removes_cached_track_by_id() {
     let tracks = vec![
         test_imported_track("a", "C:/Music/a.flac", "A"),
@@ -1077,6 +1106,7 @@ fn sidecar_lookup_prefers_ttml_over_lrc() {
     assert_eq!(lyrics.lines[0].text, "word");
     assert!(lyrics.lines[0].words.is_some());
     assert_eq!(lyrics.source.kind, LyricSourceKind::Sidecar);
+    assert_eq!(lyrics.offset_ms, 0);
     assert_eq!(lyrics.sync, LyricSync::Word);
 
     // 大小写不同的 stem（Windows 上精确分支即命中，返回 `SONG.ttml`）同样按 ttml 优先
@@ -1086,6 +1116,13 @@ fn sidecar_lookup_prefers_ttml_over_lrc() {
     assert!(found
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ttml")));
+
+    // LRC sidecar 的 [offset:] 记进文档（时间已折进去）
+    fs::remove_file(dir.join("song.ttml")).unwrap();
+    fs::write(dir.join("song.lrc"), "[offset:-250]\n[00:01.00]line level").unwrap();
+    let lyrics = external_lrc_lyrics(&audio).expect("lrc sidecar");
+    assert_eq!(lyrics.offset_ms, -250);
+    assert_eq!(lyrics.lines[0].start_ms, 1250);
     let _ = fs::remove_dir_all(&dir);
 }
 

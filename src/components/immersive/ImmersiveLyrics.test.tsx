@@ -159,4 +159,41 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     act(() => usePlayerStore.setState({ playlist: [{ ...track, lyrics: lyricDocument([]) }] }));
     expect(immersive.getByText("暂无歌词")).toBeInTheDocument();
   });
+
+  it("对唱重叠时两句同时 aria-current，主句先开始的那句；和声与制作信息块按角色渲染", () => {
+    usePlayerStore.setState({
+      playlist: [{
+        ...track,
+        lyrics: lyricDocument([
+          { startMs: 0, text: "作词：某人", role: "credit" },
+          { startMs: 0, text: "作曲：某人", role: "credit" },
+          { startMs: 10000, endMs: 20000, text: "You sing first", agent: "v1" },
+          { startMs: 12000, endMs: 16000, text: "(ooh)", role: "background" },
+          { startMs: 15000, endMs: 25000, text: "Then I join", agent: "v2" },
+          { startMs: 40000, text: "Outro" },
+        ]),
+      }],
+      currentTime: 16,
+    });
+    render(<Harness />);
+    const immersive = within(screen.getByRole("region", { name: "沉浸播放" }));
+    const first = immersive.getByRole("button", { name: /You sing first/ });
+    const second = immersive.getByRole("button", { name: /Then I join/ });
+    expect(first).toHaveAttribute("aria-current", "true");
+    expect(second).toHaveAttribute("aria-current", "true");
+    expect(immersive.getByRole("button", { name: /Outro/ })).not.toHaveAttribute("aria-current");
+    // 和声挂在第一句按钮内
+    expect(first).toHaveTextContent("(ooh)");
+    // 制作信息：两行一个按钮，带 is-credit
+    const credits = immersive.getByRole("button", { name: /作词：某人/ });
+    expect(credits).toHaveTextContent("作曲：某人");
+    expect(credits.className).toContain("is-credit");
+    expect(credits).not.toHaveAttribute("aria-current");
+    // 译文开关：制作信息块不算译文形态
+    expect(immersive.getByRole("button", { name: "显示译文" })).toBeDisabled();
+
+    act(() => usePlayerStore.setState({ currentTime: 21 }));
+    expect(first).not.toHaveAttribute("aria-current");
+    expect(second).toHaveAttribute("aria-current", "true");
+  });
 });

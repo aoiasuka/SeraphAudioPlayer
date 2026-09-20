@@ -170,6 +170,9 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     showLyricsTranslation: state.showLyricsTranslation !== false,
     showLyricsRoman: state.showLyricsRoman === true,
     lyricsFolder: typeof state.lyricsFolder === "string" ? state.lyricsFolder.trim() : "",
+    // B2：制作信息默认显示（升级不改变既有可见内容）；忽略文件 offset 默认关
+    showLyricsCredits: state.showLyricsCredits !== false,
+    ignoreLyricsFileOffset: state.ignoreLyricsFileOffset === true,
   };
 }
 
@@ -218,6 +221,8 @@ export const usePlayerStore = create<PlayerStore>()(
         showLyricsTranslation: true,
         showLyricsRoman: false,
         lyricsFolder: "",
+        showLyricsCredits: true,
+        ignoreLyricsFileOffset: false,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -250,8 +255,10 @@ export const usePlayerStore = create<PlayerStore>()(
             showLyricsRoman: false,
             lyricsFolder: "",
           });
-          // 排除规则匹配在 Rust 侧，必须走 action 让后端同步并广播重拉
+          // 排除规则匹配与显示投影都在 Rust 侧，必须走 action 让后端同步并广播重拉
           storeGet().setLyricsExcludeRules([]);
+          storeGet().setShowLyricsCredits(true);
+          storeGet().setIgnoreLyricsFileOffset(false);
           storeGet().showNotification("歌词设置已恢复默认");
         },
       };
@@ -306,6 +313,8 @@ export const usePlayerStore = create<PlayerStore>()(
         showLyricsTranslation: state.showLyricsTranslation,
         showLyricsRoman: state.showLyricsRoman,
         lyricsFolder: state.lyricsFolder,
+        showLyricsCredits: state.showLyricsCredits,
+        ignoreLyricsFileOffset: state.ignoreLyricsFileOffset,
       }),
     }
   )

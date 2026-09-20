@@ -29,11 +29,14 @@ export interface LyricLine {
   translations?: LyricText[];
   /** 音译 / 罗马音。 */
   roman?: LyricText;
-  /** 行角色：主唱 / 和声 / 制作信息（缺省 main；暂只存不渲染）。 */
+  /**
+   * 行角色（缺省 main）：和声（TTML `x-bg`，挂在所在主句下渲染）/ 制作信息（自成一组，
+   * 「显示制作信息」关闭时由后端按 `hidden` 打标）。
+   */
   role?: LyricRole;
-  /** TTML 对唱 agent。 */
+  /** TTML 对唱 agent；同起点、agent 不同的两条主句是对唱而不是双语。 */
   agent?: string;
-  /** 被歌词排除规则命中（后端打标，仅显示层使用）。 */
+  /** 被歌词排除规则命中或被显示选项隐藏（后端打标，仅显示层使用）。 */
   hidden?: boolean;
 }
 
@@ -53,7 +56,7 @@ export interface LyricSource {
   providerTrackId?: string;
   /** AMLL TTML DB 查找键（如 `ncm-lyrics/65923804`）。 */
   lookupKeys?: string[];
-  /** 用户手动导入 / 明确应用 = 固定选择。 */
+  /** 用户手动导入 / 明确应用 = 固定选择：重新导入与歌词目录匹配不替换；歌词稿右键菜单可切换。 */
   pinned?: boolean;
   fetchedAt?: number;
 }
@@ -65,8 +68,15 @@ export interface LyricDocument {
   schema: number;
   source: LyricSource;
   sync: LyricSync;
+  /** 解析时折进各行时间的文件 `[offset:]`（毫秒）；「忽略文件 offset」开启时后端回传前已还原。 */
   offsetMs: number;
   lines: LyricLine[];
+}
+
+/** 歌词显示选项（后端回传前投影，主窗口与任务栏一致；与 Rust `LyricsDisplayOptions` 同形）。 */
+export interface LyricsDisplayOptions {
+  ignoreFileOffset: boolean;
+  showCredits: boolean;
 }
 
 export type LyricsSourcePriority = "auto" | "netease" | "kugou" | "qq";
