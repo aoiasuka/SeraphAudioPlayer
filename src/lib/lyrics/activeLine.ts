@@ -34,11 +34,13 @@ function sameStart(a: number, b: number) {
 /** 组的最晚结束时间（含和声）；没有可靠结束时间则 undefined。 */
 export function groupEnd(group: LyricGroup): number | undefined {
   let end: number | undefined;
-  for (const line of [...group.lines, ...group.background]) {
+  const consider = (line: LyricLine) => {
     if (typeof line.endMs === "number" && Number.isFinite(line.endMs) && line.endMs > group.startMs) {
       end = end === undefined ? line.endMs : Math.max(end, line.endMs);
     }
-  }
+  };
+  for (const line of group.lines) consider(line);
+  for (const line of group.background) consider(line);
   return end;
 }
 
@@ -74,9 +76,15 @@ export function groupLyricsByTime(lyrics: LyricLine[]): LyricGroup[] {
         previous.lines.push(line);
         continue;
       }
-      // 双语兜底：同起点、两条主唱、agent 一致（或都没有）才合并；对唱各自成组
+      // 双语兜底：同起点、两条主唱、agent 一致（或都没有）才合并；对唱各自成组。
+      // 带逐字时间轴的那条做主句（lines[0]）：LDDC 默认按「音译、原文、译文」顺序写文件，
+      // 否则罗马音会被当成主句大字显示、真正的原文降级成小字且丢掉逐字高亮。
       if (role === "main" && headRole === "main" && (head.agent ?? "") === (line.agent ?? "")) {
-        previous.lines.push(line);
+        if (hasWordTiming(line) && !hasWordTiming(head)) {
+          previous.lines.unshift(line);
+        } else {
+          previous.lines.push(line);
+        }
         continue;
       }
     }

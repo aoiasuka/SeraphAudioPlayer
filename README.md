@@ -219,7 +219,7 @@ Rust 审计需先安装 `cargo-audit`，并在仓库根目录执行。既有的 
 
 CI 与发布工作流的 Cargo 命令都带 `--locked`，锁文件需要更新时检查会明确失败，请把 `Cargo.lock` 变更与代码一起提交。
 
-截至 v0.6.1，自动化回归为前端 **309 项**、Rust **379 项**，合计 **688 项**。覆盖歌词解析（LRC / 增强 LRC / 逐字 LRC / QRC / KRC / YRC / TTML 含和声容器）、QQ 密文解密与三源载荷、译文 / 音译副轨对齐与候选排序、旧曲库迁移与清单版本升级、LRC 导出与往返、间奏判定、角色分组与多活动区间、显示投影（制作信息隐藏 / 文件 offset 还原）、固定来源策略、排除规则与隐藏句定位、AMLL 地址守卫与缓存、批量删除与重试、流媒体缓存文件处理、沉浸播放入口与键盘操作、歌词定位与在线匹配、进度拖动、队列检索，以及分析冻结、隐藏窗口和切歌时的帧生命周期。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
+截至 v0.6.2，自动化回归为前端 **310 项**、Rust **394 项**，合计 **704 项**。覆盖歌词解析（LRC / 增强 LRC / 逐字 LRC / QRC / KRC / YRC / TTML 含和声容器）、QQ 密文解密与三源载荷、译文 / 音译副轨对齐与候选排序、旧曲库迁移与清单版本升级、LRC 导出与往返、间奏判定、角色分组与多活动区间、显示投影（制作信息隐藏 / 文件 offset 还原）、固定来源策略、排除规则与隐藏句定位、AMLL 地址守卫与缓存、系统工具路径存在性、批量删除与重试、流媒体缓存文件处理、沉浸播放入口与键盘操作、歌词定位与在线匹配、进度拖动、队列检索，以及分析冻结、隐藏窗口和切歌时的帧生命周期。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
 
 沉浸界面已在浏览器中检查 960×600、1280×720 的两种模式，以及 1920×1080 的歌词模式；声场绘制完成 100%、125%、150%、200% 缩放下的离屏对比，使用同一组合成 PCM 经实际 Rust 分析引擎抽样。真实声卡播放、设备切换与用户曲库迁移尚未桌面实测。
 
@@ -228,6 +228,7 @@ CI 与发布工作流的 Cargo 命令都带 `--locked`，锁文件需要更新�
 ```bash
 npm run benchmark:optimizations   # 前端资源体积、合成曲库搜索排序、队列同步编码
 npm run benchmark:analysis        # Rust 响度历史快照（在 target 下生成 harness）
+npm run benchmark:lyrics          # 歌词解析（LRC / QRC / YRC / KRC / TTML / 加密 QRC / 曲库 JSON，release 构建）
 ```
 
 结果分别写入 `target/optimization-frontend-benchmark.json` 与 `target/optimization-analysis-benchmark.json`。这是合成数据上的微基准，不代表真实桌面交互延迟或整机 CPU。
@@ -277,6 +278,15 @@ target/release/bundle/msi/
 正式发布的安装包由 GitHub Actions 的 Release 工作流构建并上传；本地构建产物、构建日志与核对记录位于 `target/`，不随 Git 提交。
 
 ## 版本记录
+
+### v0.6.2
+
+歌词解析模型审计与性能专版：用 1 279 份真实加密 QRC 全量筛查并修正 9 处解析 / 显示缺陷，解析链路重写为无分配单趟实现（真实语料 4.5× 提速），修复「前往下载」「在资源管理器中显示」自 v0.5.7 起的静默失败。详见 [v0.6.2 发布说明](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.2)。
+
+- **更新功能**：explorer.exe 本体在 `%SystemRoot%` 而非 System32，`open_release_page` / `reveal_in_explorer` 改按真实位置解析并加 Windows 存在性回归闸；GitHub 匿名限流给出可读提示。
+- **解析缺陷**：QRC 元数据未转义引号截断（真实缓存 24 份受影响）、YRC 含 `<` 误判 KRC、TTML 空白音节丢失与 `<br/>` 粘连、实体双重解码与数字实体、双语 LRC 音译行在前时主句错位、QQ 音译轨丢逐字时间轴、QQ 译文版权行、上限不覆盖音节 / 副轨、offset 还原溢出。
+- **性能**：清洗单趟化、时间标签 / 元组无分配、字节解码借用与 UTF-16 嗅探采样、QQ 3DES 查表化 + 密钥展开缓存、`LyricDocument` 流式反序列化、目录匹配归一化提升、逐字平滑时钟移入当前行组件；新增 `npm run benchmark:lyrics`。
+- **回归覆盖**：前端 309 → 310，Rust 379 → 394。
 
 ### v0.6.1
 

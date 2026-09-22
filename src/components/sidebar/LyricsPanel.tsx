@@ -12,12 +12,10 @@ import { CloudDownload, Copy, Download, Loader2, Pin, PinOff, Search, Upload } f
 import { Dialog } from "@/components/ui/dialog";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
-import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { copyText } from "@/lib/clipboard";
 import { candidateBadges } from "@/lib/lyrics/candidate";
 import {
   activeVisibleRange,
-  groupHasWordTiming,
   hasWordTiming,
   isInIntermission,
   lyricsPositionMs,
@@ -120,8 +118,6 @@ export function LyricsPanel() {
   // 主句（滚动与逐字锚定）+ 仍在唱的更早句（对唱重叠 / 和声延续）一起高亮
   const activeIdx = activeRange.primary;
   const activeSet = useMemo(() => new Set(activeRange.active), [activeRange]);
-  const activeHasWords = activeRange.active.some((index) => groupHasWordTiming(lyricGroups[index]));
-  const smoothMs = useSmoothTime(currentMs, isPlaying, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
   const intermission = useMemo(
     () => isInIntermission(resolvedGroups, activeIdx, currentMs),
@@ -522,7 +518,8 @@ export function LyricsPanel() {
                                 hasWordTiming(line) ? (
                                   <KaraokeLine
                                     words={line.words}
-                                    currentMs={smoothMs}
+                                    currentMs={currentMs}
+                                    playing={isPlaying}
                                     lineEndMs={line.endMs}
                                   />
                                 ) : (
@@ -569,7 +566,8 @@ export function LyricsPanel() {
                               {active && hasWordTiming(line) ? (
                                 <KaraokeLine
                                   words={line.words}
-                                  currentMs={smoothMs}
+                                  currentMs={currentMs}
+                                  playing={isPlaying}
                                   lineEndMs={line.endMs}
                                   sungColor="var(--ink2)"
                                   unsungColor="rgba(43, 39, 34, 0.3)"

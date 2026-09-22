@@ -3,8 +3,7 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
-import { useSmoothTime } from "@/hooks/useSmoothTime";
-import { activeVisibleRange, groupHasWordTiming, hasWordTiming, isInIntermission, lyricsPositionMs, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { activeVisibleRange, hasWordTiming, isInIntermission, lyricsPositionMs, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
 import { lyricLines } from "@/lib/lyrics/document";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
@@ -55,10 +54,10 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     return group.lines.length > 1 || (main.translations?.length ?? 0) > 0;
   });
   const activeSet = useMemo(() => new Set(active), [active]);
-  const activeHasWords = active.some((index) => groupHasWordTiming(groups[index]));
+  // 逐字锚点：只有活动句带逐字时间轴时才订阅播放位置（否则整篇列表不必随进度重渲染）
+  const activeHasWords = active.some((index) => hasWordTiming(groups[index]?.lines[0]) || (groups[index]?.background ?? []).some((line) => hasWordTiming(line)));
   const currentMs = usePlayerStore((s) => (activeHasWords ? lyricsPositionMs(s.currentTime, s.outputLatency) : 0));
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const smoothMs = useSmoothTime(currentMs, isPlaying, activeHasWords);
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -140,7 +139,8 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                         hasWordTiming(main) ? (
                           <KaraokeLine
                             words={main.words}
-                            currentMs={smoothMs}
+                            currentMs={currentMs}
+                            playing={isPlaying}
                             lineEndMs={main.endMs}
                             sungColor="var(--stamp)"
                             unsungColor="rgba(181, 72, 42, 0.32)"
@@ -160,7 +160,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                   {group.background.map((line, bgIndex) => (
                     <small key={`bg-${bgIndex}`} className="immersive-lyric-bg">
                       {isCurrent && hasWordTiming(line) ? (
-                        <KaraokeLine words={line.words} currentMs={smoothMs} lineEndMs={line.endMs} sungColor="var(--stamp)" unsungColor="rgba(181, 72, 42, 0.32)" />
+                        <KaraokeLine words={line.words} currentMs={currentMs} playing={isPlaying} lineEndMs={line.endMs} sungColor="var(--stamp)" unsungColor="rgba(181, 72, 42, 0.32)" />
                       ) : line.text}
                     </small>
                   ))}

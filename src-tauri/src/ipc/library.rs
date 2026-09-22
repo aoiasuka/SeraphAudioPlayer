@@ -4,6 +4,8 @@
 //! 索引且可见性没有边界；现改为真模块树，跨模块共享项收敛到 [`prelude`]。
 
 mod amll;
+#[cfg(test)]
+mod audit_tests;
 mod commands;
 mod deletion;
 mod display;
@@ -12,6 +14,8 @@ mod exclude;
 mod local_lyrics;
 mod lrc_export;
 mod lyrics;
+#[cfg(test)]
+mod lyrics_bench;
 mod media_library;
 mod metadata;
 mod online_covers;

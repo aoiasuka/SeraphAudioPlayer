@@ -60,8 +60,12 @@ pub(crate) fn project_document_with(document: &mut LyricDocument, options: Lyric
 
 /// 全部行 / 音节 / 副轨音节的时间整体平移（毫秒，可负；结果不小于 0）。
 fn shift_lines(lines: &mut [LyricLine], delta_ms: i64) {
-    let shift =
-        |ms: u64| -> u64 { (i64::try_from(ms).unwrap_or(i64::MAX) + delta_ms).max(0) as u64 };
+    let shift = |ms: u64| -> u64 {
+        i64::try_from(ms)
+            .unwrap_or(i64::MAX)
+            .saturating_add(delta_ms)
+            .max(0) as u64
+    };
     let shift_words = |words: &mut Vec<LyricWord>| {
         for word in words {
             word.start_ms = shift(word.start_ms);

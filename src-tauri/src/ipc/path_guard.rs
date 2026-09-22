@@ -24,6 +24,20 @@ pub(crate) fn system32_tool(name: &str) -> PathBuf {
     }
 }
 
+/// `%SystemRoot%\explorer.exe` 绝对路径（打开 URL / 定位文件都靠它）。
+///
+/// 2026-09-22 教训：explorer.exe **不在 System32**（那里只有 SysWOW64 的 32 位副本与
+/// `%SystemRoot%` 根目录下的 64 位本体），`system32_tool("explorer.exe")` 从 v0.5.7 起一直
+/// 指向不存在的文件，「前往下载」与「在资源管理器中显示」静默失败。系统工具路径必须
+/// 按各自真实位置解析，回归闸 `resolved_system_tools_actually_exist` 在 Windows 上实测存在性。
+#[cfg(windows)]
+pub(crate) fn explorer_exe() -> PathBuf {
+    match std::env::var_os("SystemRoot") {
+        Some(root) if !root.is_empty() => Path::new(&root).join("explorer.exe"),
+        _ => PathBuf::from("explorer.exe"),
+    }
+}
+
 /// F-02：**写入**类 IPC 的路径校验。
 ///
 /// 路径正常来自 dialog 选择结果,但命令边界不校验的话,任一渲染进程被攻破即等于
@@ -127,6 +141,15 @@ pub(crate) fn validate_import_path(raw: &str, allowed_extensions: &[&str]) -> Ip
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn resolved_system_tools_actually_exist() {
+        // 2026-09-22：explorer.exe 不在 System32（只有 SysWOW64 与 %SystemRoot% 根目录），
+        // `system32_tool("explorer.exe")` 让「前往下载」「在资源管理器中显示」从 v0.5.7 起一直失败
+        assert!(explorer_exe().is_file(), "{}", explorer_exe().display());
+        assert!(system32_tool("icacls.exe").is_file());
+    }
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir()

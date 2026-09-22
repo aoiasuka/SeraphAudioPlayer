@@ -1,12 +1,15 @@
 import { useMemo } from "react";
+import { useSmoothTime } from "@/hooks/useSmoothTime";
 import { wordProgress } from "@/lib/lyrics/activeLine";
 import { cn } from "@/lib/utils";
 import type { LyricWord } from "@/types/track";
 
 interface KaraokeLineProps {
   words: LyricWord[];
-  /** 平滑后的播放位置（毫秒） */
+  /** 播放位置锚点（毫秒，可听位置）；平滑外推在组件内部完成 */
   currentMs: number;
+  /** 播放中才按墙钟外推；暂停时冻结在锚点 */
+  playing?: boolean;
   /** 行终点（毫秒）：末音节终点未知时的兜底 */
   lineEndMs?: number;
   className?: string;
@@ -21,19 +24,24 @@ interface KaraokeLineProps {
 
 /**
  * 逐字歌词行：每个音节用 background-clip 渐变按进度从左到右“填色”。
- * 只依赖 currentMs 与 words，父组件只在当前行挂载它。
+ *
+ * 平滑时钟（`useSmoothTime`，rAF 每帧外推）**只在这里**跑：此前由父组件持有 `smoothMs`，
+ * 每一帧都让整篇歌词列表（几百行）重渲染一次；现在 60 fps 的更新只落在当前行的音节 span 上，
+ * 父组件只随后端 Progress 事件（约 10 Hz）重渲染（2026-09-22）。父组件只在当前行挂载它。
  */
 export function KaraokeLine({
   words,
   currentMs,
+  playing = false,
   lineEndMs,
   className,
   sungColor = "var(--ink)",
   unsungColor = "rgba(43, 39, 34, 0.35)",
 }: KaraokeLineProps) {
+  const smoothMs = useSmoothTime(currentMs, playing);
   const progress = useMemo(
-    () => wordProgress(words, currentMs, lineEndMs),
-    [words, currentMs, lineEndMs]
+    () => wordProgress(words, smoothMs, lineEndMs),
+    [words, smoothMs, lineEndMs]
   );
   return (
     <span className={cn("karaoke-line", className)} data-testid="karaoke-line">

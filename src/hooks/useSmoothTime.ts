@@ -6,7 +6,8 @@ import { useEffect, useRef, useState } from "react";
  * store 的播放位置由后端 Progress 事件驱动（百毫秒级），直接拿来驱动
  * 音节高亮会一顿一顿。这里以最近一次位置为锚点，播放中用 rAF 按
  * 墙钟外推，暂停/未播放时冻结在锚点；每次锚点更新都重新校准，不会漂移。
- * 只在需要逐字渲染的当前行挂载，rAF 循环不会常驻。
+ * 只在 `KaraokeLine` 内部使用（2026-09-22 起）：rAF 每帧的 setState 只重渲染当前行的
+ * 音节，不再牵动整篇歌词列表；rAF 循环随当前行卸载而停止，不会常驻。
  */
 export function useSmoothTime(currentMs: number, playing: boolean, enabled = true) {
   const [smooth, setSmooth] = useState(currentMs);

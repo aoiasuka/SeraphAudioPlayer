@@ -122,54 +122,78 @@ pub(crate) fn parse_lyrics_file_stem(
     }
 }
 
-fn artist_matches(file_artist: &str, track_artist: &str) -> bool {
-    let file = normalize_for_match(file_artist);
-    if file.is_empty() {
-        return true;
-    }
-    let track = normalize_for_match(track_artist);
-    if track.is_empty() || track == "unknown" {
-        return true;
-    }
-    // 多艺术家 `A / B`、`A&B` 任一匹配即可
-    track == file
-        || track.contains(&file)
-        || file.contains(&track)
-        || track_artist
-            .split(['/', '&', ',', '，', '、', ';'])
-            .any(|part| normalize_for_match(part) == file)
+/// 曲目侧的归一化结果，整个目录扫描只算一次（此前每个候选文件都重算 4 次曲名 / 艺术家归一化，
+/// 2 万条目的目录就是 8 万次分配）。
+struct TrackKey {
+    title_full: String,
+    title_base: String,
+    artist_norm: String,
+    artist_parts: Vec<String>,
 }
 
-/// 匹配分：0 = 不匹配；越高越优先。
+impl TrackKey {
+    fn new(track_title: &str, track_artist: &str) -> Self {
+        Self {
+            title_full: normalize_for_match(track_title),
+            title_base: normalize_for_match(strip_trailing_parens(track_title)),
+            artist_norm: normalize_for_match(track_artist),
+            artist_parts: track_artist
+                .split(['/', '&', ',', '，', '、', ';'])
+                .map(normalize_for_match)
+                .collect(),
+        }
+    }
+
+    fn artist_matches(&self, file_artist: &str) -> bool {
+        let file = normalize_for_match(file_artist);
+        if file.is_empty() {
+            return true;
+        }
+        let track = &self.artist_norm;
+        if track.is_empty() || track == "unknown" {
+            return true;
+        }
+        // 多艺术家 `A / B`、`A&B` 任一匹配即可
+        *track == file
+            || track.contains(&file)
+            || file.contains(track.as_str())
+            || self.artist_parts.contains(&file)
+    }
+
+    /// 匹配分：0 = 不匹配；越高越优先。
+    fn score(&self, file_artist: Option<&str>, file_title: &str) -> u8 {
+        let file_full = normalize_for_match(file_title);
+        if self.title_full.is_empty() || file_full.is_empty() {
+            return 0;
+        }
+        let title_score = if file_full == self.title_full {
+            3
+        } else if normalize_for_match(strip_trailing_parens(file_title)) == self.title_base {
+            2
+        } else {
+            0
+        };
+        if title_score == 0 {
+            return 0;
+        }
+        match file_artist {
+            Some(artist) if self.artist_matches(artist) => title_score + 2,
+            // 文件名带艺术家但对不上 → 不认
+            Some(_) => 0,
+            None => title_score,
+        }
+    }
+}
+
+/// 匹配分：0 = 不匹配；越高越优先（测试入口；扫描路径用 `TrackKey` 复用归一化结果）。
+#[cfg(test)]
 fn match_score(
     file_artist: Option<&str>,
     file_title: &str,
     track_title: &str,
     track_artist: &str,
 ) -> u8 {
-    let title_full = normalize_for_match(track_title);
-    let title_base = normalize_for_match(strip_trailing_parens(track_title));
-    let file_full = normalize_for_match(file_title);
-    let file_base = normalize_for_match(strip_trailing_parens(file_title));
-    if title_full.is_empty() || file_full.is_empty() {
-        return 0;
-    }
-    let title_score = if file_full == title_full {
-        3
-    } else if file_base == title_base {
-        2
-    } else {
-        0
-    };
-    if title_score == 0 {
-        return 0;
-    }
-    match file_artist {
-        Some(artist) if artist_matches(artist, track_artist) => title_score + 2,
-        // 文件名带艺术家但对不上 → 不认
-        Some(_) => 0,
-        None => title_score,
-    }
+    TrackKey::new(track_title, track_artist).score(file_artist, file_title)
 }
 
 /// 在目录里找最匹配的歌词文件：扫顶层 + 直接子目录（深度 1，不再往下），
@@ -180,6 +204,7 @@ pub(crate) fn find_in_folder(
     track_artist: &str,
 ) -> Option<(PathBuf, Vec<String>)> {
     let entries = fs::read_dir(folder).ok()?;
+    let key = TrackKey::new(track_title, track_artist);
     let mut best: Option<(u8, PathBuf, Vec<String>)> = None;
     let mut budget = MAX_DIR_ENTRIES;
     let mut subdirs: Vec<PathBuf> = Vec::new();
@@ -200,7 +225,7 @@ pub(crate) fn find_in_folder(
             subdirs.push(entry.path());
             continue;
         }
-        consider_lyrics_file(entry.path(), track_title, track_artist, &mut best);
+        consider_lyrics_file(entry.path(), &key, &mut best);
     }
 
     for subdir in subdirs {
@@ -219,7 +244,7 @@ pub(crate) fn find_in_folder(
             if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 continue;
             }
-            consider_lyrics_file(entry.path(), track_title, track_artist, &mut best);
+            consider_lyrics_file(entry.path(), &key, &mut best);
         }
     }
 
@@ -229,8 +254,7 @@ pub(crate) fn find_in_folder(
 /// 单个候选文件：扩展名过滤 → 文件名解析 → 打分，比当前最优高则替换。
 fn consider_lyrics_file(
     path: PathBuf,
-    track_title: &str,
-    track_artist: &str,
+    key: &TrackKey,
     best: &mut Option<(u8, PathBuf, Vec<String>)>,
 ) {
     let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
@@ -248,7 +272,7 @@ fn consider_lyrics_file(
     let Some((artist, title, ncm_id)) = parse_lyrics_file_stem(stem) else {
         return;
     };
-    let score = match_score(artist.as_deref(), &title, track_title, track_artist);
+    let score = key.score(artist.as_deref(), &title);
     if score == 0 {
         return;
     }

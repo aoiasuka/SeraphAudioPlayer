@@ -1,7 +1,7 @@
 {
   "name": "seraph-audio-player",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "description": "Premium local HiFi audio player — Rust + Tauri + React",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "vitest run",
     "benchmark:optimizations": "node scripts/benchmark-optimizations.mjs",
     "benchmark:analysis": "node scripts/benchmark-analysis.mjs",
+    "benchmark:lyrics": "node scripts/benchmark-lyrics.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",

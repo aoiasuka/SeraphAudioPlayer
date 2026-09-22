@@ -312,3 +312,16 @@ describe("lyricsPositionMs", () => {
     expect(lyricsPositionMs(Number.NaN, 0)).toBe(0);
   });
 });
+
+describe("2026-09-22 audit", () => {
+  it("same-start bilingual group: the word-synced line becomes the head (LDDC roma, orig, ts order)", () => {
+    const roman = { startMs: 5000, text: "kon ni chi wa" };
+    const orig = { startMs: 5000, endMs: 7000, text: "konnichiwa", words: [{ startMs: 5000, endMs: 7000, text: "konnichiwa" }] };
+    const ts = { startMs: 5000, text: "hello" };
+    const groups = groupLyricsByTime([roman, orig, ts]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].lines.map((l) => l.text)).toEqual(["konnichiwa", "kon ni chi wa", "hello"]);
+    const plain = groupLyricsByTime([{ startMs: 1, text: "a" }, { startMs: 1, text: "b" }]);
+    expect(plain[0].lines.map((l) => l.text)).toEqual(["a", "b"]);
+  });
+});

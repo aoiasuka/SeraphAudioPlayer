@@ -1,5 +1,4 @@
 use super::prelude::*;
-use super::qq_des::QqTripleDes;
 
 pub(crate) const QRC_MAGIC_HEADER: &[u8] = b"\x98%\xb0\xac\xe3\x02\x83h\xe8\xfcl";
 pub(crate) const KRC_MAGIC_HEADER: &[u8] = b"krc18";
@@ -23,6 +22,8 @@ pub(crate) const MAX_LYRIC_LINES: usize = 5_000;
 /// W-01：单行字符数上限。TypewriterText 按 30 ms/字符逐字 `slice`（每次 O(n) 重建），
 /// 单行接近 2 MB 时既跑不完（>16 小时）又每 30 ms 重建一次巨串 → UI 永久冻结。
 pub(crate) const MAX_LYRIC_LINE_CHARS: usize = 512;
+/// 单行译文轨数上限（网易云 ytlrc + tlyric 并存也只有 2 份；多余的是异常输入）。
+pub(crate) const MAX_LYRIC_TRANSLATIONS: usize = 4;
 
 pub(crate) fn parse_lyrics_bytes(bytes: &[u8]) -> Vec<LyricLine> {
     parse_lyrics_bytes_with_offset(bytes).0
@@ -35,14 +36,45 @@ pub(crate) fn parse_lyrics_bytes_with_offset(bytes: &[u8]) -> (Vec<LyricLine>, i
     (clamp_lyrics(lines), offset_ms)
 }
 
+/// 按字符截断（不按字节，避免把多字节字符切成半个——中文歌词必踩）。
+fn truncate_chars(text: &mut String, max_chars: usize) {
+    if let Some((index, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(index);
+    }
+}
+
 /// W-01：所有歌词来源（本地导入 / 在线抓取 / 外部 .lrc）都经 `parse_lyrics_bytes`
 /// 收口，所以上限只需在这一处施加。**新增歌词解析路径务必也走这里**。
+/// 音节、译文与音译同受上限：整行钳到 512 字符而音节不钳的话，KaraokeLine 照样渲染上千个 span。
 pub(crate) fn clamp_lyrics(mut lyrics: Vec<LyricLine>) -> Vec<LyricLine> {
     lyrics.truncate(MAX_LYRIC_LINES);
     for line in &mut lyrics {
-        // 按字符截断而不是字节，避免把多字节字符切成半个（中文歌词必踩）
-        if line.text.chars().count() > MAX_LYRIC_LINE_CHARS {
-            line.text = line.text.chars().take(MAX_LYRIC_LINE_CHARS).collect();
+        truncate_chars(&mut line.text, MAX_LYRIC_LINE_CHARS);
+        if let Some(words) = line.words.as_mut() {
+            // 音节按累计字符数截断：超出上限的音节整段丢弃（余量对应整行截断后的文本）
+            let mut budget = MAX_LYRIC_LINE_CHARS;
+            let mut keep = 0;
+            for word in words.iter_mut() {
+                let chars = word.text.chars().count();
+                if chars > budget {
+                    truncate_chars(&mut word.text, budget);
+                    keep += usize::from(budget > 0);
+                    break;
+                }
+                budget -= chars;
+                keep += 1;
+            }
+            words.truncate(keep);
+            if words.is_empty() {
+                line.words = None;
+            }
+        }
+        line.translations.truncate(MAX_LYRIC_TRANSLATIONS);
+        for translation in &mut line.translations {
+            truncate_chars(&mut translation.text, MAX_LYRIC_LINE_CHARS);
+        }
+        if let Some(roman) = line.roman.as_mut() {
+            truncate_chars(&mut roman.text, MAX_LYRIC_LINE_CHARS);
         }
     }
     lyrics
@@ -81,15 +113,18 @@ fn parse_lyrics_bytes_inner(bytes: &[u8]) -> (Vec<LyricLine>, i32) {
 }
 
 /// TTML 内容嗅探：去 BOM/前导空白后以 `<?xml` 或 `<tt` 开头，且开头一段里含 `<tt`
-/// （大小写不敏感）。只看前 8 K 字符，避免为嗅探把 4 MB 文本整份小写化。
+/// （大小写不敏感）。只看前 8 KB，且不为嗅探分配（此前每次解析都把 8K 字符小写化成新串）。
 pub(crate) fn looks_like_ttml(text: &str) -> bool {
     let trimmed = text.trim_start_matches('\u{feff}').trim_start();
-    let head = trimmed
-        .chars()
-        .take(8 * 1024)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    (head.starts_with("<?xml") || head.starts_with("<tt")) && head.contains("<tt")
+    let head = trimmed.as_bytes();
+    let head = &head[..head.len().min(8 * 1024)];
+    let starts_with_ci = |prefix: &[u8]| {
+        head.len() >= prefix.len() && head[..prefix.len()].eq_ignore_ascii_case(prefix)
+    };
+    (starts_with_ci(b"<?xml") || starts_with_ci(b"<tt"))
+        && head
+            .windows(3)
+            .any(|window| window.eq_ignore_ascii_case(b"<tt"))
 }
 
 /// 按扩展名分派的歌词文件解析：`.ttml` 走 TTML 解析（经 `clamp_lyrics` 收口），
@@ -190,7 +225,7 @@ fn tdes_decrypt_inflate(encrypted: &[u8]) -> Result<String, String> {
         return Err("invalid qrc block length".into());
     }
 
-    let cipher = QqTripleDes::new(QRC_KEY);
+    let cipher = super::qq_des::qrc_cipher();
     let mut decrypted = Vec::with_capacity(encrypted.len());
     let (blocks, _remainder) = encrypted.as_chunks::<8>();
     for chunk in blocks {
@@ -251,7 +286,9 @@ pub(crate) fn parse_provider_lyrics_text(text: &str) -> Vec<LyricLine> {
         return qrc_lyrics;
     }
 
-    if text.contains("<") {
+    // KRC 的判据是至少有一个 `<offset,dur,0>` 音节标签——此前只看 `contains("<")`，
+    // 歌词文本里一个 `<3` 就会让 YRC 被当成 KRC，整行连同 `(start,dur,0)` 标签当纯文本返回
+    if contains_tuple_marker(text, '<', '>', 3) {
         let krc_lyrics = parse_krc_text(text);
         if !krc_lyrics.is_empty() {
             return krc_lyrics;
@@ -279,7 +316,7 @@ pub(crate) fn parse_qrc_text(text: &str) -> Vec<LyricLine> {
     let Some(content) = extract_qrc_lyric_content(text) else {
         return Vec::new();
     };
-    provider_lines_to_lyrics(parse_qrc_content(&decode_xml_entities(&content)))
+    provider_lines_to_lyrics(parse_qrc_content(&decode_xml_entities(content)))
 }
 
 /// 三方（QRC / KRC / YRC）歌词行：`base` 是行级起点与清洗后的整行文本，
@@ -366,11 +403,15 @@ pub(crate) fn parse_krc_text(text: &str) -> Vec<LyricLine> {
             }
         }
         // 译文按原文行起点写进 translations 字段；原文行被清洗掉（空占位）的译文落单，
-        // 作为独立行保留（与此前行为一致，不丢内容）
+        // 作为独立行保留（与此前行为一致，不丢内容）。按起点建索引，避免逐条线性查找。
+        let mut index_by_start: HashMap<u64, usize> = HashMap::with_capacity(lyrics.len());
+        for (index, line) in lyrics.iter().enumerate() {
+            index_by_start.entry(line.start_ms).or_insert(index);
+        }
         let mut orphans = Vec::new();
         for (start_ms, text) in tracks.translations {
-            match lyrics.iter_mut().find(|line| line.start_ms == start_ms) {
-                Some(line) => line.translations.push(LyricText::new(text)),
+            match index_by_start.get(&start_ms) {
+                Some(&index) => lyrics[index].translations.push(LyricText::new(text)),
                 None => orphans.push(LyricLine::new(start_ms, text)),
             }
         }
@@ -432,7 +473,7 @@ pub(crate) fn provider_lines_to_lyrics(mut lines: Vec<ProviderWordLine>) -> Vec<
 /// （词间空格属前一音节，与 TTML / 增强 LRC 口径一致；开头的空白直接丢弃），
 /// 文本经 `clean_lyric_segment`（与整行同一套清洗），音节全部无效时返回空。
 fn collect_provider_words(segments: Vec<(u64, u64, &str)>) -> Vec<LyricWord> {
-    let mut words: Vec<LyricWord> = Vec::new();
+    let mut words: Vec<LyricWord> = Vec::with_capacity(segments.len());
     for (start_ms, duration_ms, raw) in segments {
         let text = clean_lyric_segment(raw);
         if text.trim().is_empty() {
@@ -455,6 +496,12 @@ fn collect_provider_words(segments: Vec<(u64, u64, &str)>) -> Vec<LyricWord> {
     words
 }
 
+/// 与 `parse_lyrics_text_with_offset` 同口径的行拆分：`\r\n` / `\r` / `\n` / U+2028 / U+2029
+/// 都是行终止符（不复制文本）。BOM 在调用方按需剥离。
+fn split_lyric_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split(['\n', '\r', '\u{2028}', '\u{2029}'])
+}
+
 pub(crate) fn normalized_lyric_lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines()
         .flat_map(|line| line.split('\r'))
@@ -465,17 +512,19 @@ pub(crate) fn split_provider_timed_line(line: &str) -> Option<(u64, u64, &str)> 
     let stripped = line.strip_prefix('[')?;
     let end = stripped.find(']')?;
     let (start, duration) = stripped[..end].split_once(',')?;
-    if !start.chars().all(|ch| ch.is_ascii_digit())
-        || !duration.chars().all(|ch| ch.is_ascii_digit())
-    {
-        return None;
-    }
-
     Some((
-        start.parse().ok()?,
-        duration.parse().ok()?,
+        parse_ascii_u64(start)?,
+        parse_ascii_u64(duration)?,
         &stripped[end + 1..],
     ))
+}
+
+/// 非空纯 ASCII 数字串 → u64；溢出与非数字都 None。
+fn parse_ascii_u64(digits: &str) -> Option<u64> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 pub(crate) fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
@@ -488,17 +537,24 @@ pub(crate) fn split_metadata_tag(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-pub(crate) fn extract_qrc_lyric_content(text: &str) -> Option<String> {
+pub(crate) fn extract_qrc_lyric_content(text: &str) -> Option<&str> {
+    // 没有 `LyricContent` 字面量就不必跑正则（LRC / KRC / YRC 文本都从这里过一遍）
+    if !text.contains("LyricContent") {
+        return None;
+    }
     // P3-3：正则只编译一次，批量解析歌词候选时避免每次重新编译。
+    // 内容以 `"` + 可选空白 + `/>` / `>` 收尾：元数据里未转义的直引号（`[al:THE BEST "Blue"]`，
+    // 真实 QQ 缓存 1279 份里有 4 份）不再截断内容——此前截断后 QRC 判空、误走 KRC 路径，
+    // 输出成带 `(ms,dur)` 标签的行级垃圾文本
     static QRC_CONTENT_PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let pattern = QRC_CONTENT_PATTERN.get_or_init(|| {
-        Regex::new(r#"(?s)<Lyric_1\s+[^>]*LyricContent="(?P<content>.*?)"[^>]*/?>"#)
+        Regex::new(r#"(?s)<Lyric_1\s+[^>]*LyricContent="(?P<content>.*?)"\s*/?>"#)
             .expect("valid qrc content regex")
     });
     pattern
         .captures(text)
         .and_then(|captures| captures.name("content"))
-        .map(|content| content.as_str().to_string())
+        .map(|content| content.as_str())
 }
 
 /// QRC 行体：`文本(start,dur)文本(start,dur)…`，标签在文本**后**，start 为绝对毫秒。
@@ -580,16 +636,22 @@ pub(crate) fn tagged_body(
     }
 }
 
-/// `is_numeric_tuple` 的取值版：形如 `a,b[,c]` 的纯数字元组解析成数字；
-/// 任一段溢出 u64 视为无效（不让畸形输入 panic 或绕过）。
-pub(crate) fn parse_numeric_tuple(token: &str, expected_len: usize) -> Option<Vec<u64>> {
-    if !is_numeric_tuple(token, expected_len) {
+/// `is_numeric_tuple` 的取值版：形如 `a,b[,c]` 的纯数字元组解析成数字（未用的槽位为 0）；
+/// 任一段溢出 u64 视为无效（不让畸形输入 panic 或绕过）。不分配。
+pub(crate) fn parse_numeric_tuple(token: &str, expected_len: usize) -> Option<[u64; 3]> {
+    if expected_len > 3 {
         return None;
     }
-    token
-        .split(',')
-        .map(|part| part.parse::<u64>().ok())
-        .collect()
+    let mut numbers = [0_u64; 3];
+    let mut count = 0;
+    for part in token.split(',') {
+        if count >= expected_len {
+            return None;
+        }
+        numbers[count] = parse_ascii_u64(part)?;
+        count += 1;
+    }
+    (count == expected_len).then_some(numbers)
 }
 
 pub(crate) fn find_tuple_markers(
@@ -599,6 +661,21 @@ pub(crate) fn find_tuple_markers(
     tuple_len: usize,
 ) -> Vec<(usize, usize)> {
     let mut markers = Vec::new();
+    for_each_tuple_marker(value, open, close, tuple_len, |marker| {
+        markers.push(marker);
+        true
+    });
+    markers
+}
+
+/// 逐个回调 `open…close` 里是纯数字元组的标签位置 `(标签起点, 标签终点)`；回调返回 false 即停。
+fn for_each_tuple_marker(
+    value: &str,
+    open: char,
+    close: char,
+    tuple_len: usize,
+    mut visit: impl FnMut((usize, usize)) -> bool,
+) {
     let mut cursor = 0;
     let open_len = open.len_utf8();
     let close_len = close.len_utf8();
@@ -611,31 +688,40 @@ pub(crate) fn find_tuple_markers(
         };
         let end = token_start + relative_close;
         if is_numeric_tuple(&value[token_start..end], tuple_len) {
-            markers.push((start, end + close_len));
+            if !visit((start, end + close_len)) {
+                return;
+            }
             cursor = end + close_len;
         } else {
             cursor = token_start;
         }
     }
-
-    markers
 }
 
 pub(crate) fn is_numeric_tuple(token: &str, expected_len: usize) -> bool {
-    let parts = token.split(',').collect::<Vec<_>>();
-    parts.len() == expected_len
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    let mut count = 0;
+    for part in token.split(',') {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        count += 1;
+    }
+    count == expected_len
 }
 
+/// 有没有任一元组标签：找到第一个就停，不像 `find_tuple_markers` 那样收集整篇。
 pub(crate) fn contains_tuple_marker(
     value: &str,
     open: char,
     close: char,
     tuple_len: usize,
 ) -> bool {
-    !find_tuple_markers(value, open, close, tuple_len).is_empty()
+    let mut found = false;
+    for_each_tuple_marker(value, open, close, tuple_len, |_| {
+        found = true;
+        false
+    });
+    found
 }
 
 pub(crate) fn strip_provider_prefix_timestamp(value: &str) -> &str {
@@ -769,57 +855,44 @@ pub(crate) fn decode_xml_entity(entity: &str) -> Option<char> {
     }
 }
 
-pub(crate) fn decode_lyric_bytes(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+/// 文件字节 → 文本：BOM（UTF-8 / UTF-16 LE / BE）→ 无 BOM 的 UTF-16 嗅探 → 严格 UTF-8（借用，
+/// 不复制——绝大多数输入）→ GBK 兜底。M3U8 导入与 AMLL 响应也复用这条探测链。
+pub(crate) fn decode_lyric_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest);
     }
 
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units = bytes[2..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect::<Vec<_>>();
-        return String::from_utf16_lossy(&units);
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return Cow::Owned(decode_utf16(rest, u16::from_le_bytes));
     }
 
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        let units = bytes[2..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_be_bytes(*pair))
-            .collect::<Vec<_>>();
-        return String::from_utf16_lossy(&units);
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return Cow::Owned(decode_utf16(rest, u16::from_be_bytes));
     }
 
     if looks_like_utf16_le(bytes) {
-        let units = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect::<Vec<_>>();
-        return String::from_utf16_lossy(&units);
+        return Cow::Owned(decode_utf16(bytes, u16::from_le_bytes));
     }
 
     if looks_like_utf16_be(bytes) {
-        let units = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_be_bytes(*pair))
-            .collect::<Vec<_>>();
-        return String::from_utf16_lossy(&units);
+        return Cow::Owned(decode_utf16(bytes, u16::from_be_bytes));
     }
 
     if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
 
-    let (text, _, _) = GBK.decode(bytes);
-    text.into_owned()
+    GBK.decode(bytes).0
+}
+
+fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    // 逐单元解码，不再先物化一份 Vec<u16>
+    char::decode_utf16(pairs.iter().map(|pair| unit(*pair)))
+        .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 pub(crate) fn looks_like_utf16_le(bytes: &[u8]) -> bool {
@@ -830,20 +903,19 @@ pub(crate) fn looks_like_utf16_be(bytes: &[u8]) -> bool {
     looks_like_utf16(bytes, 0)
 }
 
+/// 无 BOM 的 UTF-16 嗅探只看开头一段：4 MB 文件不必为此扫两遍全文。
+const UTF16_SNIFF_BYTES: usize = 8 * 1024;
+
 pub(crate) fn looks_like_utf16(bytes: &[u8], zero_offset: usize) -> bool {
     if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
         return false;
     }
 
-    let pairs = bytes.len() / 2;
-    let zero_count = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .filter(|pair| pair[zero_offset] == 0)
-        .count();
+    let sample = &bytes[..bytes.len().min(UTF16_SNIFF_BYTES)];
+    let (pairs, _) = sample.as_chunks::<2>();
+    let zero_count = pairs.iter().filter(|pair| pair[zero_offset] == 0).count();
 
-    zero_count * 100 / pairs >= 60
+    zero_count * 100 / pairs.len() >= 60
 }
 
 /// 标签内嵌歌词（`LYRICS` / `UNSYNCEDLYRICS`），取第一份能解析出内容的；来源标 `Embedded`，
@@ -874,14 +946,12 @@ pub(crate) fn parse_lyrics_text(text: &str) -> Vec<LyricLine> {
 /// LRC 家族解析；第二项是折进各行时间的 `[offset:]`（毫秒，钳到 i32；文件里没有即 0）。
 /// 多个 `[offset:]` 标签时逐行按当时生效值校正，记录最后一个——实际文件只在头部写一次。
 pub(crate) fn parse_lyrics_text_with_offset(text: &str) -> (Vec<LyricLine>, i32) {
-    let normalized = text
-        .replace("\r\n", "\n")
-        .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
     let mut offset_ms = 0_i64;
     let mut timed = Vec::new();
     let mut unsynced = Vec::new();
 
-    for raw_line in normalized.lines() {
+    // 不再先把全文按换行归一化复制两遍：直接按四种行终止符切片
+    for raw_line in split_lyric_lines(text) {
         let line = raw_line.trim().trim_start_matches('\u{feff}');
         if line.is_empty() {
             continue;
@@ -1127,6 +1197,8 @@ pub(crate) fn parse_lrc_offset(line: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok()
 }
 
+/// LRC 时间标签 → 秒。`mm:ss.xx` / `mm:ss,xx` / `hh:mm:ss.x` / 千千静听 `mm:ss:cc` /
+/// 三方 `start_ms,dur`。不分配：逗号归一与 `ss.cc` 拼接都在栈上缓冲里完成。
 pub(crate) fn parse_lrc_time_token(token: &str) -> Option<f64> {
     let token = token.trim();
     if token.is_empty() {
@@ -1137,45 +1209,65 @@ pub(crate) fn parse_lrc_time_token(token: &str) -> Option<f64> {
         return parse_millisecond_lrc_token(token);
     }
 
-    let normalized = token.replace(',', ".");
-    let parts = normalized.split(':').collect::<Vec<_>>();
-    let (hours, minutes, seconds) = match parts.as_slice() {
-        [minutes, seconds] => (0, minutes.parse::<u64>().ok()?, (*seconds).to_string()),
-        [first, second, third] => {
+    // 逗号当小数点：拷进栈缓冲（时间标签不会超过 32 字节，超长即畸形）
+    let mut buffer = [0_u8; 32];
+    let bytes = token.as_bytes();
+    if bytes.len() > buffer.len() {
+        return None;
+    }
+    for (slot, byte) in buffer.iter_mut().zip(bytes) {
+        *slot = if *byte == b',' { b'.' } else { *byte };
+    }
+    let normalized = std::str::from_utf8(&buffer[..bytes.len()]).ok()?;
+
+    let mut parts = normalized.split(':');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let (hours, minutes, seconds) = match third {
+        None => (0, parse_ascii_u64(first)?, parse_seconds_field(second)?),
+        Some(third) => {
             // M-11：`[mm:ss:cc]`（千千静听时代的冒号百分秒变体）不能按
             // hh:mm:ss 解析——`[00:29:26]` 是 29.26s 而不是 1766s，否则歌词
             // 导入成功但全程不滚动。第三段为 1-2 位纯数字时判定为百分秒；
             // 含小数点或超两位才按真 hh:mm:ss 处理。
             let is_centiseconds =
-                (1..=2).contains(&third.len()) && third.chars().all(|ch| ch.is_ascii_digit());
+                (1..=2).contains(&third.len()) && third.bytes().all(|byte| byte.is_ascii_digit());
             if is_centiseconds {
-                (0, first.parse::<u64>().ok()?, format!("{second}.{third}"))
+                // 与旧实现同源：按 "ss.cc" 整体解析成 f64
+                let mut joined = [0_u8; 40];
+                let len = second.len() + 1 + third.len();
+                joined[..second.len()].copy_from_slice(second.as_bytes());
+                joined[second.len()] = b'.';
+                joined[second.len() + 1..len].copy_from_slice(third.as_bytes());
+                let seconds = parse_seconds_field(std::str::from_utf8(&joined[..len]).ok()?)?;
+                (0, parse_ascii_u64(first)?, seconds)
             } else {
                 (
-                    first.parse::<u64>().ok()?,
-                    second.parse::<u64>().ok()?,
-                    (*third).to_string(),
+                    parse_ascii_u64(first)?,
+                    parse_ascii_u64(second)?,
+                    parse_seconds_field(third)?,
                 )
             }
         }
-        _ => return None,
     };
-
-    let seconds = seconds.parse::<f64>().ok()?;
-    if seconds.is_nan() || seconds.is_sign_negative() {
-        return None;
-    }
 
     Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds)
 }
 
+/// 秒字段：非负有限的十进制数（沿用 `f64::from_str` 的接受范围，如 `1.5`、`7`）。
+fn parse_seconds_field(field: &str) -> Option<f64> {
+    let seconds = field.parse::<f64>().ok()?;
+    (seconds.is_finite() && !seconds.is_sign_negative()).then_some(seconds)
+}
+
 pub(crate) fn parse_millisecond_lrc_token(token: &str) -> Option<f64> {
     let (start_ms, _) = token.split_once(',')?;
-    if start_ms.is_empty() || !start_ms.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-
-    Some(start_ms.parse::<u64>().ok()? as f64 / 1000.0)
+    Some(parse_ascii_u64(start_ms)? as f64 / 1000.0)
 }
 
 pub(crate) fn is_lrc_metadata_line(line: &str) -> bool {
@@ -1194,47 +1286,113 @@ pub(crate) fn is_lrc_metadata_line(line: &str) -> bool {
 
 /// 整行清洗：逐段清洗后再把所有空白折叠成单个空格并去首尾。空则 None。
 pub(crate) fn clean_lyric_text(value: &str) -> Option<String> {
-    let text = clean_lyric_segment(value)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    (!text.is_empty()).then_some(text)
+    // `clean_lyric_segment` 已把连续空白压成单个空格，这里只剩去首尾
+    let cleaned = clean_lyric_segment(value);
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// 音节 / 片段级清洗：剥行内时间标签、`<br>` → 空格、去 `\0`、HTML 实体解码、
-/// 全角空格与制表符归一为半角空格、连续空白压成一个空格。**不 trim**——词间空格属于
-/// 前一音节，音节文本拼接起来（折叠空白后）必须与整行 `clean_lyric_text` 一致。
-pub(crate) fn clean_lyric_segment(value: &str) -> String {
-    let decoded = strip_inline_time_tags(value)
-        .replace("<br />", " ")
-        .replace("<br/>", " ")
-        .replace("<br>", " ")
-        .replace('\0', "")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'");
+/// 音节 / 片段级清洗：剥行内时间标签、`<br>` → 空格、去 `\0`、HTML 实体解码（`&amp;` 等
+/// 5 个命名实体 + `&#NNN;` / `&#xHH;` 数字实体，只解一层）、全角空格与制表符归一为半角空格、
+/// 连续空白压成一个空格。**不 trim**——词间空格属于前一音节，音节文本拼接起来（折叠空白后）
+/// 必须与整行 `clean_lyric_text` 一致。
+///
+/// 单趟扫描：此前是 `strip_inline_time_tags` + 9 次链式 `replace` + 折叠，每个音节要分配十来次，
+/// 一首逐字歌几千个音节；现在无需改动的输入直接借用。
+pub(crate) fn clean_lyric_segment(value: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
 
-    let mut output = String::with_capacity(decoded.len());
+    if !segment_needs_cleaning(value) {
+        return Cow::Borrowed(value);
+    }
+
+    let mut output = String::with_capacity(value.len());
     let mut pending_space = false;
-    for ch in decoded.chars() {
-        if ch.is_whitespace() {
-            pending_space = true;
-            continue;
+    let mut rest = value;
+    while let Some(ch) = rest.chars().next() {
+        // 标签 / 实体分支消费一整段；普通字符逐个处理
+        let consumed = match ch {
+            '[' | '<' => {
+                let close = if ch == '[' { ']' } else { '>' };
+                match rest[1..].find(close) {
+                    Some(close_at) => {
+                        let token = &rest[1..1 + close_at];
+                        let after = 1 + close_at + 1;
+                        if parse_lrc_time_token(token).is_some() {
+                            Some(after)
+                        } else if ch == '<' && matches!(token, "br" | "br/" | "br /") {
+                            pending_space = true;
+                            Some(after)
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                }
+            }
+            '&' => rest[1..].find(';').and_then(|semi| {
+                let entity = &rest[1..1 + semi];
+                let decoded = match entity {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    _ if entity.starts_with('#') => decode_xml_entity(entity),
+                    _ => None,
+                }?;
+                push_clean_char(&mut output, &mut pending_space, decoded);
+                Some(1 + semi + 1)
+            }),
+            _ => None,
+        };
+        match consumed {
+            Some(len) => rest = &rest[len..],
+            None => {
+                push_clean_char(&mut output, &mut pending_space, ch);
+                rest = &rest[ch.len_utf8()..];
+            }
         }
-        if pending_space {
-            output.push(' ');
-            pending_space = false;
-        }
-        output.push(ch);
     }
     if pending_space {
         output.push(' ');
     }
-    output
+    Cow::Owned(output)
+}
+
+fn push_clean_char(output: &mut String, pending_space: &mut bool, ch: char) {
+    if ch == '\0' {
+        return;
+    }
+    if ch.is_whitespace() {
+        *pending_space = true;
+        return;
+    }
+    if *pending_space {
+        output.push(' ');
+        *pending_space = false;
+    }
+    output.push(ch);
+}
+
+/// 快速判定：没有标签 / 实体 / 控制字符，且空白只有单个半角空格夹在非空白之间时，输入已是
+/// 清洗态，直接借用。
+fn segment_needs_cleaning(value: &str) -> bool {
+    let mut previous_space = false;
+    for ch in value.chars() {
+        match ch {
+            '[' | '<' | '&' | '\0' => return true,
+            ' ' => {
+                if previous_space {
+                    return true;
+                }
+                previous_space = true;
+            }
+            _ if ch.is_whitespace() => return true,
+            _ => previous_space = false,
+        }
+    }
+    false
 }
 
 pub(crate) fn lrc_tag_content(line: &str) -> Option<&str> {
@@ -1242,45 +1400,6 @@ pub(crate) fn lrc_tag_content(line: &str) -> Option<&str> {
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .map(str::trim)
-}
-
-pub(crate) fn strip_inline_time_tags(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-
-    while let Some((start, open, close)) = find_next_time_tag_open(rest) {
-        output.push_str(&rest[..start]);
-        let after_open = start + open.len_utf8();
-
-        let Some(close_at) = rest[after_open..].find(close) else {
-            output.push(open);
-            rest = &rest[after_open..];
-            continue;
-        };
-
-        let token = &rest[after_open..after_open + close_at];
-        let after_close = after_open + close_at + close.len_utf8();
-        if parse_lrc_time_token(token).is_some() {
-            rest = &rest[after_close..];
-            continue;
-        }
-
-        output.push(open);
-        rest = &rest[after_open..];
-    }
-
-    output.push_str(rest);
-    output
-}
-
-pub(crate) fn find_next_time_tag_open(value: &str) -> Option<(usize, char, char)> {
-    match (value.find('['), value.find('<')) {
-        (Some(square), Some(angle)) if square <= angle => Some((square, '[', ']')),
-        (Some(_), Some(angle)) => Some((angle, '<', '>')),
-        (Some(square), None) => Some((square, '[', ']')),
-        (None, Some(angle)) => Some((angle, '<', '>')),
-        (None, None) => None,
-    }
 }
 
 #[cfg(test)]

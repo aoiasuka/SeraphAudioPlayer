@@ -74,11 +74,25 @@ impl LineBuilder {
             word_text
         };
         let text = clean_lyric_text(&raw_text)?;
+        // 纯空白音节并入前一音节（时间也并入），行首的直接丢弃——与 QRC / 增强 LRC 口径一致；
+        // 此前直接 filter 掉，音节拼接少一个空格（"Helloworld"），KaraokeLine 渲染丢词间空格
         let words = (!self.words.is_empty()).then(|| {
-            self.words
-                .into_iter()
-                .filter(|word| !word.text.trim().is_empty())
-                .collect::<Vec<_>>()
+            let mut merged: Vec<LyricWord> = Vec::with_capacity(self.words.len());
+            for word in self.words {
+                if word.text.trim().is_empty() {
+                    if let Some(last) = merged.last_mut() {
+                        if !last.text.ends_with(' ') {
+                            last.text.push(' ');
+                        }
+                        if let Some(end) = word.end_ms {
+                            last.end_ms = Some(last.end_ms.map_or(end, |current| current.max(end)));
+                        }
+                    }
+                    continue;
+                }
+                merged.push(word);
+            }
+            merged
         });
         let begin_ms = self.begin.map(seconds_to_ms).or_else(|| {
             words
@@ -197,6 +211,22 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
             {
                 saw_tt = true;
             }
+            // `<br/>` 是换行：当成一个空格（否则前后文本直接粘连）
+            Event::Empty(start)
+                if current.is_some() && local_name(start.name().as_ref()) == b"br" =>
+            {
+                match span_stack.last_mut() {
+                    Some(top) => top.3.push(' '),
+                    None => {
+                        if let Some(line) = current.as_mut() {
+                            match line.words.last_mut() {
+                                Some(last) if line.plain.is_empty() => last.text.push(' '),
+                                _ => line.plain.push(' '),
+                            }
+                        }
+                    }
+                }
+            }
             Event::Start(start) if local_name(start.name().as_ref()) == b"body" => {
                 in_body = true;
             }
@@ -286,7 +316,6 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                 let Ok(decoded) = text.decode() else {
                     continue;
                 };
-                let decoded = decoded.into_owned();
                 match span_stack.last_mut() {
                     // 和声容器内音节之间的空白并入前一个和声音节（与 p 直接文本同口径）
                     Some((SpanRole::Background, .., buffer)) if decoded.trim().is_empty() => {
@@ -372,24 +401,44 @@ fn attr_value(start: &BytesStart<'_>, wanted: &[u8]) -> Option<String> {
     })
 }
 
+/// `begin` / `end` 一趟扫完属性表（此前各扫一遍并各分配一个 String）。
 fn time_attrs(start: &BytesStart<'_>) -> (Option<f64>, Option<f64>) {
-    let begin = attr_value(start, b"begin").and_then(|value| parse_ttml_time(&value));
-    let end = attr_value(start, b"end").and_then(|value| parse_ttml_time(&value));
+    let mut begin = None;
+    let mut end = None;
+    for attr in start.attributes().flatten() {
+        let slot = match local_name(attr.key.as_ref()) {
+            b"begin" => &mut begin,
+            b"end" => &mut end,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = attr
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .ok()
+                .and_then(|value| parse_ttml_time(&value));
+        }
+    }
     (begin, end)
 }
 
 fn span_role(start: &BytesStart<'_>) -> SpanRole {
-    match attr_value(start, b"role").as_deref() {
-        Some("x-translation") => SpanRole::Translation,
-        Some("x-roman") => SpanRole::Roman,
-        Some("x-bg") => SpanRole::Background,
-        Some(_) => SpanRole::Other,
-        None => SpanRole::Word,
+    let Some(role) = start
+        .attributes()
+        .flatten()
+        .find(|attr| local_name(attr.key.as_ref()) == b"role")
+    else {
+        return SpanRole::Word;
+    };
+    match role.value.as_ref() {
+        b"x-translation" => SpanRole::Translation,
+        b"x-roman" => SpanRole::Roman,
+        b"x-bg" => SpanRole::Background,
+        _ => SpanRole::Other,
     }
 }
 
 /// TTML 时间表达式 → 秒。支持 `hh:mm:ss.fff`、`mm:ss.fff`、`ss.fff`、
-/// 以及 `123ms` / `1.5s` / `2m` / `1h` 的 offset-time 形式；帧/tick 形式不支持。
+/// 以及 `123ms` / `1.5s` / `2m` / `1h` 的 offset-time 形式；帧/tick 形式不支持。不分配。
 pub(crate) fn parse_ttml_time(raw: &str) -> Option<f64> {
     let value = raw.trim();
     if value.is_empty() {
@@ -397,19 +446,17 @@ pub(crate) fn parse_ttml_time(raw: &str) -> Option<f64> {
     }
 
     if value.contains(':') {
-        let parts = value.split(':').collect::<Vec<_>>();
-        let (hours, minutes, seconds) = match parts.as_slice() {
-            [minutes, seconds] => (
-                0.0,
-                minutes.parse::<f64>().ok()?,
-                seconds.parse::<f64>().ok()?,
-            ),
-            [hours, minutes, seconds] => (
-                hours.parse::<f64>().ok()?,
-                minutes.parse::<f64>().ok()?,
-                seconds.parse::<f64>().ok()?,
-            ),
-            _ => return None,
+        let mut parts = value.split(':');
+        let first = parts.next()?.parse::<f64>().ok()?;
+        let second = parts.next()?.parse::<f64>().ok()?;
+        let third = parts.next().map(|part| part.parse::<f64>().ok());
+        if parts.next().is_some() {
+            return None;
+        }
+        let (hours, minutes, seconds) = match third {
+            None => (0.0, first, second),
+            Some(Some(third)) => (first, second, third),
+            Some(None) => return None,
         };
         if hours < 0.0 || minutes < 0.0 || seconds < 0.0 {
             return None;

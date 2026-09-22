@@ -51,7 +51,16 @@ pub async fn check_for_update() -> IpcResult<UpdateCheckResult> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?
+        .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?;
+    // 匿名 API 每 IP 每小时 60 次，超限返回 403/429；给用户一条能看懂的提示而不是裸状态码
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return Err(IpcError::network(
+            "GitHub 接口请求过于频繁（匿名限流），请稍后再试",
+        ));
+    }
+    let response = response
         .error_for_status()
         .map_err(|err| IpcError::network(format!("检查更新失败: {err}")))?;
     // S-03：外部 JSON capped 读取，防异常超大响应
@@ -110,8 +119,8 @@ pub fn open_release_page(url: String) -> IpcResult<()> {
 
     #[cfg(windows)]
     {
-        // F-05：走 System32 绝对路径，避免裸名被同目录同名 EXE 劫持
-        Command::new(crate::ipc::path_guard::system32_tool("explorer.exe"))
+        // F-05：走绝对路径，避免裸名被同目录同名 EXE 劫持（explorer 本体在 %SystemRoot%）
+        Command::new(crate::ipc::path_guard::explorer_exe())
             .arg(&url)
             .spawn()
             .map_err(|err| IpcError::from(format!("打开浏览器失败: {err}")))?;
@@ -199,5 +208,18 @@ mod tests {
         ] {
             assert!(!is_allowed_release_url(url), "should reject {url:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// 联网探针（`cargo test -p seraph-tauri --lib live_github -- --ignored --nocapture`）：
+    /// 用生产同款 client 配置真查一次 GitHub Releases，排查「检查更新失败」时先跑它。
+    #[test]
+    #[ignore]
+    fn live_github_release_lookup() {
+        let result = tauri::async_runtime::block_on(super::check_for_update());
+        eprintln!("{result:?}");
+        result.expect("check_for_update");
     }
 }

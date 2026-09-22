@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Home, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
-import { useSmoothTime } from "@/hooks/useSmoothTime";
 import {
   activeVisibleRange,
   hasWordTiming,
@@ -358,7 +357,6 @@ export function TaskbarLyricsBar() {
     activeIdx >= 0 ? lyricGroups[activeIdx]?.lines[0] : undefined;
   const activeLine = activeLineEntry?.text ?? "";
   const activeHasWords = hasWordTiming(activeLineEntry);
-  const smoothMs = useSmoothTime(lyricsMs, playing, activeHasWords);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
   const intermission = isInIntermission(resolvedGroups, activeIdx, lyricsMs);
 
@@ -454,7 +452,8 @@ export function TaskbarLyricsBar() {
             activeHasWords && activeLineEntry ? (
               <KaraokeLine
                 words={activeLineEntry.words}
-                currentMs={smoothMs}
+                currentMs={lyricsMs}
+                playing={playing}
                 lineEndMs={activeLineEntry.endMs}
                 sungColor={dark ? "#f5f1e8" : "#2b2722"}
                 unsungColor={dark ? "rgba(245, 241, 232, 0.4)" : "rgba(43, 39, 34, 0.35)"}

@@ -606,7 +606,11 @@ pub(crate) fn parse_qq_translation_text(text: &str) -> Vec<LyricLine> {
         .collect::<Vec<_>>()
         .join("\n");
     let mut lines = parse_lyrics_bytes(cleaned.as_bytes());
-    lines.retain(|line| line.text.trim() != "//");
+    // `//` 占位行与 QQ 的版权声明行（"QQ音乐享有本翻译作品的著作权"）都不是译文
+    lines.retain(|line| {
+        let text = line.text.trim();
+        text != "//" && !text.contains("享有本翻译作品的著作权")
+    });
     lines
 }
 
@@ -633,7 +637,13 @@ pub(crate) fn attach_lyric_tracks(
         .enumerate()
     {
         if let Some(original_index) = matched {
-            original[original_index].roman = Some(LyricText::new(romans[roman_index].text.clone()));
+            // 音译轨若本身逐字（QQ roma 是 QRC），把音节时间轴一并带上（`LyricText.words`）
+            let roman = &romans[roman_index];
+            original[original_index].roman = Some(LyricText {
+                text: roman.text.clone(),
+                words: roman.words.clone(),
+                lang: None,
+            });
         }
     }
 
@@ -1094,11 +1104,9 @@ mod tests {
     fn qq_translation_text_drops_kana_tag_and_placeholder_lines() {
         let text = "[ti:水中リフレクション]\n[offset:0]\n[kana:1す(201,159)い(360,121)1ちゅう]\n[00:00.20]TME享有本翻译作品的著作权\n[00:02.16]//\n[00:29.44]朝着遥远深邃之处缓缓下沉\n";
         let lines = parse_qq_translation_text(text);
-        assert_eq!(
-            texts(&lines),
-            ["TME享有本翻译作品的著作权", "朝着遥远深邃之处缓缓下沉"]
-        );
-        assert_eq!(lines[1].start_ms, 29_440);
+        // 版权声明行（TME / QQ音乐 两种前缀）不是译文，与 `//` 占位一并剔除
+        assert_eq!(texts(&lines), ["朝着遥远深邃之处缓缓下沉"]);
+        assert_eq!(lines[0].start_ms, 29_440);
         // 只有 kana 与标签、没有任何歌词行 → 空，而不是把注音串当歌词
         assert!(parse_qq_translation_text("[ti:x]\n[kana:1す(201,159)]\n").is_empty());
     }
