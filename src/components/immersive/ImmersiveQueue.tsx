@@ -17,6 +17,7 @@ export function ImmersiveQueue({ onClose }: { onClose: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const initialId = useRef(currentId);
   const initialPositioned = useRef(false);
+  const positionedQuery = useRef<string | null>(null);
   const entries = useMemo(() => {
     const term = deferredQuery.trim().toLocaleLowerCase();
     return playlist.map((track, index) => ({ track, index })).filter(({ track }) => !term || `${track.title}\n${track.artist}\n${track.album}`.toLocaleLowerCase().includes(term));
@@ -35,12 +36,14 @@ export function ImmersiveQueue({ onClose }: { onClose: () => void }) {
   useLayoutEffect(() => {
     const element = containerRef.current;
     if (!element) return;
+    if (initialPositioned.current && positionedQuery.current === deferredQuery) return;
+    positionedQuery.current = deferredQuery;
     const index = initialPositioned.current ? 0 : entries.findIndex(({ track }) => track.id === initialId.current);
     initialPositioned.current = true;
     const top = Math.max(0, index * ROW_HEIGHT - element.clientHeight / 2 + ROW_HEIGHT / 2);
     element.scrollTo({ top });
     setScrollTop(top);
-  }, [deferredQuery]);
+  }, [deferredQuery, entries]);
 
   const clampedTop = Math.min(scrollTop, Math.max(0, entries.length * ROW_HEIGHT - height));
   const start = Math.max(0, Math.floor(clampedTop / ROW_HEIGHT) - 4);

@@ -265,7 +265,7 @@ export function createLibraryActions(
         .filter((id): id is string => !!id);
 
       if (trackIds.length === 0) {
-        get().showNotification("清单曲目导入失败");
+        get().showNotification("清单曲目导入失败", "error");
         return;
       }
 
@@ -295,9 +295,9 @@ export function createLibraryActions(
       if (imported.truncated) parts.push("清单超长已截断");
       get().showNotification(`已导入歌单「${name}」（${parts.join("，")}）`);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("import_playlist_m3u8 failed", err);
-      get().showNotification(`导入歌单失败: ${normalizeIpcError(err).message}`);
+      get().showNotification(`导入歌单失败: ${normalizeIpcError(err).message}`, "error");
     }
   },
 
@@ -330,9 +330,9 @@ export function createLibraryActions(
       await invoke("export_playlist_m3u8", { path: target, entries });
       get().showNotification(`已导出歌单：${userPlaylist.name}`);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("export_playlist_m3u8 failed", err);
-      get().showNotification(`导出歌单失败: ${normalizeIpcError(err).message}`);
+      get().showNotification(`导出歌单失败: ${normalizeIpcError(err).message}`, "error");
     }
   },
 
@@ -421,7 +421,7 @@ export function createLibraryActions(
       libraryLoadSequence += 1;
       const message = normalizeIpcError(err).message;
       console.warn("Tauri command failed: delete_tracks", err);
-      get().showNotification(`删除失败：${message}`);
+      get().showNotification(`删除失败：${message}`, "error");
       return { ...empty, failures: tracks.map((track) => ({ id: track.id, title: track.title, message })) };
     }
   },
@@ -446,7 +446,7 @@ export function createLibraryActions(
       return true;
     } catch (err) {
       const { code, message } = normalizeIpcError(err);
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: fetch_online_cover", err);
       get().showNotification(
         code === "not_found" ? "未找到匹配的在线封面" : `封面匹配失败: ${message}`
@@ -512,9 +512,9 @@ export function createLibraryActions(
         };
       });
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: get_playlist", err);
-      get().showNotification(`曲库读取失败：${normalizeIpcError(err).message}`);
+      get().showNotification(`曲库读取失败：${normalizeIpcError(err).message}`, "error");
     }
   },
 
@@ -579,9 +579,9 @@ export function createLibraryActions(
         get().showNotification(`已更新 ${updatedCount} 首本地音乐`);
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: import_tracks", err);
-      get().showNotification("导入本地音乐失败");
+      get().showNotification("导入本地音乐失败", "error");
     }
   },
 

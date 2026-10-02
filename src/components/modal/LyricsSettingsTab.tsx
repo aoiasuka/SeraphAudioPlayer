@@ -82,7 +82,7 @@ export function LyricsSettingsTab() {
       });
       if (typeof selected === "string" && selected.trim()) setLyricsFolder(selected);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri dialog unavailable", err);
       showNotification("无法打开文件夹选择窗口");
     }

@@ -9,6 +9,7 @@ pub mod library;
 pub(crate) mod path_guard;
 pub mod playback;
 pub mod playlist_io;
+pub(crate) mod process_util;
 pub mod system;
 pub mod update;
 pub(crate) mod url_guard;

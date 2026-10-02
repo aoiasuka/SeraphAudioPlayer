@@ -1,4 +1,3 @@
-import * as QRCode from "qrcode";
 import { invoke } from "@/lib/tauri";
 import type {
   BilibiliFfmpegStatus,
@@ -103,7 +102,7 @@ function startLoginPollInterval(
         set({ loginQr: { ...latest, message: result.message } });
       })
       .catch((err) => {
-        // eslint-disable-next-line no-console
+
         console.warn("Tauri command failed: bilibili_poll_login", err);
         const latest = get().loginQr;
         if (!latest || latest.qrcodeKey !== qrcodeKey) return;
@@ -137,7 +136,7 @@ export function createStreamingActions(
           bilibiliFfmpegStatus: ffmpeg ?? get().bilibiliFfmpegStatus,
         });
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.warn("Tauri command failed: bilibili status", err);
       }
     },
@@ -168,7 +167,7 @@ export function createStreamingActions(
         set({ ffmpegDownload: { stage: "error", percent: 0 } });
         const reason = typeof err === "string" ? err : "下载失败";
         get().showNotification(reason);
-        // eslint-disable-next-line no-console
+
         console.warn("download_ffmpeg failed", err);
       }
     },
@@ -178,27 +177,10 @@ export function createStreamingActions(
       set({ isLoginBusy: true });
       try {
         const qrcode = await invoke<BilibiliLoginQrCode>("bilibili_login_qrcode");
-        let dataUrl = "";
-        try {
-          dataUrl = await QRCode.toDataURL(qrcode.url, {
-            width: 184,
-            margin: 1,
-            color: { dark: "#0f172a", light: "#ffffff" },
-          });
-        } catch (qrErr) {
-          // 审2-R5（顺带修 L-6）：二维码渲染失败不再静默——置错误态并提示，不启动轮询
-          // eslint-disable-next-line no-console
-          console.warn("Failed to render bilibili login qrcode", qrErr);
-          get().showNotification("二维码生成失败");
-          set({
-            loginQr: {
-              qrcodeKey: qrcode.qrcodeKey,
-              url: qrcode.url,
-              dataUrl: "",
-              message: "二维码生成失败",
-            },
-          });
-          return;
+        // 二维码由后端纯 Rust 编码，前端不再静态加载会写 toString 的 CommonJS 库。
+        const dataUrl = qrcode.dataUrl;
+        if (!dataUrl?.startsWith("data:image/svg+xml;base64,")) {
+          throw new Error("登录二维码图像缺失");
         }
         set({
           loginQr: {
@@ -210,7 +192,7 @@ export function createStreamingActions(
         });
         startLoginPollInterval(set, get, qrcode.qrcodeKey);
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.warn("Tauri command failed: bilibili_login_qrcode", err);
         get().showNotification("无法生成 B 站登录二维码");
       } finally {
@@ -229,9 +211,9 @@ export function createStreamingActions(
         set({ bilibiliLoginStatus: { loggedIn: false } });
         get().showNotification("已退出 B 站登录");
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.warn("Tauri command failed: bilibili_logout", err);
-        get().showNotification("退出 B 站登录失败");
+        get().showNotification("退出 B 站登录失败", "error");
       }
     },
   };

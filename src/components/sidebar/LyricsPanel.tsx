@@ -19,9 +19,10 @@ import {
   hasWordTiming,
   isInIntermission,
   lyricsPositionMs,
+  NO_ACTIVE_RANGE,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
-import { describeLyricSource, lyricLines } from "@/lib/lyrics/document";
+import { describeLyricSource, isUnsyncedLyrics, lyricLines } from "@/lib/lyrics/document";
 import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -111,17 +112,19 @@ export function LyricsPanel() {
     onlineCandidates[0] ??
     null;
 
+  // 纯文本歌词只有合成的假时间轴：静态展示，不高亮、不跟随、不 seek（BUG-03）
+  const unsynced = isUnsyncedLyrics(track);
   const activeRange = useMemo(
-    () => activeVisibleRange(resolvedGroups, currentMs),
-    [resolvedGroups, currentMs]
+    () => (unsynced ? NO_ACTIVE_RANGE : activeVisibleRange(resolvedGroups, currentMs)),
+    [unsynced, resolvedGroups, currentMs]
   );
   // 主句（滚动与逐字锚定）+ 仍在唱的更早句（对唱重叠 / 和声延续）一起高亮
   const activeIdx = activeRange.primary;
   const activeSet = useMemo(() => new Set(activeRange.active), [activeRange]);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
   const intermission = useMemo(
-    () => isInIntermission(resolvedGroups, activeIdx, currentMs),
-    [resolvedGroups, activeIdx, currentMs]
+    () => !unsynced && isInIntermission(resolvedGroups, activeIdx, currentMs),
+    [unsynced, resolvedGroups, activeIdx, currentMs]
   );
 
   useLayoutEffect(() => {
@@ -361,8 +364,8 @@ export function LyricsPanel() {
   if (!track) return null;
 
   // 审2-R7：与 WaveformProgress 的 canSeek 一致——duration 未知(<=0)时点击歌词行不触发 seek，
-  // 否则 seek 会被钳制成 0 导致进度直接回开头。
-  const canSeek = track.duration > 0;
+  // 否则 seek 会被钳制成 0 导致进度直接回开头。未同步歌词的行时间是合成的，同样不 seek。
+  const canSeek = track.duration > 0 && !unsynced;
 
   return (
     <>
@@ -456,6 +459,11 @@ export function LyricsPanel() {
                   aria-hidden="true"
                   style={{ height: `${centerPadding}px` }}
                 />
+                {unsynced ? (
+                  <p className="px-1 font-tw text-[10px] font-bold tracking-[1px] text-ink3">
+                    未同步歌词 · 纯文本不随播放滚动
+                  </p>
+                ) : null}
                 {lyricGroups.map((group, idx) => {
                   const active = activeSet.has(idx);
                   const primary = idx === activeIdx;
@@ -486,7 +494,9 @@ export function LyricsPanel() {
                           ? primary && intermission
                             ? "opacity-55"
                             : "opacity-100"
-                          : "opacity-40 hover:opacity-70"
+                          : unsynced
+                            ? "opacity-90"
+                            : "opacity-40 hover:opacity-70"
                       )}
                       data-intermission={primary && intermission ? "true" : undefined}
                       data-role={credit ? "credit" : undefined}
@@ -510,7 +520,9 @@ export function LyricsPanel() {
                                         ? lineIdx === 0
                                           ? "text-[16.5px] font-semibold text-ink"
                                           : "text-[13px] font-medium text-ink2"
-                                        : "text-[14px] text-ink3"
+                                        : unsynced
+                                          ? "text-[14px] text-ink2"
+                                          : "text-[14px] text-ink3"
                                     )
                               )}
                             >

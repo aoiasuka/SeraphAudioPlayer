@@ -6,7 +6,7 @@ Seraph Audio Player 是一款面向本地高保真音乐播放的桌面播放器
 
 Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudioPlayer/releases/latest) 下载，支持 EXE 安装器及中英文 MSI。
 
-当前代码版本：**v0.6.1**。这是一个**逐字歌词专版**：收尾增强型 LRC（ESLyric）并支持导出为 LRC；修正在线三源取词管线（酷狗关键词、QQ 加密 QRC、网易云译文）并按可听位置定位；歌词数据模型重构为 `LyricDocument`（毫秒整数、结构化译文、来源身份，曲库清单升到版本 2）；渲染和声 / 制作信息 / 对唱角色，支持同一时刻多句活动，并加入固定来源策略与两个显示选项，详见 [GitHub Release](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.1)。v0.6.0 引入歌词设置（源优先级、繁体转换、AMLL TTML 逐字歌词、排除规则），见 [GitHub Release](https://github.com/aoiasuka/SeraphAudioPlayer/releases/tag/v0.6.0)。
+当前代码版本：**v0.6.3**。本版聚焦**可靠性与安全边界**：修复歌词错误提示、纯文本歌词滚动、EQ 数字输入和设置失败回滚；完善窗口崩溃兜底、前端诊断日志、菜单与弹窗键盘操作；缓存清理与下载互斥、子进程有界等待、下载 Cookie 隔离，并补齐发布版本校验。详见 [v0.6.3 发布说明](docs/releases/v0.6.3.md)。
 
 **升级注意**：曲库存储从 v0.5.12 起改为新格式，2026-09 歌词模型重构后曲库清单再升到版本 2；旧版本程序读不到迁移后的曲库变更；回退前请先备份应用数据目录（见下文「曲库数据文件与诊断日志」）。
 
@@ -20,6 +20,11 @@ Windows 安装包可在 [GitHub Releases](https://github.com/aoiasuka/SeraphAudi
 4. 选中曲目后，点击底部播放条左侧的圆形专辑封面进入沉浸播放，在右上角切换「封面 · 歌词」和「声学分析」；点击「收起」或按 `Esc` 返回资料库。
 
 ## 核心特性
+
+- **v0.6.3 可靠性改进**：纯文本歌词静态展示、不按合成时间滚动或跳转；EQ 数字参数在失焦/回车时提交；输出与任务栏设置等待后端确认，失败回滚并提示，迟到响应不覆盖新选择。
+- **单实例与诊断**：再次启动时唤起已有窗口，避免多个实例竞争同一曲库；前端警告、未捕获异常与歌词条操作失败进入限频、脱敏的本地诊断日志。错误通知停留更久，普通通知不会覆盖它。
+- **清理与下载互斥**：存在在途下载/重缓存/删除任务时拒绝整库清理或更换缓存目录，保护未入库文件；子进程运行、退出回收和 stderr 排空都有时限。CDN 下载不携带登录 Cookie。
+- **键盘可访问**：右键子菜单支持点击、方向键与 Enter/Escape；弹窗有可访问名称，关闭后返回触发元素，嵌套弹窗只关闭最上层。
 
 - **Rust 音频后端**：播放状态、切歌、结束续播、上一首/下一首由 Rust 统一管理，减少前后端状态分叉。
 - **随机播放预览与历史一致**：后端预选并保留下一首，「UP NEXT」、下一首按钮、系统媒体键与自动续播共用同一个选择结果；连续“上一首”按实际历史回退，再前进可返回原有历史。
@@ -103,7 +108,6 @@ Seraph Audio Player
 │  ├─ seraph-audio/       # 播放控制器、WASAPI/CPAL 输出、播放会话
 │  ├─ seraph-decoder/     # Symphonia / FFmpeg / DSD 解码
 │  ├─ seraph-dsp/         # 重采样与 DSD DSP
-│  ├─ seraph-playlist/    # 播放列表与曲库模型
 │  └─ seraph-visualizer/  # 频谱 FFT 与声学分析（K 加权响度/真峰/相关度）
 ├─ src-tauri/
 │  └─ src/
@@ -180,7 +184,7 @@ Seraph Audio Player
 ### 环境要求
 
 - Node.js **24.14.0**（仓库根目录 `.node-version`，CI 与发布使用同一版本）
-- Rust **1.98.1**（CI 与发布通过 `RUSTUP_TOOLCHAIN=1.98.1` 固定；本地 `rust-toolchain.toml` 仍跟随 stable，请保持本机版本与之一致）
+- Rust **1.98.1**（本机与两条工作流统一读取 `rust-toolchain.toml`；工具版本不再跟随 stable 漂移）
 - Windows SDK / MSVC 工具链
 - Tauri CLI 依赖由项目脚本调用
 
@@ -205,21 +209,23 @@ npm run tauri:dev
 ### 类型检查与测试
 
 ```bash
+npm run lint -- --max-warnings 0
 npm run typecheck
 npm test
+npm run test:release
 npm run build
 cargo fmt --all --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 npm audit --audit-level=low
-cargo audit --ignore RUSTSEC-2024-0429
+cargo audit
 ```
 
-Rust 审计需先安装 `cargo-audit`，并在仓库根目录执行。既有的 `glib` 例外 `RUSTSEC-2024-0429` 属于 Windows 产物不包含的 Linux GTK 依赖，原因及回收条件见 CI 工作流注释；新公告仍须处理。
+Rust 审计工具固定为 `cargo-audit 0.22.2`，在仓库根执行，不忽略任何公告。未维护、glib unsound 与被撤回版本等警告仍需跟踪，不等同于“全部依赖问题已修复”。
 
 CI 与发布工作流的 Cargo 命令都带 `--locked`，锁文件需要更新时检查会明确失败，请把 `Cargo.lock` 变更与代码一起提交。
 
-截至 v0.6.2，自动化回归为前端 **310 项**、Rust **394 项**，合计 **704 项**。覆盖歌词解析（LRC / 增强 LRC / 逐字 LRC / QRC / KRC / YRC / TTML 含和声容器）、QQ 密文解密与三源载荷、译文 / 音译副轨对齐与候选排序、旧曲库迁移与清单版本升级、LRC 导出与往返、间奏判定、角色分组与多活动区间、显示投影（制作信息隐藏 / 文件 offset 还原）、固定来源策略、排除规则与隐藏句定位、AMLL 地址守卫与缓存、系统工具路径存在性、批量删除与重试、流媒体缓存文件处理、沉浸播放入口与键盘操作、歌词定位与在线匹配、进度拖动、队列检索，以及分析冻结、隐藏窗口和切歌时的帧生命周期。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
+截至 v0.6.3，自动化回归为前端 **382 项**、Rust **419 项**，另有发布脚本 **28 项**（合计 **829 项**；Rust 的 2 项忽略测试不计入）。覆盖歌词解析（LRC / 增强 LRC / 逐字 LRC / QRC / KRC / YRC / TTML 含和声容器）、QQ 密文解密与三源载荷、译文 / 音译副轨对齐与候选排序、旧曲库迁移与清单版本升级、LRC 导出与往返、间奏判定、角色分组与多活动区间、显示投影（制作信息隐藏 / 文件 offset 还原）、固定来源策略、排除规则与隐藏句定位、AMLL 地址守卫与缓存、系统工具路径存在性、批量删除与重试、流媒体缓存文件处理、沉浸播放入口与键盘操作、歌词定位与在线匹配、进度拖动、队列检索，以及分析冻结、隐藏窗口和切歌时的帧生命周期。上述检查也会在 GitHub Release 工作流中作为发布门禁执行。
 
 沉浸界面已在浏览器中检查 960×600、1280×720 的两种模式，以及 1920×1080 的歌词模式；声场绘制完成 100%、125%、150%、200% 缩放下的离屏对比，使用同一组合成 PCM 经实际 Rust 分析引擎抽样。真实声卡播放、设备切换与用户曲库迁移尚未桌面实测。
 
@@ -278,6 +284,10 @@ target/release/bundle/msi/
 正式发布的安装包由 GitHub Actions 的 Release 工作流构建并上传；本地构建产物、构建日志与核对记录位于 `target/`，不随 Git 提交。
 
 ## 版本记录
+
+### v0.6.3
+
+可靠性与安全边界修复：**歌词错误提示与纯文本显示、EQ 草稿输入、设置失败回滚与代次保护、单实例、前端诊断、菜单/弹窗键盘操作、歌单详情虚拟化、下载与清理互斥、子进程超时、CDN 不带 Cookie**。前端 382 项、Rust 419 项与发布脚本 28 项回归通过。详见 [v0.6.3 发布说明](docs/releases/v0.6.3.md)。
 
 ### v0.6.2
 
@@ -713,20 +723,23 @@ target/release/bundle/msi/
 
 仓库包含 `.github/workflows/release.yml`。推送 `v*` tag 时会触发 Windows release 构建，并发布安装包到 GitHub Release。
 
-以下以从 0.6.0 升级到 0.6.1 为例；版本已同步时无需重复执行 `bump`：
+以下以 v0.6.3 为例；版本已同步时无需重复执行 `bump`：
 
 ```bash
-npm run bump 0.6.1
+npm run bump 0.6.3
+node scripts/release-check.mjs --tag v0.6.3
+node scripts/generate-notices.mjs
+# 全部检查与本地安装包构建通过后再提交、推 tag
 git add -A
-git commit -m "release: v0.6.1 逐字歌词专版——增强型 LRC 收尾、三源取词管线、歌词模型重构与角色渲染"
-git tag -a v0.6.1 -m "Seraph Audio Player v0.6.1"
-git push origin main v0.6.1
+git commit -m "release: v0.6.3 可靠性与安全边界修复"
+git tag -a v0.6.3 -m "Seraph Audio Player v0.6.3"
+git push origin main v0.6.3
 ```
 
-发布前确认本机 Rust 与 CI 固定的 `1.98.1` 一致（两条工作流均通过 `RUSTUP_TOOLCHAIN` 与显式 `toolchain` 固定，升级版本需同时改动两处），再完成格式检查、类型检查、前后端测试、Clippy（均带 `--locked`）、当天的两道在线依赖审计及本地安装包构建。确认版本号与 tag 一致后，仅推送本次明确指定的 tag。
+发布前完成 ESLint、类型检查、前后端与发布脚本测试、格式检查、Clippy、当天双审计及本地安装包构建。Rust 固定版统一来自 `rust-toolchain.toml`，Cargo 命令使用 `--locked`。发布检查会比较 tag、package.json、tauri.conf.json、两份 lock 与 workspace 包版本。
 
 发布工作流会读取 `docs/releases/<tag>.md` 作为 GitHub Release 正文，生成 Windows x64 EXE 安装器和中英文 MSI 并上传。说明文件缺失或任一门禁失败都会中止发布。
 
 ## 许可证
 
-MIT License
+项目代码采用 [MIT License](LICENSE)。第三方依赖与内置字体保留各自许可，原文汇总于 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)，并随安装包放入 `licenses/`。更新依赖后运行 `node scripts/generate-notices.mjs` 重新生成。

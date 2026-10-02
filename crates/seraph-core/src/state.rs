@@ -1,19 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-/// 完整播放状态机。
+/// 播放状态（Rust 侧维护，React 只做投影）。
 ///
-/// 状态机仅在 Rust 侧维护，React 仅作为 UI 投影层；
-/// 这避免双向状态同步带来的 race condition。
+/// 只保留实际会进入的状态：此前定义的 Loading / Buffering / Seeking / Transitioning
+/// 从未被构造（ARCH-02 清理）。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayerState {
     #[default]
     Stopped,
-    Loading,
-    Buffering,
     Playing,
     Paused,
-    Seeking,
-    Transitioning,
+    /// 输出设备丢失（拔出 / 被其它应用独占）后停在这里，直到用户重新起播或换设备
     DeviceLost,
 }

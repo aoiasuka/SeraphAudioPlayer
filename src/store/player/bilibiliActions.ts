@@ -147,9 +147,9 @@ export function createBilibiliActions(
       );
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: import_bilibili_audio", err);
-      get().showNotification(bilibiliImportErrorMessage(err));
+      get().showNotification(bilibiliImportErrorMessage(err), "error");
       return false;
     }
   },
@@ -201,9 +201,9 @@ export function createBilibiliActions(
 
       return { tracks, failed, cancelled: result.cancelled };
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: import_bilibili_favorites", err);
-      get().showNotification(bilibiliImportErrorMessage(err));
+      get().showNotification(bilibiliImportErrorMessage(err), "error");
       return null;
     } finally {
       set({ bilibiliBatchProgress: null });
@@ -217,7 +217,7 @@ export function createBilibiliActions(
       await invoke("cancel_bilibili_favorites_import", { taskId: progress.taskId });
       get().showNotification("正在取消收藏夹导入…");
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: cancel_bilibili_favorites_import", err);
     }
   },
@@ -269,9 +269,9 @@ export function createBilibiliActions(
       get().showNotification(`已重新加载: ${imported.title}`);
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: reload streaming track", err);
-      get().showNotification(bilibiliImportErrorMessage(err));
+      get().showNotification(bilibiliImportErrorMessage(err), "error");
       return false;
     }
   },

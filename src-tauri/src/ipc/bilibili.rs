@@ -10,6 +10,7 @@ mod impls_and_tests;
 mod import_audio;
 mod parsing;
 mod prelude;
+mod qr;
 mod session;
 mod types;
 

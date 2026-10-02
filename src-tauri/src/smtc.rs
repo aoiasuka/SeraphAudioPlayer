@@ -262,17 +262,13 @@ fn handle_media_event(app: &AppHandle, event: MediaControlEvent) {
         MediaControlEvent::Toggle => toggle_playback(&state),
         MediaControlEvent::Next => state.advance_track(TrackAdvance::Next),
         MediaControlEvent::Previous => state.advance_track(TrackAdvance::Previous),
-        MediaControlEvent::Stop => {
-            let result = state.audio.stop().map_err(|err| err.to_string());
-            if result.is_ok() {
-                *state.player_state.write() = PlayerState::Stopped;
-            }
-            result
-        }
-        MediaControlEvent::SetPosition(position) => state
-            .audio
-            .seek(position.0.as_secs_f64())
-            .map_err(|err| err.to_string()),
+        MediaControlEvent::Stop => state.stop_playback(),
+        MediaControlEvent::SetPosition(position) => state.run_playback_control(None, || {
+            state
+                .audio
+                .seek(position.0.as_secs_f64())
+                .map_err(|err| err.to_string())
+        }),
         _ => Ok(()),
     };
 
@@ -296,9 +292,7 @@ fn smtc_play(state: &AppState) -> Result<(), String> {
 }
 
 fn smtc_pause(state: &AppState) -> Result<(), String> {
-    state.audio.pause().map_err(|err| err.to_string())?;
-    *state.player_state.write() = PlayerState::Paused;
-    Ok(())
+    state.pause_playback()
 }
 
 #[cfg(test)]

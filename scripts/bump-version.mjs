@@ -56,7 +56,7 @@ patchJson("src-tauri/tauri.conf.json");
 patchWorkspaceCargo();
 
 console.log("刷新 lock 文件…");
-execSync("npm install --package-lock-only", { cwd: root, stdio: "inherit" });
+execSync("npm install --package-lock-only --ignore-scripts", { cwd: root, stdio: "inherit" });
 // --workspace 只更新本仓库成员的版本记录，不动第三方依赖
 execSync("cargo update --workspace --offline", { cwd: root, stdio: "inherit" });
 console.log(`✓ 全部完成：版本已同步为 ${version}`);

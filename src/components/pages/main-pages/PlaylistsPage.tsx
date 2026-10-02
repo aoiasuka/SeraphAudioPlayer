@@ -14,9 +14,11 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
+import { useVirtualRows } from "@/hooks/useVirtualRows";
 import { formatSeconds } from "@/lib/format";
+import { trackIndexById } from "@/lib/trackIndex";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
@@ -173,12 +175,14 @@ export function PlaylistsPage() {
       null,
     [selectedPlaylistId, userPlaylists]
   );
+  // 稳定引用：详情页把它放进 effect 依赖（歌单被删时回到列表）
+  const closeSelectedPlaylist = useCallback(() => setSelectedPlaylistId(null), []);
 
   if (selectedPlaylist) {
     return (
       <UserPlaylistDetail
         playlistId={selectedPlaylist.id}
-        onBack={() => setSelectedPlaylistId(null)}
+        onBack={closeSelectedPlaylist}
       />
     );
   }
@@ -393,6 +397,9 @@ export function PlaylistsPage() {
   );
 }
 
+/** 歌单详情行高：`h-[46px]` + `mb-2`。改样式时同步这里，否则虚拟滚动错位。 */
+const PLAYLIST_ROW_HEIGHT = 54;
+
 /** 用户歌单详情：曲目列表 + 上移/下移/移除 + 导出 M3U8。 */
 function UserPlaylistDetail({
   playlistId,
@@ -414,24 +421,27 @@ function UserPlaylistDetail({
   );
 
   const userPlaylist = userPlaylists.find((item) => item.id === playlistId);
-  const trackById = useMemo(
-    () => new Map(playlist.map((track) => [track.id, track])),
-    [playlist]
+  const indexById = trackIndexById(playlist);
+  const tracks = useMemo(
+    () =>
+      (userPlaylist?.trackIds ?? [])
+        .map((id) => {
+          const index = indexById.get(id);
+          return index === undefined ? undefined : playlist[index];
+        })
+        .filter((track): track is Track => !!track),
+    [userPlaylist, indexById, playlist]
   );
-  const indexById = useMemo(() => {
-    const map = new Map<string, number>();
-    playlist.forEach((track, index) => map.set(track.id, index));
-    return map;
-  }, [playlist]);
+  // PERF-02：m3u8 导入可生成很大的歌单，详情列表按可见区虚拟化（行高 46 + 间距 8）
+  const rows = useVirtualRows(tracks.length, PLAYLIST_ROW_HEIGHT, { mountKey: tracks.length > 0 });
 
-  if (!userPlaylist) {
-    onBack();
-    return null;
-  }
+  // BUG-07：歌单被删除时回到列表。放在 effect 里——渲染期间调用父组件的 setState
+  // 会触发 React「Cannot update a component while rendering a different component」。
+  useEffect(() => {
+    if (!userPlaylist) onBack();
+  }, [userPlaylist, onBack]);
 
-  const tracks = userPlaylist.trackIds
-    .map((id) => trackById.get(id))
-    .filter((track): track is Track => !!track);
+  if (!userPlaylist) return null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -471,8 +481,14 @@ function UserPlaylistDetail({
           歌单还没有曲目——在曲目列表悬停行上点「加入歌单」按钮添加
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          {tracks.map((track, index) => {
+        <div
+          ref={rows.scrollRef}
+          onScroll={rows.onScroll}
+          className="min-h-0 flex-1 overflow-y-auto pr-1"
+        >
+          <div style={{ paddingTop: rows.paddingTop, paddingBottom: rows.paddingBottom }}>
+          {tracks.slice(rows.start, rows.end).map((track, offset) => {
+            const index = rows.start + offset;
             const globalIndex = indexById.get(track.id) ?? -1;
             const active = currentTrack?.id === track.id;
             return (
@@ -562,6 +578,7 @@ function UserPlaylistDetail({
               </div>
             );
           })}
+          </div>
         </div>
       )}
     </div>

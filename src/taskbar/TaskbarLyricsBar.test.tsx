@@ -158,6 +158,26 @@ describe("任务栏歌词排除规则", () => {
     expect(screen.queryByText("— 暂无歌词稿 —")).toBeNull();
   });
 
+  it("未同步（纯文本）歌词不按合成的 4 秒时间轴推进，显示专用文案", async () => {
+    const plain = {
+      ...trackA,
+      lyrics: {
+        ...lyricDocument([
+          { startMs: 0, text: "纯文本第一行" },
+          { startMs: 4000, text: "纯文本第二行" },
+        ]),
+        sync: "none" as const,
+      },
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_playback_snapshot") return { ...snapshotA, seconds: 5 };
+      if (command === "get_track_info") return plain;
+    });
+    render(<TaskbarLyricsBar />);
+    expect(await screen.findByText("— 未同步歌词 —")).toBeTruthy();
+    expect(screen.queryByText("纯文本第二行")).toBeNull();
+  });
+
   it("对唱重叠时单行条停留在先开始的主句，不切到后开始的句子", async () => {
     const duet = {
       ...trackA,

@@ -4,7 +4,8 @@ import { sendPlayCommand } from "./outputActions";
 import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
-import { isTauriRuntime } from "@/lib/tauri";
+import { isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
+import { trackById } from "@/lib/trackIndex";
 import type { Track } from "@/types/track";
 
 // 审2-R2：代际计数迁至 ./playEpoch（避免与 outputActions 循环导入），此处重新导出保持既有导入兼容
@@ -162,15 +163,18 @@ function reportPlaybackCommandError(
   context: string,
   err: unknown
 ) {
-  // eslint-disable-next-line no-console
+
   console.warn(context, err);
-  get().showNotification(playbackErrorMessage(err));
+  get().showNotification(playbackErrorMessage(err), "error");
 }
 
 export function createPlaybackActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
 ): Pick<PlayerStore, "nextTrackPreview" | "playNextPreview" | "togglePlayback" | "nextTrack" | "prevTrack" | "loadTrack" | "seek" | "tick" | "setVolume" | "toggleMute" | "toggleShuffle" | "toggleLoop" | "toggleLike"> {
+  // 按意图代次而非布尔值识别请求，避免 A→B→A 的旧回调回滚新选择。
+  let shuffleRevision = 0;
+  let loopRevision = 0;
   return {
   nextTrackPreview: () => {
     const { playlist, currentTrackIndex, recentTrackIds, shuffleMode, playbackQueuePreview } = get();
@@ -179,7 +183,8 @@ export function createPlaybackActions(
         playbackQueuePreview?.currentTrackId !== playlist[currentTrackIndex]?.id ||
         playbackQueuePreview?.shuffleMode !== shuffleMode
       ) return null;
-      return playlist.find((track) => track.id === playbackQueuePreview.nextTrackId) ?? null;
+      // PERF-05：UpNext 卡片每次 store 更新都会调用，按共享索引 O(1) 查找
+      return trackById(playlist, playbackQueuePreview.nextTrackId) ?? null;
     }
     const next = resolveNextIndex(
       playlist,
@@ -255,9 +260,9 @@ export function createPlaybackActions(
       })
       .catch((err) => {
         if (epoch !== currentPlayEpoch() || get().currentTrack()?.id !== track.id) return;
-        // eslint-disable-next-line no-console
+
         console.warn("Failed to prepare streaming track", err);
-        get().showNotification(bilibiliImportErrorMessage(err));
+        get().showNotification(bilibiliImportErrorMessage(err), "error");
       });
   },
 
@@ -351,9 +356,9 @@ export function createPlaybackActions(
         })
         .catch((err) => {
           if (epoch !== currentPlayEpoch() || get().currentTrack()?.id !== track.id) return;
-          // eslint-disable-next-line no-console
+
           console.warn("Failed to prepare streaming track", err);
-          get().showNotification(bilibiliImportErrorMessage(err));
+          get().showNotification(bilibiliImportErrorMessage(err), "error");
           // 审2-R4：重缓存失败时复位播放态，避免 UI 停留在“播放中”而实际无声；
           // 仅当播放意图仍指向本曲目时才复位，不影响用户随后切走的新播放。
           if (
@@ -365,7 +370,7 @@ export function createPlaybackActions(
         });
     } else {
       void syncPlaybackQueue(get, set).catch((err) => {
-        // eslint-disable-next-line no-console
+
         console.warn("Failed to sync selected track", err);
       });
     }
@@ -435,24 +440,42 @@ export function createPlaybackActions(
   },
 
   toggleShuffle: () => {
+    const revision = ++shuffleRevision;
     const next = !get().shuffleMode;
     set({ shuffleMode: next });
     resetNextIndexCache();
-    void syncPlaybackModes(get, set).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn("Failed to sync shuffle mode", err);
-    });
-    get().showNotification(next ? "随机播放已启用" : "顺序播放已启用");
+    // BUG-06：后端确认后才提示；失败时回滚（下一首由后端按模式预选，两侧不能分叉）
+    void syncPlaybackModes(get, set).then(
+      () => {
+        if (revision === shuffleRevision && get().shuffleMode === next) get().showNotification(next ? "随机播放已启用" : "顺序播放已启用");
+      },
+      (err: unknown) => {
+
+        console.warn("Failed to sync shuffle mode", err);
+        if (revision !== shuffleRevision || get().shuffleMode !== next) return;
+        set({ shuffleMode: !next });
+        resetNextIndexCache();
+        get().showNotification(`切换播放顺序失败：${normalizeIpcError(err).message}`, "error");
+      }
+    );
   },
 
   toggleLoop: () => {
+    const revision = ++loopRevision;
     const next = !get().loopMode;
     set({ loopMode: next });
-    void syncPlaybackModes(get, set).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn("Failed to sync loop mode", err);
-    });
-    get().showNotification(next ? "单曲循环已开启" : "单曲循环已关闭");
+    void syncPlaybackModes(get, set).then(
+      () => {
+        if (revision === loopRevision && get().loopMode === next) get().showNotification(next ? "单曲循环已开启" : "单曲循环已关闭");
+      },
+      (err: unknown) => {
+
+        console.warn("Failed to sync loop mode", err);
+        if (revision !== loopRevision || get().loopMode !== next) return;
+        set({ loopMode: !next });
+        get().showNotification(`切换单曲循环失败：${normalizeIpcError(err).message}`, "error");
+      }
+    );
   },
 
   toggleLike: (trackId) => {

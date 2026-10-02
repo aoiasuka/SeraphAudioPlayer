@@ -160,6 +160,24 @@ describe.each(["lyrics", "analysis"] as const)("沉浸 %s 模式的歌词", (mod
     expect(immersive.getByText("暂无歌词")).toBeInTheDocument();
   });
 
+  it("未同步（纯文本）歌词静态展示：不高亮、点击不 seek", () => {
+    const seek = vi.fn();
+    usePlayerStore.setState({
+      playlist: [{
+        ...track,
+        lyrics: { ...lyricDocument([{ startMs: 0, text: "Plain one" }, { startMs: 4000, text: "Plain two" }]), sync: "none" },
+      }],
+      currentTime: 5,
+      seek,
+    });
+    render(<Harness />);
+    const immersive = within(screen.getByRole("region", { name: "沉浸播放" }));
+    expect(immersive.getByRole("button", { name: /Plain one/ })).not.toHaveAttribute("aria-current");
+    expect(immersive.getByRole("button", { name: /Plain two/ })).not.toHaveAttribute("aria-current");
+    fireEvent.click(immersive.getByRole("button", { name: /Plain two/ }));
+    expect(seek).not.toHaveBeenCalled();
+  });
+
   it("对唱重叠时两句同时 aria-current，主句先开始的那句；和声与制作信息块按角色渲染", () => {
     usePlayerStore.setState({
       playlist: [{

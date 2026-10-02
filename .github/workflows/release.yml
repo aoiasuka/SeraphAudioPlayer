@@ -4,19 +4,28 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "待演练版本（vX.Y.Z）；检出所选分支，不创建 tag 或 Release"
+        required: true
+        type: string
 
-# 发布需要向 Releases 上传产物；仅授予 contents 写权限
+# 默认只读；仅真实 tag 发布 job 获得原有 contents 写权限。
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows:
     name: Build Windows installers
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
-    env:
-      RUSTUP_TOOLCHAIN: 1.98.1
+    timeout-minutes: 90
+    permissions:
+      contents: write
 
-    steps:
+    # 两个 job 复用同一套门禁，避免演练与发布漂移；权限仍分别声明。
+    steps: &windows_steps
       # S-13：第三方 Action 一律按 commit SHA 锁定，防 tag 被移动指向恶意提交
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -29,34 +38,36 @@ jobs:
           node-version: 24.14.0
           cache: npm
 
-      # 锁 SHA 后 action 无法从 ref 名推断 toolchain，必须显式传 toolchain
+      - name: Test release checks
+        run: node --test scripts/test-release-check.mjs
+
+      # 输入只经环境变量传递，不把手动输入插入 shell 脚本。
+      - name: Verify release versions and notes
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: node scripts/release-check.mjs --tag "$env:RELEASE_TAG"
+
+      - name: Read Rust toolchain
+        id: rust_version
+        run: node scripts/release-check.mjs --toolchain
+
+      # 锁 SHA 后 action 无法从 ref 名推断 toolchain，显式传入文件中的固定版本。
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: 1.98.1
+          toolchain: ${{ steps.rust_version.outputs.version }}
           components: clippy,rustfmt
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      # S-08：tag 与 package.json 版本必须一致。漏跑 bump 就打 tag 会发出一个
-      # 版本号对不上的安装包（内部显示旧版本），且事后只能删 tag 重发。
-      - name: Verify tag matches package version
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          echo "tag=$tag package.json=$pkg tauri.conf.json=$conf"
-          if [ "$tag" != "$pkg" ] || [ "$tag" != "$conf" ]; then
-            echo "::error::版本号不一致——先跑 npm run bump $tag 再打 tag"
-            exit 1
-          fi
-
       # S-01：安装脚本不参与构建，显式禁用
       - name: Install frontend dependencies
         run: npm ci --ignore-scripts
+
+      - name: Lint frontend
+        run: npm run lint
 
       - name: Typecheck frontend
         run: npm run typecheck
@@ -68,11 +79,12 @@ jobs:
         run: npm audit --audit-level=low
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        # 本机 cargo audit --version 与 cargo install --list 已核实为 0.22.2。
+        run: cargo install --locked cargo-audit --version '=0.22.2'
 
-      # S-13：发布门禁与 CI 同强度。ignore 说明见 ci.yml 同名步骤注释。
+      # 发布门禁与 CI 同强度，不忽略任何公告。
       - name: Audit Rust dependencies
-        run: cargo audit --ignore RUSTSEC-2024-0429
+        run: cargo audit
 
       - name: Check Rust formatting
         run: cargo fmt --all --check
@@ -83,8 +95,14 @@ jobs:
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # 演练跑完整安装包构建，但不传令牌、不创建 Release、不上传发布资产。
+      - name: Rehearse Windows packaging without publishing
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run tauri:build -- -- --locked
+
       # 发布说明与 tag 一起提交，直接用于 Release 正文，避免正文与仓库脱节。
       - name: Read release notes
+        if: github.event_name == 'push'
         id: release_notes
         shell: pwsh
         run: |
@@ -101,6 +119,7 @@ jobs:
             Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Build and publish Tauri release
+        if: github.event_name == 'push'
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -111,3 +130,12 @@ jobs:
           releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
+
+  rehearsal:
+    name: Rehearse Windows installers (no release)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps: *windows_steps

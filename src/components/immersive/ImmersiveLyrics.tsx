@@ -3,8 +3,8 @@ import { CloudDownload, Languages, Music2, Type } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
 import { TypewriterText } from "@/components/ui/TypewriterText";
-import { activeVisibleRange, hasWordTiming, isInIntermission, lyricsPositionMs, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
-import { lyricLines } from "@/lib/lyrics/document";
+import { activeVisibleRange, hasWordTiming, isInIntermission, lyricsPositionMs, NO_ACTIVE_RANGE, resolveVisibleGroups } from "@/lib/lyrics/activeLine";
+import { isUnsyncedLyrics, lyricLines } from "@/lib/lyrics/document";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
@@ -14,17 +14,19 @@ function useLyricGroups(track: Track) {
   const lines = lyricLines(track);
   const resolved = useMemo(() => resolveVisibleGroups(lines), [lines]);
   const groups = resolved.visible;
+  // 纯文本歌词只有合成的假时间轴：静态展示，不高亮、不跟随、不 seek（BUG-03）
+  const unsynced = isUnsyncedLyrics(track);
+  const rangeAt = (s: { currentTime: number; outputLatency: number }) =>
+    unsynced ? NO_ACTIVE_RANGE : activeVisibleRange(resolved, lyricsPositionMs(s.currentTime, s.outputLatency));
   // 只在活动句集合变化时重渲染，不把高频播放进度传播到整篇歌词。定位按可听位置（减输出延迟）。
   // 多活动区间：主句（滚动锚点）+ 仍在唱的更早句（对唱重叠 / 和声延续）；浅比较数组内容。
-  const active = usePlayerStore(
-    useShallow((s) => activeVisibleRange(resolved, lyricsPositionMs(s.currentTime, s.outputLatency)).active)
-  );
-  const activeIndex = usePlayerStore((s) => activeVisibleRange(resolved, lyricsPositionMs(s.currentTime, s.outputLatency)).primary);
+  const active = usePlayerStore(useShallow((s) => rangeAt(s).active));
+  const activeIndex = usePlayerStore((s) => rangeAt(s).primary);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（布尔选择器，只在翻转时重渲染）
-  const intermission = usePlayerStore((s) => isInIntermission(resolved, activeIndex, lyricsPositionMs(s.currentTime, s.outputLatency)));
+  const intermission = usePlayerStore((s) => !unsynced && isInIntermission(resolved, activeIndex, lyricsPositionMs(s.currentTime, s.outputLatency)));
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = lines.length > 0 && groups.length === 0;
-  return { groups, activeIndex, active, intermission, allHiddenByRules };
+  return { groups, activeIndex, active, intermission, allHiddenByRules, unsynced };
 }
 
 interface LyricsProps {
@@ -37,7 +39,7 @@ interface LyricsProps {
 }
 
 export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact = false, onToggleTranslation, onToggleSize }: LyricsProps) {
-  const { groups, activeIndex, active, intermission, allHiddenByRules } = useLyricGroups(track);
+  const { groups, activeIndex, active, intermission, allHiddenByRules, unsynced } = useLyricGroups(track);
   const seek = usePlayerStore((s) => s.seek);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -59,6 +61,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
   const currentMs = usePlayerStore((s) => (activeHasWords ? lyricsPositionMs(s.currentTime, s.outputLatency) : 0));
   const isPlaying = usePlayerStore((s) => s.isPlaying);
 
+  const hasGroups = groups.length > 0;
   useLayoutEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
@@ -71,7 +74,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [groups.length > 0]);
+  }, [hasGroups]);
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -79,6 +82,10 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     const changed = lastContext.current?.id !== track.id || lastContext.current?.groups !== groups;
     const resized = lastContext.current?.viewport !== viewport;
     lastContext.current = { id: track.id, groups, viewport };
+    if (unsynced) {
+      if (changed) container.scrollTo({ top: 0, behavior: "instant" });
+      return;
+    }
     if (changed) {
       clearTimeout(resumeTimer.current);
       setFollowing(true);
@@ -87,7 +94,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     const top = line ? Math.max(0, line.offsetTop - container.clientHeight / 2 + line.clientHeight / 2) : 0;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     container.scrollTo({ top, behavior: changed || resized || reducedMotion ? "instant" : "smooth" });
-  }, [activeIndex, viewport, track.id, groups, following, showTranslation, largeLyrics]);
+  }, [activeIndex, viewport, track.id, groups, following, showTranslation, largeLyrics, unsynced]);
 
   useEffect(() => () => clearTimeout(resumeTimer.current), []);
 
@@ -96,12 +103,13 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     clearTimeout(resumeTimer.current);
     resumeTimer.current = setTimeout(() => setFollowing(true), 3000);
   };
-  const canSeek = Number.isFinite(track.duration) && track.duration > 0;
+  // 未同步歌词的行时间是合成的，点击 seek 没有意义
+  const canSeek = Number.isFinite(track.duration) && track.duration > 0 && !unsynced;
 
   return (
     <section className={`immersive-lyrics${compact ? " immersive-lyrics-compact" : ""}${largeLyrics ? " immersive-lyrics-large" : ""}`} aria-label="同步歌词">
       <header className="immersive-lyrics-heading">
-        <span className="immersive-eyebrow">LYRICS / 歌词</span>
+        <span className="immersive-eyebrow">{unsynced ? "LYRICS / 未同步歌词" : "LYRICS / 歌词"}</span>
         <div className="immersive-lyric-tools">
           <button aria-label="在线匹配歌词" title="在线匹配歌词" onClick={() => window.dispatchEvent(new CustomEvent("seraph:open-lyrics-search"))}><CloudDownload size={14} /><span>在线匹配</span></button>
           <button aria-label="显示译文" title={showTranslation ? "隐藏译文" : "显示译文"} aria-pressed={showTranslation} disabled={!hasTranslation} onClick={onToggleTranslation}><Languages size={13} /><span>译文</span></button>
@@ -120,7 +128,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                 <button
                   key={`${track.id}-${group.startMs}-${index}`}
                   ref={(element) => { lineRefs.current[index] = element; }}
-                  className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${isPrimary && intermission ? " is-intermission" : ""}${isCredit ? " is-credit" : ""}${Math.abs(index - activeIndex) > 1 && !isCurrent ? " is-distant" : ""}`}
+                  className={`immersive-lyric-line${isCurrent ? " is-current" : ""}${isPrimary && intermission ? " is-intermission" : ""}${isCredit ? " is-credit" : ""}${Math.abs(index - activeIndex) > 1 && !isCurrent && !unsynced ? " is-distant" : ""}`}
                   aria-current={isCurrent ? "true" : undefined}
                   aria-label={`${formatSeconds(group.startMs / 1000)} · ${main?.text}`}
                   disabled={!canSeek || group.startMs / 1000 > track.duration}

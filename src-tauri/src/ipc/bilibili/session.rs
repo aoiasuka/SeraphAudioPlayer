@@ -30,8 +30,9 @@ pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client
 /// F-01：**逐跳**复验重定向目标。首个 URL 过了 `is_safe_bilibili_download_url`
 /// 不代表后续跳也安全——CDN 返回的 302 可指向任意主机，不拦的话既是盲 SSRF 探针，
 /// 下载物还会被写进缓存直接交给解码器。
-pub(crate) fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client, String> {
-    let cookie = load_session(app)?.and_then(|session| session.cookie_header());
+/// CDN 是第三方分发域，下载客户端不读取会话、不携带 Cookie；登录态只用于 API
+/// 获取可访问的音频地址。若某 CDN 要求额外认证，应报错而不是回退外发凭据。
+pub(crate) fn bilibili_download_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
@@ -40,7 +41,7 @@ pub(crate) fn bilibili_download_client_for_app(app: &AppHandle) -> Result<Client
         .no_brotli()
         .no_zstd()
         .no_deflate()
-        .default_headers(bilibili_headers(cookie.as_deref())?)
+        .default_headers(bilibili_headers(None)?)
         .build()
         .map_err(|err| format!("failed to create download http client: {err}"))
 }
@@ -332,6 +333,21 @@ pub(crate) fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(all(test, windows))]
+#[test]
+fn acl_failure_prevents_session_write() {
+    let path = std::env::temp_dir().join(format!(
+        "seraph-missing-session-{}-{}.json",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    assert!(!path.exists());
+    assert!(restrict_session_file_permissions(&path).is_err());
+}
+
 pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -345,43 +361,30 @@ pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), Strin
 
     #[cfg(windows)]
     {
-        // P2-6：std::process::Command 传参不经 shell，无需引号；手动加引号
-        // 会被转义为字面 `"user"` 导致账户解析失败。若 USERNAME 未设置则退到
-        // SID S-1-5-32-545（Users），至少保留可访问性，不让权限设置直接失败。
+        // 参数不经 shell；找不到当前用户时拒绝写盘，不回退授予整个 Users 组。
         let user = std::env::var("USERNAME")
             .ok()
-            .filter(|name| !name.trim().is_empty());
-        let grant_arg = match &user {
-            Some(name) => format!("{name}:F"),
-            None => "*S-1-5-32-545:F".to_string(),
-        };
-        let status = {
-            // F-05：走 System32 绝对路径。裸名 `icacls` 会经 CreateProcess 搜索顺序，
-            // 其中包含应用自身所在目录——从下载目录/共享盘运行时存在同名 EXE 种植面。
-            let mut command = Command::new(crate::ipc::path_guard::system32_tool("icacls.exe"));
-            hide_console_window(&mut command);
-            command
-                .arg(path)
-                .arg("/inheritance:r")
-                .arg("/grant:r")
-                .arg(grant_arg)
-                .arg("/remove:g")
-                .arg("Users")
-                .arg("Everyone")
-                .output()
-        };
-
-        match status {
-            Ok(output) if !output.status.success() => {
-                tracing::warn!(
-                    "failed to restrict bilibili session permissions with icacls: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(err) => {
-                tracing::warn!("failed to run icacls for bilibili session permissions: {err}");
-            }
-            _ => {}
+            .filter(|name| !name.trim().is_empty() && !name.contains(':'))
+            .ok_or_else(|| "无法确定当前用户，已中止会话文件写入".to_string())?;
+        let mut command = Command::new(crate::ipc::path_guard::system32_tool("icacls.exe"));
+        hide_console_window(&mut command);
+        command
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:F"))
+            .arg("/remove:g")
+            // 使用 SID，不依赖系统本地化后的组名。
+            .arg("*S-1-5-32-545")
+            .arg("*S-1-1-0");
+        let output =
+            crate::ipc::process_util::run_bounded(&mut command, Duration::from_secs(10), || false)
+                .map_err(|err| format!("无法收窄会话文件权限，已中止写入：{err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "无法收窄会话文件权限，已中止写入：{}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
     }
 

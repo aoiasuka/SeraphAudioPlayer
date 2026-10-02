@@ -1204,6 +1204,17 @@ fn atomic_write_replaces_existing_file_and_leaves_no_temp() {
 }
 
 #[test]
+fn unrecoverable_snapshot_maps_to_cache_corrupt_code() {
+    // BUG-05：清单损坏且上一版不可用时，命令边界必须得到 cache_corrupt 码，
+    // 前端才能给出区别于普通失败的「曲库损坏」提示。
+    let dir = TestLibraryDir::new();
+    fs::write(dir.0.join("library-snapshot.json"), b"{ broken").unwrap();
+    let err = dir.storage().load().unwrap_err();
+    let ipc: crate::ipc::error::IpcError = err.into();
+    assert_eq!(ipc.code, crate::ipc::error::IpcErrorCode::CacheCorrupt);
+}
+
+#[test]
 fn corrupt_library_cache_is_reported_and_backed_up_not_emptied() {
     let path = temp_audio_path("seraph-corrupt-cache", "json");
     fs::write(&path, b"{ this is not valid json").unwrap();

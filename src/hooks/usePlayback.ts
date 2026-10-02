@@ -7,6 +7,10 @@ import { usePlayerEvents } from "@/hooks/usePlayerEvents";
 import { resetNextIndexCache, seekGuard, withRecentTrack } from "@/store/player/playbackActions";
 import { syncPlaybackQueue } from "@/store/player/queueSync";
 
+/** device_lost 之后多久内的 "device lost: …" 通用错误视为同一次故障。 */
+const DEVICE_LOST_ERROR_WINDOW_MS = 2000;
+let deviceLostAt = 0;
+
 /**
  * 每秒推进播放进度（mock 时间轴）。
  * 真正接通音频后，进度由 Rust 侧 `Progress` 事件驱动，此 hook 即可移除。
@@ -148,12 +152,26 @@ export function usePlayback() {
       return;
     }
 
+    if (event.type === "device_lost") {
+      // REL-04（F-18）：后端在 Error 之前单独发 DeviceLost，区分「设备拔了」与「文件坏了」
+      deviceLostAt = Date.now();
+      const state = usePlayerStore.getState();
+      usePlayerStore.setState({ isPlaying: false });
+      state.showNotification("输出设备已断开，请在设备菜单重新选择输出设备后继续播放", "error");
+      // 只刷新候选：自动选择默认设备可能直接从扬声器外放，必须等待用户明确选择。
+      void state.loadDevices({ enumerateOnly: true });
+      return;
+    }
+
     if (event.type === "error") {
       const message =
         typeof event.message === "string" ? event.message : "音频播放失败";
-      const state = usePlayerStore.getState();
-      state.showNotification(message);
       usePlayerStore.setState({ isPlaying: false });
+      // 紧随 device_lost 的那条通用错误（"device lost: …"）不再覆盖专用提示
+      if (Date.now() - deviceLostAt < DEVICE_LOST_ERROR_WINDOW_MS && message.startsWith("device lost")) {
+        return;
+      }
+      usePlayerStore.getState().showNotification(message, "error");
     }
   }, []);
 
@@ -169,7 +187,7 @@ export function usePlayback() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
     void syncPlaybackQueue(usePlayerStore.getState, usePlayerStore.setState).catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.warn("Failed to sync playback queue", err);
     });
   }, [playlist, currentTrackIndex, recentTrackIds, shuffleMode, loopMode]);

@@ -1,4 +1,5 @@
 import React from "react";
+import { revealMainWindow } from "@/hooks/useRevealWindow";
 
 /** boot 侧（applyConfigImport）识别的界面重置标记 */
 export const UI_RESET_FLAG = "seraph-ui-reset-request";
@@ -26,8 +27,10 @@ export class AppErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    // eslint-disable-next-line no-console
+
     console.error("UI render crashed", error, info.componentStack);
+    // 主窗口初始隐藏：App 首帧就崩溃时它的 reveal effect 不会执行，兜底页必须自己显示窗口
+    void revealMainWindow();
   }
 
   private reload = () => {

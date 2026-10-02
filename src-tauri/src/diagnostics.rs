@@ -189,9 +189,110 @@ pub(crate) fn init(app: &AppHandle) {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "播放器启动");
 }
 
+/// 单条前端日志的最大字符数（按 char 截断，不切碎中文）。
+const MAX_FRONTEND_MESSAGE_CHARS: usize = 2000;
+const MAX_FRONTEND_SCOPE_CHARS: usize = 64;
+/// 每个窗口在一个窗口期内最多接收的前端日志条数，超出丢弃（防刷屏把真实记录轮转掉）。
+const FRONTEND_LOG_BURST: usize = 30;
+const FRONTEND_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 换行类字符 → 空格、按 char 截断：前端文本不可信（可能含外部歌词 / 元数据），
+/// 不能在日志里伪造出额外的行。凭据字段与 URL 查询串由写入线程统一脱敏。
+fn sanitize_frontend_log(scope: &str, message: &str) -> (String, String) {
+    fn single_line(text: &str, limit: usize) -> String {
+        let mut out = String::with_capacity(text.len().min(limit * 3));
+        for (count, ch) in text.chars().enumerate() {
+            if count == limit {
+                out.push('…');
+                break;
+            }
+            out.push(match ch {
+                '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\u{85}' => ' ',
+                ch if ch.is_control() => ' ',
+                ch => ch,
+            });
+        }
+        out
+    }
+    (
+        single_line(scope, MAX_FRONTEND_SCOPE_CHARS),
+        single_line(message, MAX_FRONTEND_MESSAGE_CHARS),
+    )
+}
+
+#[derive(Default)]
+struct FrontendLogLimiter {
+    windows: std::collections::HashMap<String, (std::time::Instant, usize)>,
+}
+
+impl FrontendLogLimiter {
+    fn allow(&mut self, window: &str, now: std::time::Instant) -> bool {
+        // 窗口 label 只有 main / taskbar-lyrics（命令白名单已拒绝其它 label），表不会增长
+        let entry = self.windows.entry(window.to_string()).or_insert((now, 0));
+        if now.duration_since(entry.0) >= FRONTEND_LOG_WINDOW {
+            *entry = (now, 0);
+        }
+        if entry.1 >= FRONTEND_LOG_BURST {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+}
+
+static FRONTEND_LIMITER: LazyLock<parking_lot::Mutex<FrontendLogLimiter>> =
+    LazyLock::new(Default::default);
+
+/// REL-06：前端（发布版没有 devtools）的警告、未捕获异常写进同一份诊断日志。
+/// 限长、单行化、按窗口限频；两个窗口都可调用（歌词条的 IPC 失败此前被 `.catch` 吞掉）。
+#[tauri::command]
+pub(crate) fn log_frontend(
+    window: tauri::WebviewWindow,
+    level: String,
+    scope: String,
+    message: String,
+) {
+    let label = window.label().to_string();
+    if !FRONTEND_LIMITER
+        .lock()
+        .allow(&label, std::time::Instant::now())
+    {
+        return;
+    }
+    let (scope, message) = sanitize_frontend_log(&scope, &message);
+    if level == "error" {
+        tracing::error!(target: "seraph::frontend", window = %label, scope = %scope, "{message}");
+    } else {
+        tracing::warn!(target: "seraph::frontend", window = %label, scope = %scope, "{message}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_log_is_single_line_bounded_and_labelled() {
+        // REL-06：前端日志进同一份诊断文件，不得用换行伪造其它日志行，长度有上限
+        let message = format!("第一行\n伪造 INFO 行\r\u{2028}{}", "x".repeat(5000));
+        let (scope, text) = sanitize_frontend_log("sync\nscope", &message);
+        assert_eq!(scope, "sync scope");
+        assert!(!text.contains(['\n', '\r', '\u{2028}']));
+        assert!(text.starts_with("第一行 伪造 INFO 行"));
+        assert!(text.chars().count() <= MAX_FRONTEND_MESSAGE_CHARS + 1);
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn frontend_log_limiter_caps_bursts_per_window() {
+        let mut limiter = FrontendLogLimiter::default();
+        let start = std::time::Instant::now();
+        let accepted = (0..100).filter(|_| limiter.allow("main", start)).count();
+        assert_eq!(accepted, FRONTEND_LOG_BURST);
+        // 另一个窗口有独立配额；窗口期过后恢复
+        assert!(limiter.allow("taskbar-lyrics", start));
+        assert!(limiter.allow("main", start + FRONTEND_LOG_WINDOW));
+    }
 
     #[test]
     fn diagnostics_redact_credentials_and_http_query_strings() {

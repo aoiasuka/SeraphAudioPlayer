@@ -76,7 +76,7 @@ export function useFileDropImport() {
 
         unlistenAll = [unlisten];
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.warn("Failed to bind file drop events", err);
       }
     }

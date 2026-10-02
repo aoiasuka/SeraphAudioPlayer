@@ -45,6 +45,21 @@ pub(crate) const GITHUB_API_HOST_SUFFIXES: &[&str] = &["api.github.com"];
 /// b23.tv 短链的合法跳转目标就是 bilibili.com 主站。
 pub(crate) const BILIBILI_SITE_HOST_SUFFIXES: &[&str] = &["bilibili.com", "b23.tv", "acg.tv"];
 
+/// 音频 CDN 允许域。Akamai 是共享 CDN，因此此表只允许不带登录 Cookie 的下载，
+/// 绝不能把命中此表等同于“可携带用户凭据”。裸 CDN 域仍不放行。
+const BILIBILI_CDN_HOST_SUFFIXES: &[&str] = &[
+    ".bilivideo.com",
+    ".bilivideo.cn",
+    ".hdslb.com",
+    ".akamaized.net",
+    "bilibili.com",
+];
+
+pub(crate) fn is_safe_bilibili_download_url(raw: &str) -> bool {
+    is_https_url_with_host_suffix(raw, BILIBILI_CDN_HOST_SUFFIXES)
+        && reqwest::Url::parse(raw.trim()).is_ok_and(|url| url.port_or_known_default() == Some(443))
+}
+
 /// ffmpeg 下载双源(constants::FFMPEG_DOWNLOADS)。GitHub release 资产会 302 到
 /// `release-assets.githubusercontent.com`(2026-08-16 实测,历史上还有
 /// `objects.githubusercontent.com`),带点后缀两者都覆盖;裸 githubusercontent.com

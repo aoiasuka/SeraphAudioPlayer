@@ -238,6 +238,23 @@ it("BUG-06：水合静音设置时必须同步引擎音量，供系统媒体键�
   expect(invokeMock).toHaveBeenCalledWith("set_volume", { volume: 0 });
 });
 
+it("BUG-06（2026-09-27）：启动时系统集成设置同步失败要提示，而不是静默吞掉", async () => {
+  localStorage.setItem("seraph-player-state", JSON.stringify({
+    version: 3,
+    state: migratePersistedPlayerState({ smtcEnabled: false, taskbarLyricsEnabled: true }),
+  }));
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "set_smtc_enabled") throw "smtc not ready";
+    if (command === "set_taskbar_lyrics_enabled") throw { code: "internal", message: "窗口创建失败" };
+    return undefined;
+  });
+  renderHook(() => useHydratePlayerStore());
+  await flush();
+  const text = usePlayerStore.getState().notification?.text ?? "";
+  expect(text).toContain("系统媒体控件");
+  expect(text).toContain("任务栏歌词条");
+});
+
 it("BUG-06：静音同步不等待空闲曲库加载", async () => {
   vi.mocked(runWhenIdle).mockImplementation(() => () => {});
   localStorage.setItem("seraph-player-state", JSON.stringify({

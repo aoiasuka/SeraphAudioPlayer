@@ -83,6 +83,7 @@ pub struct BilibiliImportOptions {
 pub struct BilibiliLoginQrCode {
     pub(crate) url: String,
     pub(crate) qrcode_key: String,
+    pub(crate) data_url: String,
 }
 
 #[derive(Debug, Serialize)]

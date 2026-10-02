@@ -967,7 +967,9 @@ pub(crate) fn parse_lyrics_text_with_offset(text: &str) -> (Vec<LyricLine>, i32)
             if let Some(text) = clean_lyric_text(body) {
                 for time in times {
                     // L-9：LRC 通行约定——正 offset 让歌词提前显示（time - offset）。
-                    let shifted = ((time * 1000.0).round() as i64 - offset_ms).max(0) as u64;
+                    let shifted = ((time * 1000.0).round() as i64)
+                        .saturating_sub(offset_ms)
+                        .max(0) as u64;
                     let mut lyric = LyricLine::new(shifted, text.clone());
                     // 增强型（`<t>` 在文字前，ESLyric / LDDC）与逐字型（`[t]` 在文字后，
                     // LDDC「逐字 LRC」）两种行内时间标签都拆成音节；首标签之前的文字
@@ -1113,7 +1115,11 @@ fn parse_tagged_lrc_words(
     line_time: f64,
     offset_ms: i64,
 ) -> Option<(Vec<LyricWord>, Option<u64>)> {
-    let shift = |seconds: f64| ((seconds * 1000.0).round() as i64 - offset_ms).max(0) as u64;
+    let shift = |seconds: f64| {
+        ((seconds * 1000.0).round() as i64)
+            .saturating_sub(offset_ms)
+            .max(0) as u64
+    };
 
     // 收集 (时间, 标签起始偏移, 标签结束偏移)
     let mut tags: Vec<(f64, usize, usize)> = Vec::new();
@@ -1194,7 +1200,12 @@ pub(crate) fn parse_lrc_offset(line: &str) -> Option<i64> {
         return None;
     }
 
-    value.trim().parse::<i64>().ok()
+    // 解析即钳到 i32：折进时间的值与文档记录值同口径（BUG-08，未钳时 i64::MIN 减法溢出）
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .map(|offset| offset.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
 }
 
 /// LRC 时间标签 → 秒。`mm:ss.xx` / `mm:ss,xx` / `hh:mm:ss.x` / 千千静听 `mm:ss:cc` /
@@ -1405,6 +1416,24 @@ pub(crate) fn lrc_tag_content(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod enhanced_lrc_tests {
     use super::*;
+
+    #[test]
+    fn extreme_offsets_are_clamped_before_shifting() {
+        // BUG-08：offset 未钳就参与 `time - offset`，i64::MIN 在 debug 构建溢出 panic、
+        // release 回绕把整篇时间归 0；折进时间的值必须与记录值（i32）同口径。
+        let (lines, offset_ms) = parse_lyrics_text_with_offset(
+            "[offset:-9223372036854775808]\n[00:01.00]<00:01.00>a<00:02.00>\n",
+        );
+        assert_eq!(offset_ms, i32::MIN);
+        let shift = 1000 + u64::from(i32::MIN.unsigned_abs());
+        assert_eq!(lines[0].start_ms, shift);
+        assert_eq!(lines[0].words.as_ref().unwrap()[0].start_ms, shift);
+
+        let (lines, offset_ms) =
+            parse_lyrics_text_with_offset("[offset:9223372036854775807]\n[00:01.00]a\n");
+        assert_eq!(offset_ms, i32::MAX);
+        assert_eq!(lines[0].start_ms, 0);
+    }
 
     #[test]
     fn parses_lddc_enhanced_lrc_into_words_with_offset() {

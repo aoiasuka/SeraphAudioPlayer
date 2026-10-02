@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { cn } from "@/lib/utils";
 import {
   isSeparator,
@@ -16,7 +16,30 @@ const MENU_PANEL_CLASS =
   "bg-card border-2 border-ink shadow-[4px_4px_0_rgba(43,39,34,0.18)] p-1.5";
 
 function MenuSeparatorLine() {
-  return <div className="mx-1 my-1 border-t border-dashed border-line" />;
+  return <div role="separator" className="mx-1 my-1 border-t border-dashed border-line" />;
+}
+
+/** 只取当前层的可用条目，不把后代子菜单混入上下键循环。 */
+function menuItems(menu: HTMLElement) {
+  return Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])'))
+    .filter((item) => item.closest('[role="menu"]') === menu);
+}
+
+function navigateMenu(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (!(event.target instanceof Element) || event.target.closest('[role="menu"]') !== event.currentTarget) return;
+  const items = menuItems(event.currentTarget);
+  const index = items.findIndex((item) => item === document.activeElement);
+  let next: number;
+  switch (event.key) {
+    case "ArrowDown": next = (index + 1) % items.length; break;
+    case "ArrowUp": next = (index <= 0 ? items.length : index) - 1; break;
+    case "Home": next = 0; break;
+    case "End": next = items.length - 1; break;
+    default: return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  items[next]?.focus();
 }
 
 function MenuRow({
@@ -31,29 +54,65 @@ function MenuRow({
   const [submenuOpen, setSubmenuOpen] = useState(false);
   const [submenuAlign, setSubmenuAlign] = useState<"top" | "bottom">("top");
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const submenuRef = useRef<HTMLDivElement | null>(null);
+  const focusOnOpen = useRef(false);
+  const submenuId = useId();
   const Icon = entry.icon;
   const hasChildren = !!entry.children && entry.children.length > 0;
+
+  const openSubmenu = (focus: boolean) => {
+    if (!hasChildren || entry.disabled) return;
+    const rect = rowRef.current?.getBoundingClientRect();
+    setSubmenuAlign(rect && rect.top > window.innerHeight * 0.55 ? "bottom" : "top");
+    focusOnOpen.current = focus;
+    setSubmenuOpen(true);
+    if (focus && submenuRef.current) (menuItems(submenuRef.current)[0] ?? submenuRef.current).focus();
+  };
+  useLayoutEffect(() => {
+    if (submenuOpen && focusOnOpen.current && submenuRef.current) {
+      (menuItems(submenuRef.current)[0] ?? submenuRef.current).focus();
+      focusOnOpen.current = false;
+    }
+  }, [submenuOpen]);
 
   return (
     <div
       ref={rowRef}
       className="relative"
-      onPointerEnter={() => {
-        if (!hasChildren || entry.disabled) return;
-        // 行靠近视口下缘时子菜单向上对齐，避免被窗口裁掉
-        const rect = rowRef.current?.getBoundingClientRect();
-        setSubmenuAlign(
-          rect && rect.top > window.innerHeight * 0.55 ? "bottom" : "top"
-        );
-        setSubmenuOpen(true);
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "touch") openSubmenu(false);
       }}
-      onPointerLeave={() => setSubmenuOpen(false)}
+      onPointerLeave={() => {
+        if (!rowRef.current?.contains(document.activeElement)) setSubmenuOpen(false);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSubmenuOpen(false);
+      }}
     >
       <button
+        ref={buttonRef}
         type="button"
+        role="menuitem"
+        tabIndex={-1}
+        aria-disabled={entry.disabled || undefined}
+        aria-haspopup={hasChildren ? "menu" : undefined}
+        aria-expanded={hasChildren ? submenuOpen : undefined}
+        aria-controls={hasChildren && submenuOpen ? submenuId : undefined}
         disabled={entry.disabled}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowRight" && hasChildren && !entry.disabled) {
+            event.preventDefault();
+            event.stopPropagation();
+            openSubmenu(true);
+          }
+        }}
         onClick={() => {
-          if (entry.disabled || hasChildren) return;
+          if (entry.disabled) return;
+          if (hasChildren) {
+            openSubmenu(true);
+            return;
+          }
           entry.onSelect?.();
           onClose();
         }}
@@ -80,6 +139,21 @@ function MenuRow({
       {/* 子菜单紧贴父面板（无间隙），跨越时 pointerleave 不会误触发收起 */}
       {submenuOpen && hasChildren ? (
         <div
+          ref={submenuRef}
+          id={submenuId}
+          role="menu"
+          aria-label={entry.label}
+          tabIndex={-1}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" || event.key === "ArrowLeft") {
+              event.preventDefault();
+              event.stopPropagation();
+              setSubmenuOpen(false);
+              buttonRef.current?.focus();
+              return;
+            }
+            navigateMenu(event);
+          }}
           className={cn(
             MENU_PANEL_CLASS,
             "absolute z-10 max-h-[55vh] w-48 space-y-0.5 overflow-y-auto",
@@ -141,7 +215,7 @@ export function ContextMenuLayer() {
       if (!rootRef.current?.contains(event.target as Node)) closeContextMenu();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeContextMenu();
+      if (event.key === "Escape" && !event.defaultPrevented) closeContextMenu();
     };
     const onScroll = (event: Event) => {
       // 子菜单内部滚动（歌单较多时）不关闭菜单
@@ -167,6 +241,10 @@ export function ContextMenuLayer() {
       window.removeEventListener("blur", onWindowChange);
     };
   }, [open, closeContextMenu]);
+
+  useEffect(() => {
+    if (open && rootRef.current) (menuItems(rootRef.current)[0] ?? rootRef.current).focus();
+  }, [open, entries]);
 
   // 视口边界翻转：先隐形渲染在触发坐标，测量实际尺寸后按需向左/上翻
   useLayoutEffect(() => {
@@ -196,6 +274,18 @@ export function ContextMenuLayer() {
       {open ? (
         <div
           ref={rootRef}
+          role="menu"
+          aria-label="操作菜单"
+          tabIndex={-1}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" || event.key === "Tab") {
+              if (event.key === "Escape") event.preventDefault();
+              event.stopPropagation();
+              closeContextMenu();
+              return;
+            }
+            navigateMenu(event);
+          }}
           className={cn(
             MENU_PANEL_CLASS,
             "ctx-menu-panel fixed z-[90] w-52 space-y-0.5 select-none",

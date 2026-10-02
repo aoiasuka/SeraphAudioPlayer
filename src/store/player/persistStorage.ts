@@ -37,7 +37,7 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
         localStorage.setItem(name, serialized);
       } catch (err) {
         // QuotaExceededError / SecurityError 等：回退到内存存储，避免崩溃
-        // eslint-disable-next-line no-console
+
         console.warn(
           "localStorage.setItem failed, falling back to memory storage",
           err
@@ -88,7 +88,7 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
         lastValue = parsed;
         return parsed;
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.warn("Failed to parse persisted player state, resetting it", err);
         lastValue = null;
         storage()?.removeItem(name);

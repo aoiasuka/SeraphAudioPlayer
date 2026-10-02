@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
+import { DraftNumberInput } from "@/components/ui/DraftNumberInput";
 import { parseApoPreset, toApoText } from "@/lib/eqApoParser";
 import { GENRE_EQ_PRESETS } from "@/lib/eqPresets";
 import { combinedResponseDb, logFreqPoints } from "@/lib/eqResponse";
@@ -169,7 +170,7 @@ export function EqPage() {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : normalizeIpcError(err).message;
-      showNotification(`导入预设失败：${message}`);
+      showNotification(`导入预设失败：${message}`, "error");
     }
   };
 
@@ -193,7 +194,7 @@ export function EqPage() {
       await invoke("export_eq_preset", { path: target, content });
       showNotification(`已导出 EQ 预设（${format.toUpperCase()}）`);
     } catch (err) {
-      showNotification(`导出预设失败：${normalizeIpcError(err).message}`);
+      showNotification(`导出预设失败：${normalizeIpcError(err).message}`, "error");
     }
   };
 
@@ -570,6 +571,7 @@ function AdvancedBandRow({
       <select
         value={band.kind}
         onChange={(event) => onChange({ kind: event.target.value as EqBandKind })}
+        aria-label="滤波器类型"
         className="h-7 cursor-pointer border-[1.5px] border-line bg-card px-1 font-tw text-[10px] font-bold text-ink2 outline-none focus:border-ink"
       >
         {(Object.keys(BAND_KIND_LABELS) as EqBandKind[]).map((kind) => (
@@ -578,31 +580,25 @@ function AdvancedBandRow({
           </option>
         ))}
       </select>
-      <input
-        type="number"
-        min={20}
-        max={20000}
-        value={Math.round(band.freq)}
-        onChange={(event) => onChange({ freq: Number.parseFloat(event.target.value) })}
-        className="h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
+      {/* BUG-04：草稿式输入，失焦 / 回车才提交（提交路径仍经 sanitizeEqBandPatch 钳制） */}
+      <DraftNumberInput
+        value={band.freq}
+        format={(freq) => String(Math.round(freq))}
+        onCommit={(freq) => onChange({ freq })}
+        aria-label="中心频率（Hz）"
+        className="h-7 min-w-0 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
       />
-      <input
-        type="number"
-        min={-24}
-        max={24}
-        step={0.5}
+      <DraftNumberInput
         value={band.gain}
-        onChange={(event) => onChange({ gain: Number.parseFloat(event.target.value) })}
-        className="h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
+        onCommit={(gain) => onChange({ gain })}
+        aria-label="增益（dB）"
+        className="h-7 min-w-0 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
       />
-      <input
-        type="number"
-        min={0.1}
-        max={10}
-        step={0.1}
+      <DraftNumberInput
         value={band.q}
-        onChange={(event) => onChange({ q: Number.parseFloat(event.target.value) })}
-        className="h-7 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
+        onCommit={(q) => onChange({ q })}
+        aria-label="Q 值"
+        className="h-7 min-w-0 border-[1.5px] border-line bg-card px-2 font-tw text-[11px] text-ink outline-none focus:border-ink"
       />
       <button
         type="button"

@@ -117,9 +117,14 @@ pub async fn delete_tracks(
     .map_err(IpcError::from)
 }
 
+/// REL-03：同步命令在主线程执行，设备枚举（COM 初始化 + WASAPI 集合遍历）会让窗口
+/// 在打开设备菜单时卡顿；放进阻塞线程池（那里 `initialize_mta` 也不会碰主线程的 STA）。
 #[tauri::command]
-pub fn list_devices() -> IpcResult<Vec<OutputDeviceInfo>> {
-    let devices = list_output_devices().map_err(|err| IpcError::from(err.to_string()))?;
+pub async fn list_devices() -> IpcResult<Vec<OutputDeviceInfo>> {
+    let devices = tauri::async_runtime::spawn_blocking(list_output_devices)
+        .await
+        .map_err(|err| IpcError::from(format!("设备枚举任务异常终止: {err}")))?
+        .map_err(|err| IpcError::from(err.to_string()))?;
     Ok(devices
         .into_iter()
         .map(|device| OutputDeviceInfo {

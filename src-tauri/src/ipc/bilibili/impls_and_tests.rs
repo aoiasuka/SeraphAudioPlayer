@@ -290,6 +290,8 @@ mod tests {
             // 裸后缀（无子域）不放行，避免仅凭后缀匹配放过奇怪构造
             "https://bilivideo.com/a.m4s",
             "https://akamaized.net/a.m4s",
+            "https://user:password@cdn.bilivideo.com/a.m4s",
+            "https://cdn.bilivideo.com:8443/a.m4s",
             "",
             "not a url",
         ] {

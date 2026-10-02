@@ -1,3 +1,7 @@
+pub(crate) mod operations;
+#[cfg(test)]
+mod tests;
+
 use std::{
     collections::HashSet,
     env, fs,
@@ -91,6 +95,7 @@ fn update_cache_settings_inner(
     app: &AppHandle,
     settings: UpdateCacheSettings,
 ) -> IpcResult<CacheStatus> {
+    let cleanup = operations::OPERATIONS.acquire_cleanup()?;
     let mut current = load_cache_settings(app)?;
 
     if let Some(cache_dir) = settings.cache_dir {
@@ -113,7 +118,7 @@ fn update_cache_settings_inner(
 
     ensure_cache_dir(Path::new(&current.cache_dir))?;
     save_cache_settings(app, &current)?;
-    enforce_cache_limit(app)?;
+    enforce_cache_limit_with_lease(app, &[], &cleanup)?;
     Ok(cache_status(app)?)
 }
 
@@ -132,56 +137,27 @@ pub async fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
 }
 
 fn clear_cache_inner(app: &AppHandle) -> IpcResult<CacheCleanupResult> {
+    let cleanup = operations::OPERATIONS.acquire_cleanup()?;
     let settings = load_cache_settings(app)?;
-    let cache_dir = PathBuf::from(&settings.cache_dir);
-    // M-5：必须先按磁盘真实状态校验 marker，再 ensure。ensure_cache_dir 会在 marker
-    // 缺失时无条件补写，若放在 require 之前会让保护检查永远通过（死代码）。
-    require_managed_cache_dir(&cache_dir)?;
-    ensure_cache_dir(&cache_dir)?;
-
-    let entries = collect_cache_files(&cache_dir)?;
-    let mut removed_paths = Vec::new();
-    let mut removed_bytes = 0;
-    let mut errors = Vec::new();
-
-    // P2-2：单个文件删除失败（如正被播放、句柄独占）跳过继续，
-    // 最后统一标记 cache_missing 并把错误汇总在结果里。
-    for entry in entries {
-        match fs::remove_file(&entry.path) {
-            Ok(()) => {
-                remove_ok_sentinel(&entry.path);
-                removed_bytes += entry.size;
-                removed_paths.push(entry.path);
-            }
-            Err(err) => errors.push(format!("{}: {err}", entry.path.display())),
-        }
-    }
-
-    mark_tracks_cache_missing_by_paths(app, &removed_paths)?;
-    let used_bytes = cache_size(&cache_dir)?;
-    Ok(CacheCleanupResult {
-        removed_files: removed_paths.len(),
-        removed_bytes,
-        used_bytes,
-        removed_paths: removed_paths
-            .into_iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect(),
-        errors,
-    })
+    let result = cleanup_cache_files(
+        Path::new(&settings.cache_dir),
+        &[],
+        CleanupMode::Clear,
+        &cleanup,
+    )?;
+    mark_cleanup_result(app, &result)?;
+    Ok(result)
 }
 
 pub(crate) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let settings = load_cache_settings(app)?;
     let path = PathBuf::from(settings.cache_dir);
     ensure_cache_dir(&path)?;
-    // 每次拿 cache_dir 时机会成本极低地扫一次孤儿 .download/.tmp
-    let _ = sweep_orphan_temp_files(&path);
+    // 有下载时不扫临时文件；租约覆盖整个清扫，避免检查后又启动新下载。
+    if let Ok(cleanup) = operations::OPERATIONS.acquire_cleanup() {
+        let _ = sweep_orphan_temp_files(&path, &cleanup);
+    }
     Ok(path)
-}
-
-pub(super) fn enforce_cache_limit(app: &AppHandle) -> Result<CacheCleanupResult, String> {
-    enforce_cache_limit_inner(app, &[])
 }
 
 /// 审2-S3：多路径 preserve 版本——收藏夹批量导入整批结束后统一清理一次，
@@ -198,29 +174,69 @@ fn enforce_cache_limit_inner(
     app: &AppHandle,
     preserve_paths: &[PathBuf],
 ) -> Result<CacheCleanupResult, String> {
+    let cleanup = operations::OPERATIONS.acquire_cleanup()?;
+    enforce_cache_limit_with_lease(app, preserve_paths, &cleanup)
+}
+
+fn enforce_cache_limit_with_lease(
+    app: &AppHandle,
+    preserve_paths: &[PathBuf],
+    cleanup: &operations::CacheCleanupSlot<'_>,
+) -> Result<CacheCleanupResult, String> {
     let settings = load_cache_settings(app)?;
-    let cache_dir = PathBuf::from(&settings.cache_dir);
-    // M-5：先按磁盘真实状态校验 marker，再 ensure（理由同 clear_cache）。
-    require_managed_cache_dir(&cache_dir)?;
-    ensure_cache_dir(&cache_dir)?;
+    let mode = if settings.auto_cleanup && settings.max_size_mb > 0 {
+        CleanupMode::Quota(settings.max_size_mb.saturating_mul(1024 * 1024))
+    } else {
+        CleanupMode::Measure
+    };
+    sweep_orphan_temp_files(Path::new(&settings.cache_dir), cleanup)?;
+    let result = cleanup_cache_files(
+        Path::new(&settings.cache_dir),
+        preserve_paths,
+        mode,
+        cleanup,
+    )?;
+    mark_cleanup_result(app, &result)?;
+    Ok(result)
+}
 
-    if !settings.auto_cleanup || settings.max_size_mb == 0 {
-        return Ok(CacheCleanupResult {
-            removed_files: 0,
-            removed_bytes: 0,
-            used_bytes: cache_size(&cache_dir)?,
-            removed_paths: Vec::new(),
-            errors: Vec::new(),
-        });
-    }
+fn mark_cleanup_result(app: &AppHandle, result: &CacheCleanupResult) -> Result<(), String> {
+    let paths = result
+        .removed_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    mark_tracks_cache_missing_by_paths(app, &paths)
+}
 
-    let max_bytes = settings.max_size_mb.saturating_mul(1024 * 1024);
-    let threshold_bytes = max_bytes.saturating_mul(CLEANUP_THRESHOLD_PERCENT) / 100;
-    let target_bytes = max_bytes.saturating_mul(CLEANUP_TARGET_PERCENT) / 100;
-    let mut entries = collect_cache_files(&cache_dir)?;
-    let mut used_bytes = entries.iter().map(|entry| entry.size).sum::<u64>();
+enum CleanupMode {
+    Clear,
+    Quota(u64),
+    Measure,
+}
 
-    if used_bytes < threshold_bytes {
+/// 与 AppHandle 无关的清理内核，使用隔离目录做回归；租约必须覆盖删除和曲库标记提交。
+fn cleanup_cache_files(
+    path: &Path,
+    preserve_paths: &[PathBuf],
+    mode: CleanupMode,
+    _cleanup: &operations::CacheCleanupSlot<'_>,
+) -> Result<CacheCleanupResult, String> {
+    require_managed_cache_dir(path)?;
+    let mut entries = collect_cache_files(path)?;
+    let mut used_bytes = entries
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.size));
+    let target = match mode {
+        CleanupMode::Clear => 0,
+        CleanupMode::Quota(maximum)
+            if used_bytes >= maximum.saturating_mul(CLEANUP_THRESHOLD_PERCENT) / 100 =>
+        {
+            maximum.saturating_mul(CLEANUP_TARGET_PERCENT) / 100
+        }
+        CleanupMode::Quota(_) | CleanupMode::Measure => used_bytes,
+    };
+    if !matches!(mode, CleanupMode::Clear) && target >= used_bytes {
         return Ok(CacheCleanupResult {
             removed_files: 0,
             removed_bytes: 0,
@@ -229,56 +245,69 @@ fn enforce_cache_limit_inner(
             errors: Vec::new(),
         });
     }
-
-    entries.sort_by_key(|entry| entry.modified);
-    // 审2-S3：preserve 集合归一化后做整体比对，支持一次保住整批导入的文件。
+    entries.sort_by(|a, b| {
+        a.modified
+            .cmp(&b.modified)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let preserve_keys = preserve_paths
         .iter()
         .map(|path| normalized_path_key(path))
         .collect::<HashSet<_>>();
     let mut removed_paths = Vec::new();
-    let mut removed_bytes = 0;
+    let mut removed_bytes = 0_u64;
     let mut errors = Vec::new();
-
     for entry in entries {
-        if used_bytes <= target_bytes {
+        // 全量清理也删除零字节临时文件；配额模式达到目标就停止。
+        if !matches!(mode, CleanupMode::Clear) && used_bytes <= target {
             break;
         }
         if preserve_keys.contains(&normalized_path_key(&entry.path)) {
             continue;
         }
-
-        // P2-2：删除失败跳过继续，不让一个被占用的文件卡死整个清理。
-        match fs::remove_file(&entry.path) {
-            Ok(()) => {
-                remove_ok_sentinel(&entry.path);
+        let removed = (|| {
+            if let Some(metadata) = cache_delete_metadata(&entry.path)? {
+                reject_cache_link(&entry.path, &metadata)?;
+                if !metadata.is_file() {
+                    return Err("缓存条目不再是普通文件".to_string());
+                }
+            }
+            // 完成标记无法移除时不动音频，避免把残留标记错误复用于下一次下载。
+            remove_ok_sentinel(&entry.path)?;
+            remove_cache_file_if_present(&entry.path)
+        })();
+        match removed {
+            Ok(_) => {
                 used_bytes = used_bytes.saturating_sub(entry.size);
-                removed_bytes += entry.size;
-                removed_paths.push(entry.path);
+                removed_bytes = removed_bytes.saturating_add(entry.size);
+                removed_paths.push(entry.path.to_string_lossy().to_string());
             }
             Err(err) => errors.push(format!("{}: {err}", entry.path.display())),
         }
     }
-
-    mark_tracks_cache_missing_by_paths(app, &removed_paths)?;
     Ok(CacheCleanupResult {
         removed_files: removed_paths.len(),
         removed_bytes,
         used_bytes,
-        removed_paths: removed_paths
-            .into_iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect(),
+        removed_paths,
         errors,
     })
 }
 
 /// P1-2：删除缓存音频时同步清掉对应的 `.{name}.ok` sentinel，
 /// 避免零字节 sentinel 永久残留。
-fn remove_ok_sentinel(path: &Path) {
+fn remove_ok_sentinel(path: &Path) -> Result<(), String> {
     if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
-        let _ = fs::remove_file(path.with_file_name(format!(".{file_name}.ok")));
+        let sentinel = path.with_file_name(format!(".{file_name}.ok"));
+        if let Some(metadata) = cache_delete_metadata(&sentinel)? {
+            reject_cache_link(&sentinel, &metadata)?;
+            if !metadata.is_file() {
+                return Err("缓存完成标记不是普通文件".into());
+            }
+        }
+        remove_cache_file_if_present(&sentinel)?;
     }
+    Ok(())
 }
 
 /// 单曲删除仅处理已入库的精确路径，支持仍有缓存标记的历史目录。
@@ -412,6 +441,10 @@ fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
     let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
     ensure_cache_dir(&cache_dir)?;
+    // 空闲查看缓存时也清扫旧临时文件，不依赖正持有来源租约的下载入口。
+    if let Ok(cleanup) = operations::OPERATIONS.acquire_cleanup() {
+        let _ = sweep_orphan_temp_files(&cache_dir, &cleanup);
+    }
     let entries = collect_cache_files(&cache_dir)?;
     let used_bytes = entries.iter().map(|entry| entry.size).sum::<u64>();
     let max_bytes = settings.max_size_mb.saturating_mul(1024 * 1024);
@@ -579,11 +612,41 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn validate_cache_dir(path: &Path) -> Result<(), String> {
-    if path.as_os_str().is_empty() {
-        return Err("缓存路径不能为空".into());
+    use std::path::Component;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("缓存路径必须是无 .. 的绝对目录".into());
     }
     if path.parent().is_none() {
         return Err("不能把磁盘根目录设置为缓存目录".into());
+    }
+    #[cfg(windows)]
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix)
+                if !matches!(
+                    prefix.kind(),
+                    std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+                ) =>
+            {
+                return Err("缓存目录必须位于本机磁盘，不能使用 UNC 或设备路径".into());
+            }
+            Component::Normal(name) if name.to_string_lossy().contains(':') => {
+                return Err("缓存目录不能使用备用数据流路径".into());
+            }
+            _ => {}
+        }
+    }
+    for ancestor in path.ancestors() {
+        if let Some(metadata) = cache_delete_metadata(ancestor)? {
+            reject_cache_link(ancestor, &metadata)?;
+            if !metadata.is_dir() {
+                return Err("缓存路径或上级路径不是目录".into());
+            }
+        }
     }
     Ok(())
 }
@@ -595,67 +658,69 @@ fn validate_cache_dir(path: &Path) -> Result<(), String> {
 /// - 存在且有 marker：允许
 fn ensure_cache_dir_safe(path: &Path) -> Result<(), String> {
     validate_cache_dir(path)?;
-
-    if path.exists() && path.is_dir() {
-        let marker = path.join(CACHE_MARKER_FILE);
-        if !marker.is_file() {
-            let has_entries = fs::read_dir(path)
-                .map(|mut entries| entries.next().is_some())
-                .unwrap_or(false);
-            if has_entries {
-                return Err(format!(
-                    "目录 {} 已包含其他文件，且缺少 Seraph 缓存标记 ({})，\
-                     为防止误删请改用空目录或新建子目录作为缓存路径。",
-                    path.display(),
-                    CACHE_MARKER_FILE
-                ));
-            }
+    let marker = path.join(CACHE_MARKER_FILE);
+    if let Some(metadata) = cache_delete_metadata(&marker)? {
+        reject_cache_link(&marker, &metadata)?;
+        if !metadata.is_file() {
+            return Err("缓存目录标记不是普通文件".into());
         }
+        return Ok(());
     }
-
+    if path.exists()
+        && fs::read_dir(path)
+            .map_err(|err| format!("无法检查缓存目录内容：{err}"))?
+            .next()
+            .transpose()
+            .map_err(|err| format!("无法读取缓存目录条目：{err}"))?
+            .is_some()
+    {
+        return Err(format!(
+            "目录 {} 已包含其他文件且缺少缓存标记，请使用空目录或新目录",
+            path.display()
+        ));
+    }
     fs::create_dir_all(path)
         .map_err(|err| format!("failed to create cache dir {}: {err}", path.display()))?;
-    let marker = path.join(CACHE_MARKER_FILE);
-    if !marker.is_file() {
-        fs::write(&marker, b"Seraph Audio Player managed cache\n")
-            .map_err(|err| format!("failed to write cache marker {}: {err}", marker.display()))?;
+    // 不覆盖另一并发初始化刚写好的标记，更不能跟随伪造的标记链接。
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(b"Seraph Audio Player managed cache\n")
+                .map_err(|err| format!("无法写入缓存标记：{err}"))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            require_managed_cache_dir(path)?
+        }
+        Err(err) => return Err(format!("无法创建缓存标记：{err}")),
     }
     Ok(())
 }
 
 fn ensure_cache_dir(path: &Path) -> Result<(), String> {
-    // 内部调用：默认目录已确认安全，跳过保护检查。
-    validate_cache_dir(path)?;
-    fs::create_dir_all(path)
-        .map_err(|err| format!("failed to create cache dir {}: {err}", path.display()))?;
-    let marker = path.join(CACHE_MARKER_FILE);
-    if !marker.is_file() {
-        fs::write(&marker, b"Seraph Audio Player managed cache\n")
-            .map_err(|err| format!("failed to write cache marker {}: {err}", marker.display()))?;
-    }
-    Ok(())
+    // 即使是已保存的目录也重新检查：标记丢失时不能默默收编其中的用户文件。
+    ensure_cache_dir_safe(path)
 }
 
 /// 缓存清理 / 扫描的前置检查：若目标目录缺少 marker，拒绝继续。
 /// 防止用户误把缓存目录指到本地音乐文件夹后又执行清理操作时，
 /// 用扩展名白名单按 mtime 批量删除真实音乐文件。
 fn require_managed_cache_dir(path: &Path) -> Result<(), String> {
+    validate_cache_dir(path)?;
     let marker = path.join(CACHE_MARKER_FILE);
-    if !marker.is_file() {
-        return Err(format!(
-            "拒绝在未标记为 Seraph 缓存的目录 {} 上执行清理操作；\
-             请到设置里重新指定一个由 Seraph 管理的缓存目录。",
-            path.display()
-        ));
+    if let Some(metadata) = cache_delete_metadata(&marker)? {
+        reject_cache_link(&marker, &metadata)?;
+        if metadata.is_file() {
+            return Ok(());
+        }
     }
-    Ok(())
-}
-
-fn cache_size(path: &Path) -> Result<u64, String> {
-    Ok(collect_cache_files(path)?
-        .into_iter()
-        .map(|entry| entry.size)
-        .sum())
+    Err(format!(
+        "拒绝在未标记为 Seraph 缓存的目录 {} 上执行清理操作；请在设置里指定受管目录。",
+        path.display()
+    ))
 }
 
 /// P2-3：缓存扫描递归深度上限，与曲库导入端 L-14 方案对齐。
@@ -687,16 +752,17 @@ fn collect_cache_files_inner(
             continue;
         }
         let path = entry.path();
+        let metadata = entry.metadata().map_err(|err| err.to_string())?;
+        if reject_cache_link(&path, &metadata).is_err() {
+            continue;
+        }
         if file_type.is_dir() {
             collect_cache_files_inner(&path, files, depth + 1)?;
             continue;
         }
-        if !is_managed_cache_file(&path) {
+        if !file_type.is_file() || !is_managed_cache_file(&path) {
             continue;
         }
-
-        let metadata = fs::metadata(&path)
-            .map_err(|err| format!("failed to read cache file {}: {err}", path.display()))?;
         files.push(CacheFile {
             path,
             size: metadata.len(),
@@ -722,11 +788,11 @@ fn is_managed_cache_file(path: &Path) -> bool {
 
 /// 扫描已知缓存目录下，长时间未被修改的 `.download` / `.tmp`，删除掉孤儿临时文件，
 /// 防止下载中断 / ffmpeg 崩溃后的残骸不停堆积。仅在 marker 目录内执行。
-fn sweep_orphan_temp_files(path: &Path) -> std::io::Result<()> {
-    let marker = path.join(CACHE_MARKER_FILE);
-    if !marker.is_file() {
-        return Ok(());
-    }
+fn sweep_orphan_temp_files(
+    path: &Path,
+    _cleanup: &operations::CacheCleanupSlot<'_>,
+) -> Result<(), String> {
+    require_managed_cache_dir(path)?;
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs(60 * 60))
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -748,10 +814,17 @@ fn sweep_orphan_temp_files(path: &Path) -> std::io::Result<()> {
         if !is_temp {
             continue;
         }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if reject_cache_link(&candidate, &metadata).is_err() || !metadata.is_file() {
+            continue;
+        }
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
         if modified < cutoff {
             let _ = fs::remove_file(&candidate);
         }

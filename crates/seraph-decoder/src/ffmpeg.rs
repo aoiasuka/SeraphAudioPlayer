@@ -553,7 +553,10 @@ static FFPROBE_CACHE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 /// 重复遍历 PATH+candidate dirs+stat 每个候选 5–10 ms，热路径上无意义。
 fn cached_tool_path(tool: &str, cache: &OnceLock<Mutex<Option<PathBuf>>>) -> Option<PathBuf> {
     let mutex = cache.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().ok()?;
+    // 中毒只说明持锁线程 panic 过，缓存值本身仍可用；`.ok()?` 会把它误报成「找不到 ffmpeg」
+    let mut guard = mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(path) = guard.as_ref() {
         if path.is_file() {
             return Some(path.clone());
@@ -566,14 +569,11 @@ fn cached_tool_path(tool: &str, cache: &OnceLock<Mutex<Option<PathBuf>>>) -> Opt
 
 /// 任何对 EXTRA_TOOL_DIRS 的修改都应失效缓存，否则后注册的目录永远轮不到。
 fn invalidate_tool_cache() {
-    if let Some(mutex) = FFMPEG_CACHE.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
-        }
-    }
-    if let Some(mutex) = FFPROBE_CACHE.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+    for cache in [&FFMPEG_CACHE, &FFPROBE_CACHE] {
+        if let Some(mutex) = cache.get() {
+            *mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         }
     }
 }
@@ -622,7 +622,7 @@ fn tool_candidates(tool: &str) -> Vec<PathBuf> {
     }
 
     if let Some(dirs) = env::var_os("SERAPH_FFMPEG_DIRS") {
-        candidates.extend(env::split_paths(&dirs).map(|dir| dir.join(&exe_name)));
+        candidates.extend(search_dir_candidates(&dirs, &exe_name));
     }
 
     if let Ok(exe) = env::current_exe() {
@@ -633,10 +633,27 @@ fn tool_candidates(tool: &str) -> Vec<PathBuf> {
     }
 
     if let Some(path) = env::var_os("PATH") {
-        candidates.extend(env::split_paths(&path).map(|dir| dir.join(&exe_name)));
+        candidates.extend(search_dir_candidates(&path, &exe_name));
     }
 
-    dedupe_paths(candidates)
+    absolute_only(dedupe_paths(candidates))
+}
+
+/// 把 `;` 分隔的目录列表展开成候选，只保留绝对目录（SEC-01：相对项与空项
+/// 会按当前工作目录解析，重新打开 M-1 的同目录 EXE 种植面）。
+fn search_dir_candidates(dirs: &std::ffi::OsStr, exe_name: &str) -> Vec<PathBuf> {
+    env::split_paths(dirs)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(exe_name))
+        .collect()
+}
+
+/// 最后一道闸：`SERAPH_FFMPEG_PATH` 等任何来源给出的相对候选一律丢弃。
+fn absolute_only(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_absolute())
+        .collect()
 }
 
 fn tool_env_path(tool: &str) -> Option<PathBuf> {
@@ -669,6 +686,20 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SEC-01：PATH / SERAPH_FFMPEG_DIRS 的相对项与空项（PATH 以 `;` 结尾很常见，
+    /// `split_paths` 会产出空路径）拼出的候选按**当前工作目录**解析，等于把 M-1
+    /// 堵掉的「同目录植入 ffmpeg.exe」又放了回来——候选一律只认绝对路径。
+    #[cfg(windows)]
+    #[test]
+    fn search_dirs_only_yield_absolute_candidates() {
+        let dirs = std::ffi::OsStr::new(r"C:\tools;;.;bin;");
+        assert_eq!(
+            search_dir_candidates(dirs, "ffmpeg.exe"),
+            vec![PathBuf::from(r"C:\tools\ffmpeg.exe")]
+        );
+        assert!(absolute_only(vec![PathBuf::from("ffmpeg.exe")]).is_empty());
+    }
 
     #[test]
     fn dash_prefixed_path_gets_file_protocol_prefix() {

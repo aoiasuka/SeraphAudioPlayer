@@ -321,14 +321,36 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
 /// 恢复交互只能走设置页开关(条本身收不到鼠标)。标志常驻,开关销毁重建
 /// 窗口时沿用;窗口已存在时立即生效。
 pub fn set_click_through(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    CLICK_THROUGH.store(enabled, Ordering::SeqCst);
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-        window
-            .set_ignore_cursor_events(enabled)
-            .map_err(|err| err.to_string())?;
-        debug!("taskbar lyrics click-through -> {enabled}");
-    }
+    let _guard = TOGGLE_LOCK.lock();
+    update_click_through(&CLICK_THROUGH, enabled, || {
+        if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+            window
+                .set_ignore_cursor_events(enabled)
+                .map_err(|err| err.to_string())?;
+            debug!("taskbar lyrics click-through -> {enabled}");
+        }
+        Ok(())
+    })
+}
+
+fn update_click_through(
+    flag: &AtomicBool,
+    enabled: bool,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    apply()?;
+    // 窗口操作失败不提交常驻标志，避免下一次建窗意外启用鼠标穿透。
+    flag.store(enabled, Ordering::SeqCst);
     Ok(())
+}
+
+#[test]
+fn click_through_flag_is_not_committed_on_window_error() {
+    let flag = AtomicBool::new(false);
+    assert!(update_click_through(&flag, true, || Err("窗口已销毁".into())).is_err());
+    assert!(!flag.load(Ordering::SeqCst));
+    update_click_through(&flag, true, || Ok(())).unwrap();
+    assert!(flag.load(Ordering::SeqCst));
 }
 
 /// 设置页滑块:直接指定条沿任务栏长边的位置比例(0..=1)。

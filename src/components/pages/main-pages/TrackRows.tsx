@@ -2,6 +2,7 @@ import { ListPlus, ListChecks, Heart, Search, Trash2, X } from "lucide-react";
 import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
+import { trackIndexById as sharedTrackIndexById } from "@/lib/trackIndex";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
 import { showContextMenu, useContextMenuStore } from "@/store/contextMenu";
@@ -77,11 +78,7 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
       return next;
     });
   };
-  const trackIndexById = useMemo(() => {
-    const indexById = new Map<string, number>();
-    playlist.forEach((track, index) => indexById.set(track.id, index));
-    return indexById;
-  }, [playlist]);
+  const trackIndexById = useMemo(() => sharedTrackIndexById(playlist), [playlist]);
   const trackToAdd = useMemo(
     () =>
       tracks.find((track) => track.id === trackToAddId) ??

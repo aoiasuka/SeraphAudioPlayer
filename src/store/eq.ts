@@ -75,7 +75,7 @@ function pushToEngine(settings: DspSettings) {
   pushTimer = setTimeout(() => {
     pushTimer = null;
     void invoke("set_dsp_settings", { settings }).catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.warn("set_dsp_settings failed", normalizeIpcError(err).message);
     });
   }, 60);

@@ -9,7 +9,7 @@ import {
   lyricsPositionMs,
   resolveVisibleGroups,
 } from "@/lib/lyrics/activeLine";
-import { lyricLines } from "@/lib/lyrics/document";
+import { isUnsyncedLyrics, lyricLines } from "@/lib/lyrics/document";
 import {
   coverSrc,
   emitToMain,
@@ -62,6 +62,17 @@ interface PlayerEventPayload {
 }
 
 /**
+ * REL-07：歌词条 IPC 失败此前一律 `.catch(() => undefined)` 吞掉，表现为「点了没反应」
+ * 且无从定位（v0.5.7 白名单事故即如此）。改为写警告——入口安装的诊断转发会把它送进
+ * 后端 seraph.log。单行条没有提示区，界面上仍不弹窗。
+ */
+function logBarFailure(action: string) {
+  return (error: unknown) => {
+    console.warn(`歌词条操作失败：${action}`, error);
+  };
+}
+
+/**
  * 一次性迁移 v0.5.4 的像素位置:把旧值喂给后端反解成比例回传主窗口,
  * 随即删掉 key。此后位置的单一事实来源只有主窗口 store。
  */
@@ -105,7 +116,7 @@ export function TaskbarLyricsBar() {
     if (legacyX !== null) {
       void invoke<number>("position_taskbar_bar", { x: legacyX })
         .then((ratio) => void emitToMain(POSITION_EVENT, ratio))
-        .catch(() => undefined);
+        .catch(logBarFailure("迁移旧位置"));
     }
 
     void invoke<PlaybackSnapshot>("get_playback_snapshot")
@@ -126,7 +137,7 @@ export function TaskbarLyricsBar() {
           setTotal(snapshot.total);
         }
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("读取播放快照"));
 
     return () => {
       cancelled = true;
@@ -197,7 +208,7 @@ export function TaskbarLyricsBar() {
         }
         unlisten = fn;
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("监听播放事件"));
 
     return () => {
       disposed = true;
@@ -220,7 +231,7 @@ export function TaskbarLyricsBar() {
         }
         unlisten = fn;
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("监听任务栏主题"));
 
     return () => {
       disposed = true;
@@ -265,7 +276,7 @@ export function TaskbarLyricsBar() {
         }
         unlisten = fn;
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("监听歌词更新"));
 
     // 排除规则改了 → hidden 标记变化，重拉当前曲目（规则匹配在后端，条自己不算）
     let unlistenRules: (() => void) | undefined;
@@ -280,7 +291,7 @@ export function TaskbarLyricsBar() {
         }
         unlistenRules = fn;
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("监听排除规则"));
 
     return () => {
       disposed = true;
@@ -315,7 +326,7 @@ export function TaskbarLyricsBar() {
           lastReportedRef.current = key;
           void invoke<number>("position_taskbar_bar", { x, y })
             .then((ratio) => emitToMain(POSITION_EVENT, ratio))
-            .catch(() => undefined);
+            .catch(logBarFailure("上报拖拽位置"));
         }, 400);
       },
       WINDOW_LABEL
@@ -327,7 +338,7 @@ export function TaskbarLyricsBar() {
         }
         unlisten = fn;
       })
-      .catch(() => undefined);
+      .catch(logBarFailure("监听窗口移动"));
 
     return () => {
       disposed = true;
@@ -347,9 +358,11 @@ export function TaskbarLyricsBar() {
   // 歌词定位按可听位置（毫秒；进度条 / seek 仍用原始 seconds）。
   // 单行条只展示主句（仍在唱的句子里最早开始的那句），对唱重叠时不切到后开始的句子。
   const lyricsMs = lyricsPositionMs(seconds, outputLatency);
+  // 纯文本歌词只有合成的假时间轴：单行条不按它推进，显示专用文案（BUG-03）
+  const unsynced = isUnsyncedLyrics(track);
   const activeIdx = useMemo(
-    () => activeVisibleRange(resolvedGroups, lyricsMs).primary,
-    [resolvedGroups, lyricsMs]
+    () => (unsynced ? -1 : activeVisibleRange(resolvedGroups, lyricsMs).primary),
+    [unsynced, resolvedGroups, lyricsMs]
   );
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = lyricLines(track).length > 0 && lyricGroups.length === 0;
@@ -376,7 +389,7 @@ export function TaskbarLyricsBar() {
         Math.max(0, (event.clientX - rect.left) / rect.width)
       );
       void invoke("seek", { seconds: ratio * effectiveTotal }).catch(
-        () => undefined
+        logBarFailure("拖动进度")
       );
     },
     [effectiveTotal]
@@ -466,7 +479,9 @@ export function TaskbarLyricsBar() {
               {track
                 ? allHiddenByRules
                   ? "— 歌词已被排除规则隐藏 —"
-                  : "— 暂无歌词稿 —"
+                  : unsynced
+                    ? "— 未同步歌词 —"
+                    : "— 暂无歌词稿 —"
                 : "— 未在播放 —"}
             </span>
           )}
@@ -486,7 +501,7 @@ export function TaskbarLyricsBar() {
             className={controlButton}
             title="上一首"
             aria-label="上一首"
-            onClick={() => void invoke("prev_track").catch(() => undefined)}
+            onClick={() => void invoke("prev_track").catch(logBarFailure("上一首"))}
           >
             <SkipBack className="h-3 w-3" />
           </button>
@@ -495,7 +510,7 @@ export function TaskbarLyricsBar() {
             className={controlButton}
             title={playing ? "暂停" : "播放"}
             aria-label={playing ? "暂停" : "播放"}
-            onClick={() => void invoke("toggle_play").catch(() => undefined)}
+            onClick={() => void invoke("toggle_play").catch(logBarFailure("播放 / 暂停"))}
           >
             {playing ? (
               <Pause className="h-3 w-3" />
@@ -508,7 +523,7 @@ export function TaskbarLyricsBar() {
             className={controlButton}
             title="下一首"
             aria-label="下一首"
-            onClick={() => void invoke("next_track").catch(() => undefined)}
+            onClick={() => void invoke("next_track").catch(logBarFailure("下一首"))}
           >
             <SkipForward className="h-3 w-3" />
           </button>
@@ -518,7 +533,7 @@ export function TaskbarLyricsBar() {
             title="打开主窗口"
             aria-label="打开主窗口"
             onClick={() =>
-              void invoke("focus_main_window").catch(() => undefined)
+              void invoke("focus_main_window").catch(logBarFailure("唤起主窗口"))
             }
           >
             <Home className="h-3 w-3" />
@@ -531,7 +546,7 @@ export function TaskbarLyricsBar() {
             )}
             title="关闭歌词条"
             aria-label="关闭歌词条"
-            onClick={() => void emitToMain(CLOSE_EVENT).catch(() => undefined)}
+            onClick={() => void emitToMain(CLOSE_EVENT).catch(logBarFailure("关闭歌词条"))}
           >
             <X className="h-3 w-3" />
           </button>

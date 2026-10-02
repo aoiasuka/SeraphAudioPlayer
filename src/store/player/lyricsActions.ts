@@ -57,14 +57,12 @@ function replaceTrackLyrics(
   );
 }
 
+// 后端 IpcResult 命令以 `{ code, message }` 对象 reject，旧命令抛字符串——
+// 一律先 normalizeIpcError 归一，再按 code 分支（只按 message 猜会把对象错误吞成空串）。
 function lyricImportErrorMessage(err: unknown) {
-  const message =
-    typeof err === "string"
-      ? err
-      : err instanceof Error
-        ? err.message
-        : "";
+  const { code, message } = normalizeIpcError(err);
 
+  if (code === "cache_corrupt") return "曲库缓存损坏，无法保存歌词";
   if (!message) return "导入歌词失败";
   if (message.includes("missing track id")) return "当前曲目缺少 ID";
   if (message.includes("lyrics file is empty")) return "歌词文件为空";
@@ -75,24 +73,16 @@ function lyricImportErrorMessage(err: unknown) {
   if (message.includes("track was not found")) {
     return "当前曲目未写入曲库缓存，请重新导入音频";
   }
-  if (message.includes("failed to parse library cache")) {
-    return "曲库缓存损坏，无法保存歌词";
-  }
-  if (message.includes("failed to write library cache")) {
-    return "无法写入曲库缓存";
-  }
 
   return `导入歌词失败：${message}`;
 }
 
 function onlineLyricsErrorMessage(err: unknown) {
-  const message =
-    typeof err === "string"
-      ? err
-      : err instanceof Error
-        ? err.message
-        : "";
+  const { code, message } = normalizeIpcError(err);
 
+  if (code === "cache_corrupt") return "曲库缓存损坏，无法保存歌词";
+  // M-12：网络失败与「确实没找到」必须区分，前者给可行动的提示（后端 message 已是中文）
+  if (code === "network") return message || "在线歌词源访问失败，请检查网络连接后重试";
   if (!message) return "在线歌词获取失败";
   if (message.includes("missing track title")) return "当前曲目缺少标题";
   if (message.includes("online lyrics not found")) {
@@ -100,9 +90,6 @@ function onlineLyricsErrorMessage(err: unknown) {
   }
   if (message.includes("track was not found")) {
     return "当前曲目未写入曲库缓存，请重新导入音频";
-  }
-  if (message.includes("failed to write library cache")) {
-    return "无法写入曲库缓存";
   }
 
   return `在线歌词获取失败：${message}`;
@@ -159,7 +146,7 @@ export function createLyricsActions(
       }));
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: find_local_lyrics", err);
       return false;
     }
@@ -253,9 +240,9 @@ export function createLyricsActions(
       );
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: set_track_lyrics_pinned", err);
-      get().showNotification(`修改歌词固定状态失败：${normalizeIpcError(err).message}`);
+      get().showNotification(`修改歌词固定状态失败：${normalizeIpcError(err).message}`, "error");
       return false;
     }
   },
@@ -296,9 +283,9 @@ export function createLyricsActions(
       }));
       get().showNotification(`已导入 ${lyrics.lines.length} 行歌词`);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: save_track_lyrics", err);
-      get().showNotification(lyricImportErrorMessage(err));
+      get().showNotification(lyricImportErrorMessage(err), "error");
     }
   },
 
@@ -345,9 +332,9 @@ export function createLyricsActions(
       get().showNotification(`找到 ${candidates.length} 份在线歌词`);
       return candidates;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: fetch_online_lyrics", err);
-      get().showNotification(onlineLyricsErrorMessage(err));
+      get().showNotification(onlineLyricsErrorMessage(err), "error");
       return [];
     }
   },
@@ -385,9 +372,9 @@ export function createLyricsActions(
       get().showNotification(`已应用 ${savedLyrics.lines.length} 行在线歌词`);
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: apply_online_lyrics", err);
-      get().showNotification(onlineLyricsErrorMessage(err));
+      get().showNotification(onlineLyricsErrorMessage(err), "error");
       return false;
     }
   },
@@ -427,9 +414,9 @@ export function createLyricsActions(
       );
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: export_track_lyrics", err);
-      get().showNotification(`导出歌词失败：${normalizeIpcError(err).message}`);
+      get().showNotification(`导出歌词失败：${normalizeIpcError(err).message}`, "error");
       return false;
     }
   },

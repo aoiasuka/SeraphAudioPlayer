@@ -11,7 +11,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { LyricsSettingsTab } from "@/components/modal/LyricsSettingsTab";
 import {
@@ -19,7 +19,7 @@ import {
   parseConfigImport,
   stashPendingImport,
 } from "@/lib/configTransfer";
-import { invoke } from "@/lib/tauri";
+import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { checkForUpdate, openReleasePage, type UpdateCheckResult } from "@/lib/update";
 import { usePlayerStore } from "@/store/player";
 import type { DriverKind } from "@/types/track";
@@ -137,7 +137,7 @@ export function SettingsModal() {
   const currentDriver = drivers.find((driver) => driver.value === driverKind);
   const usagePercent = Math.min(cacheStatus?.usagePercent ?? 0, 100);
 
-  const refreshCacheStatus = async () => {
+  const refreshCacheStatus = useCallback(async () => {
     try {
       const status = await invoke<CacheStatus>("get_cache_status");
       setCacheStatus(status);
@@ -145,16 +145,16 @@ export function SettingsModal() {
       setMaxSizeMb(String(status.settings.maxSizeMb));
       setAutoCleanup(status.settings.autoCleanup);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: get_cache_status", err);
-      showNotification("读取缓存设置失败");
+      showNotification("读取缓存设置失败", "error");
     }
-  };
+  }, [showNotification]);
 
   useEffect(() => {
     if (!open) return;
     void refreshCacheStatus();
-  }, [open]);
+  }, [open, refreshCacheStatus]);
 
   // M-18：驱动/设备/SMTC 等设置全部即时生效，弹窗从不存在“待保存”的输出
   // 配置——旧「保存配置/取消」双按钮语义均为假（保存只是关窗+假通知，取消
@@ -190,9 +190,9 @@ export function SettingsModal() {
       showNotification("缓存设置已保存");
       return true;
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: update_cache_settings", err);
-      showNotification(`保存缓存设置失败：${String(err)}`);
+      showNotification(`保存缓存设置失败：${normalizeIpcError(err).message}`, "error");
       return false;
     } finally {
       setCacheBusy(false);
@@ -224,9 +224,9 @@ export function SettingsModal() {
         `已清理 ${result.removedFiles} 个缓存文件，释放 ${formatBytes(result.removedBytes)}`
       );
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri command failed: clear_cache", err);
-      showNotification(`清理缓存失败：${String(err)}`);
+      showNotification(`清理缓存失败：${normalizeIpcError(err).message}`, "error");
     } finally {
       setCacheBusy(false);
     }
@@ -246,7 +246,7 @@ export function SettingsModal() {
         setCacheDir(selected);
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("Tauri dialog unavailable", err);
       showNotification("无法打开文件夹选择窗口");
     }
@@ -269,9 +269,9 @@ export function SettingsModal() {
       await invoke("export_app_config", { path: target, content });
       showNotification("配置已导出");
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("export_app_config failed", err);
-      showNotification(`导出配置失败：${String(err)}`);
+      showNotification(`导出配置失败：${normalizeIpcError(err).message}`, "error");
     }
   };
 
@@ -290,7 +290,7 @@ export function SettingsModal() {
       showNotification("配置已导入，界面即将重载…");
       window.setTimeout(() => window.location.reload(), 600);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("import_app_config failed", err);
       showNotification(
         `导入配置失败：${err instanceof Error ? err.message : String(err)}`
@@ -685,7 +685,7 @@ export function SettingsModal() {
 function UpdateSection({
   showNotification,
 }: {
-  showNotification: (message: string) => void;
+  showNotification: (message: string, level?: "info" | "error") => void;
 }) {
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<UpdateCheckResult | null>(null);
@@ -700,9 +700,9 @@ function UpdateSection({
         showNotification(`已是最新版本 v${checked.currentVersion}`);
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("check_for_update failed", err);
-      showNotification("检查更新失败，请稍后重试");
+      showNotification("检查更新失败，请稍后重试", "error");
     } finally {
       setChecking(false);
     }
@@ -713,9 +713,9 @@ function UpdateSection({
     try {
       await openReleasePage(result.releaseUrl);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn("open_release_page failed", err);
-      showNotification("打开下载页失败");
+      showNotification("打开下载页失败", "error");
     }
   };
 

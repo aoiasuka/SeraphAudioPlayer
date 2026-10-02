@@ -69,19 +69,21 @@ pub async fn play(
     let state = (*state).clone();
     run_blocking(move || {
         if let Some(path) = path {
-            state
-                .audio
-                .play_file(
-                    PathBuf::from(path),
-                    track_id.unwrap_or_default(),
-                    start_seconds.unwrap_or(0.0),
-                )
-                .map_err(|err| err.to_string())?;
+            state.run_playback_control(Some(true), || {
+                state
+                    .audio
+                    .play_file(
+                        PathBuf::from(path),
+                        track_id.unwrap_or_default(),
+                        start_seconds.unwrap_or(0.0),
+                    )
+                    .map_err(|err| err.to_string())?;
+                *state.player_state.write() = PlayerState::Playing;
+                Ok(())
+            })
         } else {
-            return state.play_current_track();
+            state.play_current_track()
         }
-        *state.player_state.write() = PlayerState::Playing;
-        Ok(())
     })
     .await
 }
@@ -90,24 +92,14 @@ pub async fn play(
 pub async fn pause(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::pause");
     let state = (*state).clone();
-    run_blocking(move || {
-        state.audio.pause().map_err(|err| err.to_string())?;
-        *state.player_state.write() = PlayerState::Paused;
-        Ok(())
-    })
-    .await
+    run_blocking(move || state.pause_playback()).await
 }
 
 #[tauri::command]
 pub async fn stop(state: State<'_, AppState>) -> Result<(), String> {
     debug!("ipc::stop");
     let state = (*state).clone();
-    run_blocking(move || {
-        state.audio.stop().map_err(|err| err.to_string())?;
-        *state.player_state.write() = PlayerState::Stopped;
-        Ok(())
-    })
-    .await
+    run_blocking(move || state.stop_playback()).await
 }
 
 #[tauri::command]
@@ -118,7 +110,12 @@ pub async fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String
         return Err(format!("无效的跳转位置: {seconds}"));
     }
     let state = (*state).clone();
-    run_blocking(move || state.audio.seek(seconds).map_err(|err| err.to_string())).await
+    run_blocking(move || {
+        state.run_playback_control(None, || {
+            state.audio.seek(seconds).map_err(|err| err.to_string())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -161,10 +158,12 @@ pub async fn select_output_device(
     debug!("ipc::select_output_device -> {device_id}");
     let state = (*state).clone();
     run_blocking(move || {
-        state
-            .audio
-            .set_output_device(device_id)
-            .map_err(|err| err.to_string())
+        state.run_playback_control(None, || {
+            state
+                .audio
+                .set_output_device(device_id)
+                .map_err(|err| err.to_string())
+        })
     })
     .await
 }
@@ -174,10 +173,12 @@ pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> Re
     debug!("ipc::set_output_driver -> {driver}");
     let state = (*state).clone();
     run_blocking(move || {
-        state
-            .audio
-            .set_driver(driver)
-            .map_err(|err| err.to_string())
+        state.run_playback_control(None, || {
+            state
+                .audio
+                .set_driver(driver)
+                .map_err(|err| err.to_string())
+        })
     })
     .await
 }

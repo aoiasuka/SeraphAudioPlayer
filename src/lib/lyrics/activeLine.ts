@@ -187,6 +187,12 @@ export function activeGroupRange(
   return { primary: active[0], active };
 }
 
+/** 没有活动句：尚未到第一句，或歌词未同步（纯文本，见 `isUnsyncedLyrics`）。只读共享值。 */
+export const NO_ACTIVE_RANGE: { readonly primary: number; readonly active: readonly number[] } = {
+  primary: -1,
+  active: [],
+};
+
 /** `activeGroupRange` 映射到可见分组：整组隐藏的句子剔除；主句被隐藏时按 -1 处理。 */
 export function activeVisibleRange(
   resolved: ResolvedLyricGroups,

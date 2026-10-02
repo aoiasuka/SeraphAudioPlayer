@@ -100,6 +100,33 @@ describe("切歌时的歌词时间轴", () => {
     expect(usePlayerStore.getState().isPlaying).toBe(false);
   });
 
+  it("REL-04：设备丢失给出专用提示、刷新设备列表，随后的通用错误不覆盖它", () => {
+    usePlayerStore.setState({ isPlaying: true, notification: null });
+    const loadDevices = vi.fn(async () => undefined);
+    usePlayerStore.setState({ loadDevices });
+    renderHook(usePlayback);
+    emit({ type: "device_lost", reason: "AUDCLNT_E_DEVICE_INVALIDATED" });
+    emit({ type: "error", message: "device lost: AUDCLNT_E_DEVICE_INVALIDATED" });
+    emit({ type: "playback_stopped" });
+    expect(usePlayerStore.getState().isPlaying).toBe(false);
+    expect(usePlayerStore.getState().notification?.text).toContain("输出设备已断开");
+    expect(loadDevices).toHaveBeenCalledWith({ enumerateOnly: true });
+  });
+
+  it("设备丢失只刷新候选列表，不切换到扬声器或自动续播", async () => {
+    usePlayerStore.setState({ currentDeviceId: "headphones", isPlaying: true });
+    vi.mocked(invoke).mockImplementation(async (command) => command === "list_devices"
+      ? [{ id: "speaker", name: "扬声器", isDefault: true }] : undefined);
+    renderHook(usePlayback);
+    await act(async () => { emit({ type: "device_lost", reason: "耳机已拔出" }); });
+    expect(usePlayerStore.getState().devices.map((device) => device.id)).toEqual(["speaker"]);
+    expect(usePlayerStore.getState().currentDeviceId).toBe("headphones");
+    expect(usePlayerStore.getState().isPlaying).toBe(false);
+    for (const command of ["set_output_driver", "select_output_device", "play"]) {
+      expect(vi.mocked(invoke).mock.calls.map(([name]) => name)).not.toContain(command);
+    }
+  });
+
   it("切歌立即归零并清除上一首的 seek 保护", () => {
     renderHook(usePlayback);
     seekGuard.until = Date.now() + 400;

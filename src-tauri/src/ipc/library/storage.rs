@@ -200,7 +200,8 @@ impl LibraryStorage {
                 Ok(tracks)
             }
             Err(recovery_error) => Err(format!(
-                "曲库读取失败，已中止写入以免覆盖数据：{error}；上一版恢复失败：{recovery_error}"
+                "{}：曲库读取失败，已中止写入以免覆盖数据：{error}；上一版恢复失败：{recovery_error}",
+                crate::ipc::error::CACHE_CORRUPT_MARKER
             )),
         }
     }

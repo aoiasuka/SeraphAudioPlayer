@@ -151,6 +151,7 @@ pub async fn bilibili_login_qrcode(app: AppHandle) -> Result<BilibiliLoginQrCode
         .into_data("bilibili qrcode")?;
 
     Ok(BilibiliLoginQrCode {
+        data_url: super::qr::login_qr_data_url(&api.url)?,
         url: api.url,
         qrcode_key: api.qrcode_key,
     })

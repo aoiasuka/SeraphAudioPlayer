@@ -72,13 +72,17 @@ impl IpcError {
     }
 }
 
+/// 曲库不可恢复损坏的消息前缀：`storage.rs` 的恢复失败路径以它开头，
+/// [`From<String>`] 据此映射为 [`IpcErrorCode::CacheCorrupt`]。两处共用常量，
+/// 由 `unrecoverable_snapshot_maps_to_cache_corrupt_code` 回归测试绑定——
+/// 此前文案在存储重构时改掉，这个码就再也不会产生（BUG-05）。
+pub(crate) const CACHE_CORRUPT_MARKER: &str = "曲库缓存损坏";
+
 /// 内部 `Result<_, String>` 在命令边界经 `?` 自动转为通用 Internal 错误。
 /// 需要具体错误码时在命令体内显式构造 [`IpcError`]。
 impl From<String> for IpcError {
     fn from(message: String) -> Self {
-        // 曲库损坏信息由 read_cached_tracks_for_update 拼装，识别后归类到具体码，
-        // 让前端能对"曲库损坏"给出区别于普通错误的提示。
-        let code = if message.contains("曲库缓存损坏") {
+        let code = if message.starts_with(CACHE_CORRUPT_MARKER) {
             IpcErrorCode::CacheCorrupt
         } else {
             IpcErrorCode::Internal

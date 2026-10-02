@@ -23,6 +23,8 @@ export function SpectrumPanel() {
   const immersiveOpen = useImmersiveStore((s) => s.isOpen);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTrackId = usePlayerStore((s) => s.currentTrack()?.id ?? null);
+  // 曲目身份是会话生命周期键：切歌必须换新 ID，不能沿用旧请求的身份。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const binsRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));

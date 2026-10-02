@@ -24,6 +24,15 @@ export function hasLyrics(track: Pick<Track, "lyrics"> | null | undefined): bool
   return lyricLines(track).length > 0;
 }
 
+/**
+ * 有歌词但没有真实时间轴（纯文本）。后端给这类歌词按每行 4 秒合成了假时间并标
+ * `sync: "none"`（`LyricDocument::from_lines`）；三处显示组件据此静态展示——
+ * 不高亮、不跟随、不判间奏、点击不 seek（BUG-03：此前前端从不读 `sync`）。
+ */
+export function isUnsyncedLyrics(track: Pick<Track, "lyrics"> | null | undefined): boolean {
+  return track?.lyrics?.sync === "none" && hasLyrics(track);
+}
+
 const SOURCE_KIND_LABEL: Record<LyricSource["kind"], string> = {
   unknown: "来源未知",
   embedded: "音频内嵌",

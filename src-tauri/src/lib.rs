@@ -87,9 +87,23 @@ pub fn run() {
             ipc::visualizer::get_spectrum_frame,
             ipc::visualizer::get_analysis_frame,
             ipc::visualizer::reset_analysis_meters,
+            diagnostics::log_frontend,
         ]);
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // 第二个实例只唤起现有窗口，不再次读写同一曲库或水合持久化设置。
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         // F-03：Tauri v2 的 capabilities 只约束 core/插件命令，`generate_handler!`
@@ -124,6 +138,7 @@ pub fn run() {
             // Windows 任务栏：缩略图播控按钮 + 图标播放进度条
             #[cfg(windows)]
             taskbar::init(app.handle());
+            spawn_reveal_fallback(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -139,6 +154,32 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Seraph Audio Player");
+}
+
+/// 主窗口显示的超时兜底时长。
+const MAIN_WINDOW_REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// BUG-02：主窗口 `visible:false`，正常由前端首帧绘制后显示（`useRevealWindow`），
+/// React 崩溃兜底页也会自己显示。但前端在 React 挂载前就失败（store 模块求值期
+/// 抛错、bundle 加载失败）时没有任何代码会显示窗口——进程在后台、用户只觉得
+/// 「双击没反应」。超时后仍不可见即强制显示，至少能看到界面或 WebView 错误页。
+/// 在独立线程里调用：窗口操作要主线程事件循环配合，这里等待不阻塞它。
+fn spawn_reveal_fallback(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("main-window-reveal-fallback".into())
+        .spawn(move || {
+            std::thread::sleep(MAIN_WINDOW_REVEAL_FALLBACK);
+            if !window.is_visible().unwrap_or(true) {
+                tracing::warn!("前端未在超时内显示主窗口，已强制显示");
+                let _ = window.show();
+            }
+        });
+    if let Err(err) = spawned {
+        tracing::warn!("无法启动主窗口显示兜底线程：{err}");
+    }
 }
 
 /// F-03：任务栏歌词条窗口允许调用的自定义命令白名单。
@@ -166,6 +207,8 @@ const TASKBAR_LYRICS_ALLOWED_COMMANDS: &[&str] = &[
     // 窗口：拖拽移动自身、⌂ 唤起主窗口
     "position_taskbar_bar",
     "focus_main_window",
+    // REL-07：诊断日志（限长、单行化、按窗口限频，无文件路径 / 子进程接触面）
+    "log_frontend",
 ];
 
 fn command_allowed_for_window(label: &str, command: &str) -> bool {

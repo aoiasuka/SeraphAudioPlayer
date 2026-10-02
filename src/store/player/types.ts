@@ -12,9 +12,13 @@ import type {
   UserPlaylist,
 } from "@/types/track";
 
+/** REL-08：error 停留更久、不会被随后的 info 覆盖（info 排到 error 消失之后）。 */
+export type NotificationLevel = "info" | "error";
+
 export interface NotificationPayload {
   id: number;
   text: string;
+  level: NotificationLevel;
 }
 
 export interface BackendDevice {
@@ -68,6 +72,7 @@ export interface BilibiliLoginStatus {
 export interface BilibiliLoginQrCode {
   url: string;
   qrcodeKey: string;
+  dataUrl: string;
 }
 
 export interface BilibiliLoginPollResult {
@@ -277,7 +282,11 @@ export interface PlayerStore {
   ) => Promise<boolean>;
   /** 弹出保存对话框，把当前曲目歌词导出为 LRC（增强型 / 逐字 / 逐行）；成功返回 true */
   exportLyricsForCurrentTrack: (format: LrcExportFormat) => Promise<boolean>;
-  loadDevices: () => Promise<void>;
+  /** 仅枚举模式不改当前选择，也不向引擎下发输出配置。 */
+  loadDevices: {
+    (options: { enumerateOnly: boolean }): Promise<void>;
+    (): Promise<void>;
+  };
   selectDevice: (id: string) => void;
   setDriver: (k: DriverKind) => void;
   setSmtcEnabled: (enabled: boolean) => void;
@@ -310,7 +319,7 @@ export interface PlayerStore {
   toggleDeviceMenu: () => void;
   closeDeviceMenu: () => void;
   toggleSettings: () => void;
-  showNotification: (text: string) => void;
+  showNotification: (text: string, level?: NotificationLevel) => void;
   dismissNotification: () => void;
 }
 

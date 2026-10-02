@@ -84,6 +84,45 @@ describe("歌词滚动跟随", () => {
   });
 });
 
+describe("未同步（纯文本）歌词", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class {
+      observe() {}
+      disconnect() {}
+    });
+    Element.prototype.scrollTo = vi.fn();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("sync:none 的歌词静态展示：不高亮、不随播放推进、点击不 seek", () => {
+    // 后端给纯文本合成了 4 s 等差的假时间轴，并标 sync:"none"（BUG-03）
+    const plain = {
+      ...lyricDocument([
+        { startMs: 0, text: "第一行" },
+        { startMs: 4000, text: "第二行" },
+        { startMs: 8000, text: "第三行" },
+      ]),
+      sync: "none" as const,
+    };
+    const seek = vi.fn();
+    usePlayerStore.setState({
+      ...usePlayerStore.getInitialState(),
+      playlist: [{ id: "p", duration: 180, lyrics: plain }] as Track[],
+      currentTime: 9,
+      seek,
+    });
+    const { container } = render(<LyricsPanel />);
+    expect(container.querySelector("[data-active]")).toBeNull();
+    expect(screen.getByText(/未同步/)).toBeTruthy();
+    fireEvent.click(screen.getByText("第三行"));
+    expect(seek).not.toHaveBeenCalled();
+  });
+});
+
 describe("排除规则隐藏行", () => {
   beforeEach(() => {
     vi.stubGlobal("ResizeObserver", class {

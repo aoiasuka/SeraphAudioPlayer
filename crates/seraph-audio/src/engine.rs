@@ -127,6 +127,11 @@ enum PlaybackCommand {
     SetOutputDevice(String),
     SetDriver(String),
     SetVolume(f32),
+    /// 仅测试：模拟命令处理中的 panic（REL-01 回归闸）
+    #[cfg(test)]
+    PanicForTest,
+    #[cfg(test)]
+    AssertVolumeForTest(f32),
 }
 
 impl PlaybackController {
@@ -136,37 +141,60 @@ impl PlaybackController {
         let dsp = Arc::new(DspControl::new());
         let engine_spectrum = spectrum.clone();
         let engine_dsp = dsp.clone();
-        thread::spawn(move || {
-            let mut engine =
-                PlaybackEngine::with_spectrum_tap(event_bus.clone(), engine_spectrum, engine_dsp);
-            while let Ok(request) = rx.recv() {
-                let result = match request.command {
-                    PlaybackCommand::PlayFile {
-                        path,
-                        track_id,
-                        start_seconds,
-                    } => engine.play_file(path, track_id, start_seconds),
-                    PlaybackCommand::Resume => engine.resume(),
-                    PlaybackCommand::Pause => engine.pause(),
-                    PlaybackCommand::Stop => engine.stop(),
-                    PlaybackCommand::Seek(seconds) => engine.seek(seconds),
-                    PlaybackCommand::SetOutputDevice(device_id) => {
-                        engine.set_output_device(device_id)
-                    }
-                    PlaybackCommand::SetDriver(driver) => engine.set_driver(driver),
-                    PlaybackCommand::SetVolume(volume) => engine.set_volume(volume),
+        let spawned = thread::Builder::new()
+            .name("seraph-engine".into())
+            .spawn(move || {
+                let new_engine = || {
+                    PlaybackEngine::with_spectrum_tap(
+                        event_bus.clone(),
+                        engine_spectrum.clone(),
+                        engine_dsp.clone(),
+                    )
                 };
-
-                if let Err(err) = &result {
-                    event_bus.publish(PlayerEvent::Error {
-                        message: err.to_string(),
+                let mut engine = new_engine();
+                while let Ok(request) = rx.recv() {
+                    // REL-01：审2-2 只给 play_file 的打开段兜了 catch_unwind；seek / 切驱动 /
+                    // 建流 / 独占初始化任何一处 panic 都会让本线程 unwind 死亡，此后所有命令
+                    // 返回 "audio thread is not available"，只能重启。整个分发包一层，
+                    // panic 后重建会话，但保留本条命令之前确认过的设备、驱动和音量。
+                    // 系统媒体键可以绕过前端直接起播，不能依赖下一次 UI 操作重新下发配置。
+                    let volume = engine.volume;
+                    let driver = engine.driver;
+                    let selected_device_id = engine.selected_device_id.clone();
+                    let command = request.command;
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        dispatch_command(&mut engine, command)
+                    }))
+                    .unwrap_or_else(|payload| {
+                        let reason = panic_message(payload.as_ref());
+                        tracing::error!("audio engine command panicked: {reason}");
+                        let mut restored = new_engine();
+                        restored.volume = volume;
+                        restored.driver = driver;
+                        restored.selected_device_id = selected_device_id;
+                        let broken = std::mem::replace(&mut engine, restored);
+                        // 旧引擎的 Drop 会停会话、join 工作线程，同样可能 panic
+                        let _ =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(broken)));
+                        Err(BackendError::Internal(format!(
+                            "audio engine panicked and was reset: {reason}"
+                        )))
                     });
-                    event_bus.publish(PlayerEvent::PlaybackStopped);
-                }
 
-                let _ = request.reply.send(result);
-            }
-        });
+                    if let Err(err) = &result {
+                        event_bus.publish(PlayerEvent::Error {
+                            message: err.to_string(),
+                        });
+                        event_bus.publish(PlayerEvent::PlaybackStopped);
+                    }
+
+                    let _ = request.reply.send(result);
+                }
+            });
+        if let Err(err) = spawned {
+            // 起不了线程时 tx 的接收端随闭包一起丢弃，之后每条命令都会得到明确的错误
+            tracing::error!("failed to spawn audio engine thread: {err}");
+        }
 
         Self { tx, spectrum, dsp }
     }
@@ -245,6 +273,42 @@ impl PlaybackController {
             )),
         }
     }
+}
+
+fn dispatch_command(engine: &mut PlaybackEngine, command: PlaybackCommand) -> Result<()> {
+    match command {
+        PlaybackCommand::PlayFile {
+            path,
+            track_id,
+            start_seconds,
+        } => engine.play_file(path, track_id, start_seconds),
+        PlaybackCommand::Resume => engine.resume(),
+        PlaybackCommand::Pause => engine.pause(),
+        PlaybackCommand::Stop => engine.stop(),
+        PlaybackCommand::Seek(seconds) => engine.seek(seconds),
+        PlaybackCommand::SetOutputDevice(device_id) => engine.set_output_device(device_id),
+        PlaybackCommand::SetDriver(driver) => engine.set_driver(driver),
+        PlaybackCommand::SetVolume(volume) => engine.set_volume(volume),
+        #[cfg(test)]
+        PlaybackCommand::PanicForTest => {
+            engine.volume = 1.0;
+            panic!("simulated engine panic");
+        }
+        #[cfg(test)]
+        PlaybackCommand::AssertVolumeForTest(expected) => {
+            assert_eq!(engine.volume, expected);
+            Ok(())
+        }
+    }
+}
+
+/// panic 载荷转成可读文本（`panic!` 的字面量是 `&str`，格式化的是 `String`）。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
 }
 
 pub struct PlaybackEngine {
@@ -2390,6 +2454,34 @@ mod tests {
         let output = adapt(&[0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0], 4, 1, 2, 1);
         assert!(output.iter().all(|sample| sample.is_finite()));
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
+    #[test]
+    fn engine_thread_survives_a_panicking_command() {
+        // REL-01：命令处理中任一处 panic 都不能让引擎线程死掉——否则此后所有命令
+        // 都返回 "audio thread is not available"，只能重启应用。
+        let bus = EventBus::new();
+        let events = bus.subscribe();
+        let controller = PlaybackController::new(bus);
+        controller.set_volume(0.14).unwrap();
+        let err = controller
+            .send(PlaybackCommand::PanicForTest)
+            .expect_err("panicking command must report an error");
+        assert!(err.to_string().contains("panicked"), "{err}");
+        controller
+            .send(PlaybackCommand::AssertVolumeForTest(0.14))
+            .unwrap();
+        controller
+            .set_volume(0.5)
+            .expect("engine thread must still serve commands after a panic");
+        let mut saw_error = false;
+        while let Ok(event) = events.try_recv() {
+            saw_error |= matches!(event, PlayerEvent::Error { .. });
+        }
+        assert!(
+            saw_error,
+            "panic must be reported to the frontend as an Error event"
+        );
     }
 
     #[test]

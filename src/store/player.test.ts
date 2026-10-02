@@ -171,6 +171,63 @@ describe("player store lyrics pinning", () => {
   });
 });
 
+describe("player store lyrics error messages", () => {
+  // 后端 IpcResult 命令失败时 invoke 以 `{ code, message }` 普通对象 reject（不是 Error / 字符串）
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async () => undefined);
+    usePlayerStore.setState({
+      playlist: [testTrack({ id: "t" })],
+      currentTrackIndex: 0,
+      notification: null,
+    });
+  });
+
+  it("在线歌词 not_found 显示「没有匹配到」，network 显示网络提示", async () => {
+    invokeMock.mockRejectedValueOnce({ code: "not_found", message: "online lyrics not found" });
+    await usePlayerStore.getState().fetchOnlineLyricsForCurrentTrack();
+    expect(usePlayerStore.getState().notification?.text).toBe("没有匹配到在线歌词");
+
+    invokeMock.mockRejectedValueOnce({
+      code: "network",
+      message: "在线歌词源访问失败，请检查网络连接后重试",
+    });
+    await usePlayerStore.getState().fetchOnlineLyricsForCurrentTrack();
+    expect(usePlayerStore.getState().notification?.text).toBe(
+      "在线歌词源访问失败，请检查网络连接后重试"
+    );
+  });
+
+  it("导入歌词的对象形态错误保留具体原因", async () => {
+    invokeMock.mockRejectedValueOnce({
+      code: "invalid_input",
+      message: "lyrics file has no usable text",
+    });
+    await usePlayerStore
+      .getState()
+      .importLyricsForCurrentTrack(new File(["x"], "a.lrc"));
+    expect(usePlayerStore.getState().notification?.text).toBe("歌词文件没有可用内容");
+
+    invokeMock.mockRejectedValueOnce({ code: "cache_corrupt", message: "无法解析 x.json" });
+    await usePlayerStore
+      .getState()
+      .importLyricsForCurrentTrack(new File(["x"], "a.lrc"));
+    expect(usePlayerStore.getState().notification?.text).toContain("曲库缓存损坏");
+  });
+
+  it("应用在线歌词失败时同样按错误码给出原因", async () => {
+    invokeMock.mockRejectedValueOnce({ code: "not_found", message: "track was not found" });
+    const ok = await usePlayerStore
+      .getState()
+      .applyOnlineLyricsForCurrentTrack(lyricDocument([{ startMs: 0, text: "a" }]));
+    expect(ok).toBe(false);
+    expect(usePlayerStore.getState().notification?.text).toBe(
+      "当前曲目未写入曲库缓存，请重新导入音频"
+    );
+    usePlayerStore.setState({ playlist: [], currentTrackIndex: 0, notification: null });
+  });
+});
+
 describe("player store startup and persistence", () => {
   it("starts with an empty production playlist", () => {
     expect(usePlayerStore.getState().playlist).toEqual([]);

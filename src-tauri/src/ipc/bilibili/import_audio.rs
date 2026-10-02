@@ -15,7 +15,7 @@ pub(crate) async fn import_bilibili_audio_inner(
     let bvid = cancellation.run(resolve_bvid(client, input)).await?;
     // 同一来源的下载、缓存命中、入库与删除互斥，且跨音质/缓存目录使用同一身份。
     // guard 只登记占用，不跨 await 持有 mutex；一直保留到入库完成。
-    let operation = acquire_audio_operation(&bvid)?;
+    let operation = std::sync::Arc::new(acquire_audio_operation(&bvid)?);
     if let Some(track_id) = options.existing_track_id.clone() {
         let app_for_check = app.clone();
         let exists = tauri::async_runtime::spawn_blocking(move || {
@@ -46,7 +46,7 @@ pub(crate) async fn import_bilibili_audio_inner(
 
     // P1-1：下载走专用 client（无总超时，仅连接/读空闲超时），
     // 避免大文件在 30 秒总超时下必然失败。
-    let download_client = bilibili_download_client_for_app(app)?;
+    let download_client = bilibili_download_client()?;
     // P2-4：EAC3 等必须 remux 的流，remux 失败时不允许 fallback 落盘。
     let must_remux = matches!(
         resolved.stream.kind,
@@ -59,25 +59,9 @@ pub(crate) async fn import_bilibili_audio_inner(
         ffmpeg_path.as_deref(),
         must_remux,
         cancellation,
+        &operation,
     )
     .await?;
-    if enforce_cache_limit {
-        // 审2-S2：enforce_cache_limit 是同步磁盘遍历 + 删除，不能在 async
-        // runtime 线程上直调；挪进 spawn_blocking，失败只 warn 不中断导入
-        // （保持原 `let _ =` 的容错语义）。
-        let app_for_cache = app.clone();
-        let preserve = vec![final_path.clone()];
-        match tauri::async_runtime::spawn_blocking(move || {
-            enforce_cache_limit_preserving_many(&app_for_cache, &preserve)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => tracing::warn!("bilibili 导入后缓存清理失败: {err}"),
-            Err(err) => tracing::warn!("bilibili 导入后缓存清理任务异常终止: {err}"),
-        }
-    }
-
     cancellation.check()?;
     let track = track_from_resolved_audio(&resolved, &final_path, ffmpeg_path.is_some())?;
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
@@ -96,6 +80,20 @@ pub(crate) async fn import_bilibili_audio_inner(
     })
     .await
     .map_err(|err| format!("曲库合并任务异常终止: {err}"))??;
+    // 必须在入库提交并释放来源占用后清理；否则会与自己的下载租约冲突。
+    if enforce_cache_limit {
+        let app_for_cache = app.clone();
+        let preserve = vec![final_path];
+        match tauri::async_runtime::spawn_blocking(move || {
+            enforce_cache_limit_preserving_many(&app_for_cache, &preserve)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => tracing::warn!("bilibili 导入后缓存清理跳过: {err}"),
+            Err(err) => tracing::warn!("bilibili 导入后缓存清理任务异常终止: {err}"),
+        }
+    }
     imported
         .into_iter()
         .next()
@@ -115,36 +113,7 @@ pub(crate) fn is_bilibili_host(url: &reqwest::Url) -> bool {
     })
 }
 
-/// M-3：playurl 返回的 DASH 音频 URL 允许的 CDN host 后缀。
-/// 官方播放地址落在 B 站自有 / 授权 CDN 域名族；对下载 client 而言这些请求会携带
-/// 登录 Cookie（SESSDATA），必须限定在这些域内，避免响应里的第三方/畸形 URL 把凭据带走。
-const BILIBILI_CDN_HOST_SUFFIXES: &[&str] = &[
-    ".bilivideo.com",
-    ".bilivideo.cn",
-    ".hdslb.com",
-    ".akamaized.net",
-    ".bilibili.com",
-];
-
-/// M-3：校验 playurl 返回的音频下载 URL 是否可安全携带 Cookie 请求。
-/// 要求：scheme 必须是 https（拒绝 http 明文，防被动监听截获会话）；
-/// host 必须落在 [`BILIBILI_CDN_HOST_SUFFIXES`] 白名单内。
-pub(crate) fn is_safe_bilibili_download_url(raw: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
-        return false;
-    };
-    if url.scheme() != "https" {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    BILIBILI_CDN_HOST_SUFFIXES
-        .iter()
-        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
-        || host == "bilibili.com"
-}
+pub(crate) use crate::ipc::url_guard::is_safe_bilibili_download_url;
 
 pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
     if let Some(bvid) = extract_bvid(input) {
@@ -464,25 +433,10 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     })
 }
 
-/// 下载和删除共用来源占用表，避免交错写入、删除后重缓存复活文件。
-static AUDIO_OPERATIONS_IN_FLIGHT: parking_lot::Mutex<BTreeSet<String>> =
-    parking_lot::Mutex::new(BTreeSet::new());
-
-pub(crate) struct AudioOperationSlot(String);
-
-impl Drop for AudioOperationSlot {
-    fn drop(&mut self) {
-        AUDIO_OPERATIONS_IN_FLIGHT.lock().remove(&self.0);
-    }
-}
-
-pub(crate) fn acquire_audio_operation(source: &str) -> Result<AudioOperationSlot, String> {
-    let key = source.trim().replace('\\', "/").to_ascii_lowercase();
-    let mut in_flight = AUDIO_OPERATIONS_IN_FLIGHT.lock();
-    if !in_flight.insert(key.clone()) {
-        return Err("该曲目正在下载、重新缓存或删除，请稍后重试".into());
-    }
-    Ok(AudioOperationSlot(key))
+pub(crate) fn acquire_audio_operation(
+    source: &str,
+) -> Result<crate::ipc::cache::operations::AudioOperationSlot<'static>, String> {
+    crate::ipc::cache::operations::OPERATIONS.acquire_source(source)
 }
 
 pub(crate) async fn ensure_audio_file(
@@ -492,6 +446,7 @@ pub(crate) async fn ensure_audio_file(
     ffmpeg_path: Option<&Path>,
     must_remux: bool,
     cancellation: &ImportCancellation,
+    operation: &std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>,
 ) -> Result<PathBuf, String> {
     cancellation.check()?;
     // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
@@ -531,7 +486,10 @@ pub(crate) async fn ensure_audio_file(
                 let target = path.to_path_buf();
                 let ffmpeg = ffmpeg_path.map(Path::to_path_buf);
                 let cancel = cancellation.clone();
+                let operation = std::sync::Arc::clone(operation);
                 let outcome = tauri::async_runtime::spawn_blocking(move || {
+                    // 丢弃异步调用不等于阻塞任务已结束，写盘线程退出前必须保留来源占用。
+                    let _operation = operation;
                     finalize_audio_file(&temp, &target, ffmpeg.as_deref(), must_remux, &cancel)
                 })
                 .await
@@ -604,8 +562,7 @@ pub(crate) async fn download_audio_to_file(
         return Err("empty bilibili audio url".into());
     }
 
-    // M-3：下载 client 携带登录 Cookie。playurl 响应里的 baseUrl/backupUrl 属外部输入，
-    // 必须先校验为 https + B 站系 CDN 域名，拒绝把 SESSDATA 发往第三方/明文地址。
+    // playurl 的 baseUrl/backupUrl 属外部输入：下载不带 Cookie，但仍需白名单限制出站。
     if !is_safe_bilibili_download_url(audio_url) {
         return Err(format!(
             "拒绝从非 B 站 CDN 或非 https 地址下载音频: {audio_url}"
@@ -778,6 +735,10 @@ pub(crate) fn finalize_audio_file(
             Err(err) => {
                 let _ = fs::remove_file(path);
                 cancellation.check()?;
+                // 超时、启动失败或无法确认退出时不把任务包装成成功的格式回退。
+                if matches!(err, RemuxError::Process(_)) {
+                    return Err(err.to_string());
+                }
                 // P2-4：EAC3 等必须 remux 的流不允许把原始 fMP4 字节冠以
                 // .eac3 落盘——Symphonia 无法解码，会永久缓存一个不可播文件。
                 if must_remux {
@@ -800,18 +761,24 @@ pub(crate) fn finalize_audio_file(
     Ok(fallback_path)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemuxError {
+    #[error("ffmpeg 进程未安全完成：{0}")]
+    Process(String),
+    #[error("{0}")]
+    Format(String),
+}
+
 pub(crate) fn remux_audio(
     ffmpeg_path: &Path,
     input: &Path,
     output: &Path,
     cancellation: &ImportCancellation,
-) -> Result<(), String> {
-    use std::io::Read;
-    use std::process::Stdio;
-    cancellation.check()?;
+) -> Result<(), RemuxError> {
+    cancellation.check().map_err(RemuxError::Process)?;
     let mut command = Command::new(ffmpeg_path);
     hide_console_window(&mut command);
-    let mut child = command
+    command
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -821,50 +788,17 @@ pub(crate) fn remux_audio(
         .arg("-vn")
         .arg("-c:a")
         .arg("copy")
-        .arg(output)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to start ffmpeg: {err}"))?;
-    // 持续排空 stderr，最多保留 16 KiB 错误摘要；避免子进程被管道反压卡住。
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut captured = Vec::new();
-        if let Some(mut stderr) = stderr {
-            let mut buffer = [0u8; 4096];
-            while let Ok(count) = stderr.read(&mut buffer) {
-                if count == 0 {
-                    break;
-                }
-                let keep = count.min(16_384usize.saturating_sub(captured.len()));
-                captured.extend_from_slice(&buffer[..keep]);
-            }
-        }
-        captured
-    });
-    let status = loop {
-        if cancellation.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err("导入已取消".into());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(format!("等待 ffmpeg 失败：{error}"));
-            }
-        }
-    };
-    let stderr = reader.join().unwrap_or_default();
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
-        return Err(format!("ffmpeg remux failed: {stderr}"));
+        .arg(output);
+    // 重封装不重新编码，但慢盘也不能无限占住导入槽位；运行最长五分钟，
+    // stderr 排空与终止回收各有独立上限，取消仍每 25 ms 检查一次。
+    let result =
+        crate::ipc::process_util::run_bounded(&mut command, Duration::from_secs(5 * 60), || {
+            cancellation.is_cancelled()
+        })
+        .map_err(|err| RemuxError::Process(err.to_string()))?;
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(RemuxError::Format(format!("ffmpeg remux failed: {stderr}")));
     }
 
     if !output.is_file()
@@ -872,7 +806,9 @@ pub(crate) fn remux_audio(
             .map(|meta| meta.len() == 0)
             .unwrap_or(true)
     {
-        return Err("ffmpeg did not create a usable output file".into());
+        return Err(RemuxError::Format(
+            "ffmpeg did not create a usable output file".into(),
+        ));
     }
 
     Ok(())

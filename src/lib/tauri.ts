@@ -25,12 +25,12 @@ interface TauriBridge {
 function createBrowserStub(): TauriBridge {
   return {
     invoke: async (cmd, args) => {
-      // eslint-disable-next-line no-console
+
       console.debug(`[stub] invoke(${cmd})`, args);
       return undefined as never;
     },
     listen: async (event, _cb, windowLabel) => {
-      // eslint-disable-next-line no-console
+
       console.debug(`[stub] listen(${event})`, windowLabel);
       return () => undefined;
     },

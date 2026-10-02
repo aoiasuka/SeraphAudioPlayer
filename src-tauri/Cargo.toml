@@ -22,7 +22,6 @@ seraph-core = { workspace = true }
 seraph-audio = { workspace = true }
 seraph-dsp = { workspace = true }
 seraph-decoder = { workspace = true }
-seraph-playlist = { workspace = true }
 seraph-visualizer = { workspace = true }
 
 tauri = { version = "2.1", features = ["protocol-asset"] }
@@ -50,6 +49,7 @@ zhconv = { version = "0.3", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # S-01：ffmpeg 下载包 SHA-256 完整性校验
 sha2 = "0.10"
+qrcodegen = "=1.8.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
@@ -65,3 +65,4 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+tauri-plugin-single-instance = "2"

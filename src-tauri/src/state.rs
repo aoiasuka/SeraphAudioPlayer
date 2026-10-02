@@ -1,4 +1,4 @@
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use seraph_audio::PlaybackController;
 use seraph_core::{EventBus, PlayerEvent, PlayerState};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,9 @@ pub struct AppState {
     pub event_bus: EventBus,
     pub player_state: Arc<RwLock<PlayerState>>,
     playback_queue: Arc<RwLock<PlaybackQueue>>,
+    // 手动播控与自动续播共用串行门闩；bool 记录用户允许继续播放的意图，
+    // 不受迟到的界面事件改写。门闩覆盖状态检查、选曲、命令提交及回执。
+    playback_control: Arc<Mutex<bool>>,
     pub audio: PlaybackController,
     pub visualizer: Arc<crate::visualizer_service::VisualizerService>,
 }
@@ -38,6 +41,7 @@ impl AppState {
             event_bus,
             player_state: Arc::new(RwLock::new(PlayerState::Stopped)),
             playback_queue: Arc::new(RwLock::new(PlaybackQueue::default())),
+            playback_control: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -176,25 +180,65 @@ impl AppState {
         queue.select_track(index);
     }
 
+    pub fn run_playback_control<T>(
+        &self,
+        allow_auto: Option<bool>,
+        job: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut intent = self.playback_control.lock();
+        if let Some(allowed) = allow_auto {
+            *intent = allowed;
+        }
+        let result = job();
+        if allow_auto == Some(true) && result.is_err() {
+            *intent = false;
+        }
+        result
+    }
+
+    pub fn pause_playback(&self) -> Result<(), String> {
+        self.run_playback_control(Some(false), || {
+            self.audio.pause().map_err(|err| err.to_string())?;
+            *self.player_state.write() = PlayerState::Paused;
+            Ok(())
+        })
+    }
+
+    pub fn stop_playback(&self) -> Result<(), String> {
+        self.run_playback_control(Some(false), || {
+            self.audio.stop().map_err(|err| err.to_string())?;
+            *self.player_state.write() = PlayerState::Stopped;
+            Ok(())
+        })
+    }
+
     pub fn advance_track(&self, direction: TrackAdvance) -> Result<(), String> {
-        self.advance_track_with_start(direction, PlaybackStart::PreserveState)
+        let intent = self.playback_control.lock();
+        let start = if *intent && *self.player_state.read() == PlayerState::Playing {
+            PlaybackStart::ForcePlaying
+        } else {
+            PlaybackStart::PreserveState
+        };
+        self.advance_track_with_start(direction, start)
     }
 
     /// 系统入口恢复所选曲目：同一会话保留位置，选曲改变或会话结束则重新加载。
     pub fn play_current_track(&self) -> Result<(), String> {
-        let track = self.playback_queue.read().current_track().cloned();
-        let Some(track) = track else {
-            return Ok(());
-        };
-        let result = self
-            .audio
-            .play_file_at(PathBuf::from(&track.path), track.id.clone(), None);
-        *self.player_state.write() = if result.is_ok() {
-            PlayerState::Playing
-        } else {
-            PlayerState::Stopped
-        };
-        result.map_err(|err| err.to_string())
+        self.run_playback_control(Some(true), || {
+            let track = self.playback_queue.read().current_track().cloned();
+            let Some(track) = track else {
+                return Ok(());
+            };
+            let result =
+                self.audio
+                    .play_file_at(PathBuf::from(&track.path), track.id.clone(), None);
+            *self.player_state.write() = if result.is_ok() {
+                PlayerState::Playing
+            } else {
+                PlayerState::Stopped
+            };
+            result.map_err(|err| err.to_string())
+        })
     }
 
     /// 按 id 查询队列内曲目（SMTC 元数据展示用）。
@@ -212,6 +256,11 @@ impl AppState {
     }
 
     pub fn handle_playback_ended(&self, track_id: &str) -> Result<(), String> {
+        // 必须与手动停止共用门闩，不能“检查后解锁、稍后提交”。
+        let intent = self.playback_control.lock();
+        if !*intent || *self.player_state.read() != PlayerState::Playing {
+            return Ok(());
+        }
         let next = {
             let mut queue = self.playback_queue.write();
             if !queue.is_current_track(track_id) {
@@ -256,7 +305,7 @@ impl AppState {
     fn play_track(&self, track: &PlaybackQueueTrack, start: PlaybackStart) -> Result<(), String> {
         let should_play = match start {
             PlaybackStart::ForcePlaying => true,
-            PlaybackStart::PreserveState => *self.player_state.read() == PlayerState::Playing,
+            PlaybackStart::PreserveState => false,
         };
 
         // 选择先同步给所有窗口。文件打开失败时仍停在明确的失败曲目，下一次
@@ -706,6 +755,61 @@ mod tests {
     }
 
     #[test]
+    fn delayed_end_event_does_not_restart_a_stopped_or_paused_queue() {
+        let state = AppState::new();
+        state.sync_playback_queue(tracks(&["a", "b"]), 0, vec![], false, false);
+        for stopped in [
+            PlayerState::Stopped,
+            PlayerState::Paused,
+            PlayerState::DeviceLost,
+        ] {
+            *state.player_state.write() = stopped;
+            state.handle_playback_ended("a").unwrap();
+            assert_eq!(state.current_queue_track().unwrap().id, "a");
+        }
+    }
+
+    #[test]
+    fn completed_stop_wins_even_if_an_older_started_event_arrives_late() {
+        let state = AppState::new();
+        state.sync_playback_queue(tracks(&["a", "b"]), 0, vec![], false, false);
+        *state.playback_control.lock() = true;
+        state.stop_playback().unwrap();
+        // 模拟较早的 PlaybackStarted 事件晚于停止回执才被转发；不能改变停止意图。
+        *state.player_state.write() = PlayerState::Playing;
+        state.handle_playback_ended("a").unwrap();
+        assert_eq!(state.current_queue_track().unwrap().id, "a");
+    }
+
+    #[test]
+    fn waiting_auto_advance_checks_stop_intent_after_acquiring_control_gate() {
+        let state = AppState::new();
+        state.sync_playback_queue(tracks(&["a", "b"]), 0, vec![], false, false);
+        *state.player_state.write() = PlayerState::Playing;
+        let mut gate = state.playback_control.lock();
+        *gate = true;
+        let worker_state = state.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = worker_state.handle_playback_ended("a");
+            done_tx.send(result).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        *gate = false;
+        drop(gate);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(state.current_queue_track().unwrap().id, "a");
+    }
+
+    #[test]
     fn bug_audit_09_failed_advance_publishes_selection_and_allows_skipping() {
         let state = AppState::new();
         let mut items = tracks(&["a", "b", "c"]);
@@ -715,6 +819,7 @@ mod tests {
         items[1].path = missing.to_string_lossy().into_owned();
         state.sync_playback_queue(items, 0, vec![], false, false);
         *state.player_state.write() = PlayerState::Playing;
+        *state.playback_control.lock() = true;
         let rx = state.event_bus.subscribe();
         assert!(state.handle_playback_ended("a").is_err());
         let events = rx.try_iter().collect::<Vec<_>>();

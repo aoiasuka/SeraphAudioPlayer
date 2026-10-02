@@ -1,21 +1,13 @@
-use seraph_core::types::{BitDepth, Channels, SampleRate};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, BTreeSet, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 
 use crate::backend::{BackendError, Result};
-use cpal::{
-    traits::{DeviceTrait, HostTrait},
-    SampleFormat,
-};
+use cpal::traits::{DeviceTrait, HostTrait};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ShareMode {
-    Exclusive,
-    Shared,
-}
-
+/// 输出设备身份。REL-03：此前每个设备还调 `supported_output_configs()` 探测采样率 /
+/// 位深 / 声道能力，而 IPC 只回传 id 与名称、探测结果直接丢弃——WASAPI 上逐个激活
+/// 设备探测很慢，且会唤醒休眠的蓝牙 / USB 设备。能力判定在真正打开流时按文件格式做。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
     pub id: String,
@@ -23,17 +15,6 @@ pub struct AudioDevice {
     pub is_default: bool,
     #[serde(default, rename = "legacyIds")]
     pub legacy_ids: Vec<String>,
-    pub capabilities: DeviceCapabilities,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceCapabilities {
-    pub sample_rates: Vec<SampleRate>,
-    pub bit_depths: Vec<BitDepth>,
-    pub max_channels: Channels,
-    pub supports_exclusive: bool,
-    pub supports_dsd_dop: bool,
-    pub supports_dsd_native: bool,
 }
 
 #[derive(Clone)]
@@ -75,21 +56,11 @@ fn platform_list_output_devices() -> Result<Vec<AudioDevice>> {
 
     Ok(identities
         .into_iter()
-        .map(|identity| {
-            let capabilities = cpal_device_by_name_occurrence(
-                &cpal_devices,
-                &identity.name,
-                identity.name_occurrence,
-            )
-            .map(|entry| capabilities_from_device(&entry.device))
-            .unwrap_or_else(default_capabilities);
-            AudioDevice {
-                id: identity.id,
-                name: identity.name,
-                is_default: identity.is_default,
-                legacy_ids: identity.legacy_ids,
-                capabilities,
-            }
+        .map(|identity| AudioDevice {
+            id: identity.id,
+            name: identity.name,
+            is_default: identity.is_default,
+            legacy_ids: identity.legacy_ids,
         })
         .collect())
 }
@@ -121,7 +92,6 @@ fn platform_list_output_devices() -> Result<Vec<AudioDevice>> {
             is_default,
             legacy_ids: vec![legacy_index_device_id(entry.index, &entry.name)],
             name: entry.name,
-            capabilities: capabilities_from_device(&entry.device),
         });
     }
 
@@ -301,75 +271,6 @@ fn cpal_device_by_name_occurrence<'a>(
         .nth(occurrence)
 }
 
-fn capabilities_from_device(device: &cpal::Device) -> DeviceCapabilities {
-    let mut sample_rates = BTreeSet::new();
-    let mut bit_depths = BTreeSet::new();
-    let mut max_channels = 2_u16;
-
-    if let Ok(configs) = device.supported_output_configs() {
-        for config in configs {
-            max_channels = max_channels.max(config.channels());
-            for rate in
-                sample_rates_from_range(config.min_sample_rate().0, config.max_sample_rate().0)
-            {
-                sample_rates.insert(rate);
-            }
-            if let Some(bits) = bit_depth_from_sample_format(config.sample_format()) {
-                bit_depths.insert(bits);
-            }
-        }
-    }
-
-    DeviceCapabilities {
-        sample_rates: sample_rates.into_iter().map(SampleRate).collect(),
-        bit_depths: bit_depths.into_iter().map(BitDepth).collect(),
-        max_channels: Channels(max_channels),
-        supports_exclusive: cfg!(windows),
-        supports_dsd_dop: false,
-        supports_dsd_native: false,
-    }
-}
-
-fn default_capabilities() -> DeviceCapabilities {
-    DeviceCapabilities {
-        sample_rates: Vec::new(),
-        bit_depths: Vec::new(),
-        max_channels: Channels(2),
-        supports_exclusive: cfg!(windows),
-        supports_dsd_dop: false,
-        supports_dsd_native: false,
-    }
-}
-
-fn sample_rates_from_range(min: u32, max: u32) -> Vec<u32> {
-    const COMMON: [u32; 9] = [
-        44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 768_000,
-    ];
-    let mut rates: Vec<u32> = COMMON
-        .into_iter()
-        .filter(|rate| (min..=max).contains(rate))
-        .collect();
-
-    if rates.is_empty() {
-        rates.push(min);
-        if max != min {
-            rates.push(max);
-        }
-    }
-
-    rates
-}
-
-fn bit_depth_from_sample_format(format: SampleFormat) -> Option<u16> {
-    match format {
-        SampleFormat::I8 | SampleFormat::U8 => Some(8),
-        SampleFormat::I16 | SampleFormat::U16 => Some(16),
-        SampleFormat::I32 | SampleFormat::U32 | SampleFormat::F32 => Some(32),
-        SampleFormat::I64 | SampleFormat::U64 | SampleFormat::F64 => Some(64),
-        _ => None,
-    }
-}
-
 fn legacy_device_ids(name: &str, occurrence: usize, enum_index: usize) -> Vec<String> {
     let mut ids = vec![
         legacy_hashed_device_id_with_occurrence(name, occurrence),
@@ -424,19 +325,6 @@ fn sanitize_device_id(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn keeps_common_rates_inside_device_range() {
-        assert_eq!(
-            sample_rates_from_range(44_100, 96_000),
-            vec![44_100, 48_000, 88_200, 96_000]
-        );
-    }
-
-    #[test]
-    fn falls_back_to_min_max_when_common_rates_are_absent() {
-        assert_eq!(sample_rates_from_range(8_000, 16_000), vec![8_000, 16_000]);
-    }
 
     #[test]
     fn keeps_legacy_device_ids_for_migration() {
