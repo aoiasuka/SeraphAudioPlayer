@@ -7,7 +7,7 @@
 //! 处理顺序：preamp+EQ → crossfeed。运行在解码线程（非实时回调）。
 
 use crate::crossfeed::{Crossfeed, CrossfeedSettings};
-use crate::eq::{combined_response_db, EqBand, Equalizer};
+use crate::eq::{EqBand, Equalizer};
 use serde::{Deserialize, Serialize};
 
 /// DSP 链的完整配置。持久化于前端，经 IPC 下发到引擎。
@@ -36,13 +36,6 @@ impl Default for DspSettings {
             crossfeed: CrossfeedSettings::default(),
             apply_to_dsd: false,
         }
-    }
-}
-
-impl DspSettings {
-    /// 计算整条 EQ 在给定频点的合成响应（dB），供曲线预览。
-    pub fn response_db(&self, freq: f32, sample_rate: f32) -> f32 {
-        combined_response_db(self.preamp, &self.bands, freq, sample_rate)
     }
 }
 

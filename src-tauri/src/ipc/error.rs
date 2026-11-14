@@ -23,7 +23,6 @@ pub enum IpcErrorCode {
     /// 曲库缓存损坏（已备份坏文件、拒绝覆盖写）
     CacheCorrupt,
     /// 文件系统/IO 失败
-    #[allow(dead_code)] // M3U8 导入导出命令落地后使用
     Io,
     /// 网络请求失败（在线歌词/封面/更新检查）
     Network,

@@ -121,30 +121,8 @@ pub(crate) fn format_bilibili_quality(
     }
 }
 
-pub(crate) fn format_bitrate(bitrate: Option<u32>) -> String {
-    match bitrate {
-        Some(value) if value > 0 => format!("{value} kbps"),
-        _ => "Unknown".into(),
-    }
-}
-
-pub(crate) fn format_file_size(bytes: u64) -> String {
-    let mb = bytes as f64 / 1024.0 / 1024.0;
-    format!("{mb:.1} MB")
-}
-
-pub(crate) fn color_pair(hash: u64) -> (String, String) {
-    const PAIRS: [(&str, &str); 6] = [
-        ("#67e8f9", "#a5b4fc"),
-        ("#7dd3fc", "#f0abfc"),
-        ("#5eead4", "#93c5fd"),
-        ("#f9a8d4", "#86efac"),
-        ("#fde68a", "#67e8f9"),
-        ("#c4b5fd", "#fda4af"),
-    ];
-    let pair = PAIRS[(hash as usize) % PAIRS.len()];
-    (pair.0.into(), pair.1.into())
-}
+// format_bitrate / format_file_size / color_pair 与本地曲库共用 `ipc::library` 的实现（此前各有一份）。
+pub(crate) use crate::ipc::library::{color_pair, format_bitrate, format_file_size};
 
 pub(crate) fn find_ffmpeg(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(app_dir) = app.path().app_data_dir() {

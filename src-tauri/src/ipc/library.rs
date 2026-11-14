@@ -39,5 +39,6 @@ pub(crate) use media_library::{
     mark_tracks_cache_missing_by_paths, merge_tracks_into_cache, read_cached_track,
     replace_track_in_cache,
 };
+pub(crate) use metadata::{color_pair, format_bitrate, format_file_size};
 pub use online_covers::*;
 pub use types::{ImportedTrack, LyricDocument};

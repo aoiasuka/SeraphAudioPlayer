@@ -110,7 +110,7 @@ mod tests {
                 LyricWord::new(
                     index as u64 * 100,
                     Some(index as u64 * 100 + 100),
-                    &ch.to_string(),
+                    ch.to_string(),
                 )
             })
             .collect::<Vec<_>>();
