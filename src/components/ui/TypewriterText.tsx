@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * W-01:逐字动画的文本长度上限。打字机每 tick 做一次 `text.slice(0, n)`(O(n) 重建
@@ -17,30 +17,33 @@ export function TypewriterText({ text }: { text: string }) {
   const [displayedLength, setDisplayedLength] = useState(0);
   // 超长文本退化为静态显示:动画本身才是卡死根源,不是渲染
   const animated = text.length <= MAX_TYPEWRITER_CHARS;
+  // 按码点切分：按 UTF-16 码元截取会把代理对（emoji、扩展区汉字）切成半个，动画中途闪乱码
+  const chars = useMemo(() => (animated ? Array.from(text) : []), [text, animated]);
+  const total = chars.length;
 
   useEffect(() => {
     if (!animated) return;
     setDisplayedLength(0);
-    if (!text) return;
+    if (!total) return;
 
-    const speed = Math.max(30, Math.min(80, 800 / text.length));
+    const speed = Math.max(30, Math.min(80, 800 / total));
 
     const interval = setInterval(() => {
       setDisplayedLength((prev) => {
-        if (prev >= text.length) {
+        if (prev >= total) {
           clearInterval(interval);
-          return text.length;
+          return total;
         }
         return prev + 1;
       });
     }, speed);
 
     return () => clearInterval(interval);
-  }, [text, animated]);
+  }, [text, animated, total]);
 
   if (!animated) {
     return <span className="type-caret">{text}</span>;
   }
 
-  return <span className="type-caret">{text.slice(0, displayedLength)}</span>;
+  return <span className="type-caret">{chars.slice(0, displayedLength).join("")}</span>;
 }

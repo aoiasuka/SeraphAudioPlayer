@@ -7,7 +7,7 @@ import { activeVisibleRange, hasWordTiming, isInIntermission, lyricsPositionMs, 
 import { isUnsyncedLyrics, lyricLines } from "@/lib/lyrics/document";
 import { formatSeconds } from "@/lib/format";
 import { usePlayerStore } from "@/store/player";
-import type { Track } from "@/types/track";
+import type { LyricWord, Track } from "@/types/track";
 
 function useLyricGroups(track: Track) {
   // 排除规则由后端打 hidden 标记：全量分组定位、可见分组渲染，隐藏句区间不并入上一句
@@ -27,6 +27,26 @@ function useLyricGroups(track: Track) {
   // 原始歌词非空但全部被排除规则隐藏
   const allHiddenByRules = lines.length > 0 && groups.length === 0;
   return { groups, activeIndex, active, intermission, allHiddenByRules, unsynced };
+}
+
+/**
+ * 活动行的逐字高亮（L4-03）：播放位置的订阅下沉到这里。
+ * 此前由 `ImmersiveLyrics` 订阅位置（约每 250 ms 变一次），逐字歌词下整篇几百个歌词按钮
+ * 每秒重渲染约 4 次；现在进度事件只重渲染活动行自己。
+ */
+function ActiveKaraokeLine({ words, lineEndMs }: { words: LyricWord[]; lineEndMs?: number }) {
+  const currentMs = usePlayerStore((s) => lyricsPositionMs(s.currentTime, s.outputLatency));
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  return (
+    <KaraokeLine
+      words={words}
+      currentMs={currentMs}
+      playing={isPlaying}
+      lineEndMs={lineEndMs}
+      sungColor="var(--stamp)"
+      unsungColor="rgba(181, 72, 42, 0.32)"
+    />
+  );
 }
 
 interface LyricsProps {
@@ -56,11 +76,6 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
     return group.lines.length > 1 || (main.translations?.length ?? 0) > 0;
   });
   const activeSet = useMemo(() => new Set(active), [active]);
-  // 逐字锚点：只有活动句带逐字时间轴时才订阅播放位置（否则整篇列表不必随进度重渲染）
-  const activeHasWords = active.some((index) => hasWordTiming(groups[index]?.lines[0]) || (groups[index]?.background ?? []).some((line) => hasWordTiming(line)));
-  const currentMs = usePlayerStore((s) => (activeHasWords ? lyricsPositionMs(s.currentTime, s.outputLatency) : 0));
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
-
   const hasGroups = groups.length > 0;
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -145,14 +160,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                     <span className="immersive-lyric-text">
                       {isCurrent ? (
                         hasWordTiming(main) ? (
-                          <KaraokeLine
-                            words={main.words}
-                            currentMs={currentMs}
-                            playing={isPlaying}
-                            lineEndMs={main.endMs}
-                            sungColor="var(--stamp)"
-                            unsungColor="rgba(181, 72, 42, 0.32)"
-                          />
+                          <ActiveKaraokeLine words={main.words} lineEndMs={main.endMs} />
                         ) : (
                           <>
                             <span className="immersive-lyric-placeholder type-caret" aria-hidden="true">{main?.text}</span>
@@ -168,7 +176,7 @@ export function ImmersiveLyrics({ track, showTranslation, largeLyrics, compact =
                   {group.background.map((line, bgIndex) => (
                     <small key={`bg-${bgIndex}`} className="immersive-lyric-bg">
                       {isCurrent && hasWordTiming(line) ? (
-                        <KaraokeLine words={line.words} currentMs={currentMs} playing={isPlaying} lineEndMs={line.endMs} sungColor="var(--stamp)" unsungColor="rgba(181, 72, 42, 0.32)" />
+                        <ActiveKaraokeLine words={line.words} lineEndMs={line.endMs} />
                       ) : line.text}
                     </small>
                   ))}
