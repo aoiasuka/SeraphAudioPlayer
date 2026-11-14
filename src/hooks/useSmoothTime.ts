@@ -9,6 +9,13 @@ import { useEffect, useRef, useState } from "react";
  * 只在 `KaraokeLine` 内部使用（2026-09-22 起）：rAF 每帧的 setState 只重渲染当前行的
  * 音节，不再牵动整篇歌词列表；rAF 循环随当前行卸载而停止，不会常驻。
  */
+/**
+ * 外推上限（L4-02）：进度事件约 250 ms 一次，锚点之后最多外推这么久。
+ * 进度事件停了而播放状态仍是「播放中」（解码卡在断连网络盘、输出断流、曲尾到下一首之间）时，
+ * 高亮停在上限处等下一个事件，而不是一直往前走、与实际声音脱节。
+ */
+export const SMOOTH_TIME_MAX_EXTRAPOLATION_MS = 500;
+
 export function useSmoothTime(currentMs: number, playing: boolean, enabled = true) {
   const [smooth, setSmooth] = useState(currentMs);
   const anchor = useRef({ time: currentMs, at: 0 });
@@ -26,7 +33,8 @@ export function useSmoothTime(currentMs: number, playing: boolean, enabled = tru
     let frame = 0;
     const step = () => {
       const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-      setSmooth(anchor.current.time + (now - anchor.current.at));
+      const elapsed = Math.min(Math.max(0, now - anchor.current.at), SMOOTH_TIME_MAX_EXTRAPOLATION_MS);
+      setSmooth(anchor.current.time + elapsed);
       frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
