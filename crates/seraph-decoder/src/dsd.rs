@@ -361,6 +361,15 @@ fn validate_dsd_header(
 
 /// F-4：chunk 偏移推进必须 checked 且严格单调递增，
 /// 否则 u64 回绕导致向后 seek → chunk 循环重复解析 → 死循环。
+/// 容器块遍历次数上限（DEC4-01），与标签解析（`dsd_tags.rs` / `wav_id3.rs`）同值。
+/// 块大小全为 0 的构造文件每次只前进 12 字节，1 GB 文件要循环约九千万次「定位 + 读取」，
+/// 而这段代码在打开文件时跑在引擎命令线程 / 导入线程上。
+const MAX_CONTAINER_CHUNKS: usize = 4096;
+
+fn too_many_chunks() -> DecoderError {
+    DecoderError::UnsupportedFormat("too many container chunks".into())
+}
+
 fn advance_offset(chunk_start: u64, next: Option<u64>) -> Result<u64, DecoderError> {
     next.filter(|n| *n > chunk_start)
         .ok_or_else(|| DecoderError::UnsupportedFormat("corrupt chunk size".into()))
@@ -384,7 +393,12 @@ fn parse_dsf(file: &mut File) -> Result<ParsedDsd, DecoderError> {
     let mut data_start = 0_u64;
     let mut data_len = 0_u64;
 
+    let mut visited = 0_usize;
     while let Some((id, chunk_start, chunk_size)) = read_dsf_chunk_header(file)? {
+        visited += 1;
+        if visited > MAX_CONTAINER_CHUNKS {
+            return Err(too_many_chunks());
+        }
         let payload_start = advance_offset(chunk_start, chunk_start.checked_add(12))?;
         let payload_len = chunk_size.saturating_sub(12);
         let next_chunk = advance_offset(chunk_start, payload_start.checked_add(payload_len))?;
@@ -488,7 +502,12 @@ fn parse_dff(file: &mut File) -> Result<ParsedDsd, DecoderError> {
     let mut data_start = 0_u64;
     let mut data_len = 0_u64;
 
+    let mut visited = 0_usize;
     while let Some((id, chunk_start, chunk_size)) = read_dff_chunk_header(file, file_end)? {
+        visited += 1;
+        if visited > MAX_CONTAINER_CHUNKS {
+            return Err(too_many_chunks());
+        }
         let payload_start = advance_offset(chunk_start, chunk_start.checked_add(12))?;
         let padded_size = chunk_size
             .checked_add(chunk_size & 1)
@@ -859,6 +878,29 @@ mod tests {
         let err = DsdDecoder::new().open(&path).unwrap_err();
         assert!(matches!(err, DecoderError::UnsupportedFormat(_)), "{err}");
         let _ = fs::remove_file(path);
+    }
+
+    /// DEC4-01：块大小全为 0 的文件每次只前进 12 字节，遍历必须有次数上限。
+    #[test]
+    fn rejects_dsf_with_endless_zero_sized_chunks() {
+        let path = temp_audio_path("seraph-dsd-zero-chunks", "dsf");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DSD ");
+        bytes.extend_from_slice(&28_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        for _ in 0..(MAX_CONTAINER_CHUNKS + 64) {
+            bytes.extend_from_slice(b"junk");
+            bytes.extend_from_slice(&0_u64.to_le_bytes());
+        }
+        fs::write(&path, bytes).expect("write dsf");
+
+        let err = DsdDecoder::new().open(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(
+            matches!(&err, DecoderError::UnsupportedFormat(message) if message.contains("too many")),
+            "{err}"
+        );
     }
 
     #[test]
