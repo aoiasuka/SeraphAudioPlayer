@@ -40,8 +40,8 @@ describe("EqualizerAPO / AutoEq 预设解析", () => {
     expect(result.bands.every((band) => Math.abs(band.gain) <= 24)).toBe(true);
     // 4 个点相隔一个十倍频程，4 个滤波器只能给出折中的近似（真实预设点密得多，见下一例）
     const response = combinedResponseDb(0, result.bands, [100, 1000]);
-    expect(Math.abs(response[0] - 2.0)).toBeLessThan(1.5);
-    expect(Math.abs(response[1] + 3.0)).toBeLessThan(1.5);
+    expect(Math.abs(response[0] - 2.0)).toBeLessThan(1);
+    expect(Math.abs(response[1] + 3.0)).toBeLessThan(1);
   });
 
   const tilt = (freq: number) => 4 - 10 * (Math.log10(freq / 20) / 3);

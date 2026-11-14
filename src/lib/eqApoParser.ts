@@ -157,6 +157,8 @@ function solveLinear(matrix: number[][], rhs: number[]): number[] | null {
 
 /** 拟合时每个频段之间加密的探测点数（含端点一侧）。 */
 const FIT_PROBES_PER_BAND = 4;
+/** 频段中心探测点相对中间插值点的权重。 */
+const FIT_CENTER_WEIGHT = 6;
 /** 拟合时同时考虑的采样率（见 fitGraphicGains）。 */
 const FIT_SAMPLE_RATES = [44_100, 96_000];
 
@@ -174,15 +176,21 @@ function fitGraphicGains(bands: EqBand[], curve: GraphicPoint[]): void {
   const n = bands.length;
   if (n === 0) return;
   const probes: number[] = [];
+  // 频段中心是预设里真实给出的点，权重高于中间的插值点：点很稀疏时
+  // （几个点相隔一个十倍频程）优先保证给定点上的增益准确。
+  const probeWeights: number[] = [];
   for (let i = 0; i < n; i += 1) {
     probes.push(bands[i].freq);
+    probeWeights.push(FIT_CENTER_WEIGHT);
     if (i + 1 < n) {
       const ratio = bands[i + 1].freq / bands[i].freq;
       for (let k = 1; k < FIT_PROBES_PER_BAND; k += 1) {
         probes.push(bands[i].freq * ratio ** (k / FIT_PROBES_PER_BAND));
+        probeWeights.push(1);
       }
     }
   }
+  const weights = FIT_SAMPLE_RATES.flatMap(() => probeWeights);
   const probeTargets = probes.map((freq) => clampGain(interpolateGraphicGain(curve, freq)));
   // 数字峰化滤波器靠近奈奎斯特时会被压窄，同一组系数在 44.1 kHz 与 96 kHz 下的高频响应
   // 不一样。把两种采样率的误差叠在一起求解，得到在常见采样率下都不离谱的折中，
@@ -212,12 +220,12 @@ function fitGraphicGains(bands: EqBand[], curve: GraphicPoint[]): void {
     for (let r = 0; r < n; r += 1) {
       for (let c = r; c < n; c += 1) {
         let sum = 0;
-        for (let i = 0; i < m; i += 1) sum += jacobian[i][r] * jacobian[i][c];
+        for (let i = 0; i < m; i += 1) sum += weights[i] * jacobian[i][r] * jacobian[i][c];
         normal[r][c] = sum + (r === c ? lambda : 0);
         normal[c][r] = normal[r][c];
       }
       let sum = 0;
-      for (let i = 0; i < m; i += 1) sum += jacobian[i][r] * error[i];
+      for (let i = 0; i < m; i += 1) sum += weights[i] * jacobian[i][r] * error[i];
       rhs[r] = sum;
     }
     const delta = solveLinear(normal, rhs);
