@@ -33,16 +33,38 @@ pub(crate) fn lines_to_traditional(lines: &mut [LyricLine]) {
         for translation in &mut line.translations {
             translation.text = to_traditional(&translation.text);
             if let Some(words) = translation.words.as_mut() {
-                for word in words {
-                    word.text = to_traditional(&word.text);
-                }
+                words_to_traditional(words);
             }
         }
         if let Some(words) = line.words.as_mut() {
-            for word in words {
-                word.text = to_traditional(&word.text);
-            }
+            words_to_traditional(words);
         }
+    }
+}
+
+/// 逐字音节按**整行上下文**转换（L4-01）：中文逐字歌词通常一字一音节，逐音节转换
+/// 会丢掉词语上下文（「头」「发」分开转得到「頭發」，整行却是「頭髮」）。
+/// 做法是把音节拼成整串转换一次，再按各音节原有的字符数切回去；简繁转换绝大多数
+/// 是一字对一字，转换前后字符数不等时（少见的一对多词条）退回逐音节转换。
+fn words_to_traditional(words: &mut [LyricWord]) {
+    if words.is_empty() {
+        return;
+    }
+    let joined: String = words.iter().map(|word| word.text.as_str()).collect();
+    if !joined.chars().any(is_cjk) {
+        return;
+    }
+    let converted = to_traditional(&joined);
+    if converted.chars().count() != joined.chars().count() {
+        for word in words {
+            word.text = to_traditional(&word.text);
+        }
+        return;
+    }
+    let mut chars = converted.chars();
+    for word in words {
+        let count = word.text.chars().count();
+        word.text = chars.by_ref().take(count).collect();
     }
 }
 
@@ -75,5 +97,59 @@ mod tests {
         assert_eq!(converted[0].words.as_ref().unwrap()[0].text, "頭髮");
         // 音译不动
         assert_eq!(converted[0].roman_text(), Some("tou fa"));
+    }
+
+    #[test]
+    fn per_character_words_convert_with_line_context() {
+        // 一字一音节：逐音节转换会把「发」按默认映射转成「發」，与整行「頭髮」不一致
+        let text = "我的头发在后面";
+        let words = text
+            .chars()
+            .enumerate()
+            .map(|(index, ch)| {
+                LyricWord::new(
+                    index as u64 * 100,
+                    Some(index as u64 * 100 + 100),
+                    &ch.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let line = LyricLine {
+            words: Some(words),
+            ..LyricLine::new(0, text)
+        };
+        let converted = lyrics_to_traditional(LyricDocument::from_lines(
+            vec![line],
+            LyricSource::default(),
+        ));
+        let line = &converted.lines[0];
+        let joined: String = line
+            .words
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect();
+        assert_eq!(joined, line.text, "音节拼接必须等于整行");
+        assert!(line.text.contains("頭髮"), "整行应按词转换：{}", line.text);
+        // 音节数与各音节字符数不变
+        assert_eq!(line.words.as_ref().unwrap().len(), text.chars().count());
+        assert!(line
+            .words
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|w| w.text.chars().count() == 1));
+    }
+
+    #[test]
+    fn words_without_cjk_are_untouched() {
+        let mut words = vec![
+            LyricWord::new(0, Some(100), "Hello "),
+            LyricWord::new(100, Some(200), "world"),
+        ];
+        words_to_traditional(&mut words);
+        assert_eq!(words[0].text, "Hello ");
+        assert_eq!(words[1].text, "world");
     }
 }
