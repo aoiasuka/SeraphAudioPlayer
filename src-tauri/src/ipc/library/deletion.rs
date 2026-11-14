@@ -44,6 +44,18 @@ fn cache_path_key(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// 不触盘的路径键：只做分隔符与大小写归一化。
+fn lexical_path_key(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+/// 文件名（小写）：判断两条记录有没有可能指向同一个文件的廉价前置条件。
+fn file_name_key(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+}
+
 /// 调用方全程持有 LIBRARY_LOCK。只接收 ID；用于删文件的路径来自可信曲库快照。
 /// 成功项一次提交，失败项保留；占用 guard 直到存储提交后才释放。
 pub(super) fn delete_selected_tracks(
@@ -70,10 +82,29 @@ pub(super) fn delete_selected_tracks(
         .iter()
         .any(|track| requested.contains(&track.id) && is_streaming_track(track));
     // 纯本地记录删除不做磁盘扫描；含流媒体时预先固定路径身份，删除后也不改变 key。
+    //
+    // BE-02：规范化（`canonicalize`）是一次文件系统调用，此前对**全库每一首**都做——
+    // 曲库里有离线网络盘上的本地曲目时，每个路径可能等几秒才超时，全程还持有曲库锁。
+    // 现在只对「文件名与某个待删缓存文件相同」的曲目做：两条记录要指向同一个文件，
+    // 文件名必然相同（不区分大小写）；文件名不同的直接用不触盘的字符串键。
+    let deleting_names = tracks
+        .iter()
+        .filter(|track| requested.contains(&track.id) && is_streaming_track(track))
+        .filter_map(|track| file_name_key(&track.path))
+        .collect::<HashSet<_>>();
     let path_keys = tracks
         .iter()
         .filter(|_| has_streaming_deletion)
-        .map(|track| (track.id.as_str(), cache_path_key(&track.path)))
+        .map(|track| {
+            let may_collide =
+                file_name_key(&track.path).is_some_and(|name| deleting_names.contains(&name));
+            let key = if may_collide {
+                cache_path_key(&track.path)
+            } else {
+                lexical_path_key(&track.path)
+            };
+            (track.id.as_str(), key)
+        })
         .collect::<HashMap<_, _>>();
     let unselected_paths = tracks
         .iter()

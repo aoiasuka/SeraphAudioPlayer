@@ -314,3 +314,30 @@ fn local_track_with_bilibili_album_is_deleted_as_local() {
     assert!(result.failures.is_empty());
     assert!(local_audio.exists(), "本地文件不得被删除");
 }
+
+/// BE-02：删除流媒体曲目时，与待删文件不同名的其它曲目不做文件系统规范化；
+/// 同名（可能是同一个文件的另一种写法）的仍然规范化并拦下删除。
+#[test]
+fn batch_delete_only_canonicalizes_tracks_that_share_a_file_name() {
+    let dir = TestLibraryDir::new();
+    let cache = managed_cache(&dir);
+    let audio = cache.join("shared.m4a");
+    audio_with_sentinel(&audio);
+    // 同一个文件的另一种写法（多一段 `.`），字符串不同、规范化后相同
+    let alias = cache.join(".").join("shared.m4a");
+    let stream = streaming_track("stream", &audio);
+    let mut other = streaming_track("alias", &alias);
+    other.path = alias.to_string_lossy().into_owned();
+    // 离线网络盘上的本地曲目：文件名不同，不应被触碰
+    let offline = test_imported_track("offline", r"\\offline-nas.invalid\music\song.flac", "NAS");
+    let tracks = vec![stream, other, offline];
+
+    let result = delete_selected_tracks(tracks, &["stream".into()], |_| Ok(())).unwrap();
+    assert!(
+        result.deleted_ids.is_empty(),
+        "别名记录仍引用该文件，必须拦下"
+    );
+    assert_eq!(result.failures.len(), 1);
+    assert!(result.failures[0].message.contains("未选中"));
+    assert!(audio.exists());
+}
