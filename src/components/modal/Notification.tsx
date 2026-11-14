@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Stamp } from "lucide-react";
+import { AlertTriangle, Stamp, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePlayerStore } from "@/store/player";
 import type { NotificationLevel } from "@/store/player/types";
@@ -57,6 +57,22 @@ export function Notification() {
       <span className="font-tw text-xs font-bold">
         {notification?.text ?? content.text}
       </span>
+      {isError ? (
+        // UI4-03：错误提示停留 6.5 秒，看完了可以手动关掉（之后在标题栏「最近通知」里回看）
+        <button
+          type="button"
+          aria-label="关闭提示"
+          title="关闭提示"
+          tabIndex={visible ? 0 : -1}
+          className="text-ink2 hover:text-stamp transition-colors"
+          onClick={() => {
+            setVisible(false);
+            dismiss();
+          }}
+        >
+          <X className="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+      ) : null}
     </div>
   );
 }

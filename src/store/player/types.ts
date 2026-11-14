@@ -22,6 +22,15 @@ export interface NotificationPayload {
   level: NotificationLevel;
 }
 
+/** 最近通知列表的一条（UI4-03）：单槽通知错过后可在标题栏回看。 */
+export interface NotificationRecord {
+  id: number;
+  text: string;
+  level: NotificationLevel;
+  /** 产生时间（毫秒时间戳） */
+  at: number;
+}
+
 export interface BackendDevice {
   id: string;
   name: string;
@@ -230,6 +239,8 @@ export interface PlayerStore {
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
+  /** 最近通知（新的在前，非持久化，上限见 uiActions） */
+  notificationHistory: NotificationRecord[];
   // 审2-R5：流媒体页提升到 store 的状态（非持久化）
   bilibiliLoginStatus: BilibiliLoginStatus;
   bilibiliFfmpegStatus: BilibiliFfmpegStatus;
@@ -356,6 +367,7 @@ export interface PlayerStore {
   toggleSettings: () => void;
   showNotification: (text: string, level?: NotificationLevel) => void;
   dismissNotification: () => void;
+  clearNotificationHistory: () => void;
 }
 
 /** `test_amll_ttml_db` 命令的结果分类。 */

@@ -4,6 +4,9 @@ let notificationCounter = 0;
 /** 错误提示显示期间到达的普通提示：只保留最新一条，错误消失后补显示。 */
 let deferredInfo: NotificationPayload | null = null;
 
+/** 最近通知保留条数（UI4-03）。 */
+export const MAX_NOTIFICATION_HISTORY = 50;
+
 function nextId() {
   notificationCounter += 1;
   return notificationCounter + Date.now() * 1000;
@@ -12,7 +15,10 @@ function nextId() {
 export function createUiActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "setActiveView" | "toggleSettings" | "showNotification" | "dismissNotification"> {
+): Pick<
+  PlayerStore,
+  "setActiveView" | "toggleSettings" | "showNotification" | "dismissNotification" | "clearNotificationHistory"
+> {
   return {
     setActiveView: (view) => {
       if (get().activeView === view) return;
@@ -23,6 +29,13 @@ export function createUiActions(
 
     showNotification: (text, level = "info") => {
       const payload: NotificationPayload = { id: nextId(), text, level };
+      // UI4-03：每条通知都进历史（包括被错误压住而延后、甚至最终没显示出来的普通提示）
+      set({
+        notificationHistory: [{ ...payload, at: Date.now() }, ...get().notificationHistory].slice(
+          0,
+          MAX_NOTIFICATION_HISTORY
+        ),
+      });
       // REL-08：单槽通知里，失败提示常被紧随其后的成功提示冲掉（例如批量操作
       // 部分失败后又弹「已完成」）。错误在显示中时，普通提示延后到它消失再出现。
       if (level === "info" && get().notification?.level === "error") {
@@ -38,6 +51,10 @@ export function createUiActions(
       const next = deferredInfo;
       deferredInfo = null;
       set({ notification: next ? { ...next, id: nextId() } : null });
+    },
+
+    clearNotificationHistory: () => {
+      if (get().notificationHistory.length > 0) set({ notificationHistory: [] });
     },
   };
 }

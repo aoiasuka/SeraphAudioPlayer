@@ -243,6 +243,7 @@ export const usePlayerStore = create<PlayerStore>()(
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
+        notificationHistory: [],
         // 审2-R5：流媒体页提升到 store 的状态（非持久化，不进 partialize）
         bilibiliLoginStatus: { loggedIn: false },
         bilibiliFfmpegStatus: { available: false },

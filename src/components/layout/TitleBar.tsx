@@ -1,4 +1,5 @@
 import { Disc3, Minus, Square, X } from "lucide-react";
+import { NotificationHistory } from "@/components/layout/NotificationHistory";
 import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "@/lib/tauri";
 
@@ -55,6 +56,7 @@ export function TitleBar() {
         </span>
       </div>
       <div className="flex items-center gap-5 text-ink2">
+        <NotificationHistory />
         <button
           onClick={onMinimize}
           className="hover:text-ink transition-colors"
