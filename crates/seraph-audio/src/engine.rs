@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use rtrb::{Consumer, Producer, RingBuffer};
 use seraph_core::{EventBus, PlayerEvent};
 use seraph_decoder::{is_dsd_file, open_decoder, Decoder, StreamInfo};
-use seraph_dsp::{resample_interleaved_linear, DspProcessor, DspSettings, StatefulSincResampler};
+use seraph_dsp::{DspProcessor, DspSettings, StatefulSincResampler};
 use std::{
     path::PathBuf,
     sync::{
@@ -56,8 +56,6 @@ const GAIN_RAMP_SECONDS: f32 = 0.005;
 const RESUME_SEEK_THRESHOLD_SECONDS: f64 = 1.0;
 /// F-3：seek 上界钳制时距曲尾保留的余量（秒）。
 const SEEK_END_MARGIN_SECONDS: f64 = 0.1;
-/// F-15：EOF 后向重采样器喂入的零填充帧数（≥ sinc radius=16，冲出尾部残留）。
-const RESAMPLER_FLUSH_FRAMES: usize = 32;
 /// 审2-5：stop/切歌前留给渲染端执行 ramp-out 的宽限（5ms 斜坡 + 共享模式 ~10ms 回调周期 + 余量）。
 const STOP_RAMP_GRACE: Duration = Duration::from_millis(30);
 /// 审2-5：独占模式退出前等待设备缓冲排空的上限（缓冲总深约 185ms，超时兜底防挂）。
@@ -1848,10 +1846,12 @@ fn run_decode_worker(
             );
         }
 
-        // F-15：EOF 后向重采样器喂 ≥radius 帧零，把尾部残留的 radius 输入帧冲出来，
-        // 否则重采样路径每曲结尾丢约 16 帧（gapless 场景累积可闻）。
-        if resampler.input_rate() != resampler.output_rate() {
-            let flush_input = vec![0.0_f32; RESAMPLER_FLUSH_FRAMES * input_channels];
+        // F-15：EOF 后向重采样器喂零，把仍卡在滤波窗口里的尾部输入帧冲出来，
+        // 否则重采样路径每曲结尾丢掉半个核宽的帧（gapless 场景累积可闻）。
+        // 帧数由重采样器给出：核宽随降采样比变化，不能写死。
+        let flush_frames = resampler.flush_input_frames();
+        if flush_frames > 0 {
+            let flush_input = vec![0.0_f32; flush_frames * input_channels];
             if adapt_samples_into(
                 &flush_input,
                 input_channels,
@@ -2355,7 +2355,6 @@ fn render_output<T>(
 
 /// 把单包样本走完：channel remap → 跨包 sinc 重采样 → 写入 output scratch。
 /// 用持久化 `StatefulSincResampler` 避免每包独立计算（旧 #7 包边界 click）+ 减少分配。
-/// sinc 失败时降级为无状态线性重采样（fallback path，仅保人间）。
 fn adapt_samples_into(
     input: &[f32],
     input_channels: usize,
@@ -2386,27 +2385,18 @@ fn adapt_samples_into(
         return Ok(());
     }
 
-    match resampler.process(remap_scratch, output_scratch) {
-        Ok(()) => Ok(()),
-        Err(sinc_err) => {
-            output_scratch.clear();
-            resample_interleaved_linear(
-                remap_scratch,
-                output_channels,
-                resampler.input_rate().max(1),
-                resampler.output_rate().max(1),
-                output_scratch,
-            )
-            .map_err(|linear_err| {
-                BackendError::Internal(format!(
-                    "resampler failed ({} Hz -> {} Hz, {} ch): sinc={sinc_err}; linear={linear_err}",
-                    resampler.input_rate(),
-                    resampler.output_rate(),
-                    output_channels
-                ))
-            })
-        }
-    }
+    // 重采样唯一可能的错误是输入长度不整除声道数，上面已经校验过；
+    // 此前这里有一个「退回线性重采样」的分支，但线性重采样遇到同样的输入也会失败（AUD-13）。
+    resampler
+        .process(remap_scratch, output_scratch)
+        .map_err(|err| {
+            BackendError::Internal(format!(
+                "resampler failed ({} Hz -> {} Hz, {} ch): {err}",
+                resampler.input_rate(),
+                resampler.output_rate(),
+                output_channels
+            ))
+        })
 }
 
 /// F-17：多声道→立体声下混系数（ITU-R BS.775 风格）。

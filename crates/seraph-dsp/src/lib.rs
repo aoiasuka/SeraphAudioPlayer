@@ -14,7 +14,4 @@ pub use chain::{DspProcessor, DspSettings};
 pub use crossfeed::{Crossfeed, CrossfeedSettings};
 pub use dsd::{DopConverter, DsdConverter, DsdMode, NativeDsdPassthrough};
 pub use eq::{combined_response_db, BandKind, EqBand, Equalizer};
-pub use resampler::{
-    resample_interleaved_linear, resample_interleaved_sinc, LinearResampler, Resampler,
-    ResamplerError, ResamplerQuality, StatefulSincResampler,
-};
+pub use resampler::{ResamplerError, StatefulSincResampler};
