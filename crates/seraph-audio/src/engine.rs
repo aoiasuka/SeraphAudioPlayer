@@ -182,10 +182,7 @@ impl PlaybackController {
                     });
 
                     if let Err(err) = &result {
-                        event_bus.publish(PlayerEvent::Error {
-                            message: err.to_string(),
-                        });
-                        event_bus.publish(PlayerEvent::PlaybackStopped);
+                        publish_command_failure(&event_bus, &engine, err);
                     }
 
                     let _ = request.reply.send(result);
@@ -272,6 +269,21 @@ impl PlaybackController {
                 "audio thread did not return a result".into(),
             )),
         }
+    }
+}
+
+/// 命令失败的统一上报（AUD-01）：`Error` 总是发；`PlaybackStopped` 只在会话确实不在播放时发。
+///
+/// 此前任何返回 `Err` 的命令都会补发 `PlaybackStopped`。但有些命令失败时播放并没有停：
+/// 切换输出设备失败后引擎已回滚到旧设备继续出声、设备 ID 校验失败根本没动会话——
+/// 这时再发「已停止」，事件桥把状态置为 Stopped、界面显示暂停态、曲终也不再自动切下一首，
+/// 而声音其实还在。
+fn publish_command_failure(event_bus: &EventBus, engine: &PlaybackEngine, err: &BackendError) {
+    event_bus.publish(PlayerEvent::Error {
+        message: err.to_string(),
+    });
+    if !engine.has_live_session() {
+        event_bus.publish(PlayerEvent::PlaybackStopped);
     }
 }
 
@@ -423,6 +435,13 @@ impl PlaybackEngine {
             spectrum,
             dsp,
         }
+    }
+
+    /// 是否有一个仍在工作的会话（播放中或暂停中，尚未宣告结束）。
+    fn has_live_session(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| !session.shared.stopped.load(Ordering::Acquire))
     }
 
     pub fn play_file(
@@ -624,6 +643,9 @@ impl PlaybackEngine {
             return Ok(());
         }
 
+        // AUD-05：记住旧驱动，新驱动起播失败时还原（与 set_output_device 的回滚对称）。
+        // 否则引擎停在起不来的新驱动上，之后每次播放都失败，而界面已回滚显示旧驱动。
+        let previous = self.driver;
         self.driver = next;
         let Some(session) = self.session.as_ref() else {
             return Ok(());
@@ -634,7 +656,15 @@ impl PlaybackEngine {
         let seconds = session.shared.progress_seconds();
         let was_paused = session.shared.paused.load(Ordering::Acquire);
         self.stop_session();
-        self.play_file(path, track_id, Some(seconds))?;
+        if let Err(err) = self.play_file(path.clone(), track_id.clone(), Some(seconds)) {
+            self.driver = previous;
+            // 用旧驱动恢复播放；旧驱动也起不来时保持停止态，原始错误仍然上抛。
+            let _ = self.play_file(path, track_id, Some(seconds));
+            if was_paused {
+                let _ = self.pause();
+            }
+            return Err(err);
+        }
         if was_paused {
             self.pause()?;
         }
@@ -791,7 +821,9 @@ impl PlaybackEngine {
             join_worker_bounded(worker, "decode");
         }
         if let Some(worker) = session.render_worker.take() {
-            if let Ok(Err(err)) = worker.join() {
+            // AUD-08 / R-03：独占渲染线程可能卡在驱动调用里（设备拔出时个别驱动会这样），
+            // 裸 join 会把引擎命令线程一起钉死。同样有界等待、超时 detach。
+            if let Some(Ok(Err(err))) = join_worker_bounded_result(worker, "render") {
                 warn!("audio render worker stopped with error: {err}");
             }
         }
@@ -803,19 +835,35 @@ impl PlaybackEngine {
 /// 时限取 5 s：正常 worker 在置 `stopped` 后一个解码循环内即退出（毫秒级），
 /// 拖到秒级只可能是卡在子进程 I/O 上，此时保住引擎线程比回收该线程重要得多。
 fn join_worker_bounded<T>(worker: thread::JoinHandle<T>, label: &str) -> bool {
-    const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+    join_worker_bounded_result(worker, label).is_some()
+}
+
+/// 同 [`join_worker_bounded`]，但把线程的返回值带回来；超时 detach 时返回 `None`。
+fn join_worker_bounded_result<T>(
+    worker: thread::JoinHandle<T>,
+    label: &str,
+) -> Option<thread::Result<T>> {
+    join_worker_within(worker, label, WORKER_JOIN_TIMEOUT)
+}
+
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn join_worker_within<T>(
+    worker: thread::JoinHandle<T>,
+    label: &str,
+    timeout: Duration,
+) -> Option<thread::Result<T>> {
     const JOIN_POLL: Duration = Duration::from_millis(10);
 
-    let deadline = Instant::now() + JOIN_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     while !worker.is_finished() {
         if Instant::now() >= deadline {
-            warn!("{label} worker did not stop within {JOIN_TIMEOUT:?}; detaching it");
-            return false;
+            warn!("{label} worker did not stop within {timeout:?}; detaching it");
+            return None;
         }
         thread::sleep(JOIN_POLL);
     }
-    let _ = worker.join();
-    true
+    Some(worker.join())
 }
 
 impl Drop for PlaybackEngine {

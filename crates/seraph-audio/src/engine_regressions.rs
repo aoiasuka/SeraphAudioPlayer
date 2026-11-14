@@ -159,3 +159,115 @@ fn bug_audit_08_failed_seek_keeps_playing_and_reports_rollback() {
         PlayerEvent::Error { .. } | PlayerEvent::PlaybackStopped
     )));
 }
+
+/// 造一个「正在播放」的假会话：不打开声卡，解码线程空转到 stopped。
+fn fake_live_session(engine: &mut PlaybackEngine, path: std::path::PathBuf) -> Arc<PlaybackShared> {
+    let shared = Arc::new(PlaybackShared::new(8_000, 1, 0.0, SpectrumTap::new()));
+    let worker_shared = shared.clone();
+    let worker = thread::spawn(move || {
+        while !worker_shared.stopped.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    engine.session = Some(PlaybackSession {
+        path,
+        track_id: "a".into(),
+        duration_seconds: 180.0,
+        shared: shared.clone(),
+        decode_worker: Some(worker),
+        render_worker: None,
+        _stream: None,
+    });
+    shared
+}
+
+fn missing_audio_path(tag: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("seraph-{tag}-{}.flac", std::process::id()));
+    assert!(!path.exists(), "测试路径必须不存在，以免打开声卡");
+    path
+}
+
+/// AUD-01：命令失败但播放没停（例如设备 ID 校验失败、切换设备失败后已回滚）时，
+/// 只发 Error，不能补发 PlaybackStopped——否则界面显示停止、曲终不再自动切歌。
+#[test]
+fn aud_01_failed_command_does_not_report_stopped_while_session_is_live() {
+    let bus = EventBus::new();
+    let rx = bus.subscribe();
+    let mut engine = PlaybackEngine::new(bus.clone());
+    let shared = fake_live_session(&mut engine, missing_audio_path("aud01-live"));
+
+    // 无效设备 ID：校验发生在动会话之前
+    let err = engine
+        .set_output_device("seraph-test:no-such-device".into())
+        .expect_err("无效设备必须报错");
+    assert!(!shared.stopped.load(Ordering::Acquire), "会话不应被动到");
+    publish_command_failure(&bus, &engine, &err);
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, PlayerEvent::Error { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, PlayerEvent::PlaybackStopped)),
+        "播放仍在继续，不能上报已停止：{events:?}"
+    );
+    engine.stop_session();
+}
+
+/// AUD-01 的另一半：会话确实没了（起播失败）时照旧上报已停止。
+#[test]
+fn aud_01_failed_command_reports_stopped_when_session_is_gone() {
+    let bus = EventBus::new();
+    let rx = bus.subscribe();
+    let mut engine = PlaybackEngine::new(bus.clone());
+    let err = engine
+        .play_file(missing_audio_path("aud01-gone"), "a".into(), Some(0.0))
+        .expect_err("文件不存在必须报错");
+    publish_command_failure(&bus, &engine, &err);
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, PlayerEvent::PlaybackStopped)));
+}
+
+/// AUD-05：切换驱动后起播失败，引擎里的驱动要还原成旧值。
+#[test]
+fn aud_05_failed_driver_switch_rolls_back_driver() {
+    let mut engine = PlaybackEngine::new(EventBus::new());
+    assert_eq!(engine.driver, OutputDriver::WasapiExclusive);
+    // 会话指向不存在的文件：重建会话必然在打开解码器时失败，不会碰声卡
+    fake_live_session(&mut engine, missing_audio_path("aud05"));
+
+    let result = engine.set_driver("direct".into());
+    assert!(result.is_err(), "重建会话应失败");
+    assert_eq!(
+        engine.driver,
+        OutputDriver::WasapiExclusive,
+        "失败后驱动必须回滚，否则之后每次播放都用起不来的新驱动"
+    );
+
+    // 没有会话时切换驱动照常生效
+    engine.stop_session();
+    engine.set_driver("direct".into()).unwrap();
+    assert_eq!(engine.driver, OutputDriver::Shared);
+}
+
+/// AUD-08：卡住的工作线程不能把调用方一起钉死。
+#[test]
+fn aud_08_stuck_worker_join_is_bounded() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let worker = thread::spawn(move || {
+        let _ = release_rx.recv();
+        7_u32
+    });
+    let started = Instant::now();
+    let joined = join_worker_within(worker, "test", Duration::from_millis(60));
+    assert!(joined.is_none(), "超时应 detach");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(release_tx);
+
+    let quick = thread::spawn(|| 7_u32);
+    let joined = join_worker_within(quick, "test", Duration::from_secs(5));
+    assert_eq!(joined.and_then(|result| result.ok()), Some(7));
+}
