@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 /// 自卫线——`is_finite` 挡不住 1e30 dB 这类有限极端值。
 pub const MAX_EQ_GAIN_DB: f32 = 24.0;
 
+/// 频段数量上限（CMD-01 / EQ4-03）：与前端 `src/lib/eqSanitize.ts` 的 `MAX_EQ_BANDS` 同值。
+/// 前端所有入口都会封顶，这里是后端自己的兜底——一旦某条路径漏了消毒，
+/// 几千个频段会让解码线程逐样本跑几千级滤波、播放卡死。改这里要同步改前端。
+pub const MAX_EQ_BANDS: usize = 64;
+
 /// 频段滤波类型。命名与 EqualizerAPO / AutoEq 的 `PK/LSC/HSC/LP/HP` 对齐。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -297,6 +302,7 @@ impl Equalizer {
         self.coeffs = bands
             .iter()
             .filter(|band| band.enabled)
+            .take(MAX_EQ_BANDS)
             .map(|band| BiquadCoeffs::design(band, self.sample_rate))
             .collect();
 
@@ -441,6 +447,15 @@ mod tests {
             "preamp 应被钳到 +24dB（≈{expected}），实际输出 {}",
             samples[0]
         );
+    }
+
+    /// CMD-01：后端自己给频段数量封顶，不依赖前端消毒。
+    #[test]
+    fn band_count_is_capped() {
+        let bands = vec![peaking(1_000.0, 1.0, 1.0); MAX_EQ_BANDS * 10];
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &bands, 48_000.0, 2);
+        assert_eq!(eq.coeffs.len(), MAX_EQ_BANDS);
     }
 
     #[test]

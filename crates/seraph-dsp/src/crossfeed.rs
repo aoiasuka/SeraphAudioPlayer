@@ -57,8 +57,7 @@ pub struct Crossfeed {
     alpha: f32,
     lp_left: OnePole,
     lp_right: OnePole,
-    // 直接声与混入声的能量归一化，避免整体响度抬升
-    direct_gain: f32,
+    // 混入对侧的量；直达声减去同样多的「本侧低通」，见 process_interleaved
     cross_gain: f32,
 }
 
@@ -85,9 +84,7 @@ impl Crossfeed {
         // 一阶低通系数：alpha = 1 - exp(-2π fc / fs)
         let x = (-2.0 * std::f32::consts::PI * cutoff / sample_rate.max(1.0)).exp();
         self.alpha = (1.0 - x).clamp(0.0, 1.0);
-        // 归一化：direct + cross = 1，保持单位增益
         self.cross_gain = amount * 0.5;
-        self.direct_gain = 1.0 - self.cross_gain;
     }
 
     pub fn is_active(&self) -> bool {
@@ -106,10 +103,15 @@ impl Crossfeed {
             let left = frame[0];
             let right = frame[1];
             // 对侧信号先经低通（模拟头部遮蔽高频）
-            let cross_l = self.lp_right.process(self.alpha, right);
-            let cross_r = self.lp_left.process(self.alpha, left);
-            frame[0] = left * self.direct_gain + cross_l * self.cross_gain;
-            frame[1] = right * self.direct_gain + cross_r * self.cross_gain;
+            let low_r = self.lp_right.process(self.alpha, right);
+            let low_l = self.lp_left.process(self.alpha, left);
+            // EQ4-04：直达声 = 原信号 − g·低通(本侧)，对侧 = g·低通(对侧)。
+            // 直达路径因此是一个与对侧低通互补的高架（低频 1−g、高频 1），
+            // 左右相同的居中内容（人声）两项正好抵消，总响应全频段平直。
+            // 旧写法「直达 ×(1−g) + 对侧低通 ×g」在高频只剩 1−g，居中声像会变暗
+            // （默认强度约 −1.4 dB，强度拉满约 −6 dB）。
+            frame[0] = left + (low_r - low_l) * self.cross_gain;
+            frame[1] = right + (low_l - low_r) * self.cross_gain;
         }
     }
 
@@ -189,6 +191,66 @@ mod tests {
         let right_energy: f32 = samples.iter().skip(1).step_by(2).map(|s| s.abs()).sum();
         assert!(right_energy > 0.0, "crossfeed 应把左声道混入右声道");
         assert!(samples.iter().all(|s| s.is_finite()));
+    }
+
+    /// EQ4-04：左右相同的居中内容经过 crossfeed 后必须原样输出（任何频率都不变暗）。
+    #[test]
+    fn centered_content_stays_flat_at_all_frequencies() {
+        for amount in [0.3, 1.0] {
+            let mut cf = Crossfeed::default();
+            cf.configure(
+                &CrossfeedSettings {
+                    enabled: true,
+                    amount,
+                    cutoff_hz: 700.0,
+                },
+                48_000.0,
+            );
+            // 100 Hz + 12 kHz 的居中信号
+            let mut samples = Vec::new();
+            for n in 0..4800 {
+                let t = n as f32 / 48_000.0;
+                let value = 0.4 * (std::f32::consts::TAU * 100.0 * t).sin()
+                    + 0.4 * (std::f32::consts::TAU * 12_000.0 * t).sin();
+                samples.push(value);
+                samples.push(value);
+            }
+            let original = samples.clone();
+            cf.process_interleaved(&mut samples, 2);
+            for (out, input) in samples.iter().zip(original.iter()) {
+                assert!((out - input).abs() < 1.0e-5, "居中内容应保持不变");
+            }
+        }
+    }
+
+    /// 硬左的高频不混入对侧（头部遮蔽），直达声保持满幅。
+    #[test]
+    fn hard_panned_high_frequency_keeps_direct_level() {
+        let mut cf = Crossfeed::default();
+        cf.configure(
+            &CrossfeedSettings {
+                enabled: true,
+                amount: 1.0,
+                cutoff_hz: 700.0,
+            },
+            48_000.0,
+        );
+        let mut samples = Vec::new();
+        for n in 0..4800 {
+            let t = n as f32 / 48_000.0;
+            samples.push((std::f32::consts::TAU * 12_000.0 * t).sin());
+            samples.push(0.0);
+        }
+        cf.process_interleaved(&mut samples, 2);
+        let tail = &samples[4800..];
+        let left_peak = tail.iter().step_by(2).fold(0.0_f32, |m, s| m.max(s.abs()));
+        let right_peak = tail
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(left_peak > 0.9, "直达声高频不应被衰减，实际 {left_peak}");
+        assert!(right_peak < 0.1, "高频不应大量混入对侧，实际 {right_peak}");
     }
 
     #[test]
