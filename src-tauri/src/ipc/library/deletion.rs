@@ -4,6 +4,7 @@ use crate::ipc::{
     cache::delete_streaming_cache_file,
 };
 
+/// 流媒体身份只看来源字段与 ID 前缀（与前端 `trackFilters.ts::isStreamingTrack` 同口径）。
 fn is_streaming_track(track: &ImportedTrack) -> bool {
     track.id.starts_with("bilibili-")
         || track
@@ -14,7 +15,8 @@ fn is_streaming_track(track: &ImportedTrack) -> bool {
             .source_url
             .as_deref()
             .is_some_and(|url| url.to_ascii_lowercase().contains("bilibili.com"))
-        || track.album == "Bilibili"
+    // DEC4-03：不按专辑名判定。标签里专辑写着「Bilibili」的本地文件会被当成流媒体，
+    // 删除时去删「缓存文件」而它不在受管缓存目录里，结果这条记录永远删不掉。
 }
 
 fn audio_operation_key(track: &ImportedTrack) -> String {

@@ -37,7 +37,8 @@ function bvidFromTrack(track: Track) {
 }
 
 function isBilibiliTrack(track: Track) {
-  return track.id.startsWith("bilibili-") || track.album === "Bilibili";
+  // 不按专辑名判定（DEC4-03）：专辑写着「Bilibili」的本地文件不是 B 站曲目
+  return track.id.startsWith("bilibili-") || Boolean(track.sourceId?.trim().toLowerCase().startsWith("bv"));
 }
 
 export function trackMergeKey(track: Track) {

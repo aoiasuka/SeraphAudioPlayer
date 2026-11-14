@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { lyricDocument } from "@/lib/lyrics/document";
-import { filterAndSortTracks } from "./trackFilters";
+import { filterAndSortTracks, isStreamingTrack } from "./trackFilters";
 import type { Track } from "@/types/track";
 
 function makeTrack(overrides: Partial<Track> & { id: string }): Track {
@@ -87,5 +87,17 @@ describe("filterAndSortTracks", () => {
     ];
     const result = filterAndSortTracks(tracks, "song", "title");
     expect(result.map((track) => track.id)).toEqual(["y", "x"]);
+  });
+});
+
+describe("isStreamingTrack", () => {
+  it("按 ID 前缀与来源字段判定", () => {
+    expect(isStreamingTrack(makeTrack({ id: "bilibili-bv1xx411c7md-1" }))).toBe(true);
+    expect(isStreamingTrack(makeTrack({ id: "x", sourceId: "BV1xx411c7mD" }))).toBe(true);
+    expect(isStreamingTrack(makeTrack({ id: "y", sourceUrl: "https://www.bilibili.com/video/BV1" }))).toBe(true);
+  });
+
+  it("专辑名恰好是 Bilibili 的本地曲目不是流媒体（DEC4-03）", () => {
+    expect(isStreamingTrack(makeTrack({ id: "local-1", album: "Bilibili" }))).toBe(false);
   });
 });

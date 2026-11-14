@@ -15,7 +15,7 @@ const local: Track = {
   bitdepth: "16-bit", bitrate: "", channels: "Stereo", size: "1 MB", path: "C:/test/local.flac",
   duration: 180, glowColor: "#fff", lyrics: lyricDocument([]),
 };
-const stream: Track = { ...local, id: "stream", title: "流媒体曲目", album: "Bilibili" };
+const stream: Track = { ...local, id: "stream", title: "流媒体曲目", album: "Bilibili", sourceId: "BV1xx411c7mD" };
 const deleteTracks = vi.fn<(ids: string[]) => Promise<DeleteTracksResult>>();
 
 beforeEach(() => {

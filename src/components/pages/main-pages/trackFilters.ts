@@ -1,11 +1,14 @@
 import type { Track } from "@/types/track";
 
+/**
+ * 流媒体身份只看 ID 前缀与来源字段（与后端 `deletion.rs::is_streaming_track` 同口径）。
+ * 不按专辑名判定（DEC4-03）：标签里专辑写着「Bilibili」的本地文件不是流媒体曲目。
+ */
 export function isStreamingTrack(track: Track) {
-  return (
+  return Boolean(
     track.id.startsWith("bilibili-") ||
     track.sourceId?.trim().toLowerCase().startsWith("bv") ||
-    track.sourceUrl?.trim().toLowerCase().includes("bilibili.com") ||
-    track.album === "Bilibili"
+    track.sourceUrl?.trim().toLowerCase().includes("bilibili.com")
   );
 }
 

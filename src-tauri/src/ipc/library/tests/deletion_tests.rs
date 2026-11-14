@@ -292,3 +292,25 @@ fn cache_delete_refuses_symlink_or_windows_junction_ancestors() {
     assert!(outcome.unwrap_err().contains("链接或重解析点"));
     assert!(audio.is_file());
 }
+
+/// DEC4-03：专辑名恰好是「Bilibili」的本地文件不是流媒体——只删记录、不动文件、不报错。
+#[test]
+fn local_track_with_bilibili_album_is_deleted_as_local() {
+    let dir = TestLibraryDir::new();
+    let local_audio = dir.0.join("downloaded-elsewhere.flac");
+    fs::write(&local_audio, b"original local music").unwrap();
+    let mut track = test_imported_track("local-bili", &local_audio.to_string_lossy(), "Local");
+    track.album = "Bilibili".into();
+    let storage = dir.storage();
+    storage.save(std::slice::from_ref(&track), None).unwrap();
+
+    let result = delete_selected_tracks(vec![track], &["local-bili".into()], |updated| {
+        storage.save(updated, None).map(|_| ())
+    })
+    .unwrap();
+
+    assert_eq!(result.deleted_ids, ["local-bili"]);
+    assert_eq!(result.deleted_files, 0, "本地曲目只删记录");
+    assert!(result.failures.is_empty());
+    assert!(local_audio.exists(), "本地文件不得被删除");
+}
