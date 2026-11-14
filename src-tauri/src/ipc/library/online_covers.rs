@@ -101,7 +101,7 @@ pub async fn fetch_online_cover(
             ));
         };
         track.cover = cover.clone();
-        write_cached_tracks(&app, &tracks)?;
+        write_cached_tracks(&app, tracks)?;
         Ok(cover)
     })
     .await

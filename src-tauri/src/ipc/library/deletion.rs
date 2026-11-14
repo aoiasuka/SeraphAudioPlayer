@@ -49,7 +49,7 @@ fn cache_path_key(path: &str) -> String {
 pub(super) fn delete_selected_tracks(
     tracks: Vec<ImportedTrack>,
     track_ids: &[String],
-    save: impl FnOnce(&[ImportedTrack]) -> Result<(), String>,
+    save: impl FnOnce(Vec<ImportedTrack>) -> Result<(), String>,
 ) -> Result<DeleteTracksResult, String> {
     let mut requested = HashSet::new();
     let ids = track_ids
@@ -134,7 +134,7 @@ pub(super) fn delete_selected_tracks(
         .filter(|track| !deleted.contains(&track.id))
         .collect::<Vec<_>>();
     if updated.len() != previous_count {
-        save(&updated)
+        save(updated)
             .map_err(|err| format!("文件处理后保存曲库失败，记录仍保留，请重试：{err}"))?;
     }
     Ok(result)

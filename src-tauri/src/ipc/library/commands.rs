@@ -180,8 +180,9 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
                 let _guard = LIBRARY_LOCK.lock();
                 let cached = read_cached_tracks_for_update(&app)?;
                 let merged = merge_cached_tracks(cached, &tracks);
-                write_cached_tracks(&app, &merged)?;
-                return Ok(imported_tracks_from_cache(&merged, &tracks));
+                let imported = imported_tracks_from_cache(&merged, &tracks);
+                write_cached_tracks(&app, merged)?;
+                return Ok(imported);
             }
 
             Ok(tracks)
@@ -272,7 +273,7 @@ fn save_track_lyrics_inner(
         covers_dir_path(app).ok().as_deref(),
     )?;
     let stored = stored_lyrics(&tracks, track_id);
-    write_cached_tracks(app, &tracks)?;
+    write_cached_tracks(app, tracks)?;
     emit_lyrics_updated(app, track_id);
 
     Ok(projected(stored))
@@ -432,11 +433,13 @@ pub async fn set_track_lyrics_pinned(
         if track.lyrics.is_empty() {
             return Err(IpcError::invalid_input("track has no lyrics"));
         }
-        if track.lyrics.source.pinned != pinned {
-            track.lyrics.source.pinned = pinned;
-            write_cached_tracks(&app, &tracks)?;
+        let changed = track.lyrics.source.pinned != pinned;
+        track.lyrics.source.pinned = pinned;
+        let stored = track.lyrics.clone();
+        if changed {
+            write_cached_tracks(&app, tracks)?;
         }
-        Ok(projected(stored_lyrics(&tracks, &track_id)))
+        Ok(projected(stored))
     })
     .await
     .map_err(|err| {
@@ -523,7 +526,7 @@ fn find_local_lyrics_inner(
         covers_dir_path(app).ok().as_deref(),
     )?;
     let stored = stored_lyrics(&tracks, track_id);
-    write_cached_tracks(app, &tracks)?;
+    write_cached_tracks(app, tracks)?;
     emit_lyrics_updated(app, track_id);
 
     Ok(Some(LocalLyricsMatch {
@@ -614,7 +617,7 @@ fn apply_online_lyrics_inner(
         covers_dir_path(app).ok().as_deref(),
     )?;
     let stored = stored_lyrics(&tracks, track_id);
-    write_cached_tracks(app, &tracks)?;
+    write_cached_tracks(app, tracks)?;
     emit_lyrics_updated(app, track_id);
 
     Ok(projected(stored))

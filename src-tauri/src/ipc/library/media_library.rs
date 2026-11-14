@@ -133,11 +133,17 @@ pub(crate) fn read_cached_tracks_for_update(app: &AppHandle) -> Result<Vec<Impor
     read_library_snapshot_for_update(app).map(|snapshot| snapshot.tracks.clone())
 }
 
-pub(crate) fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> Result<(), String> {
+/// 提交曲库并刷新内存快照。**接收所有权**（BE-01）：落盘成功后这份数据直接成为新的内存快照，
+/// 不再 `to_vec()` 深拷贝一遍全库（含歌词）。调用方写完还要用其中某条记录的，
+/// 在调用前把那一条克隆出来。
+pub(crate) fn write_cached_tracks(
+    app: &AppHandle,
+    tracks: Vec<ImportedTrack>,
+) -> Result<(), String> {
     let path = library_cache_path(app)?;
     let previous = LIBRARY_MEMORY.read().clone();
     let stats = LibraryStorage::new(path.parent().expect("library cache has parent")).save(
-        tracks,
+        &tracks,
         previous.as_ref().map(|snapshot| snapshot.tracks.as_slice()),
     )?;
     tracing::debug!(
@@ -150,7 +156,7 @@ pub(crate) fn write_cached_tracks(app: &AppHandle, tracks: &[ImportedTrack]) -> 
     }
 
     // 落盘成功后刷新内存快照（存完整含歌词版本，读命令零成本命中）
-    *LIBRARY_MEMORY.write() = Some(Arc::new(LibrarySnapshot::new(tracks.to_vec())));
+    *LIBRARY_MEMORY.write() = Some(Arc::new(LibrarySnapshot::new(tracks)));
     Ok(())
 }
 
@@ -201,8 +207,9 @@ pub(crate) fn merge_tracks_into_cache(
     let _guard = LIBRARY_LOCK.lock();
     let cached = read_cached_tracks_for_update(app)?;
     let merged = merge_cached_tracks(cached, tracks);
-    write_cached_tracks(app, &merged)?;
-    Ok(imported_tracks_from_cache(&merged, tracks))
+    let imported = imported_tracks_from_cache(&merged, tracks);
+    write_cached_tracks(app, merged)?;
+    Ok(imported)
 }
 
 /// 重缓存和删除共享曲库锁，校验与落盘不可分开，否则删除后仍可能重新插入。
@@ -214,7 +221,7 @@ pub(crate) fn replace_track_in_cache(
     let _guard = LIBRARY_LOCK.lock();
     let mut cached = read_cached_tracks_for_update(app)?;
     let updated = replace_cached_track(&mut cached, track_id, imported)?;
-    write_cached_tracks(app, &cached)?;
+    write_cached_tracks(app, cached)?;
     Ok(updated)
 }
 
@@ -265,7 +272,7 @@ pub(crate) fn mark_tracks_cache_missing_by_paths(
             track
         })
         .collect::<Vec<_>>();
-    write_cached_tracks(app, &updated)
+    write_cached_tracks(app, updated)
 }
 
 pub(crate) fn library_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -376,9 +383,10 @@ pub(crate) fn imported_tracks_from_cache(
     cached: &[ImportedTrack],
     imported: &[ImportedTrack],
 ) -> Vec<ImportedTrack> {
+    // 按引用建索引，只克隆命中的条目（此前把全库连歌词克隆进了 HashMap）
     let cached_by_key = cached
         .iter()
-        .map(|track| (import_track_key(track), track.clone()))
+        .map(|track| (import_track_key(track), track))
         .collect::<HashMap<_, _>>();
 
     imported
@@ -386,7 +394,7 @@ pub(crate) fn imported_tracks_from_cache(
         .map(|track| {
             cached_by_key
                 .get(&import_track_key(track))
-                .cloned()
+                .map(|cached| (*cached).clone())
                 .unwrap_or_else(|| track.clone())
         })
         .collect()
@@ -933,7 +941,7 @@ pub(crate) fn backfill_album_positions(app: &AppHandle) -> bool {
             track.album_artist = album_artist.clone();
             changed = true;
         }
-        if changed && write_cached_tracks(app, &tracks).is_err() {
+        if changed && write_cached_tracks(app, tracks).is_err() {
             // 写失败不落标记，下次启动重试
             return false;
         }
@@ -1046,7 +1054,7 @@ pub(crate) fn backfill_missing_covers(app: &AppHandle) -> bool {
             track.cover = cover.clone();
             changed = true;
         }
-        if changed && write_cached_tracks(app, &tracks).is_err() {
+        if changed && write_cached_tracks(app, tracks).is_err() {
             // 写失败不落标记，下次启动重试
             return false;
         }

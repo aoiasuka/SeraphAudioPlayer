@@ -63,7 +63,7 @@ fn batch_delete_removes_streaming_files_preserves_local_files_and_commits_once()
                 acquire_audio_operation(&source).is_err(),
                 "提交存储前仍持有来源占用"
             );
-            storage.save(updated, None).map(|_| ())
+            storage.save(&updated, None).map(|_| ())
         },
     )
     .unwrap();
@@ -305,7 +305,7 @@ fn local_track_with_bilibili_album_is_deleted_as_local() {
     storage.save(std::slice::from_ref(&track), None).unwrap();
 
     let result = delete_selected_tracks(vec![track], &["local-bili".into()], |updated| {
-        storage.save(updated, None).map(|_| ())
+        storage.save(&updated, None).map(|_| ())
     })
     .unwrap();
 
