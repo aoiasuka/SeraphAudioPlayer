@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { isTauriRuntime } from "@/lib/tauri";
 import { createAnalysisSession, pollVisualizer } from "@/lib/analysis/polling";
+import { smoothingFactor } from "@/lib/analysis/smoothing";
 import { usePlayerStore } from "@/store/player";
 import { useImmersiveStore } from "@/store/immersive";
 
@@ -11,9 +12,13 @@ interface SpectrumFrame {
 }
 
 const BIN_COUNT = 48;
-/** 柱体快攻慢放系数（每 rAF 帧向目标逼近的比例），消除逐帧 FFT 硬跳变 */
-const BAR_ATTACK = 0.5;
-const BAR_RELEASE = 0.22;
+/**
+ * 柱体快攻慢放的时间常数（秒），消除逐帧 FFT 硬跳变。按时间而不是按帧平滑：
+ * 此前是「每帧逼近 0.5 / 0.22」，144Hz 屏上升降速度是 60Hz 屏的 2.4 倍。
+ * 这两个值在 60Hz 下与原先的每帧系数等效。
+ */
+const BAR_ATTACK_TAU_SEC = 0.024;
+const BAR_RELEASE_TAU_SEC = 0.067;
 
 /**
  * 实时频谱面板：播放中轮询后端 FFT 帧绘制柱状频谱，
@@ -48,7 +53,14 @@ export function SpectrumPanel() {
         .getPropertyValue("--stamp")
         .trim() || "#b4553c";
 
+    let lastDrawAt = 0;
     const draw = () => {
+      const now = performance.now() / 1000;
+      // 首帧、从隐藏恢复后的第一帧按一个 60Hz 帧计，避免长间隔让柱体一步到位
+      const dt = lastDrawAt > 0 ? now - lastDrawAt : 1 / 60;
+      lastDrawAt = now;
+      const kAttack = smoothingFactor(dt, BAR_ATTACK_TAU_SEC);
+      const kRelease = smoothingFactor(dt, BAR_RELEASE_TAU_SEC);
       const ratio = window.devicePixelRatio || 1;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
@@ -69,7 +81,7 @@ export function SpectrumPanel() {
       const target = targetRef.current;
       for (let i = 0; i < bins.length; i += 1) {
         const goal = Math.min(1, Math.max(0, target[i] ?? 0));
-        const k = goal > bins[i] ? BAR_ATTACK : BAR_RELEASE;
+        const k = goal > bins[i] ? kAttack : kRelease;
         bins[i] += (goal - bins[i]) * k;
       }
       const gap = 2;
@@ -107,6 +119,7 @@ export function SpectrumPanel() {
     const onVisibilityChange = () => {
       window.cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
+      lastDrawAt = 0;
       if (document.visibilityState !== "hidden") rafRef.current = window.requestAnimationFrame(renderLoop);
     };
     document.addEventListener("visibilitychange", onVisibilityChange);

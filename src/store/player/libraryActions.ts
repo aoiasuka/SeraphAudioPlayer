@@ -1,6 +1,7 @@
 import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
 import { emptyLyricDocument } from "@/lib/lyrics/document";
 import type { DeleteTracksResult, Track } from "@/types/track";
+import { trackIndexById } from "@/lib/trackIndex";
 import { resetNextIndexCache } from "./playbackActions";
 import { bumpPlayEpoch } from "./playEpoch";
 import { normalizePath, streamingSourceInput, trackMergeKey } from "./trackIdentity";
@@ -31,15 +32,24 @@ function dedupeTracks(tracks: Track[]) {
   return orderedKeys.map((key) => byKey.get(key)).filter((track): track is Track => !!track);
 }
 
-function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) {
+function dedupeTracksWithLiked(
+  tracks: Track[],
+  liked: Record<string, boolean>,
+  likedAt: Record<string, number>
+) {
   // L-14: 一次迭代里同时算 dedupe + liked carry-over，避免对大曲库重复遍历。
   const byKey = new Map<string, Track>();
   const orderedKeys: string[] = [];
   const likedByKey = new Set<string>();
+  const likedAtByKey = new Map<string, number>();
 
   for (const track of tracks) {
     const key = trackMergeKey(track);
-    if (liked[track.id]) likedByKey.add(key);
+    if (liked[track.id]) {
+      likedByKey.add(key);
+      const at = likedAt[track.id] ?? 0;
+      if (at > (likedAtByKey.get(key) ?? 0)) likedAtByKey.set(key, at);
+    }
 
     const existing = byKey.get(key);
     if (!existing) {
@@ -62,14 +72,19 @@ function dedupeTracksWithLiked(tracks: Track[], liked: Record<string, boolean>) 
   // 审2-R11：在原 liked 基础上做 id 迁移/合并，而不是只保留在场曲目——
   // 曲库分批加载/合并时不在当前 playlist 的收藏（如后端尚未返回的流媒体曲目）不再被丢弃。
   const nextLiked: Record<string, boolean> = { ...liked };
+  const nextLikedAt: Record<string, number> = { ...likedAt };
   for (const track of playlist) {
     // 重复曲目合并后，存活条目按 mergeKey 继承 liked（保持既有语义）
-    if (liked[track.id] || likedByKey.has(trackMergeKey(track))) {
+    const key = trackMergeKey(track);
+    if (liked[track.id] || likedByKey.has(key)) {
       nextLiked[track.id] = true;
+      // 收藏时间一并继承：取合并前各条目里最近的一次
+      const at = Math.max(likedAt[track.id] ?? 0, likedAtByKey.get(key) ?? 0);
+      if (at > 0) nextLikedAt[track.id] = at;
     }
   }
 
-  return { playlist, liked: nextLiked };
+  return { playlist, liked: nextLiked, likedAt: nextLikedAt };
 }
 
 function mergeTracksByPath(existing: Track[], incoming: Track[]) {
@@ -130,10 +145,29 @@ export function mergeIncomingTrack(existing: Track, incoming: Track) {
   return { ...merged, lyrics: incomingLyrics };
 }
 
+/** 用户歌单对应的播放范围标识。 */
+export function playlistScopeKey(playlistId: string) {
+  return `playlist:${playlistId}`;
+}
+
+/**
+ * PLAY6-01：正在播放的歌单被增删或调整顺序后，播放范围跟着换成新的顺序，
+ * 「下一首」随即按新顺序走。范围不是这个歌单时不动。
+ */
+function followPlaylistScope(set: PlayerStoreSet, playlistId: string) {
+  set((state) => {
+    const scope = state.playScope;
+    if (!scope || scope.key !== playlistScopeKey(playlistId)) return {};
+    const playlist = state.userPlaylists.find((item) => item.id === playlistId);
+    if (!playlist || playlist.trackIds === scope.trackIds) return {};
+    return { playScope: { ...scope, trackIds: playlist.trackIds } };
+  });
+}
+
 export function createLibraryActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "createUserPlaylist" | "renameUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "deleteTracks" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
+): Pick<PlayerStore, "createUserPlaylist" | "renameUserPlaylist" | "deleteUserPlaylist" | "addTrackToUserPlaylist" | "addTracksToUserPlaylist" | "removeTrackFromUserPlaylist" | "moveTrackInUserPlaylist" | "importPlaylistFromM3u8" | "exportUserPlaylistToM3u8" | "deleteTrack" | "deleteTracks" | "loadBackendLibrary" | "importLocalTracks" | "fetchOnlineCoverForCurrentTrack" | "markTracksCacheMissingByPaths" | "normalizeLibrary"> {
   return {
   createUserPlaylist: (name) => {
     const trimmedName = name.trim();
@@ -204,7 +238,41 @@ export function createLibraryActions(
           : item
       ),
     }));
+    followPlaylistScope(set, playlistId);
     get().showNotification(`已加入歌单：${playlist.name}`);
+  },
+
+  addTracksToUserPlaylist: (playlistId, trackIds, options) => {
+    const state = get();
+    const playlist = state.userPlaylists.find((item) => item.id === playlistId);
+    if (!playlist) return 0;
+    // 整组加入（专辑、艺术家、新建歌单）一次算完再写一次 store：逐首调用
+    // addTrackToUserPlaylist 是 N 次线性查找 + N 次 set + N 条通知。
+    const libraryIndex = trackIndexById(state.playlist);
+    const present = new Set(playlist.trackIds);
+    const added: string[] = [];
+    for (const id of trackIds) {
+      if (present.has(id) || !libraryIndex.has(id)) continue;
+      present.add(id);
+      added.push(id);
+    }
+    if (added.length === 0) {
+      if (!options?.silent) state.showNotification(`所选曲目已在歌单「${playlist.name}」中`);
+      return 0;
+    }
+
+    set((current) => ({
+      userPlaylists: current.userPlaylists.map((item) =>
+        item.id === playlistId
+          ? { ...item, trackIds: [...item.trackIds, ...added] }
+          : item
+      ),
+    }));
+    followPlaylistScope(set, playlistId);
+    if (!options?.silent) {
+      get().showNotification(`已把 ${added.length} 首加入歌单：${playlist.name}`);
+    }
+    return added.length;
   },
 
   removeTrackFromUserPlaylist: (playlistId, trackId) => {
@@ -215,6 +283,7 @@ export function createLibraryActions(
           : item
       ),
     }));
+    followPlaylistScope(set, playlistId);
   },
 
   moveTrackInUserPlaylist: (playlistId, trackId, direction) => {
@@ -231,6 +300,7 @@ export function createLibraryActions(
         return { ...item, trackIds };
       }),
     }));
+    followPlaylistScope(set, playlistId);
   },
 
   importPlaylistFromM3u8: async () => {
@@ -386,7 +456,11 @@ export function createLibraryActions(
         const deletingCurrent = !!previousId && deleted.has(previousId);
         const playlist = state.playlist.filter((item) => !deleted.has(item.id));
         const liked = { ...state.liked };
-        for (const id of deleted) delete liked[id];
+        const likedAt = { ...state.likedAt };
+        for (const id of deleted) {
+          delete liked[id];
+          delete likedAt[id];
+        }
         const survivingBefore = state.playlist.slice(0, state.currentTrackIndex)
           .filter((item) => !deleted.has(item.id)).length;
         const currentTrackIndex = deletingCurrent
@@ -402,6 +476,7 @@ export function createLibraryActions(
           persistedCurrentTime: deletingCurrent ? 0 : state.currentTime,
           recentTrackIds: state.recentTrackIds.filter((id) => !deleted.has(id)),
           liked,
+          likedAt,
           userPlaylists: state.userPlaylists.map((playlist) => ({
             ...playlist,
             trackIds: playlist.trackIds.filter((id) => !deleted.has(id)),
@@ -475,7 +550,8 @@ export function createLibraryActions(
           state.playlist[state.currentTrackIndex]?.id ?? state.persistedCurrentTrackId;
         const merged = dedupeTracksWithLiked(
           mergeTracksByPath(state.playlist, cached),
-          state.liked
+          state.liked,
+          state.likedAt
         );
         // M-8：合并/去重会改变顺序与长度，按曲目 id 重定位当前曲目，
         // 否则 currentTrackIndex 可能指向别的歌，甚至越界返回 null。
@@ -610,7 +686,7 @@ export function createLibraryActions(
       // 发现9：与 loadBackendLibrary (M-8) 一致，去重后按曲目 id 重映射索引，
       // 避免去重移除靠前的重复项后 currentTrackIndex 指向别的歌。
       const prevId = state.playlist[state.currentTrackIndex]?.id;
-      const deduped = dedupeTracksWithLiked(state.playlist, state.liked);
+      const deduped = dedupeTracksWithLiked(state.playlist, state.liked, state.likedAt);
       const remapped = prevId
         ? deduped.playlist.findIndex((track) => track.id === prevId)
         : -1;

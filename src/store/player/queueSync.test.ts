@@ -4,7 +4,7 @@ import { lyricDocument } from "@/lib/lyrics/document";
 import { invoke } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
-import { resetPlaybackQueueSync, syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
+import { playbackQueueTracks, resetPlaybackQueueSync, syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlaybackQueuePreview } from "./types";
 
 vi.mock("@/lib/tauri", async (importOriginal) => ({
@@ -162,5 +162,59 @@ describe("后端下一首预览", () => {
     a.resolve({ ...preview, nextTrackId: "b" });
     await Promise.all([first, second]);
     expect(get().playbackQueuePreview).toEqual(preview);
+  });
+});
+
+describe("播放范围（PLAY6-01）", () => {
+  const scope = { key: "playlist:p1", label: "歌单一", trackIds: ["c", "a"] };
+  beforeEach(() => {
+    resetPlaybackQueueSync();
+    vi.restoreAllMocks();
+    invokeMock.mockReset().mockResolvedValue({ currentTrackId: "c", nextTrackId: "a", shuffleMode: false });
+    set({ ...usePlayerStore.getInitialState(), playlist: tracks, isPlaying: false });
+  });
+
+  it("从列表点歌后，只把该列表按其顺序同步给后端，下标是队列内下标", async () => {
+    get().loadTrack(2, { scope });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalled());
+    const args = invokeMock.mock.calls[0][1]!;
+    expect((args.tracks as { id: string }[]).map((track) => track.id)).toEqual(["c", "a"]);
+    expect(args.currentTrackIndex).toBe(0);
+    expect(get().currentTrackIndex).toBe(2);
+    expect(playbackQueueTracks(get())).toBe(playbackQueueTracks(get()));
+  });
+
+  it("范围内切歌保留范围；点到范围外的曲目回到整个曲库", async () => {
+    get().loadTrack(2, { scope });
+    get().loadTrack(0);
+    expect(get().playScope).toBe(scope);
+    get().loadTrack(1);
+    expect(get().playScope).toBeNull();
+    expect(playbackQueueTracks(get())).toBe(get().playlist);
+  });
+
+  it("范围里已不存在的曲目被跳过；当前曲目不在范围内时退回曲库", () => {
+    set({ playScope: { ...scope, trackIds: ["x", "c", "c", "a"] }, currentTrackIndex: 2 });
+    expect(playbackQueueTracks(get()).map((track) => track.id)).toEqual(["c", "a"]);
+    set({ currentTrackIndex: 1 });
+    expect(playbackQueueTracks(get())).toBe(get().playlist);
+  });
+
+  it("正在播放的歌单调整顺序后，队列跟随新顺序重新同步", async () => {
+    set({ userPlaylists: [{ id: "p1", name: "歌单一", trackIds: ["c", "a"], createdAt: 1 }] });
+    get().loadTrack(2, { scope: { ...scope, trackIds: get().userPlaylists[0].trackIds } });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    get().moveTrackInUserPlaylist("p1", "c", "down");
+    expect(get().playScope?.trackIds).toEqual(["a", "c"]);
+    await syncPlaybackQueue(get, set);
+    const args = invokeMock.mock.calls[1][1]!;
+    expect((args.tracks as { id: string }[]).map((track) => track.id)).toEqual(["a", "c"]);
+    expect(args.currentTrackIndex).toBe(1);
+  });
+
+  it("调整别的歌单不影响当前范围", () => {
+    set({ userPlaylists: [{ id: "p2", name: "歌单二", trackIds: ["a", "b"], createdAt: 1 }], playScope: scope, currentTrackIndex: 2 });
+    get().moveTrackInUserPlaylist("p2", "a", "down");
+    expect(get().playScope).toBe(scope);
   });
 });

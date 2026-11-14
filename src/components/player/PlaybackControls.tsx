@@ -32,6 +32,7 @@ export function PlaybackControls() {
         onClick={toggleShuffle}
         title="随机播放"
         aria-label="随机播放"
+        aria-pressed={shuffleMode}
         className={cn(
           "stamp-btn w-[38px] h-8 flex items-center justify-center",
           shuffleMode ? "bg-ink text-paper" : "text-ink"
@@ -81,6 +82,7 @@ export function PlaybackControls() {
         onClick={toggleLoop}
         title="单曲循环"
         aria-label="单曲循环"
+        aria-pressed={loopMode}
         className={cn(
           "stamp-btn w-[38px] h-8 flex items-center justify-center",
           loopMode ? "bg-ink text-paper" : "text-ink"

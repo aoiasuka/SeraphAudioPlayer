@@ -4,7 +4,7 @@
  * 弹道学约定（与设计演示 design/visualizer-demo 一致）：
  * - 频谱快攻慢放（attack 24/s、release 7/s），峰值保持线 3.5 dB/s 缓落
  * - 电平 RMS 攻击 9/s 释放 2.6/s；峰值保持 1.4s 后 14 dB/s 回落
- * - CLIP 任一声道峰值 > -1.2 dBFS 置位，3s 自动解除
+ * - CLIP 任一声道峰值达到满幅（> -0.01 dBFS）置位，3s 自动解除
  * - 数据断流（暂停/停止）超过 0.25s 后所有量优雅衰减，瀑布继续走纸
  */
 
@@ -25,7 +25,14 @@ import {
 const PEAK_HOLD_SECONDS = 1.4;
 const PEAK_FALL_DB_PER_SEC = 14;
 const CLIP_HOLD_SECONDS = 3;
-const CLIP_THRESHOLD_DB = -1.2;
+/**
+ * 满幅判定：16 位正向满幅是 32767/32768 ≈ -0.0003 dBFS，留一点量化余量。
+ * 此前是 -1.2 dBFS——现代母带的峰值普遍在 -1.0 ~ -0.1 dBFS，灯会一直亮着，
+ * 而那个电平并没有削波；真峰值余量另有响度面板的 OVER 灯（-1 dBTP）。
+ */
+const CLIP_THRESHOLD_DB = -0.01;
+/** 落后超过这么多行就不补了（首帧、窗口隐藏后恢复），直接从当前时刻重新计时 */
+const HISTORY_MAX_CATCH_UP_ROWS = 4;
 /** 断流判定：超过该间隔没有新帧就进入衰减模式 */
 const STALE_AFTER_SEC = 0.25;
 /** VU 表针一阶弹道时间常数：300ms 到稳态 99%（IEC 60268-17 语义）→ τ≈65ms */
@@ -239,11 +246,21 @@ export function stepAnalysisView(view: AnalysisView, now: number) {
     }
   }
 
-  // 瀑布历史（有数据后固定 90ms 一行）
-  if (now - view.lastHistoryAt >= HISTORY_INTERVAL_SEC) {
-    view.lastHistoryAt = now;
-    view.historyHead = (view.historyHead + 1) % HISTORY_ROWS;
-    view.history[view.historyHead].set(view.spectrumDb);
+  // 瀑布历史：平均 90ms 一行。写入时间按间隔累加而不是取当前时间——步进只在绘制
+  // 节拍上执行（播放约 33ms、待机约 83ms），取当前时间会把每行拉长到节拍的整数倍
+  // （100ms / 167ms），时间窗就和标注对不上，暂停后走纸还会变慢。
+  const due = Math.floor((now - view.lastHistoryAt) / HISTORY_INTERVAL_SEC);
+  if (due >= 1) {
+    // 落后太多（首帧、窗口隐藏后恢复）：只写一行，从当前时刻重新计时
+    const catchingUp = due <= HISTORY_MAX_CATCH_UP_ROWS;
+    const rows = catchingUp ? due : 1;
+    view.lastHistoryAt = catchingUp
+      ? view.lastHistoryAt + rows * HISTORY_INTERVAL_SEC
+      : now;
+    for (let row = 0; row < rows; row += 1) {
+      view.historyHead = (view.historyHead + 1) % HISTORY_ROWS;
+      view.history[view.historyHead].set(view.spectrumDb);
+    }
     view.historyVersion += 1;
   }
 }

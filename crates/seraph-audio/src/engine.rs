@@ -509,8 +509,29 @@ impl PlaybackEngine {
 
         let device = self.output_device()?;
         let (sample_format, config) = select_output_config(&device, &info, self.driver)?;
+        // OUT5-01：独占模式下 16 位及以下的源，设备支持时也用 24 位容器输出，
+        // 软件音量衰减不再直接吃掉 16 位的分辨率。设备不支持（或探测失败）时保持 16 位。
+        let sample_format = if self.driver == OutputDriver::WasapiExclusive
+            && sample_format == SampleFormat::I16
+            && exclusive_supports_24_bit(
+                self.selected_device_id.as_deref(),
+                config.sample_rate.0,
+                config.channels,
+            ) {
+            SampleFormat::I32
+        } else {
+            sample_format
+        };
         let output_rate = config.sample_rate.0;
         let output_channels = usize::from(config.channels).max(1);
+        let output_format = output_format_event(
+            &track_id,
+            self.driver,
+            sample_format,
+            output_rate,
+            output_channels,
+            &info,
+        );
         let shared = Arc::new(PlaybackShared::new(
             output_rate,
             output_channels,
@@ -589,8 +610,11 @@ impl PlaybackEngine {
         self.event_bus.publish(PlayerEvent::TrackChanged {
             track_id: track_id.clone(),
         });
-        self.event_bus
-            .publish(PlayerEvent::PlaybackStarted { track_id });
+        self.event_bus.publish(PlayerEvent::PlaybackStarted {
+            track_id: track_id.clone(),
+        });
+        // 排在 PlaybackStarted 之后：前端按曲目身份核对，先有曲目再有它的输出格式。
+        self.event_bus.publish(output_format);
         Ok(())
     }
 
@@ -1090,6 +1114,37 @@ fn select_output_config(
     Ok((sample_format, supported_config.into()))
 }
 
+/// 把本次建流选定的格式整理成 [`PlayerEvent::OutputFormat`]。
+///
+/// 独占模式的 I32 是 24-in-32 容器（见 `run_wasapi_exclusive_render_worker` 的
+/// `valid_bits`），有效位深记 24；其余按采样格式的宽度记。
+fn output_format_event(
+    track_id: &str,
+    driver: OutputDriver,
+    sample_format: SampleFormat,
+    output_rate: u32,
+    output_channels: usize,
+    info: &StreamInfo,
+) -> PlayerEvent {
+    let exclusive = driver == OutputDriver::WasapiExclusive;
+    let output_bits = if exclusive && sample_format == SampleFormat::I32 {
+        24
+    } else {
+        u16::try_from(sample_format.sample_size() * 8).unwrap_or(u16::MAX)
+    };
+    PlayerEvent::OutputFormat {
+        track_id: track_id.to_string(),
+        mode: if exclusive { "exclusive" } else { "shared" }.to_string(),
+        source_rate: info.sample_rate.0,
+        source_bits: info.bit_depth.0,
+        source_channels: info.channels.0,
+        output_rate,
+        output_bits,
+        output_float: sample_format.is_float(),
+        output_channels: u16::try_from(output_channels).unwrap_or(u16::MAX),
+    }
+}
+
 /// `build_output_stream` 能够渲染的输出采样格式。
 fn is_engine_output_format(format: SampleFormat) -> bool {
     output_format_priority(format) != u8::MAX
@@ -1157,6 +1212,58 @@ fn spawn_wasapi_exclusive_render_worker(
             ))
         }
     }
+}
+
+/// 探测独占模式下设备是否接受 24 位（32 位容器）整数格式。
+///
+/// 在独立线程里做：COM 需要按线程初始化，且驱动调用可能卡住——超时按「不支持」处理，
+/// 调用方退回 16 位，行为与改动前一致。
+#[cfg(windows)]
+fn exclusive_supports_24_bit(
+    selected_device_id: Option<&str>,
+    sample_rate: u32,
+    channels: u16,
+) -> bool {
+    let endpoint_id = match selected_device_id.map(resolve_output_device_id).transpose() {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        use wasapi::{Direction, SampleType, WaveFormat};
+        let supported = (|| {
+            wasapi::initialize_mta().ok().ok()?;
+            let enumerator = wasapi::DeviceEnumerator::new().ok()?;
+            let device = match endpoint_id.as_deref() {
+                Some(id) => enumerator.get_device(id).ok()?,
+                None => enumerator.get_default_device(&Direction::Render).ok()?,
+            };
+            let audio_client = device.get_iaudioclient().ok()?;
+            let format = WaveFormat::new(
+                32,
+                24,
+                &SampleType::Int,
+                sample_rate as usize,
+                usize::from(channels),
+                None,
+            );
+            audio_client
+                .is_supported_exclusive_with_quirks(&format)
+                .ok()
+        })()
+        .is_some();
+        let _ = tx.send(supported);
+    });
+    rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn exclusive_supports_24_bit(
+    _selected_device_id: Option<&str>,
+    _sample_rate: u32,
+    _channels: u16,
+) -> bool {
+    false
 }
 
 #[cfg(not(windows))]
@@ -2371,6 +2478,95 @@ mod regressions;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream_info(rate: u32, bits: u16, channels: u16) -> StreamInfo {
+        StreamInfo {
+            sample_rate: seraph_core::SampleRate(rate),
+            bit_depth: seraph_core::BitDepth(bits),
+            channels: seraph_core::Channels(channels),
+            duration_seconds: 1.0,
+        }
+    }
+
+    #[test]
+    fn output_format_event_reports_exclusive_24_in_32_as_24_bit() {
+        let event = output_format_event(
+            "t",
+            OutputDriver::WasapiExclusive,
+            SampleFormat::I32,
+            96_000,
+            2,
+            &stream_info(96_000, 24, 2),
+        );
+        match event {
+            PlayerEvent::OutputFormat {
+                track_id,
+                mode,
+                source_bits,
+                output_rate,
+                output_bits,
+                output_float,
+                output_channels,
+                ..
+            } => {
+                assert_eq!(track_id, "t");
+                assert_eq!(mode, "exclusive");
+                assert_eq!(source_bits, 24);
+                assert_eq!((output_rate, output_bits, output_channels), (96_000, 24, 2));
+                assert!(!output_float);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_format_event_reports_shared_float_and_rate_change() {
+        // 设备不支持源采样率时退回默认配置：源 5.1 / 96 kHz → 立体声 48 kHz float
+        let event = output_format_event(
+            "t",
+            OutputDriver::Shared,
+            SampleFormat::F32,
+            48_000,
+            2,
+            &stream_info(96_000, 0, 6),
+        );
+        match event {
+            PlayerEvent::OutputFormat {
+                mode,
+                source_rate,
+                source_bits,
+                source_channels,
+                output_rate,
+                output_bits,
+                output_float,
+                output_channels,
+                ..
+            } => {
+                assert_eq!(mode, "shared");
+                assert_eq!((source_rate, source_bits, source_channels), (96_000, 0, 6));
+                assert_eq!((output_rate, output_bits, output_channels), (48_000, 32, 2));
+                assert!(output_float);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // 共享模式的 I32 是满 32 位，不套用独占的 24-in-32 约定
+        let shared_i32 = output_format_event(
+            "t",
+            OutputDriver::Shared,
+            SampleFormat::I32,
+            44_100,
+            2,
+            &stream_info(44_100, 16, 2),
+        );
+        assert!(matches!(
+            shared_i32,
+            PlayerEvent::OutputFormat {
+                output_bits: 32,
+                output_float: false,
+                ..
+            }
+        ));
+    }
 
     fn adapt(input: &[f32], in_rate: u32, in_ch: usize, out_rate: u32, out_ch: usize) -> Vec<f32> {
         let mut resampler =

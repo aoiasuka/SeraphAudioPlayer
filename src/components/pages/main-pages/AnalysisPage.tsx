@@ -31,7 +31,12 @@ import {
   resetAnalysisSession,
   stepAnalysisView,
 } from "@/lib/analysis/view";
-import { ANALYSIS_BIN_COUNT, type AnalysisFrame } from "@/lib/analysis/types";
+import {
+  ANALYSIS_BIN_COUNT,
+  HISTORY_ROWS,
+  HISTORY_WINDOW_SEC,
+  type AnalysisFrame,
+} from "@/lib/analysis/types";
 import { isTauriRuntime } from "@/lib/tauri";
 import { createAnalysisSession, pollVisualizer, visualizerPoller } from "@/lib/analysis/polling";
 import { cn } from "@/lib/utils";
@@ -1148,7 +1153,7 @@ export function AnalysisPage() {
                 </div>
                 <span className="truncate font-tw text-[9px] tracking-[1px] text-ink3">
                   {spectrogramMode === "ridge"
-                    ? "窗口 ≈5.8S · 64 帧 × 96 频点"
+                    ? `窗口 ≈${HISTORY_WINDOW_SEC.toFixed(1)}S · ${HISTORY_ROWS} 帧 × ${ANALYSIS_BIN_COUNT} 频点`
                     : "色带：纸 → 浅褐 → 棕 → 印章红 → 墨"}
                 </span>
               </div>

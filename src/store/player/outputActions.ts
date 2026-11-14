@@ -5,6 +5,7 @@ import { sendCommand, sendCommandAsync } from "./commands";
 import { playbackErrorMessage } from "./playbackActions";
 import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackQueue } from "./queueSync";
+import { volumeToGain } from "@/lib/volume";
 import type { BackendDevice, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
 async function applyOutputConfiguration(
@@ -34,7 +35,7 @@ async function applyOutputConfiguration(
     }
     // 音量在下发前读取，不能恢复配置开始时的旧静音状态。
     const { volume, isMuted } = get();
-    await sendCommandAsync("set_volume", { volume: isMuted ? 0 : volume });
+    await sendCommandAsync("set_volume", { volume: isMuted ? 0 : volumeToGain(volume) });
     if (!isStillCurrent()) return false;
     if (configurationUnchanged()) return true;
   }
@@ -165,7 +166,7 @@ function commitBackendToggle(
 export function createOutputActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "setTaskbarLyricsPosition" | "toggleDeviceMenu" | "closeDeviceMenu"> {
+): Pick<PlayerStore, "loadDevices" | "selectDevice" | "setDriver" | "setSmtcEnabled" | "setRememberPlayback" | "setAutoUpdateCheck" | "setTaskbarButtonsEnabled" | "setTaskbarProgressEnabled" | "setTaskbarLyricsEnabled" | "setTaskbarLyricsClickThrough" | "setTaskbarLyricsPosition" | "toggleDeviceMenu" | "closeDeviceMenu"> {
   let deviceRequest = 0;
   let outputRevision = 0;
   let driverRevision = 0;
@@ -414,6 +415,12 @@ export function createOutputActions(
     // 滑块拖动是连续事件，但后端只是一次幂等 SetWindowPos，直接透传即可；
     // 不发通知——每帧弹一条会刷屏。
     sendCommand("set_taskbar_lyrics_position", { ratio: clamped });
+  },
+
+  setAutoUpdateCheck: (enabled) => {
+    if (get().autoUpdateCheck === enabled) return;
+    set({ autoUpdateCheck: enabled });
+    get().showNotification(enabled ? "已开启启动时检查更新" : "已关闭启动时检查更新");
   },
 
   setRememberPlayback: (enabled) => {

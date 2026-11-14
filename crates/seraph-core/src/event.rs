@@ -30,6 +30,24 @@ pub enum PlayerEvent {
         #[serde(default)]
         output_latency: f64,
     },
+    /// 本次播放实际打开的输出格式，建流成功后发布一次（界面的信号链显示用）。
+    ///
+    /// 共享模式下 `output_*` 是交给系统混音器的格式，设备最终工作在什么格式由
+    /// Windows 决定、这里看不到；独占模式下是向设备申请的格式。
+    OutputFormat {
+        track_id: TrackId,
+        /// `"shared"` 或 `"exclusive"`
+        mode: String,
+        source_rate: u32,
+        /// 源位深；解码器不提供时为 0
+        source_bits: u16,
+        source_channels: u16,
+        output_rate: u32,
+        /// 输出的有效位深（独占 24-in-32 容器记 24）
+        output_bits: u16,
+        output_float: bool,
+        output_channels: u16,
+    },
     BufferingStart,
     BufferingEnd,
     DeviceLost {
@@ -55,6 +73,33 @@ pub enum PlayerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_format_serializes_with_snake_case_fields() {
+        // 前端按这些字段名读取（usePlayback 的 output_format 分支）
+        let event = PlayerEvent::OutputFormat {
+            track_id: "t".into(),
+            mode: "exclusive".into(),
+            source_rate: 44_100,
+            source_bits: 16,
+            source_channels: 2,
+            output_rate: 48_000,
+            output_bits: 24,
+            output_float: false,
+            output_channels: 2,
+        };
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(json["type"], "output_format");
+        assert_eq!(json["track_id"], "t");
+        assert_eq!(json["mode"], "exclusive");
+        assert_eq!(json["source_rate"], 44_100);
+        assert_eq!(json["source_bits"], 16);
+        assert_eq!(json["source_channels"], 2);
+        assert_eq!(json["output_rate"], 48_000);
+        assert_eq!(json["output_bits"], 24);
+        assert_eq!(json["output_float"], false);
+        assert_eq!(json["output_channels"], 2);
+    }
 
     #[test]
     fn progress_carries_output_latency_and_accepts_legacy_payloads() {

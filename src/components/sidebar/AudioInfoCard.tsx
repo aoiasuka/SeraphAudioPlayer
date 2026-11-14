@@ -1,16 +1,50 @@
 import { ImagePlus, Loader2 } from "lucide-react";
 import { useState } from "react";
+import { describeOutputChain, isDsdPath } from "@/lib/outputChain";
+import { cn } from "@/lib/utils";
+import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
 import { isStreamingTrack } from "@/components/pages/main-pages/trackFilters";
 
 interface Row {
   label: string;
   value: string;
+  /** 需要用户留意的值（发生了重采样）用印章红 */
+  notable?: boolean;
+}
+
+function SpecRows({ rows }: { rows: Row[] }) {
+  return (
+    <div className="font-tw text-[12px] leading-[2] text-ink">
+      {rows.map((r) => {
+        const label = r.label.replace(":", "").toUpperCase();
+        const dots = ".".repeat(Math.max(2, 12 - label.length));
+        return (
+          <div key={r.label} className="flex min-w-0">
+            <span className="shrink-0 whitespace-pre text-ink3">
+              {label}
+              {dots}{" "}
+            </span>
+            <b
+              className={cn("min-w-0 truncate font-bold", r.notable && "text-stamp")}
+              title={r.value}
+            >
+              {r.value}
+            </b>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export function AudioInfoCard() {
   const track = usePlayerStore((s) => s.currentTrack());
+  const outputFormat = usePlayerStore((s) => s.outputFormat);
   const fetchOnlineCover = usePlayerStore((s) => s.fetchOnlineCoverForCurrentTrack);
+  const eqEnabled = useEqStore((s) => s.enabled);
+  const crossfeedEnabled = useEqStore((s) => s.crossfeed.enabled);
+  const applyToDsd = useEqStore((s) => s.applyToDsd);
   const [matching, setMatching] = useState(false);
 
   if (!track) return null;
@@ -43,6 +77,16 @@ export function AudioInfoCard() {
     { label: "File Size:", value: track.size },
   ];
 
+  // 输出链路：只显示属于当前曲目的那一次建流结果（切歌后、起播前不沿用上一首的）
+  const chain =
+    outputFormat && outputFormat.trackId === track.id
+      ? describeOutputChain(outputFormat, {
+          eqEnabled,
+          crossfeedEnabled,
+          dspBypassedForDsd: isDsdPath(track.path) && !applyToDsd,
+        })
+      : null;
+
   return (
     <div className="space-y-2">
       <div className="border-[1.5px] border-ink bg-card p-4 shadow-[3px_3px_0_rgba(43,39,34,0.12)]">
@@ -50,21 +94,23 @@ export function AudioInfoCard() {
           <span>SPEC SHEET — 音频信息</span>
           <i className="not-italic font-bold text-stamp">● REC</i>
         </h3>
-        <div className="font-tw text-[12px] leading-[2] text-ink">
-          {rows.map((r) => {
-            const label = r.label.replace(":", "").toUpperCase();
-            const dots = ".".repeat(Math.max(2, 12 - label.length));
-            return (
-              <div key={r.label}>
-                <span className="text-ink3">
-                  {label}
-                  {dots}{" "}
-                </span>
-                <b className="font-bold">{r.value}</b>
-              </div>
-            );
-          })}
-        </div>
+        <SpecRows rows={rows} />
+        {chain ? (
+          <div
+            className="mt-2 border-t border-dashed border-line pt-2"
+            data-testid="output-chain"
+          >
+            <p className="mb-1 font-tw text-[9px] tracking-[3px] text-ink3">
+              SIGNAL PATH — 输出链路
+            </p>
+            <SpecRows
+              rows={[
+                { label: "Output:", value: chain.output },
+                { label: "Process:", value: chain.processing, notable: chain.resampled },
+              ]}
+            />
+          </div>
+        ) : null}
         {canMatchCover ? (
           <button
             type="button"

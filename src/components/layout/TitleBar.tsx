@@ -1,5 +1,5 @@
 import { Disc3, Minus, Square, X } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "@/lib/tauri";
 
 export function TitleBar() {
@@ -15,6 +15,25 @@ export function TitleBar() {
       const w = await import("@tauri-apps/api/window");
       await w.getCurrentWindow().toggleMaximize();
     }
+  }, []);
+
+  // UI5-06：按钮名称跟随窗口状态（最大化后读作「还原」）
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      if (!(await isTauri())) return;
+      const current = (await import("@tauri-apps/api/window")).getCurrentWindow();
+      const refresh = () => {
+        void current.isMaximized().then((value) => { if (!disposed) setMaximized(value); }).catch(() => undefined);
+      };
+      refresh();
+      const stop = await current.onResized(refresh);
+      if (disposed) stop();
+      else unlisten = stop;
+    })().catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   const onClose = useCallback(async () => {
@@ -46,7 +65,8 @@ export function TitleBar() {
         <button
           onClick={onToggleMaximize}
           className="hover:text-ink transition-colors"
-          aria-label="最大化"
+          aria-label={maximized ? "还原" : "最大化"}
+          title={maximized ? "还原" : "最大化"}
         >
           <Square className="w-3 h-3" />
         </button>

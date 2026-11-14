@@ -3,7 +3,7 @@ import { Folder, Link2, Loader2, MicVocal, Plug, Plus, RotateCcw, Trash2 } from 
 import { Dialog } from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
 import { MAX_EXCLUDE_PATTERN_CHARS, MAX_EXCLUDE_RULES } from "@/lib/lyrics/exclude";
-import { invoke, isTauriRuntime } from "@/lib/tauri";
+import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
 import {
   AMLL_LINKS,
   AMLL_TTML_DB_CUSTOM_PRESETS,
@@ -19,7 +19,8 @@ import type { LyricsExcludeRule, LyricsSourcePriority } from "@/types/track";
 
 /** 「制作信息预设」一键加入的正则（Rust regex 语法），默认不启用，只是按钮。 */
 export const CREDITS_EXCLUDE_PRESET_PATTERN =
-  "^(作词|作曲|编曲|制作人|混音|母带|监制|出品|录音|和声|吉他|贝斯|鼓|键盘|弦乐|发行|OP|SP|词|曲)\\s*[:：]";
+  // LIB5-03：含繁体、日文与常见英文写法；与 Rust 侧 `is_credit_line` 保持同一模式
+  "^(作[词詞曲]|[编編]曲|[制製]作人?|混音|母[带帶]|[监監][制製]|出品|[录錄]音|和[声聲]|吉他|[贝貝]斯|鼓|[键鍵][盘盤]|弦[乐樂]|[发發]行|OP|SP|[词詞]|曲|(lyrics|words|music|composed|arranged|produced|mixed|mastered|written)( by)?)\\s*[:：]";
 
 /** 命中预览最多列出的行数 */
 const HIDDEN_PREVIEW_LIMIT = 30;
@@ -427,7 +428,7 @@ function AmllUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }
       });
       setTestResult(result);
     } catch (err) {
-      setTestError(err instanceof Error ? err.message : String(err));
+      setTestError(normalizeIpcError(err).message);
     } finally {
       setTesting(false);
     }
@@ -625,7 +626,7 @@ function ExcludeRulesDialog({ open, onClose }: { open: boolean; onClose: () => v
         setRegexError(statuses?.[0]?.error ?? null);
       })
       .catch((err) => {
-        if (!disposed) setRegexError(err instanceof Error ? err.message : String(err));
+        if (!disposed) setRegexError(normalizeIpcError(err).message);
       });
     return () => {
       disposed = true;

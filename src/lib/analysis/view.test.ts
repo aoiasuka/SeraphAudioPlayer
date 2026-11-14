@@ -74,6 +74,45 @@ describe("analysis view ballistics (v0.4.6)", () => {
     expect(view.levels.clip).toBe(false);
   });
 
+  it("does not flag clip for peaks that merely sit close to full scale", () => {
+    // -0.5 dBFS：现代母带的常见峰值，没有削波
+    const view = createAnalysisView();
+    applyAnalysisFrame(view, frame({ peakLeft: 0.944, peakRight: 0.944 }), 1);
+    expect(view.levels.clip).toBe(false);
+  });
+
+  it("advances the spectrogram at 90ms per row regardless of the step cadence", () => {
+    const rowsOver = (stepSec: number, seconds: number) => {
+      const view = createAnalysisView();
+      applyAnalysisFrame(view, frame(), 1);
+      stepAnalysisView(view, 1);
+      const before = view.historyHead;
+      let rows = 0;
+      let previous = before;
+      for (let t = 1 + stepSec; t <= 1 + seconds + 1e-9; t += stepSec) {
+        stepAnalysisView(view, t);
+        rows += (view.historyHead - previous + view.history.length) % view.history.length;
+        previous = view.historyHead;
+      }
+      return rows;
+    };
+    // 播放时的绘制节拍（60Hz 屏上每两帧一次）与待机节拍（每五帧一次）
+    // 9 秒应写 100 行；此前按节拍取整时分别是 90 行与 54 行。±1 留给浮点累加
+    for (const cadence of [1 / 30, 1 / 12]) {
+      expect(rowsOver(cadence, 9)).toBeGreaterThanOrEqual(99);
+      expect(rowsOver(cadence, 9)).toBeLessThanOrEqual(101);
+    }
+  });
+
+  it("does not replay a burst of rows after a long gap between steps", () => {
+    const view = createAnalysisView();
+    applyAnalysisFrame(view, frame(), 1);
+    stepAnalysisView(view, 1);
+    const before = view.historyHead;
+    stepAnalysisView(view, 31); // 窗口隐藏 30 秒后恢复
+    expect((view.historyHead - before + view.history.length) % view.history.length).toBe(1);
+  });
+
   it("pushes spectrogram history rows on the 90ms cadence", () => {
     const view = createAnalysisView();
     applyAnalysisFrame(view, frame({ spectrum: new Array(ANALYSIS_BIN_COUNT).fill(1) }), 1);

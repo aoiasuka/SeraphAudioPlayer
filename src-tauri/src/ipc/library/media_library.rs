@@ -655,6 +655,9 @@ pub(crate) fn track_from_path(
         artist,
         album,
         album_year: audio_metadata.album_year,
+        track_number: audio_metadata.track_number,
+        disc_number: audio_metadata.disc_number,
+        album_artist: audio_metadata.album_artist,
         cover,
         format: format.clone(),
         bitdepth: format_audio_quality(
@@ -692,6 +695,9 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
             parsed.artist = tags.artist;
             parsed.album = tags.album;
             parsed.album_year = tags.year;
+            parsed.track_number = tags.track_number;
+            parsed.disc_number = tags.disc_number;
+            parsed.album_artist = tags.album_artist;
             parsed.cover = tags.cover;
         }
         enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
@@ -728,6 +734,8 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
         parsed.album_year = tag
             .date()
             .and_then(|value| (value.year > 0).then(|| value.year.to_string()));
+        (parsed.track_number, parsed.disc_number, parsed.album_artist) =
+            album_position_from_tag(tag);
     }
 
     parsed.lyrics = lyrics_from_tags(tagged_file.tags());
@@ -834,6 +842,106 @@ pub(crate) fn covers_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
     Ok(dir.join("covers"))
+}
+
+/// （音轨号, 碟号, 专辑艺术家）
+pub(crate) type AlbumPosition = (Option<u32>, Option<u32>, Option<String>);
+
+/// 音轨号、碟号、专辑艺术家（LIB5-01）。0 视为没有。
+fn album_position_from_tag(tag: &Tag) -> AlbumPosition {
+    (
+        tag.track().filter(|value| *value > 0),
+        tag.disk().filter(|value| *value > 0),
+        tag.get_string(ItemKey::AlbumArtist)
+            .and_then(clean_metadata_text),
+    )
+}
+
+/// 只读标签取音轨号、碟号、专辑艺术家（存量补读用，不做 ffprobe 等重探测）。
+pub(crate) fn read_album_position(path: &Path) -> AlbumPosition {
+    match lofty::read_from_path(path) {
+        Ok(tagged_file) => tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+            .map(album_position_from_tag)
+            .unwrap_or_default(),
+        // lofty 不支持 DSD 容器，改走内嵌 ID3v2
+        Err(_) => dsd_tags_from_path(path)
+            .map(|tags| (tags.track_number, tags.disc_number, tags.album_artist))
+            .unwrap_or_default(),
+    }
+}
+
+/// LIB5-01：v0.6.3 及更早导入的本地曲目没有音轨号、碟号、专辑艺术家。启动时一次性
+/// 补读这三项都为空的本地曲目，完成后写标记文件；结构与 `backfill_missing_covers` 相同
+/// （锁外读标签，持锁只做读改写，以并发写为准）。返回是否改动了曲库。
+pub(crate) fn backfill_album_positions(app: &AppHandle) -> bool {
+    let Ok(covers_dir) = covers_dir_path(app) else {
+        return false;
+    };
+    let marker = covers_dir.join(".album-position-backfill-v1");
+    if marker.is_file() {
+        return false;
+    }
+    let missing = |track: &ImportedTrack| {
+        track.source_url.is_none()
+            && track.track_number.is_none()
+            && track.disc_number.is_none()
+            && track.album_artist.is_none()
+    };
+    let candidates: Vec<String> = {
+        let Ok(snapshot) = read_library_snapshot(app) else {
+            // 缓存损坏时不写标记，等缓存恢复后下次启动重试
+            return false;
+        };
+        snapshot
+            .tracks
+            .iter()
+            .filter(|track| missing(track))
+            .map(|track| track.path.clone())
+            .collect()
+    };
+
+    let mut found: HashMap<String, AlbumPosition> = HashMap::new();
+    for path_string in &candidates {
+        let path = Path::new(path_string);
+        if !path.is_file() {
+            continue;
+        }
+        let position = read_album_position(path);
+        if position != (None, None, None) {
+            found.insert(path_string.clone(), position);
+        }
+    }
+
+    let mut changed = false;
+    if !found.is_empty() {
+        let _guard = LIBRARY_LOCK.lock();
+        let Ok(mut tracks) = read_cached_tracks_for_update(app) else {
+            return false;
+        };
+        for track in &mut tracks {
+            if !missing(track) {
+                continue;
+            }
+            let Some((track_number, disc_number, album_artist)) = found.get(&track.path) else {
+                continue;
+            };
+            track.track_number = *track_number;
+            track.disc_number = *disc_number;
+            track.album_artist = album_artist.clone();
+            changed = true;
+        }
+        if changed && write_cached_tracks(app, &tracks).is_err() {
+            // 写失败不落标记，下次启动重试
+            return false;
+        }
+    }
+
+    if fs::create_dir_all(&covers_dir).is_ok() {
+        let _ = fs::write(&marker, b"v1");
+    }
+    changed
 }
 
 /// 只读标签提取封面并落盘（启动补扫用，跳过 ffprobe 等重探测）。

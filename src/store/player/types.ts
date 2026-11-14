@@ -1,3 +1,4 @@
+import type { OutputFormatInfo } from "@/lib/outputChain";
 import type {
   DeleteTracksResult,
   DriverKind,
@@ -122,6 +123,8 @@ export interface PersistedPlayerState {
   shuffleMode: boolean;
   loopMode: boolean;
   liked: Record<string, boolean>;
+  /** 收藏时间（毫秒时间戳，按曲目 id）；「我喜欢」据此倒序。旧收藏没有记录。 */
+  likedAt: Record<string, number>;
   userPlaylists: UserPlaylist[];
   currentDeviceId: string;
   driverKind: DriverKind;
@@ -129,6 +132,8 @@ export interface PersistedPlayerState {
   smtcEnabled: boolean;
   // v0.4.2：记忆播放。关闭时启动不恢复上次曲目/位置，且不持久化播放进度。
   rememberPlayback: boolean;
+  /** 启动时自动检查更新（默认开）；关闭后只保留设置页里的手动检查。 */
+  autoUpdateCheck: boolean;
   // v0.5.4：任务栏集成（缩略图播控按钮 / 图标播放进度条）
   taskbarButtonsEnabled: boolean;
   taskbarProgressEnabled: boolean;
@@ -156,6 +161,18 @@ export interface PersistedPlayerState {
   ignoreLyricsFileOffset: boolean;
 }
 
+/**
+ * 播放范围（PLAY6-01）：从哪个列表开始播放，就以那个列表（按当时的显示顺序）作为队列。
+ * `null` 表示整个曲库。不持久化，重启后回到整个曲库。
+ */
+export interface PlayScope {
+  /** 来源标识，如 `playlist:<id>`、`tracks:local`；歌单调整顺序时据此跟随。 */
+  key: string;
+  /** 队列弹窗标题里显示的名称 */
+  label: string;
+  trackIds: string[];
+}
+
 export interface PlaybackQueuePreview {
   currentTrackId: string | null;
   nextTrackId: string | null;
@@ -166,6 +183,8 @@ export interface PlayerStore {
   playlist: Track[];
   /** 后端保留的下一首，仅用于运行时预览，不持久化。 */
   playbackQueuePreview: PlaybackQueuePreview | null;
+  /** 当前播放范围；null = 整个曲库。下一首、随机、媒体键、自动续播都只在范围内选曲。 */
+  playScope: PlayScope | null;
   currentTrackIndex: number;
   persistedCurrentTrackId: string | null;
   persistedCurrentTime: number;
@@ -174,12 +193,16 @@ export interface PlayerStore {
   currentTime: number;
   /** 引擎输出延迟（秒，Progress 事件携带）：歌词定位用 currentTime − outputLatency。不持久化。 */
   outputLatency: number;
+  /** 本次播放实际打开的输出格式（引擎 output_format 事件）；右侧信号链显示用。不持久化。 */
+  outputFormat: OutputFormatInfo | null;
   volume: number;
   isMuted: boolean;
   previousVolume: number;
   shuffleMode: boolean;
   loopMode: boolean;
   liked: Record<string, boolean>;
+  /** 收藏时间（毫秒时间戳，按曲目 id）；「我喜欢」据此倒序。旧收藏没有记录。 */
+  likedAt: Record<string, number>;
   userPlaylists: UserPlaylist[];
   devices: OutputDevice[];
   currentDeviceId: string;
@@ -187,6 +210,7 @@ export interface PlayerStore {
   activeView: LibraryView;
   smtcEnabled: boolean;
   rememberPlayback: boolean;
+  autoUpdateCheck: boolean;
   taskbarButtonsEnabled: boolean;
   taskbarProgressEnabled: boolean;
   taskbarLyricsEnabled: boolean;
@@ -220,7 +244,11 @@ export interface PlayerStore {
   togglePlayback: () => void;
   nextTrack: () => void;
   prevTrack: () => void;
-  loadTrack: (index: number, options?: { forcePlay?: boolean }) => void;
+  /**
+   * `index` 是曲库下标。`scope` 给出时把它设为播放范围；不给时，曲目在现有范围内
+   * 则保留范围，否则回到整个曲库。
+   */
+  loadTrack: (index: number, options?: { forcePlay?: boolean; scope?: PlayScope }) => void;
   setActiveView: (view: LibraryView) => void;
   seek: (sec: number) => void;
   tick: () => void;
@@ -241,6 +269,12 @@ export interface PlayerStore {
   ) => Promise<void>;
   fetchOnlineCoverForCurrentTrack: () => Promise<boolean>;
   addTrackToUserPlaylist: (playlistId: string, trackId: string) => void;
+  /** 批量加入：一次写入 store，跳过重复与曲库里不存在的曲目，返回实际加入的数量。 */
+  addTracksToUserPlaylist: (
+    playlistId: string,
+    trackIds: string[],
+    options?: { silent?: boolean }
+  ) => number;
   removeTrackFromUserPlaylist: (playlistId: string, trackId: string) => void;
   moveTrackInUserPlaylist: (
     playlistId: string,
@@ -291,6 +325,7 @@ export interface PlayerStore {
   setDriver: (k: DriverKind) => void;
   setSmtcEnabled: (enabled: boolean) => void;
   setRememberPlayback: (enabled: boolean) => void;
+  setAutoUpdateCheck: (enabled: boolean) => void;
   setTaskbarButtonsEnabled: (enabled: boolean) => void;
   setTaskbarProgressEnabled: (enabled: boolean) => void;
   setTaskbarLyricsEnabled: (enabled: boolean) => void;

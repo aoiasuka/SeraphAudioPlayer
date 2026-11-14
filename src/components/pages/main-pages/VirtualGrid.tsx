@@ -1,19 +1,29 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { recallView, rememberView } from "@/lib/viewMemory";
 
 const GAP = 16;
 const OVERSCAN_ROWS = 2;
 
-/** 卡片等高的自适应网格；列数和行高由实际 CSS 布局测量。 */
-export function VirtualGrid<T>({ items, itemKey, renderItem, label }: {
+/**
+ * 卡片等高的自适应网格；列数和行高由实际 CSS 布局测量。
+ * `stateKey` 给出后记住滚动位置，页面重新挂载时恢复（见 `lib/viewMemory.ts`）。
+ */
+export function VirtualGrid<T>({ items, itemKey, renderItem, label, stateKey }: {
   items: T[];
   itemKey: (item: T) => string;
   renderItem: (item: T) => ReactNode;
   label: string;
+  stateKey?: string;
 }) {
+  const scrollKey = stateKey ? `${stateKey}:scroll` : null;
   const scrollRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const pendingFocus = useRef<number | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  const [scrollTop, setScrollTop] = useState(() => recallView(scrollKey, 0));
+  // 要恢复到的滚动位置。行高要等首次测量后才准，所以测量前后各应用一次；
+  // 用户一旦自己滚动就作废。
+  const pendingScrollRestore = useRef<number | null>(recallView<number | null>(scrollKey, null));
+  const initialSize = useRef<object | null>(null);
   const [size, setSize] = useState({ columns: 2, stride: 280, height: 600 });
   const rows = Math.ceil(items.length / size.columns);
   const startRow = Math.max(0, Math.min(rows - 1, Math.floor(scrollTop / size.stride) - OVERSCAN_ROWS));
@@ -43,6 +53,16 @@ export function VirtualGrid<T>({ items, itemKey, renderItem, label }: {
   }, [items.length]);
 
   useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const target = pendingScrollRestore.current;
+    if (!scroll || target === null || target <= 0) return;
+    scroll.scrollTop = target;
+    initialSize.current ??= size;
+    // 尺寸已被真实测量替换过：这一次是按准确行高定位的，恢复完成
+    if (initialSize.current !== size) pendingScrollRestore.current = null;
+  }, [size]);
+
+  useLayoutEffect(() => {
     const index = pendingFocus.current;
     if (index === null) return;
     const target = gridRef.current?.querySelector<HTMLButtonElement>(`[data-grid-index="${index}"] button`);
@@ -67,12 +87,22 @@ export function VirtualGrid<T>({ items, itemKey, renderItem, label }: {
     pendingFocus.current = next;
     const top = Math.floor(next / size.columns) * size.stride;
     if (scrollRef.current) scrollRef.current.scrollTop = top;
+    pendingScrollRestore.current = null;
+    rememberView(scrollKey, top);
     setScrollTop(top);
   };
 
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto pr-1"
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)} onKeyDown={onKeyDown}>
+      onScroll={(event) => {
+        const top = event.currentTarget.scrollTop;
+        // 恢复期间由我们自己设置的位置不算用户滚动
+        if (pendingScrollRestore.current !== null && Math.abs(top - pendingScrollRestore.current) > 1) {
+          pendingScrollRestore.current = null;
+        }
+        rememberView(scrollKey, top);
+        setScrollTop(top);
+      }} onKeyDown={onKeyDown}>
       <div ref={gridRef} role="list" aria-label={label}
         className="grid grid-cols-2 content-start gap-4 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5"
         style={{ paddingTop: startRow * size.stride, paddingBottom: Math.max(0, rows - Math.ceil(end / size.columns)) * size.stride }}>

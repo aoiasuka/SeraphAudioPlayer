@@ -42,6 +42,7 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   activeView: "string",
   smtcEnabled: "boolean",
   rememberPlayback: "boolean",
+  autoUpdateCheck: "boolean",
   taskbarButtonsEnabled: "boolean",
   taskbarProgressEnabled: "boolean",
   taskbarLyricsEnabled: "boolean",

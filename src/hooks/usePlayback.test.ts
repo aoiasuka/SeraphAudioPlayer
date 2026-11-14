@@ -179,3 +179,27 @@ describe("切歌时的歌词时间轴", () => {
     expect(usePlayerStore.getState()).toMatchObject({ currentTime: 4, outputLatency: 0 });
   });
 });
+
+describe("输出格式事件", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    usePlayerStore.setState({ ...usePlayerStore.getInitialState() });
+  });
+
+  afterEach(cleanup);
+
+  it("写入 store；畸形载荷被忽略，不覆盖上一次的有效值", () => {
+    renderHook(usePlayback);
+    emit({
+      type: "output_format", track_id: "a", mode: "exclusive",
+      source_rate: 44_100, source_bits: 16, source_channels: 2,
+      output_rate: 44_100, output_bits: 16, output_float: false, output_channels: 2,
+    });
+    expect(usePlayerStore.getState().outputFormat).toMatchObject({
+      trackId: "a", mode: "exclusive", outputRate: 44_100, outputBits: 16,
+    });
+
+    emit({ type: "output_format", track_id: "b", mode: "exclusive", output_rate: 0 });
+    expect(usePlayerStore.getState().outputFormat?.trackId).toBe("a");
+  });
+});

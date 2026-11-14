@@ -6,7 +6,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { DraftNumberInput } from "@/components/ui/DraftNumberInput";
 import { parseApoPreset, toApoText } from "@/lib/eqApoParser";
@@ -30,14 +30,24 @@ function formatFreq(freq: number) {
   return freq >= 1000 ? `${(freq / 1000).toFixed(freq % 1000 === 0 ? 0 : 1)}k` : `${Math.round(freq)}`;
 }
 
-/** 频响曲线 SVG。横轴 log 频率，纵轴 ±15dB。 */
+/**
+ * 频响曲线的纵轴量程（UI5-05）：默认 ±15 dB；响应超出时按 6 dB 一档放大到刚好
+ * 容纳峰值，曲线不再被压平（频段与预放大各 ±24 dB，叠加后可以远超 15）。
+ */
+export function responseCurveRange(response: readonly number[]) {
+  let peak = 0;
+  for (const db of response) if (Number.isFinite(db)) peak = Math.max(peak, Math.abs(db));
+  return peak <= 15 ? 15 : Math.ceil(peak / 6) * 6;
+}
+
+/** 频响曲线 SVG。横轴 log 频率，纵轴默认 ±15 dB，超出时自动放大。 */
 function ResponseCurve({ preamp, bands }: { preamp: number; bands: EqBand[] }) {
   const width = 640;
   const height = 150;
-  const dbRange = 15;
-  const { path, freqs } = useMemo(() => {
+  const { path, dbRange } = useMemo(() => {
     const points = logFreqPoints(160);
     const response = combinedResponseDb(preamp, bands, points);
+    const dbRange = responseCurveRange(response);
     const logMin = Math.log10(20);
     const logMax = Math.log10(20_000);
     const d = response
@@ -47,25 +57,31 @@ function ResponseCurve({ preamp, bands }: { preamp: number; bands: EqBand[] }) {
         return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-    return { path: d, freqs: points };
+    return { path: d, dbRange };
   }, [preamp, bands]);
-  void freqs;
 
   const gridFreqs = [100, 1000, 10000];
   const logMin = Math.log10(20);
   const logMax = Math.log10(20_000);
 
   return (
+    <div className="relative">
+    <span className="pointer-events-none absolute right-1 top-0.5 font-tw text-[9px] font-bold text-ink3">
+      ±{dbRange} dB
+    </span>
     <svg
       viewBox={`0 0 ${width} ${height}`}
       className="h-[150px] w-full"
       preserveAspectRatio="none"
+      role="img"
+      aria-label={`频响曲线，纵轴 ±${dbRange} dB`}
     >
       {/* 0dB 中线 */}
       <line x1={0} y1={height / 2} x2={width} y2={height / 2} className="stroke-ink3" strokeWidth={1} strokeDasharray="4 3" />
       {/* ±中间刻度 */}
-      {[-10, -5, 5, 10].map((db) => {
-        const y = height / 2 - (db / dbRange) * (height / 2);
+      {[-2 / 3, -1 / 3, 1 / 3, 2 / 3].map((fraction) => {
+        const db = fraction * dbRange;
+        const y = height / 2 - fraction * (height / 2);
         return (
           <line key={db} x1={0} y1={y} x2={width} y2={y} className="stroke-line" strokeWidth={0.5} />
         );
@@ -79,6 +95,7 @@ function ResponseCurve({ preamp, bands }: { preamp: number; bands: EqBand[] }) {
       })}
       <path d={path} className="stroke-stamp" strokeWidth={2} fill="none" />
     </svg>
+    </div>
   );
 }
 
@@ -88,6 +105,21 @@ export function EqPage() {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // UI5-05：重置与删除预设不可撤销，改为「点一次待确认、3 秒内再点一次才执行」
+  const [armed, setArmed] = useState<string | null>(null);
+  useEffect(() => {
+    if (armed === null) return;
+    const timer = window.setTimeout(() => setArmed(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  const confirmThen = (key: string, action: () => void) => {
+    if (armed !== key) {
+      setArmed(key);
+      return;
+    }
+    setArmed(null);
+    action();
+  };
 
   const presetSelectValue = eq.activePresetId ?? "custom";
 
@@ -339,12 +371,12 @@ export function EqPage() {
             </button>
             <button
               type="button"
-              onClick={eq.resetBands}
-              className="inline-flex items-center gap-1 font-tw text-[11px] font-bold text-ink2 hover:text-stamp"
-              title="重置为平直"
+              onClick={() => confirmThen("reset", eq.resetBands)}
+              className={`inline-flex items-center gap-1 font-tw text-[11px] font-bold hover:text-stamp ${armed === "reset" ? "text-stamp" : "text-ink2"}`}
+              title="重置为平直（需再点一次确认）"
             >
               <RotateCcw className="h-3 w-3" />
-              重置
+              {armed === "reset" ? "再点一次确认" : "重置"}
             </button>
           </div>
         </div>
@@ -387,7 +419,9 @@ export function EqPage() {
             </div>
             {eq.bands.map((band, index) => (
               <AdvancedBandRow
-                key={index}
+                // 频段没有稳定 ID：把段数拼进 key，增删频段时整组重建，
+                // 数字框里未提交的草稿不会错位继承到后面的频段。
+                key={`${eq.bands.length}:${index}`}
                 band={band}
                 onChange={(patch) => eq.updateBand(index, patch)}
                 onRemove={() => eq.removeBand(index)}
@@ -481,11 +515,12 @@ export function EqPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => eq.deleteUserPreset(preset.id)}
-                  className="text-ink3 hover:text-stamp"
-                  aria-label={`删除预设 ${preset.name}`}
+                  onClick={() => confirmThen(`preset:${preset.id}`, () => eq.deleteUserPreset(preset.id))}
+                  className={`inline-flex items-center gap-1 font-tw text-[10px] font-bold hover:text-stamp ${armed === `preset:${preset.id}` ? "text-stamp" : "text-ink3"}`}
+                  aria-label={armed === `preset:${preset.id}` ? `再点一次确认删除预设 ${preset.name}` : `删除预设 ${preset.name}`}
                 >
                   <Trash2 className="h-3 w-3" />
+                  {armed === `preset:${preset.id}` ? "确认删除" : null}
                 </button>
               </div>
             ))}

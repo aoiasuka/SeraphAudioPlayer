@@ -4,6 +4,7 @@ import { coverSrc } from "@/lib/tauri";
 import { isStreamingTrack } from "@/components/pages/main-pages/trackFilters";
 import { useImmersiveStore, type ImmersiveMode } from "@/store/immersive";
 import { usePlayerStore } from "@/store/player";
+import { playbackQueueTracks } from "@/store/player/queueSync";
 import type { Track } from "@/types/track";
 import { ImmersiveLyrics } from "./ImmersiveLyrics";
 import { ImmersiveTransport } from "./ImmersiveTransport";
@@ -13,8 +14,14 @@ const LazyImmersiveAnalysis = lazy(() => import("./ImmersiveAnalysis").then((mod
 const LazyImmersiveQueue = lazy(() => import("./ImmersiveQueue").then((module) => ({ default: module.ImmersiveQueue })));
 
 function RecordPosition() {
-  const index = usePlayerStore((s) => s.currentTrackIndex);
-  const count = usePlayerStore((s) => s.playlist.length);
+  // 在播放范围（队列）里的位置，不是曲库下标
+  const index = usePlayerStore((s) => {
+    const queue = playbackQueueTracks(s);
+    if (queue === s.playlist) return s.currentTrackIndex;
+    const currentId = s.playlist[s.currentTrackIndex]?.id;
+    return Math.max(0, queue.findIndex((track) => track.id === currentId));
+  });
+  const count = usePlayerStore((s) => playbackQueueTracks(s).length);
   return <span>{String(index + 1).padStart(3, "0")} / {String(count).padStart(3, "0")}</span>;
 }
 
@@ -53,7 +60,8 @@ export function ImmersivePlayer() {
   const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
   const setShowLyricsTranslation = usePlayerStore((s) => s.setShowLyricsTranslation);
   const toggleTranslation = () => setShowLyricsTranslation(!showTranslation);
-  const [largeLyrics, setLargeLyrics] = useState(false);
+  const largeLyrics = useImmersiveStore((s) => s.largeLyrics);
+  const toggleLargeLyrics = useImmersiveStore((s) => s.toggleLargeLyrics);
 
   useEffect(() => {
     closeRef.current?.focus({ preventScroll: true });
@@ -120,12 +128,12 @@ export function ImmersivePlayer() {
               <p title={track.album}>{track.album || "未知专辑"}</p>
             </div>
           </div>
-          {mode === "analysis" && <ImmersiveLyrics compact track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={() => setLargeLyrics((value) => !value)} />}
+          {mode === "analysis" && <ImmersiveLyrics compact track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={toggleLargeLyrics} />}
         </aside>
 
         <div className="immersive-mode-panel" role="tabpanel" id={`immersive-panel-${mode}`} aria-labelledby={`immersive-tab-${mode}`}>
           {mode === "lyrics" ? (
-            <ImmersiveLyrics track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={() => setLargeLyrics((value) => !value)} />
+            <ImmersiveLyrics track={track} showTranslation={showTranslation} largeLyrics={largeLyrics} onToggleTranslation={toggleTranslation} onToggleSize={toggleLargeLyrics} />
           ) : (
             <Suspense fallback={<div className="immersive-empty" role="status">正在打开声学分析…</div>}>
               <LazyImmersiveAnalysis key={track.id} />

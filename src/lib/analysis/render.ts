@@ -10,6 +10,7 @@ import {
   FREQ_MAX,
   FREQ_MIN,
   HISTORY_ROWS,
+  HISTORY_WINDOW_SEC,
   SPECTRUM_DB_FLOOR,
   clamp,
   type AnalysisView,
@@ -979,7 +980,7 @@ export function drawSpectrogram(
     ctx.textAlign = "left";
     ctx.fillStyle = colors.ink3;
     ctx.fillText("NOW", x1 + 6, y1 - 2);
-    ctx.fillText("-5.8S", x1 + 6, y0 + 9);
+    ctx.fillText(`-${HISTORY_WINDOW_SEC.toFixed(1)}S`, x1 + 6, y0 + 9);
   }
 }
 

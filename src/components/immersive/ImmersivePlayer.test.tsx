@@ -32,6 +32,7 @@ function PlayerHarness() {
 }
 
 beforeEach(() => {
+  useImmersiveStore.setState({ largeLyrics: false });
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} unobserve() {} });
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 16));
   vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));

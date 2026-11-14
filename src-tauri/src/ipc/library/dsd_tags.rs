@@ -18,6 +18,9 @@ pub(crate) struct DsdTags {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub album_artist: Option<String>,
     pub cover: Option<CoverArt>,
 }
 
@@ -54,6 +57,9 @@ pub(crate) fn dsd_tags_from_path(path: &Path) -> Option<DsdTags> {
         title: tag.title().and_then(clean_metadata_text),
         artist: tag.artist().and_then(clean_metadata_text),
         album: tag.album().and_then(clean_metadata_text),
+        track_number: tag.track().filter(|value| *value > 0),
+        disc_number: tag.disc().filter(|value| *value > 0),
+        album_artist: tag.album_artist().and_then(clean_metadata_text),
         year: tag
             .year()
             .filter(|year| *year > 0)

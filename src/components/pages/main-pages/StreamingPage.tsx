@@ -340,7 +340,7 @@ export function StreamingPage() {
         </div>
       ) : null}
 
-      <TrackRows tracks={streamingTracks} empty="暂无流媒体曲目" scopeName="流媒体" />
+      <TrackRows tracks={streamingTracks} empty="暂无流媒体曲目" scopeName="流媒体" stateKey="tracks:streaming" />
     </div>
   );
 }

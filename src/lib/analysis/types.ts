@@ -15,6 +15,8 @@ export const LEVEL_DB_FLOOR = -90;
 /** 瀑布缓存行数与写入间隔 */
 export const HISTORY_ROWS = 64;
 export const HISTORY_INTERVAL_SEC = 0.09;
+/** 瀑布时间窗（秒）：界面标注由它计算，不再手写数字 */
+export const HISTORY_WINDOW_SEC = HISTORY_ROWS * HISTORY_INTERVAL_SEC;
 /** 频轴范围（log） */
 export const FREQ_MIN = 20;
 export const FREQ_MAX = 20000;

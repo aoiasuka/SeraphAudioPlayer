@@ -5,8 +5,10 @@ import { formatSeconds } from "@/lib/format";
 import { trackIndexById as sharedTrackIndexById } from "@/lib/trackIndex";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
+import { recallView, rememberView, useRememberedState } from "@/lib/viewMemory";
 import { showContextMenu, useContextMenuStore } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
+import type { PlayScope } from "@/store/player/types";
 import type { Track } from "@/types/track";
 import {
   filterAndSortTracks,
@@ -25,7 +27,12 @@ function compactQualityLabel(track: Track) {
     : track.bitdepth;
 }
 
-export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { tracks: Track[]; empty: string; scopeName?: string }) {
+/**
+ * `stateKey`：给出后，搜索词、排序方式和滚动位置按这个键记在内存里，切换页面再回来
+ * 时恢复（见 `lib/viewMemory.ts`）。不同列表用不同的键；不传则每次从头开始。
+ */
+export function TrackRows({ tracks, empty, scopeName = "当前列表", stateKey }: { tracks: Track[]; empty: string; scopeName?: string; stateKey?: string }) {
+  const scrollKey = stateKey ? `${stateKey}:scroll` : null;
   const playlist = usePlayerStore((s) => s.playlist);
   const currentTrack = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -40,18 +47,28 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const selectAllRef = useRef<HTMLInputElement | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  const [scrollTop, setScrollTop] = useState(() => recallView(scrollKey, 0));
   const [viewportHeight, setViewportHeight] = useState(420);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // 进入页面时要恢复到的滚动位置；容器首次挂载后应用一次即清空
+  const pendingScrollRestore = useRef<number | null>(recallView<number | null>(scrollKey, null));
   const [trackToAddId, setTrackToAddId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useRememberedState(stateKey ? `${stateKey}:query` : null, "");
   const deferredQuery = useDeferredValue(query);
-  const [sortKey, setSortKey] = useState<TrackSortKey>("default");
-  // 搜索 + 排序后的视图列表。点击播放仍经 trackIndexById 映射回全局队列索引，
-  // 因此过滤/排序只改变展示，不影响播放队列与切歌逻辑。
+  const [sortKey, setSortKey] = useRememberedState<TrackSortKey>(stateKey ? `${stateKey}:sort` : null, "default");
+  // 搜索 + 排序后的视图列表。点击播放时经 trackIndexById 映射回曲库下标。
   const displayTracks = useMemo(
     () => filterAndSortTracks(tracks, deferredQuery, sortKey),
     [tracks, deferredQuery, sortKey]
+  );
+  // PLAY6-01：从这个列表点歌，队列就是列表当前显示的内容（含筛选与排序）。
+  const playScope = useMemo<PlayScope>(
+    () => ({
+      key: stateKey ?? `tracks:${scopeName}`,
+      label: scopeName,
+      trackIds: displayTracks.map((track) => track.id),
+    }),
+    [displayTracks, scopeName, stateKey]
   );
   const displayIds = useMemo(() => new Set(displayTracks.map((track) => track.id)), [displayTracks]);
   const selectedTracks = useMemo(() => displayTracks.filter((track) => selectedIds.has(track.id)), [displayTracks, selectedIds]);
@@ -108,6 +125,7 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     setScrollTop(element.scrollTop);
+    rememberView(scrollKey, element.scrollTop);
   };
   const hasTracks = tracks.length > 0;
   // M-17：滚动容器实际挂载条件是「过滤后非空」（displayTracks）——搜索无结果
@@ -121,6 +139,10 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
 
     const updateViewport = () => setViewportHeight(element.clientHeight);
     updateViewport();
+    // 回到页面：把滚动条放回离开时的位置（首屏的占位高度已按记住的位置算好）
+    const restore = pendingScrollRestore.current;
+    pendingScrollRestore.current = null;
+    if (restore !== null && restore > 0) element.scrollTop = restore;
     const resizeObserver = new ResizeObserver(updateViewport);
     resizeObserver.observe(element);
     return () => resizeObserver.disconnect();
@@ -128,6 +150,8 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
 
   const resetScroll = () => {
     setScrollTop(0);
+    rememberView(scrollKey, 0);
+    pendingScrollRestore.current = null;
     scrollRef.current?.scrollTo({ top: 0 });
   };
 
@@ -266,10 +290,10 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
               key={track.id}
               onDoubleClick={() => {
                 // 双击行内任意处即从头强制播放本曲目（含停止态）
-                if (!selectionMode && index >= 0) loadTrack(index, { forcePlay: true });
+                if (!selectionMode && index >= 0) loadTrack(index, { forcePlay: true, scope: playScope });
               }}
               onContextMenu={(event) =>
-                showContextMenu(event, buildTrackMenuEntries(track))
+                showContextMenu(event, buildTrackMenuEntries(track, { scope: playScope }))
               }
               className={cn(
                 "archive-card group relative grid h-[49px] select-none grid-cols-[50px_minmax(0,1fr)_64px_30px_30px_30px] xl:grid-cols-[58px_minmax(0,1fr)_118px_64px_40px_34px_34px] items-center gap-2 xl:gap-3 px-3 xl:px-4 mb-2.5",
@@ -300,7 +324,7 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表" }: { track
                 type="button"
                 onClick={() => {
                   if (selectionMode) toggleSelection(track.id);
-                  else if (index >= 0) loadTrack(index);
+                  else if (index >= 0) loadTrack(index, { scope: playScope });
                 }}
                 disabled={!selectionMode && index < 0}
                 className="min-w-0 text-left disabled:cursor-not-allowed disabled:opacity-50"

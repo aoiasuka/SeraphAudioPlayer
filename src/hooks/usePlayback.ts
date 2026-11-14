@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { invoke, isTauriRuntime, listen } from "@/lib/tauri";
 import { emptyLyricDocument } from "@/lib/lyrics/document";
+import { parseOutputFormatEvent } from "@/lib/outputChain";
 import type { Track } from "@/types/track";
 import { usePlayerStore } from "@/store/player";
 import { usePlayerEvents } from "@/hooks/usePlayerEvents";
@@ -23,6 +24,7 @@ export function usePlayback() {
   const recentTrackIds = usePlayerStore((s) => s.recentTrackIds);
   const shuffleMode = usePlayerStore((s) => s.shuffleMode);
   const loopMode = usePlayerStore((s) => s.loopMode);
+  const playScope = usePlayerStore((s) => s.playScope);
   const currentTrack = playlist[currentTrackIndex];
 
   useEffect(() => {
@@ -98,6 +100,13 @@ export function usePlayback() {
             : state.outputLatency;
         return { currentTime: Math.max(0, clamped), outputLatency };
       });
+      return;
+    }
+
+    if (event.type === "output_format") {
+      // 建流成功后引擎报告一次实际输出格式；右侧卡片按曲目身份核对后显示
+      const outputFormat = parseOutputFormatEvent(event);
+      if (outputFormat) usePlayerStore.setState({ outputFormat });
       return;
     }
 
@@ -190,5 +199,5 @@ export function usePlayback() {
 
       console.warn("Failed to sync playback queue", err);
     });
-  }, [playlist, currentTrackIndex, recentTrackIds, shuffleMode, loopMode]);
+  }, [playlist, playScope, currentTrackIndex, recentTrackIds, shuffleMode, loopMode]);
 }

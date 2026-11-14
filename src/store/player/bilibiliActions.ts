@@ -14,6 +14,24 @@ import type {
 // 避免对同一曲目发起第二次下载。
 const ensureInFlight = new Map<string, Promise<Track>>();
 
+/**
+ * 缓存缺失后自动重新下载时用的选项：沿用曲目原来的音质。
+ *
+ * 此前写死为「FLAC + 杜比全景声」全开——用户按普通音质导入的曲目，缓存被清理后
+ * 一点播放就按无损或杜比重新下载：文件大得多、更耗流量，还会更快触发配额清理。
+ * 导入时的选项没有落盘，这里按缓存文件的格式标注反推（后端 `format_from_codec`
+ * 的取值：FLAC / EAC3 / M4A / OPUS / AUDIO）。混流只影响容器、不影响音质，保持开启。
+ */
+export function recacheOptionsForTrack(track: Track): BilibiliImportOptions {
+  const format = (track.format ?? "").toUpperCase();
+  return {
+    preferFlac: format.includes("FLAC"),
+    preferDolbyAtmos: format.includes("EAC3"),
+    remuxWithFfmpeg: true,
+    existingTrackId: track.id,
+  };
+}
+
 async function recachePlayableTrack(
   track: Track,
   sourceInput: string,
@@ -23,12 +41,7 @@ async function recachePlayableTrack(
   notify(`正在重新缓存: ${track.title}`);
   const imported = await invoke<Track>("import_bilibili_audio_with_options", {
     input: sourceInput,
-    options: {
-      preferFlac: true,
-      preferDolbyAtmos: true,
-      remuxWithFfmpeg: true,
-      existingTrackId: track.id,
-    },
+    options: recacheOptionsForTrack(track),
   });
 
   const merged = mergeIncomingTrack(track, imported);

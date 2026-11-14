@@ -181,7 +181,7 @@ describe("TrackRows", () => {
     // 双击第二行（First Love，全局索引 1）
     fireEvent.doubleClick(screen.getByText("First Love"));
 
-    expect(loadTrack).toHaveBeenCalledWith(1, { forcePlay: true });
+    expect(loadTrack).toHaveBeenCalledWith(1, expect.objectContaining({ forcePlay: true }));
   });
 
   it("右键流媒体曲目出现「重新加载…」，本地曲目不出现（v0.4.4）", () => {

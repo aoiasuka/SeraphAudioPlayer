@@ -1,6 +1,6 @@
 import { invoke } from "@/lib/tauri";
 import type { Track } from "@/types/track";
-import type { PlaybackQueuePreview, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
+import type { PlaybackQueuePreview, PlayScope, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
 const clientId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let sequence = 0;
@@ -11,8 +11,49 @@ const contents = new WeakMap<Track[], { revision: string; tracks: ReturnType<typ
 let lastContent: { playlist: Track[]; content: NonNullable<ReturnType<typeof contents.get>> } | null = null;
 const pending = new Set<{ state: PlayerStore; sequence: number; promise: Promise<void> }>();
 
+let scopeMemo: { playlist: Track[]; scope: PlayScope; tracks: Track[]; ids: Set<string> } | null = null;
+
+/**
+ * 实际的播放队列（PLAY6-01）：有播放范围时是范围内仍在曲库里的曲目（按范围顺序），
+ * 否则是整个曲库。当前曲目不在范围内（如被删除后切到别的歌）时退回整个曲库，
+ * 保证「当前曲目一定在队列里」。同一组 (playlist, scope) 返回同一个数组引用。
+ * 本文件被基准脚本单独加载，不能新增运行时导入。
+ */
+export function playbackQueueTracks(
+  state: Pick<PlayerStore, "playlist" | "playScope" | "currentTrackIndex">
+): Track[] {
+  const { playlist, playScope } = state;
+  if (!playScope) return playlist;
+  if (!scopeMemo || scopeMemo.playlist !== playlist || scopeMemo.scope !== playScope) {
+    const byId = new Map<string, Track>();
+    for (const track of playlist) if (!byId.has(track.id)) byId.set(track.id, track);
+    const ids = new Set<string>();
+    const tracks: Track[] = [];
+    for (const id of playScope.trackIds) {
+      const track = byId.get(id);
+      if (!track || ids.has(id)) continue;
+      ids.add(id);
+      tracks.push(track);
+    }
+    scopeMemo = { playlist, scope: playScope, tracks, ids };
+  }
+  const currentId = playlist[state.currentTrackIndex]?.id;
+  if (scopeMemo.tracks.length === 0 || (currentId !== undefined && !scopeMemo.ids.has(currentId))) {
+    return playlist;
+  }
+  return scopeMemo.tracks;
+}
+
+/** 当前曲目在队列里的下标；队列就是曲库时等于 currentTrackIndex。 */
+function queueIndex(state: PlayerStore, queue: Track[]) {
+  if (queue === state.playlist) return state.currentTrackIndex;
+  const currentId = state.playlist[state.currentTrackIndex]?.id;
+  return Math.max(0, queue.findIndex((track) => track.id === currentId));
+}
+
 function sameQueueState(a: PlayerStore, b: PlayerStore) {
-  return a.playlist === b.playlist && a.currentTrackIndex === b.currentTrackIndex &&
+  return a.playlist === b.playlist && a.playScope === b.playScope &&
+    a.currentTrackIndex === b.currentTrackIndex &&
     a.recentTrackIds === b.recentTrackIds && a.shuffleMode === b.shuffleMode &&
     a.loopMode === b.loopMode;
 }
@@ -27,16 +68,13 @@ export function resetPlaybackQueueSync() {
 }
 
 export function playbackQueueArgs(get: PlayerStoreGet) {
-  const {
-    playlist,
-    currentTrackIndex,
-    recentTrackIds,
-    shuffleMode,
-    loopMode,
-  } = get();
+  const state = get();
+  const { recentTrackIds, shuffleMode, loopMode } = state;
+  const queue = playbackQueueTracks(state);
+  const currentTrackIndex = queueIndex(state, queue);
 
   return {
-    tracks: playlist.map((track) => ({
+    tracks: queue.map((track) => ({
       id: track.id,
       path: track.path,
       // SMTC 系统媒体浮窗展示用元数据
@@ -61,11 +99,12 @@ export function syncPlaybackQueue(get: PlayerStoreGet, set: PlayerStoreSet): Pro
   if (acknowledged && sameQueueState(acknowledged.state, state) &&
       state.playbackQueuePreview === acknowledged.preview) return Promise.resolve();
 
-  let content = contents.get(state.playlist);
+  const queue = playbackQueueTracks(state);
+  let content = contents.get(queue);
   if (!content) {
     // 按需加载歌词会替换 playlist 引用，但不改变播放队列元数据；沿用原版本。
-    const sameContent = lastContent && state.playlist.length === lastContent.playlist.length &&
-      state.playlist.every((track, index) => {
+    const sameContent = lastContent && queue.length === lastContent.playlist.length &&
+      queue.every((track, index) => {
         const previous = lastContent!.playlist[index];
         return track === previous || (track.id === previous.id && track.path === previous.path &&
           track.title === previous.title && track.artist === previous.artist && track.album === previous.album &&
@@ -73,13 +112,14 @@ export function syncPlaybackQueue(get: PlayerStoreGet, set: PlayerStoreSet): Pro
       });
     content = sameContent ? lastContent!.content :
       { revision: `${clientId}:${++contentSequence}`, tracks: playbackQueueArgs(() => state).tracks };
-    contents.set(state.playlist, content);
+    contents.set(queue, content);
   }
-  lastContent = { playlist: state.playlist, content };
+  lastContent = { playlist: queue, content };
   const { revision, tracks } = content;
   const requestSequence = ++sequence;
   const args = {
-    currentTrackIndex: state.currentTrackIndex,
+    // 后端的下标是队列内下标，不是曲库下标
+    currentTrackIndex: queueIndex(state, queue),
     recentTrackIds: state.recentTrackIds,
     shuffleMode: state.shuffleMode,
     loopMode: state.loopMode,

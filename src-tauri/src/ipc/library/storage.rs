@@ -38,6 +38,12 @@ pub(crate) struct TrackMetadata<'a> {
     artist: &'a str,
     album: &'a str,
     album_year: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    track_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disc_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album_artist: &'a Option<String>,
     cover: &'a str,
     format: &'a str,
     bitdepth: &'a str,
@@ -64,6 +70,9 @@ impl<'a> From<&'a ImportedTrack> for TrackMetadata<'a> {
             artist: &track.artist,
             album: &track.album,
             album_year: &track.album_year,
+            track_number: track.track_number,
+            disc_number: track.disc_number,
+            album_artist: &track.album_artist,
             cover: &track.cover,
             format: &track.format,
             bitdepth: &track.bitdepth,

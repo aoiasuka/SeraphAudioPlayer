@@ -17,6 +17,14 @@ pub struct ImportedTrack {
     pub artist: String,
     pub album: String,
     pub album_year: Option<String>,
+    /// LIB5-01：音轨号、碟号、专辑艺术家（标签里没有即 None；旧快照缺省 None）。
+    /// 专辑页按「专辑艺术家（缺省退回曲目艺术家）+ 专辑名」分组，组内按碟号、音轨号排序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     pub cover: String,
     pub format: String,
     pub bitdepth: String,
@@ -412,7 +420,8 @@ pub fn is_credit_line(text: &str) -> bool {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
         regex::RegexBuilder::new(
-            r"^(作词|作曲|编曲|制作人|混音|母带|监制|出品|录音|和声|吉他|贝斯|鼓|键盘|弦乐|发行|OP|SP|词|曲)\s*[:：]",
+            // LIB5-03：含繁体、日文与常见英文写法（Lyrics by: / Produced by: …）
+            r"^(作[词詞曲]|[编編]曲|[制製]作人?|混音|母[带帶]|[监監][制製]|出品|[录錄]音|和[声聲]|吉他|[贝貝]斯|鼓|[键鍵][盘盤]|弦[乐樂]|[发發]行|OP|SP|[词詞]|曲|(lyrics|words|music|composed|arranged|produced|mixed|mastered|written)( by)?)\s*[:：]",
         )
         .case_insensitive(true)
         .build()
@@ -647,6 +656,9 @@ pub(crate) struct ParsedAudioMetadata {
     pub(crate) artist: Option<String>,
     pub(crate) album: Option<String>,
     pub(crate) album_year: Option<String>,
+    pub(crate) track_number: Option<u32>,
+    pub(crate) disc_number: Option<u32>,
+    pub(crate) album_artist: Option<String>,
     pub(crate) duration: Option<u64>,
     pub(crate) bitrate: Option<u32>,
     pub(crate) sample_rate: Option<u32>,
@@ -747,6 +759,21 @@ mod lyric_document_tests {
         assert_eq!(doc.lines[0].role, LyricRole::Credit);
         assert!(is_credit_line("作曲 : 周杰伦"));
         assert!(!is_credit_line("我的天空"));
+        // LIB5-03：繁体、日文与英文写法
+        for line in [
+            "作詞：林夕",
+            "編曲：某人",
+            "製作人: A",
+            "錄音：B",
+            "Lyrics by: C",
+            "Produced by：D",
+            "Music: E",
+        ] {
+            assert!(is_credit_line(line), "{line}");
+        }
+        for line in ["Music is my life", "曲终人散", "Words: 只有冒号才算"] {
+            assert_eq!(is_credit_line(line), line.starts_with("Words:"), "{line}");
+        }
         assert_eq!(seconds_to_ms(1.0005), 1001);
         assert_eq!(seconds_to_ms(-1.0), 0);
         assert_eq!(seconds_to_ms(f64::NAN), 0);

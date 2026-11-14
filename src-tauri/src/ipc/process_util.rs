@@ -131,10 +131,18 @@ fn capture_stderr(mut reader: impl Read) -> io::Result<Vec<u8>> {
     let mut buffer = [0_u8; 4096];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => return Ok(captured),
+            Ok(0) => {
+                if captured.len() > MAX_STDERR_BYTES {
+                    captured.drain(..captured.len() - MAX_STDERR_BYTES);
+                }
+                return Ok(captured);
+            }
             Ok(count) => {
-                let keep = count.min(MAX_STDERR_BYTES.saturating_sub(captured.len()));
-                captured.extend_from_slice(&buffer[..keep]);
+                // 保留末尾：ffmpeg 的关键报错通常在最后（与 seraph-decoder 的口径一致）。
+                captured.extend_from_slice(&buffer[..count]);
+                if captured.len() > MAX_STDERR_BYTES * 2 {
+                    captured.drain(..captured.len() - MAX_STDERR_BYTES);
+                }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
@@ -190,11 +198,16 @@ mod tests {
     }
 
     #[test]
-    fn stderr_is_drained_but_only_a_bounded_prefix_is_kept() {
-        let bytes = vec![b'x'; MAX_STDERR_BYTES * 8];
+    fn stderr_is_drained_but_only_a_bounded_tail_is_kept() {
+        let mut bytes = vec![b'x'; MAX_STDERR_BYTES * 8];
+        let tail = b"final error line";
+        let start = bytes.len() - tail.len();
+        bytes[start..].copy_from_slice(tail);
         let mut reader = io::Cursor::new(bytes);
         let captured = capture_stderr(&mut reader).unwrap();
         assert_eq!(captured.len(), MAX_STDERR_BYTES);
+        // 关键报错通常在最后：保留的是末尾而不是开头
+        assert!(captured.ends_with(tail));
         assert_eq!(reader.position(), (MAX_STDERR_BYTES * 8) as u64);
     }
 

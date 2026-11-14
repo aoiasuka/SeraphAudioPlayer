@@ -33,7 +33,10 @@ pub async fn get_playlist(
         std::sync::atomic::AtomicBool::new(false);
     if !MAINTENANCE_STARTED.swap(true, Ordering::AcqRel) {
         tauri::async_runtime::spawn_blocking(move || {
-            if backfill_missing_covers(&app) {
+            let covers_changed = backfill_missing_covers(&app);
+            // LIB5-01：存量曲目补读音轨号、碟号、专辑艺术家（一次性）
+            let positions_changed = backfill_album_positions(&app);
+            if covers_changed || positions_changed {
                 let _ = app.emit("seraph://library-updated", ());
             }
             gc_orphan_covers(&app);

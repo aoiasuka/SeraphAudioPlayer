@@ -22,7 +22,8 @@ export function VolumeControl() {
       <button
         onClick={toggleMute}
         className="text-ink2 hover:text-ink transition-colors"
-        aria-label="静音切换"
+        aria-label={volume === 0 ? "取消静音" : "静音"}
+        title={volume === 0 ? "取消静音" : "静音"}
       >
         <VolumeIcon className={`w-3.5 h-3.5 ${iconClass}`} />
       </button>

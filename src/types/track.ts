@@ -109,6 +109,10 @@ export interface Track {
   artist: string;
   album: string;
   albumYear?: string;
+  /** LIB5-01：音轨号、碟号、专辑艺术家；标签里没有时缺省 */
+  trackNumber?: number;
+  discNumber?: number;
+  albumArtist?: string;
   cover: string;
   format: string;
   bitdepth: string;

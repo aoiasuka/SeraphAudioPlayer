@@ -2,10 +2,11 @@ import { sendCommand, sendCommandAsync } from "./commands";
 import { ensurePlayableTrack, bilibiliImportErrorMessage } from "./bilibiliActions";
 import { sendPlayCommand } from "./outputActions";
 import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
-import { syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
+import { playbackQueueTracks, syncPlaybackModes, syncPlaybackQueue } from "./queueSync";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 import { isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
 import { trackById } from "@/lib/trackIndex";
+import { volumeToGain } from "@/lib/volume";
 import type { Track } from "@/types/track";
 
 // 审2-R2：代际计数迁至 ./playEpoch（避免与 outputActions 循环导入），此处重新导出保持既有导入兼容
@@ -139,14 +140,15 @@ function cancelQueuedVolumeCommand() {
 
 function sendVolumeCommandNow(volume: number) {
   cancelQueuedVolumeCommand();
-  sendCommand("set_volume", { volume });
+  sendCommand("set_volume", { volume: volumeToGain(volume) });
 }
 
 function queueVolumeCommand(volume: number) {
   volumeDebounce.pending = volume;
   if (volumeDebounce.timer !== null) return;
 
-  sendCommand("set_volume", { volume });
+  // 滑块位置 → 引擎增益（感知曲线）
+  sendCommand("set_volume", { volume: volumeToGain(volume) });
   volumeDebounce.pending = null;
   volumeDebounce.timer = window.setTimeout(() => {
     volumeDebounce.timer = null;
@@ -186,13 +188,16 @@ export function createPlaybackActions(
       // PERF-05：UpNext 卡片每次 store 更新都会调用，按共享索引 O(1) 查找
       return trackById(playlist, playbackQueuePreview.nextTrackId) ?? null;
     }
+    // 浏览器预览模式：与桌面端一致，只在播放范围内选下一首
+    const queue = playbackQueueTracks(get());
+    const currentId = playlist[currentTrackIndex]?.id;
     const next = resolveNextIndex(
-      playlist,
-      currentTrackIndex,
+      queue,
+      queue === playlist ? currentTrackIndex : queue.findIndex((item) => item.id === currentId),
       shuffleMode,
       recentTrackIds
     );
-    return next >= 0 ? playlist[next] ?? null : null;
+    return next >= 0 ? queue[next] ?? null : null;
   },
 
   // 卡片与下一首按钮、媒体键和自动续播使用同一份后端预选结果。
@@ -310,7 +315,12 @@ export function createPlaybackActions(
     // 发现2：任何新的选曲都会使先前挂起的播放续体过期
     const epoch = bumpPlayEpoch();
     const shouldPlay = get().isPlaying || forcePlay;
+    // PLAY6-01：从哪个列表点的歌，就以那个列表为队列；没给范围时，曲目仍在
+    // 现有范围内则保留，否则回到整个曲库。
+    const candidate = options?.scope ?? get().playScope;
+    const playScope = candidate && candidate.trackIds.includes(track.id) ? candidate : null;
     set({
+      playScope,
       currentTrackIndex: index,
       currentTime: 0,
       recentTrackIds: withRecentTrack(get().recentTrackIds, track.id),
@@ -479,8 +489,12 @@ export function createPlaybackActions(
   },
 
   toggleLike: (trackId) => {
-    const current = get().liked[trackId] ?? false;
-    set({ liked: { ...get().liked, [trackId]: !current } });
+    const { liked, likedAt } = get();
+    const current = liked[trackId] ?? false;
+    const nextLikedAt = { ...likedAt };
+    if (current) delete nextLikedAt[trackId];
+    else nextLikedAt[trackId] = Date.now();
+    set({ liked: { ...liked, [trackId]: !current }, likedAt: nextLikedAt });
     get().showNotification(current ? "已取消收藏" : "已加入我喜欢");
   },
   };

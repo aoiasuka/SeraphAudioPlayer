@@ -24,6 +24,7 @@ import {
   type ContextMenuEntry,
 } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
+import type { PlayScope } from "@/store/player/types";
 import type { Track } from "@/types/track";
 import { isStreamingTrack } from "@/components/pages/main-pages/trackFilters";
 
@@ -64,14 +65,8 @@ export function buildAddToPlaylistEntry(trackIds: string[]): ContextMenuAction {
           disabled: included,
           onSelect: () => {
             const live = usePlayerStore.getState();
-            trackIds.forEach((id) =>
-              live.addTrackToUserPlaylist(playlist.id, id)
-            );
-            if (trackIds.length > 1) {
-              live.showNotification(
-                `已把 ${trackIds.length} 首加入歌单：${playlist.name}`
-              );
-            }
+            if (single) live.addTrackToUserPlaylist(playlist.id, single);
+            else live.addTracksToUserPlaylist(playlist.id, trackIds);
           },
         };
       }),
@@ -91,6 +86,8 @@ export function buildAddToPlaylistEntry(trackIds: string[]): ContextMenuAction {
 export interface TrackMenuOptions {
   /** 歌单详情页上下文：追加上移/下移/移出本歌单 */
   inPlaylist?: { playlistId: string; position: number; total: number };
+  /** 菜单所在列表的播放范围；「播放」以它作为队列（PLAY6-01） */
+  scope?: PlayScope;
 }
 
 /** 曲目行通用菜单（本地音乐/最近播放/我喜欢/专辑详情/艺术家详情/歌单详情）。 */
@@ -123,7 +120,7 @@ export function buildTrackMenuEntries(
         // L-16：菜单开着时 playlist 可能已变（批量导入/删除），打开瞬间的
         // 快照 index 会错位播错歌——执行时按 id 现查。
         const liveIndex = live.playlist.findIndex((item) => item.id === track.id);
-        if (liveIndex >= 0) live.loadTrack(liveIndex);
+        if (liveIndex >= 0) live.loadTrack(liveIndex, { scope: options.scope });
       },
     },
     {
@@ -304,7 +301,8 @@ export function buildUpNextMenuEntries(track: Track): ContextMenuEntry[] {
 /** 专辑/艺术家卡片菜单：打开详情、从第一首播放、整组加入歌单。 */
 export function buildTrackGroupMenuEntries(
   tracks: Track[],
-  openDetail: () => void
+  openDetail: () => void,
+  label = "当前列表"
 ): ContextMenuEntry[] {
   const state = usePlayerStore.getState();
   const first = tracks[0];
@@ -330,7 +328,16 @@ export function buildTrackGroupMenuEntries(
         const liveIndex = first
           ? live.playlist.findIndex((item) => item.id === first.id)
           : -1;
-        if (liveIndex >= 0) live.loadTrack(liveIndex);
+        // PLAY6-01：播完第一首接着播这一组，而不是曲库里的下一首
+        if (liveIndex >= 0 && first) {
+          live.loadTrack(liveIndex, {
+            scope: {
+              key: `group:${first.id}`,
+              label,
+              trackIds: tracks.map((track) => track.id),
+            },
+          });
+        }
       },
     },
     buildAddToPlaylistEntry(tracks.map((track) => track.id)),

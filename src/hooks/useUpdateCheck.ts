@@ -12,6 +12,8 @@ export function useUpdateCheck() {
     if (!isTauriRuntime()) return;
 
     const timer = window.setTimeout(() => {
+      // UI5-04：用户关掉「启动时检查更新」后不再自动联网；8 秒延迟足够等到设置水合
+      if (!usePlayerStore.getState().autoUpdateCheck) return;
       void checkForUpdate()
         .then((result) => {
           if (result.updateAvailable) {

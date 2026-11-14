@@ -689,6 +689,8 @@ function UpdateSection({
 }) {
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<UpdateCheckResult | null>(null);
+  const autoUpdateCheck = usePlayerStore((s) => s.autoUpdateCheck);
+  const setAutoUpdateCheck = usePlayerStore((s) => s.setAutoUpdateCheck);
 
   const runCheck = async () => {
     if (checking) return;
@@ -763,6 +765,28 @@ function UpdateSection({
             检查更新
           </button>
         </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
+        <div className="min-w-0">
+          <h4 className="font-serif text-xs font-semibold text-ink">启动时检查更新</h4>
+          <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
+            每次启动后向 GitHub 查询一次是否有新版本。关闭后应用不会自动联网检查，
+            只在点击上方「检查更新」时查询。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setAutoUpdateCheck(!autoUpdateCheck)}
+          className={
+            autoUpdateCheck
+              ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+              : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
+          }
+          aria-pressed={autoUpdateCheck}
+          aria-label="启动时检查更新"
+        >
+          {autoUpdateCheck ? "已启用" : "已停用"}
+        </button>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { lyricDocument } from "@/lib/lyrics/document";
+import { forgetAllViews } from "@/lib/viewMemory";
 import { usePlayerStore } from "@/store/player";
 import type { Track } from "@/types/track";
 import { PlaylistsPage } from "./PlaylistsPage";
@@ -18,6 +19,7 @@ function track(index: number): Track {
 const playlist = Array.from({ length: 500 }, (_, index) => track(index));
 
 beforeEach(() => {
+  forgetAllViews();
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   usePlayerStore.setState({
     ...usePlayerStore.getInitialState(),

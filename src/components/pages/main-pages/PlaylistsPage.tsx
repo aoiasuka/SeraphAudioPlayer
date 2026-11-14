@@ -20,8 +20,11 @@ import { useVirtualRows } from "@/hooks/useVirtualRows";
 import { formatSeconds } from "@/lib/format";
 import { trackIndexById } from "@/lib/trackIndex";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
+import { useRememberedState } from "@/lib/viewMemory";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
+import { playlistScopeKey } from "@/store/player/libraryActions";
+import type { PlayScope } from "@/store/player/types";
 import type { LibraryView, Track } from "@/types/track";
 import { isLocalTrack } from "./trackFilters";
 
@@ -45,7 +48,9 @@ export function PlaylistsPage() {
   );
   const [renameTargetId, setRenameTargetId] = useState<string | null>(null);
   const [renameName, setRenameName] = useState("");
-  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(
+  // 记住打开的歌单：切到别的页面再回来仍停在这个歌单的详情
+  const [selectedPlaylistId, setSelectedPlaylistId] = useRememberedState<string | null>(
+    "playlists:selected",
     null
   );
   const [isImportingM3u8, setIsImportingM3u8] = useState(false);
@@ -63,21 +68,18 @@ export function PlaylistsPage() {
       count: localCount,
       view: "local" as LibraryView,
       icon: Music2,
-      color: "text-cyan-700 bg-cyan-600/10",
     },
     {
       title: "我喜欢",
       count: likedCount,
       view: "liked" as LibraryView,
       icon: Heart,
-      color: "text-rose-600 bg-rose-500/10",
     },
     {
       title: "最近播放",
       count: recentTrackIds.length,
       view: "recent" as LibraryView,
       icon: ListMusic,
-      color: "text-indigo-600 bg-indigo-500/10",
     },
   ], [likedCount, localCount, recentTrackIds.length]);
   const openCreateDialog = () => {
@@ -176,7 +178,7 @@ export function PlaylistsPage() {
     [selectedPlaylistId, userPlaylists]
   );
   // 稳定引用：详情页把它放进 effect 依赖（歌单被删时回到列表）
-  const closeSelectedPlaylist = useCallback(() => setSelectedPlaylistId(null), []);
+  const closeSelectedPlaylist = useCallback(() => setSelectedPlaylistId(null), [setSelectedPlaylistId]);
 
   if (selectedPlaylist) {
     return (
@@ -233,40 +235,38 @@ export function PlaylistsPage() {
           );
         })}
         {userPlaylists.map((item) => (
+          // 打开与删除是两个并列的按钮：此前整张卡片是 role="button" 的 div、里面再嵌
+          // 删除按钮，在删除按钮上按回车会同时冒泡触发「打开歌单」。
           <div
             key={item.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => setSelectedPlaylistId(item.id)}
             onContextMenu={(event) => openPlaylistCardMenu(event, item)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                setSelectedPlaylistId(item.id);
-              }
-            }}
-            className="archive-card group relative cursor-pointer p-4 text-left"
+            className="archive-card group relative"
           >
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                setPlaylistToDeleteId(item.id);
-              }}
+              onClick={() => setSelectedPlaylistId(item.id)}
+              className="block w-full p-4 text-left"
+              aria-label={`打开歌单 ${item.name}，${item.trackIds.length} 首曲目`}
+            >
+              <span className="mb-6 flex h-10 w-10 items-center justify-center border-[1.5px] border-ink bg-paper2 text-brown">
+                <ListMusic className="h-4 w-4" />
+              </span>
+              <span className="block truncate pr-8 font-serif text-sm font-bold text-ink">
+                {item.name}
+              </span>
+              <span className="mt-1 block font-tw text-[11px] text-ink2">
+                {item.trackIds.length} 首曲目
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPlaylistToDeleteId(item.id)}
               className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center text-ink3 opacity-0 transition-all hover:text-stamp group-hover:opacity-100 focus:opacity-100"
               aria-label={`删除歌单 ${item.name}`}
               title="删除歌单"
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
-            <span className="mb-6 flex h-10 w-10 items-center justify-center border-[1.5px] border-ink bg-paper2 text-brown">
-              <ListMusic className="h-4 w-4" />
-            </span>
-            <span className="block truncate font-serif text-sm font-bold text-ink">
-              {item.name}
-            </span>
-            <span className="mt-1 block font-tw text-[11px] text-ink2">
-              {item.trackIds.length} 首曲目
-            </span>
           </div>
         ))}
       </div>
@@ -432,8 +432,21 @@ function UserPlaylistDetail({
         .filter((track): track is Track => !!track),
     [userPlaylist, indexById, playlist]
   );
+  // PLAY6-01：从歌单里点歌，队列就是这个歌单（按歌单顺序）。trackIds 直接用歌单的
+  // 数组引用，调整顺序后 store 会让播放范围跟着更新。
+  const playScope = useMemo<PlayScope | undefined>(
+    () => userPlaylist && {
+      key: playlistScopeKey(userPlaylist.id),
+      label: userPlaylist.name,
+      trackIds: userPlaylist.trackIds,
+    },
+    [userPlaylist]
+  );
   // PERF-02：m3u8 导入可生成很大的歌单，详情列表按可见区虚拟化（行高 46 + 间距 8）
-  const rows = useVirtualRows(tracks.length, PLAYLIST_ROW_HEIGHT, { mountKey: tracks.length > 0 });
+  const rows = useVirtualRows(tracks.length, PLAYLIST_ROW_HEIGHT, {
+    mountKey: tracks.length > 0,
+    stateKey: `tracks:playlist:${playlistId}`,
+  });
 
   // BUG-07：歌单被删除时回到列表。放在 effect 里——渲染期间调用父组件的 setState
   // 会触发 React「Cannot update a component while rendering a different component」。
@@ -495,12 +508,13 @@ function UserPlaylistDetail({
               <div
                 key={track.id}
                 onDoubleClick={() => {
-                  if (globalIndex >= 0) loadTrack(globalIndex, { forcePlay: true });
+                  if (globalIndex >= 0) loadTrack(globalIndex, { forcePlay: true, scope: playScope });
                 }}
                 onContextMenu={(event) =>
                   showContextMenu(
                     event,
                     buildTrackMenuEntries(track, {
+                      scope: playScope,
                       inPlaylist: {
                         playlistId,
                         position: index,
@@ -517,7 +531,7 @@ function UserPlaylistDetail({
                 <button
                   type="button"
                   onClick={() => {
-                    if (globalIndex >= 0) loadTrack(globalIndex);
+                    if (globalIndex >= 0) loadTrack(globalIndex, { scope: playScope });
                   }}
                   disabled={globalIndex < 0}
                   className="min-w-0 text-left disabled:cursor-not-allowed disabled:opacity-50"
@@ -533,11 +547,11 @@ function UserPlaylistDetail({
                 <span className="text-right font-tw text-[12px] font-bold text-ink2">
                   {formatSeconds(track.duration)}
                 </span>
-                <span className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                <span className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                   <button
                     type="button"
                     onClick={() => {
-                      if (globalIndex >= 0) loadTrack(globalIndex);
+                      if (globalIndex >= 0) loadTrack(globalIndex, { scope: playScope });
                     }}
                     className="flex h-7 w-7 items-center justify-center text-ink3 hover:text-ink"
                     aria-label="播放"

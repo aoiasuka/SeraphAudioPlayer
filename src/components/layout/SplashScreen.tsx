@@ -1,24 +1,58 @@
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { useEffect, useState } from "react";
+import { usePlayerStore } from "@/store/player";
+
+/** 最短显示时间：界面就绪得再快，也让启动画面完整闪现一下，避免一闪而过的白块。 */
+const MIN_VISIBLE_MS = 600;
+/** 兜底上限：水合信号迟迟不来（或测试环境从不水合）时也要让出界面。 */
+const MAX_VISIBLE_MS = 2800;
+const SHOWN_FLAG = "seraph-splash-shown";
+
+/** 同一会话里的重载（导入配置、崩溃兜底页「重新加载」）不再播放启动画面。 */
+function alreadyShownThisSession() {
+  try {
+    if (window.sessionStorage.getItem(SHOWN_FLAG)) return true;
+    window.sessionStorage.setItem(SHOWN_FLAG, "1");
+  } catch {
+    // 存储不可用：按首次启动处理
+  }
+  return false;
+}
 
 export function SplashScreen() {
-  const [visible, setVisible] = useState(true);
+  const [visible, setVisible] = useState(() => !alreadyShownThisSession());
 
   useEffect(() => {
-    // 保持动画显示至少 2.8 秒，以展示复古质感与细节
-    const timer = setTimeout(() => {
-      setVisible(false);
-    }, 2800);
-    return () => clearTimeout(timer);
+    if (!visible) return;
+    // UI5-01：以「设置水合完成」为结束条件，而不是固定计时 2.8 秒。
+    const startedAt = performance.now();
+    let minTimer: number | undefined;
+    const finish = () => {
+      if (minTimer !== undefined) return;
+      const remaining = Math.max(0, MIN_VISIBLE_MS - (performance.now() - startedAt));
+      minTimer = window.setTimeout(() => setVisible(false), remaining);
+    };
+    const persist = usePlayerStore.persist;
+    const unsubscribe = persist.hasHydrated() ? (finish(), undefined) : persist.onFinishHydration(finish);
+    const maxTimer = window.setTimeout(() => setVisible(false), MAX_VISIBLE_MS);
+    return () => {
+      unsubscribe?.();
+      window.clearTimeout(maxTimer);
+      if (minTimer !== undefined) window.clearTimeout(minTimer);
+    };
+    // 只在挂载时建立一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
+    // 系统开启「减弱动态效果」时，位移 / 缩放 / 旋转动画由 framer-motion 关闭，只保留淡入淡出
+    <MotionConfig reducedMotion="user">
     <AnimatePresence>
       {visible && (
         <motion.div
           initial={{ opacity: 1 }}
           exit={{ opacity: 0, filter: "blur(12px)", scale: 1.05 }}
-          transition={{ duration: 0.8, ease: "easeInOut" }}
+          transition={{ duration: 0.35, ease: "easeInOut" }}
           className="absolute inset-0 z-[9999] flex flex-col items-center justify-center bg-[#f5f1e8] overflow-hidden"
           data-tauri-drag-region
         >
@@ -136,5 +170,6 @@ export function SplashScreen() {
         </motion.div>
       )}
     </AnimatePresence>
+    </MotionConfig>
   );
 }

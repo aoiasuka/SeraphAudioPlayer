@@ -62,6 +62,15 @@ function booleanRecord(value: unknown) {
   );
 }
 
+function finiteNumberRecord(value: unknown) {
+  const record = asRecord(value);
+  return Object.fromEntries(
+    Object.entries(record).filter((entry): entry is [string, number] => (
+      typeof entry[1] === "number" && Number.isFinite(entry[1])
+    ))
+  );
+}
+
 function finiteNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
@@ -136,6 +145,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     shuffleMode: state.shuffleMode === true,
     loopMode: state.loopMode === true,
     liked: booleanRecord(state.liked),
+    // 旧存档没有收藏时间：留空，「我喜欢」里这些曲目按曲库顺序排在后面
+    likedAt: finiteNumberRecord(state.likedAt),
     userPlaylists: sanitizeUserPlaylists(state.userPlaylists),
     currentDeviceId:
       typeof state.currentDeviceId === "string" && state.currentDeviceId.trim()
@@ -147,6 +158,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     smtcEnabled: state.smtcEnabled !== false,
     // v3：旧版本无此字段时默认启用记忆播放（保持既有“恢复上次播放”的行为）
     rememberPlayback: state.rememberPlayback !== false,
+    // 旧版本无此字段时保持既有行为（启动时检查）
+    autoUpdateCheck: state.autoUpdateCheck !== false,
     // v0.5.4：任务栏集成，旧版本无此字段时默认启用（与后端默认一致）
     taskbarButtonsEnabled: state.taskbarButtonsEnabled !== false,
     taskbarProgressEnabled: state.taskbarProgressEnabled !== false,
@@ -185,6 +198,7 @@ export const usePlayerStore = create<PlayerStore>()(
       return {
         playlist: [],
         playbackQueuePreview: null,
+        playScope: null,
         currentTrackIndex: 0,
         persistedCurrentTrackId: null,
         persistedCurrentTime: 0,
@@ -192,12 +206,14 @@ export const usePlayerStore = create<PlayerStore>()(
         isPlaying: false,
         currentTime: 0,
         outputLatency: 0,
+        outputFormat: null,
         volume: 0.7,
         isMuted: false,
         previousVolume: 0.7,
         shuffleMode: false,
         loopMode: false,
         liked: {},
+        likedAt: {},
         userPlaylists: [],
         devices: mockDevices,
         currentDeviceId: "wasapi:hd-dac1",
@@ -207,6 +223,7 @@ export const usePlayerStore = create<PlayerStore>()(
         activeView: "local",
         smtcEnabled: true,
         rememberPlayback: true,
+        autoUpdateCheck: true,
         taskbarButtonsEnabled: true,
         taskbarProgressEnabled: true,
         taskbarLyricsEnabled: false,
@@ -293,12 +310,14 @@ export const usePlayerStore = create<PlayerStore>()(
         shuffleMode: state.shuffleMode,
         loopMode: state.loopMode,
         liked: state.liked,
+        likedAt: state.likedAt,
         userPlaylists: state.userPlaylists,
         currentDeviceId: state.currentDeviceId,
         driverKind: state.driverKind,
         activeView: state.activeView,
         smtcEnabled: state.smtcEnabled,
         rememberPlayback: state.rememberPlayback,
+        autoUpdateCheck: state.autoUpdateCheck,
         taskbarButtonsEnabled: state.taskbarButtonsEnabled,
         taskbarProgressEnabled: state.taskbarProgressEnabled,
         taskbarLyricsEnabled: state.taskbarLyricsEnabled,

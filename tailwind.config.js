@@ -21,11 +21,6 @@ export default {
         brown: "#7a5c3e",
         stamp: "#b5482a",
         "stamp-soft": "#f3e2dc",
-        seraph: {
-          gold: "#d4af37",
-          "gold-light": "#fffbf0",
-          "gold-dark": "#b48a12",
-        },
       },
       fontFamily: {
         sans: ["Noto Sans SC", "Segoe UI", "-apple-system", "sans-serif"],

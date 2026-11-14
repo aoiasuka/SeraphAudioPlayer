@@ -72,3 +72,19 @@ export function filterAndSortTracks(
   }
   return needle ? ordered.filter((track) => matchesQuery(track, needle)) : ordered;
 }
+
+/**
+ * 「我喜欢」的曲目：按收藏时间倒序（最近收藏的在最前）。没有记录时间的旧收藏
+ * 排在后面并保持曲库顺序。
+ */
+export function sortLikedTracks(
+  playlist: Track[],
+  liked: Record<string, boolean>,
+  likedAt: Record<string, number>
+): Track[] {
+  return playlist
+    .map((track, index) => ({ track, index, at: likedAt[track.id] ?? 0 }))
+    .filter(({ track }) => liked[track.id])
+    .sort((a, b) => b.at - a.at || a.index - b.index)
+    .map(({ track }) => track);
+}

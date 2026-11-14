@@ -2,12 +2,17 @@ import { useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "re
 import { Music2, Search, X } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { formatSeconds } from "@/lib/format";
+import { trackIndexById } from "@/lib/trackIndex";
 import { usePlayerStore } from "@/store/player";
+import { playbackQueueTracks } from "@/store/player/queueSync";
 
 const ROW_HEIGHT = 58;
 
 export function ImmersiveQueue({ onClose }: { onClose: () => void }) {
   const playlist = usePlayerStore((s) => s.playlist);
+  // PLAY6-01：列出的是当前播放范围（歌单、专辑、筛选结果…），不是整个曲库
+  const queue = usePlayerStore(playbackQueueTracks);
+  const scopeLabel = usePlayerStore((s) => s.playScope?.label);
   const currentId = usePlayerStore((s) => s.currentTrack()?.id);
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const [query, setQuery] = useState("");
@@ -20,8 +25,9 @@ export function ImmersiveQueue({ onClose }: { onClose: () => void }) {
   const positionedQuery = useRef<string | null>(null);
   const entries = useMemo(() => {
     const term = deferredQuery.trim().toLocaleLowerCase();
-    return playlist.map((track, index) => ({ track, index })).filter(({ track }) => !term || `${track.title}\n${track.artist}\n${track.album}`.toLocaleLowerCase().includes(term));
-  }, [playlist, deferredQuery]);
+    const libraryIndex = trackIndexById(playlist);
+    return queue.map((track, position) => ({ track, position, index: libraryIndex.get(track.id) ?? -1 })).filter(({ track }) => !term || `${track.title}\n${track.artist}\n${track.album}`.toLocaleLowerCase().includes(term));
+  }, [playlist, queue, deferredQuery]);
 
   useLayoutEffect(() => {
     const element = containerRef.current;
@@ -51,13 +57,13 @@ export function ImmersiveQueue({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog open onClose={onClose} className="immersive-queue-dialog">
-      <div className="immersive-queue-heading"><h2>播放队列 <span>{playlist.length} RECORDS</span></h2><button className="immersive-icon" onClick={onClose} aria-label="关闭播放队列"><X size={18} /></button></div>
+      <div className="immersive-queue-heading"><h2>播放队列 <span>{queue !== playlist && scopeLabel ? `${scopeLabel} · ` : ""}{queue.length} RECORDS</span></h2><button className="immersive-icon" onClick={onClose} aria-label="关闭播放队列"><X size={18} /></button></div>
       <label className="immersive-queue-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="检索曲目、艺术家或专辑" aria-label="检索播放队列" /></label>
       <div ref={containerRef} className="immersive-queue-list" onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
         {entries.length ? (
           <div style={{ paddingTop: start * ROW_HEIGHT, paddingBottom: (entries.length - end) * ROW_HEIGHT }}>
-            {entries.slice(start, end).map(({ track, index }) => <button key={track.id} className="immersive-queue-row" aria-current={currentId === track.id ? "true" : undefined} onClick={() => { if (currentId !== track.id) loadTrack(index); }}>
-              <span className="immersive-queue-index">{currentId === track.id ? <Music2 size={15} /> : String(index + 1).padStart(2, "0")}</span><span className="immersive-queue-title"><strong>{track.title}</strong><small>{track.artist} / {track.album}</small></span><time>{formatSeconds(track.duration)}</time>
+            {entries.slice(start, end).map(({ track, position, index }) => <button key={track.id} className="immersive-queue-row" aria-current={currentId === track.id ? "true" : undefined} onClick={() => { if (currentId !== track.id && index >= 0) loadTrack(index); }}>
+              <span className="immersive-queue-index">{currentId === track.id ? <Music2 size={15} /> : String(position + 1).padStart(2, "0")}</span><span className="immersive-queue-title"><strong>{track.title}</strong><small>{track.artist} / {track.album}</small></span><time>{formatSeconds(track.duration)}</time>
             </button>)}
           </div>
         ) : <div className="immersive-empty">没有匹配的曲目</div>}

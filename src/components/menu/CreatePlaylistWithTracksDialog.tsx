@@ -37,12 +37,10 @@ export function CreatePlaylistWithTracksDialog() {
     const live = usePlayerStore.getState();
     const playlistId = live.createUserPlaylist(trimmedName);
     if (!playlistId) return;
-    trackIds.forEach((trackId) =>
-      live.addTrackToUserPlaylist(playlistId, trackId)
-    );
-    live.showNotification(
-      `已创建歌单「${trimmedName}」并加入 ${trackIds.length} 首`
-    );
+    const added = live.addTracksToUserPlaylist(playlistId, trackIds, {
+      silent: true,
+    });
+    live.showNotification(`已创建歌单「${trimmedName}」并加入 ${added} 首`);
     close();
   };
 

@@ -1,63 +1,31 @@
 import { ArrowLeft, Disc3 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
+import { groupAlbums } from "@/lib/albums";
 import { coverSrc } from "@/lib/tauri";
 import { buildTrackGroupMenuEntries } from "@/lib/trackMenu";
+import { useRememberedState } from "@/lib/viewMemory";
 import { showContextMenu } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
-import type { Track } from "@/types/track";
 import { TrackRows } from "./TrackRows";
 import { VirtualGrid } from "./VirtualGrid";
 import { isLocalTrack } from "./trackFilters";
 
 export function AlbumsPage() {
   const playlist = usePlayerStore((s) => s.playlist);
-  const [selectedAlbumKey, setSelectedAlbumKey] = useState<string | null>(null);
+  // 记住打开的专辑：切到别的页面再回来仍停在这张专辑的详情
+  const [selectedAlbumKey, setSelectedAlbumKey] = useRememberedState<string | null>("albums:selected", null);
   const localTracks = useMemo(() => playlist.filter(isLocalTrack), [playlist]);
-  const albums = useMemo(() => {
-    const groups = new Map<
-      string,
-      {
-        key: string;
-        title: string;
-        artist: string;
-        year?: string;
-        format: string;
-        cover: string;
-        tracks: Track[];
-      }
-    >();
-
-    localTracks.forEach((track) => {
-      const key = `${track.artist}::${track.album}`;
-      const group = groups.get(key);
-      if (group) {
-        group.tracks.push(track);
-        // 专辑内部分曲目缺封面时，用组内第一张可用封面兜底
-        if (!group.cover && track.cover) group.cover = track.cover;
-        return;
-      }
-
-      groups.set(key, {
-        key,
-        title: track.album,
-        artist: track.artist,
-        year: track.albumYear,
-        format: track.format,
-        cover: track.cover,
-        tracks: [track],
-      });
-    });
-
-    return Array.from(groups.values());
-  }, [localTracks]);
+  // LIB5-01：按专辑艺术家分组，组内按碟号、音轨号排序
+  const albums = useMemo(() => groupAlbums(localTracks), [localTracks]);
   const activeAlbum = useMemo(
     () => albums.find((album) => album.key === selectedAlbumKey) ?? null,
     [albums, selectedAlbumKey]
   );
 
   useEffect(() => {
-    if (selectedAlbumKey && !activeAlbum) setSelectedAlbumKey(null);
-  }, [activeAlbum, selectedAlbumKey]);
+    // 曲库还没载入（启动水合）时不清：否则记住的选择会在数据到来前被抹掉
+    if (selectedAlbumKey && !activeAlbum && playlist.length > 0) setSelectedAlbumKey(null);
+  }, [activeAlbum, selectedAlbumKey, playlist.length, setSelectedAlbumKey]);
 
   if (activeAlbum) {
     return (
@@ -81,15 +49,18 @@ export function AlbumsPage() {
           </div>
         </div>
         <TrackRows
+          key={activeAlbum.key}
           tracks={activeAlbum.tracks}
           empty={`${activeAlbum.title} 暂无曲目`}
+          scopeName={activeAlbum.title}
+          stateKey={`tracks:album:${activeAlbum.key}`}
         />
       </div>
     );
   }
 
   return (
-    <VirtualGrid items={albums} itemKey={(album) => album.key} label="专辑，方向键浏览"
+    <VirtualGrid items={albums} itemKey={(album) => album.key} label="专辑，方向键浏览" stateKey="albums:grid"
       renderItem={(album) => {
         return (
           <button
@@ -101,7 +72,7 @@ export function AlbumsPage() {
                 event,
                 buildTrackGroupMenuEntries(album.tracks, () =>
                   setSelectedAlbumKey(album.key)
-                )
+                , album.title)
               )
             }
             className="archive-card group flex flex-col p-4 text-left"

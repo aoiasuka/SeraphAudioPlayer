@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { runWhenIdle } from "@/lib/startup";
 import { invoke, isTauriRuntime, listen } from "@/lib/tauri";
+import { volumeToGain } from "@/lib/volume";
 import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
 import { lyricsDisplayOptionsOf } from "@/store/player/lyricsActions";
@@ -31,7 +32,7 @@ export function useHydratePlayerStore() {
         usePlayerStore.setState({ driverKind: "direct" });
       }
       if (isTauriRuntime()) {
-        await invoke("set_volume", { volume: restored.isMuted ? 0 : restored.volume });
+        await invoke("set_volume", { volume: restored.isMuted ? 0 : volumeToGain(restored.volume) });
       }
       if (cancelled) return;
       restored.normalizeLibrary();

@@ -1,26 +1,41 @@
 import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { recallView, rememberView } from "@/lib/viewMemory";
 
 /**
  * 定高行的虚拟滚动：只渲染可见区 ± overscan 行，上下用 padding 撑出总高度。
  * 容器高度用 ResizeObserver 测量（M-17：`mountKey` 变化 = 滚动容器重挂，须重新观察）。
+ *
+ * `stateKey` 给出后记住滚动位置：页面被卸载重建（切换视图再回来）时恢复到离开时的
+ * 位置，见 `lib/viewMemory.ts`。只在容器首次挂载时恢复一次；之后的重挂（例如列表
+ * 清空又出现）仍按真实 DOM 位置走。
  */
 export function useVirtualRows(
   count: number,
   rowHeight: number,
-  { overscan = 6, initialHeight = 420, mountKey = true }: {
+  { overscan = 6, initialHeight = 420, mountKey = true, stateKey }: {
     overscan?: number;
     initialHeight?: number;
     mountKey?: unknown;
+    stateKey?: string;
   } = {}
 ) {
+  const scrollKey = stateKey ? `${stateKey}:scroll` : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  const pendingRestore = useRef<number | null>(recallView<number | null>(scrollKey, null));
+  const [scrollTop, setScrollTop] = useState(() => recallView(scrollKey, 0));
   const [viewportHeight, setViewportHeight] = useState(initialHeight);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    setScrollTop(element.scrollTop);
+    const restore = pendingRestore.current;
+    pendingRestore.current = null;
+    if (restore !== null && restore > 0) {
+      element.scrollTop = restore;
+      setScrollTop(restore);
+    } else {
+      setScrollTop(element.scrollTop);
+    }
     const update = () => setViewportHeight(element.clientHeight);
     update();
     const observer = new ResizeObserver(update);
@@ -40,7 +55,11 @@ export function useVirtualRows(
     };
   }, [scrollTop, count, rowHeight, viewportHeight, overscan]);
 
-  const onScroll = (event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop);
+  const onScroll = (event: UIEvent<HTMLDivElement>) => {
+    const top = event.currentTarget.scrollTop;
+    setScrollTop(top);
+    rememberView(scrollKey, top);
+  };
 
   return { scrollRef, onScroll, ...range };
 }
