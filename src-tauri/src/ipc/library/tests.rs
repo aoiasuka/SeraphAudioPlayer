@@ -455,6 +455,14 @@ fn extracts_dsd_id3_tags_and_cover() {
     tag.set_title("鳥の詩");
     tag.set_artist("Lia");
     tag.set_album("AIR");
+    // DEC4-02：内嵌歌词（USLT，内容是 LRC 文本）
+    tag.add_frame(id3::frame::Lyrics {
+        lang: "jpn".into(),
+        description: String::new(),
+        text: "[00:01.00]消える飛行機雲
+[00:05.00]僕たちは見送った"
+            .into(),
+    });
     tag.add_frame(id3::frame::Picture {
         mime_type: "image/png".into(),
         picture_type: id3::frame::PictureType::CoverFront,
@@ -475,11 +483,19 @@ fn extracts_dsd_id3_tags_and_cover() {
     assert_eq!(tags.album.as_deref(), Some("AIR"));
     let cover = tags.cover.expect("cover art from APIC");
     assert_eq!(cover.ext, "png", "扩展名按图片魔数推断");
+    assert_eq!(tags.lyrics.lines.len(), 2, "USLT 内嵌歌词应被读取");
+    assert_eq!(tags.lyrics.lines[1].start_ms, 5000);
+    assert_eq!(tags.lyrics.source.kind, LyricSourceKind::Embedded);
 
     // 全链路：parse_audio_metadata 的 lofty 失败分支应带出标题与封面
     let metadata = parse_audio_metadata(&path);
     assert_eq!(metadata.title.as_deref(), Some("鳥の詩"));
     assert!(metadata.cover.is_some(), "DSD 曲目应提取到内嵌封面");
+    assert_eq!(
+        metadata.lyrics.lines.len(),
+        2,
+        "DSD 内嵌歌词应进入曲目元数据"
+    );
     assert_eq!(metadata.sample_rate, Some(44_100), "解码探测仍然生效");
 
     let _ = fs::remove_file(path);

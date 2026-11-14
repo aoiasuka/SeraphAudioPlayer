@@ -699,6 +699,7 @@ pub(crate) fn parse_audio_metadata_with_dsd_hint(
             parsed.disc_number = tags.disc_number;
             parsed.album_artist = tags.album_artist;
             parsed.cover = tags.cover;
+            parsed.lyrics = tags.lyrics;
         }
         enrich_with_decoder_probe_dsd(path, &mut parsed, is_dsd_hint);
         return parsed;

@@ -22,6 +22,8 @@ pub(crate) struct DsdTags {
     pub disc_number: Option<u32>,
     pub album_artist: Option<String>,
     pub cover: Option<CoverArt>,
+    /// 内嵌歌词（DEC4-02）：USLT 帧，与其它格式的内嵌歌词走同一个解析入口。
+    pub lyrics: LyricDocument,
 }
 
 /// 从 DSF/DFF 文件解析内嵌 ID3v2 标签；非 DSD 容器或无标签返回 None。
@@ -70,7 +72,25 @@ pub(crate) fn dsd_tags_from_path(path: &Path) -> Option<DsdTags> {
                     .map(|ts| ts.year.to_string())
             }),
         cover,
+        lyrics: lyrics_from_id3(&tag),
     })
+}
+
+/// ID3 的 USLT（非同步歌词）帧里常见的就是整段 LRC 文本，交给 LRC 解析器：
+/// 带时间标签即逐行同步，纯文本即未同步歌词；行数与长度上限由 `clamp_lyrics` 收口。
+/// 取第一份能解析出内容的；来源标 `Embedded`。
+fn lyrics_from_id3(tag: &id3::Tag) -> LyricDocument {
+    for frame in tag.lyrics() {
+        let (lines, offset_ms) = parse_lyrics_text_with_offset(&frame.text);
+        if !lines.is_empty() {
+            return LyricDocument::from_lines(
+                clamp_lyrics(lines),
+                LyricSource::of(LyricSourceKind::Embedded),
+            )
+            .with_offset(offset_ms);
+        }
+    }
+    LyricDocument::EMPTY
 }
 
 /// 定位并读出 DSF/DFF 内嵌的 ID3v2 字节块。
