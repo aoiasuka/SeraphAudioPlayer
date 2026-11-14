@@ -108,3 +108,23 @@ it("鼠标移出不移除仍持有键盘焦点的子菜单", () => {
   fireEvent.pointerLeave(parent.parentElement!);
   expect(screen.getByRole("menuitem", { name: "逐行" })).toHaveFocus();
 });
+
+it("UI4-01：关闭菜单后焦点回到打开前的元素", () => {
+  render(<><button>触发行</button><ContextMenuLayer /></>);
+  const trigger = screen.getByRole("button", { name: "触发行" });
+  trigger.focus();
+  act(() => useContextMenuStore.getState().openContextMenu({ x: 20, y: 20 }, [{ key: "only", label: "唯一项" }]));
+  expect(screen.getByRole("menuitem", { name: "唯一项" })).toHaveFocus();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(trigger).toHaveFocus();
+});
+
+it("UI4-01：用户已把焦点移到别处时不抢焦点", () => {
+  render(<><button>触发行</button><input aria-label="搜索" /><ContextMenuLayer /></>);
+  screen.getByRole("button", { name: "触发行" }).focus();
+  act(() => useContextMenuStore.getState().openContextMenu({ x: 20, y: 20 }, [{ key: "only", label: "唯一项" }]));
+  const search = screen.getByLabelText("搜索");
+  search.focus();
+  act(() => useContextMenuStore.getState().closeContextMenu());
+  expect(search).toHaveFocus();
+});

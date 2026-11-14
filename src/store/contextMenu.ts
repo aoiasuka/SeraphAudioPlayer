@@ -40,6 +40,34 @@ export interface DeleteTracksRequest {
 
 let deleteRequestSequence = 0;
 
+/**
+ * 打开菜单时的焦点所在元素（UI4-01）。菜单打开后焦点移到第一个菜单项，
+ * 关闭时要还回去，否则键盘用户按 Esc 后焦点落到页面起始位置、得重新找回原来的行。
+ */
+let menuTrigger: HTMLElement | null = null;
+
+function rememberMenuTrigger() {
+  if (typeof document === "undefined") return;
+  const active = document.activeElement;
+  // 菜单已开着时再次打开（换一处右键）：保留最初的触发元素，不记菜单项自己
+  if (active instanceof HTMLElement && active.closest('[role="menu"]')) return;
+  menuTrigger = active instanceof HTMLElement && active !== document.body ? active : null;
+}
+
+/**
+ * 只在焦点仍留在菜单里（或已丢失）时归还；用户已经点到别处就不抢。
+ * 菜单条目打开弹窗时也先归还：弹窗随后记下的「打开前焦点」就是原来的行，关闭弹窗能回到它。
+ */
+function restoreMenuTrigger() {
+  const trigger = menuTrigger;
+  menuTrigger = null;
+  if (!trigger || typeof document === "undefined" || !trigger.isConnected) return;
+  const active = document.activeElement;
+  const focusLost = !active || active === document.body;
+  const insideMenu = active instanceof HTMLElement && Boolean(active.closest('[role="menu"]'));
+  if (focusLost || insideMenu) trigger.focus({ preventScroll: true });
+}
+
 export function isSeparator(
   entry: ContextMenuEntry
 ): entry is ContextMenuSeparator {
@@ -84,19 +112,31 @@ export const useContextMenuStore = create<ContextMenuState>()((set, get) => ({
   createPlaylistTrackIds: null,
   deleteRequest: null,
   reloadStreamingTrackId: null,
-  openContextMenu: ({ x, y }, entries) => set({ open: true, x, y, entries }),
-  closeContextMenu: () => set({ open: false, entries: [] }),
-  openTrackInfo: (trackId) =>
-    set({ infoTrackId: trackId, open: false, entries: [] }),
+  openContextMenu: ({ x, y }, entries) => {
+    rememberMenuTrigger();
+    set({ open: true, x, y, entries });
+  },
+  closeContextMenu: () => {
+    const wasOpen = get().open;
+    set({ open: false, entries: [] });
+    if (wasOpen) restoreMenuTrigger();
+  },
+  openTrackInfo: (trackId) => {
+    restoreMenuTrigger();
+    set({ infoTrackId: trackId, open: false, entries: [] });
+  },
   closeTrackInfo: () => set({ infoTrackId: null }),
-  openCreatePlaylistWith: (trackIds) =>
-    set({ createPlaylistTrackIds: trackIds, open: false, entries: [] }),
+  openCreatePlaylistWith: (trackIds) => {
+    restoreMenuTrigger();
+    set({ createPlaylistTrackIds: trackIds, open: false, entries: [] });
+  },
   closeCreatePlaylistWith: () => set({ createPlaylistTrackIds: null }),
   requestDeleteTrack: (trackId) =>
     get().requestDeleteTracks([trackId], { scope: "当前曲目" }),
   requestDeleteTracks: (trackIds, options) => {
     const ids = Array.from(new Set(trackIds.filter(Boolean)));
     if (ids.length === 0) return;
+    restoreMenuTrigger();
     set({
       deleteRequest: { id: ++deleteRequestSequence, trackIds: ids, scope: options?.scope ?? "当前列表", all: options?.all ?? false },
       open: false,
@@ -104,8 +144,10 @@ export const useContextMenuStore = create<ContextMenuState>()((set, get) => ({
     });
   },
   closeDeleteTrack: () => set({ deleteRequest: null }),
-  openReloadStreaming: (trackId) =>
-    set({ reloadStreamingTrackId: trackId, open: false, entries: [] }),
+  openReloadStreaming: (trackId) => {
+    restoreMenuTrigger();
+    set({ reloadStreamingTrackId: trackId, open: false, entries: [] });
+  },
   closeReloadStreaming: () => set({ reloadStreamingTrackId: null }),
 }));
 
