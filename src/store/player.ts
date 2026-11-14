@@ -186,6 +186,9 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     // B2：制作信息默认显示（升级不改变既有可见内容）；忽略文件 offset 默认关
     showLyricsCredits: state.showLyricsCredits !== false,
     ignoreLyricsFileOffset: state.ignoreLyricsFileOffset === true,
+    bilibiliPreferDolbyAtmos: state.bilibiliPreferDolbyAtmos === true,
+    bilibiliPreferFlac: state.bilibiliPreferFlac === true,
+    bilibiliRemuxWithFfmpeg: state.bilibiliRemuxWithFfmpeg === true,
   };
 }
 
@@ -240,6 +243,9 @@ export const usePlayerStore = create<PlayerStore>()(
         lyricsFolder: "",
         showLyricsCredits: true,
         ignoreLyricsFileOffset: false,
+        bilibiliPreferDolbyAtmos: false,
+        bilibiliPreferFlac: false,
+        bilibiliRemuxWithFfmpeg: false,
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -335,6 +341,9 @@ export const usePlayerStore = create<PlayerStore>()(
         lyricsFolder: state.lyricsFolder,
         showLyricsCredits: state.showLyricsCredits,
         ignoreLyricsFileOffset: state.ignoreLyricsFileOffset,
+        bilibiliPreferDolbyAtmos: state.bilibiliPreferDolbyAtmos,
+        bilibiliPreferFlac: state.bilibiliPreferFlac,
+        bilibiliRemuxWithFfmpeg: state.bilibiliRemuxWithFfmpeg,
       }),
     }
   )

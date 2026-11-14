@@ -1,5 +1,6 @@
 import { BadgeCheck, DownloadCloud, FolderHeart, Headphones, Link2, Loader2, LogIn, LogOut, QrCode, RefreshCw, Settings2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Dialog } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { coverSrc } from "@/lib/tauri";
 import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
@@ -38,9 +39,11 @@ export function StreamingPage() {
   const isBatchImporting = batchProgress !== null;
   // B 站流媒体默认走普通音质：杜比 / FLAC / 混流三项默认全不勾选，
   // 需要时用户在工具条上手动开启。
-  const [preferDolbyAtmos, setPreferDolbyAtmos] = useState(false);
-  const [preferFlac, setPreferFlac] = useState(false);
-  const [remuxWithFfmpeg, setRemuxWithFfmpeg] = useState(false);
+  // UI4-02：选择存进 store 并持久化，离开页面再回来不再恢复成全不勾选。
+  const preferDolbyAtmos = usePlayerStore((s) => s.bilibiliPreferDolbyAtmos);
+  const preferFlac = usePlayerStore((s) => s.bilibiliPreferFlac);
+  const remuxWithFfmpeg = usePlayerStore((s) => s.bilibiliRemuxWithFfmpeg);
+  const setImportPreference = usePlayerStore((s) => s.setBilibiliImportPreference);
 
   const isFfmpegDownloading = ffmpegDownload.stage === "downloading";
 
@@ -218,8 +221,9 @@ export function StreamingPage() {
 
           <button
             type="button"
-            onClick={() => void refreshBilibiliState()}
+            onClick={() => void refreshBilibiliState({ force: true })}
             title="刷新状态"
+            aria-label="刷新状态"
             className="stamp-btn inline-flex h-8 w-8 items-center justify-center font-tw text-xs font-bold shrink-0"
           >
             <RefreshCw className="h-4 w-4" />
@@ -230,8 +234,9 @@ export function StreamingPage() {
           {/* 音质偏好簇 */}
           <button
             type="button"
-            onClick={() => setPreferDolbyAtmos((value) => !value)}
+            onClick={() => setImportPreference("bilibiliPreferDolbyAtmos", !preferDolbyAtmos)}
             title="优先杜比全景声"
+            aria-pressed={preferDolbyAtmos}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 border-[1.5px] px-2.5 font-tw text-[11px] font-bold transition-all",
               preferDolbyAtmos
@@ -244,8 +249,9 @@ export function StreamingPage() {
           </button>
           <button
             type="button"
-            onClick={() => setPreferFlac((value) => !value)}
+            onClick={() => setImportPreference("bilibiliPreferFlac", !preferFlac)}
             title="优先 FLAC / 无损"
+            aria-pressed={preferFlac}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 border-[1.5px] px-2.5 font-tw text-[11px] font-bold transition-all",
               preferFlac
@@ -258,8 +264,9 @@ export function StreamingPage() {
           </button>
           <button
             type="button"
-            onClick={() => setRemuxWithFfmpeg((value) => !value)}
+            onClick={() => setImportPreference("bilibiliRemuxWithFfmpeg", !remuxWithFfmpeg)}
             title="使用 FFmpeg 混流"
+            aria-pressed={remuxWithFfmpeg}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 border-[1.5px] px-2.5 font-tw text-[11px] font-bold transition-all",
               remuxWithFfmpeg
@@ -315,30 +322,29 @@ export function StreamingPage() {
         </div>
       </div>
 
-      {loginQr ? (
-        <div className="absolute left-2 top-12 z-20 w-[236px] border-2 border-ink bg-card p-4 shadow-[5px_5px_0_rgba(43,39,34,0.18)]">
-          <div className="flex items-center justify-between">
-            <span className="font-tw text-xs font-bold text-ink">哔哩哔哩登录</span>
-            <button
-              type="button"
-              onClick={stopLoginPolling}
-              className="px-2 py-1 font-tw text-xs font-bold text-ink3 hover:text-stamp"
-            >
-              关闭
-            </button>
-          </div>
-          <div className="mt-3 flex h-[184px] w-[184px] items-center justify-center border border-line bg-white">
-            {loginQr.dataUrl ? (
-              <img src={loginQr.dataUrl} alt="B 站登录二维码" className="h-[184px] w-[184px]" />
-            ) : (
-              <Loader2 className="h-5 w-5 animate-spin text-brown" />
-            )}
-          </div>
-          <p className="mt-2 truncate text-center font-tw text-xs font-semibold text-ink2">
-            {loginQr.message || "等待扫码"}
-          </p>
+      {/* UI4-02：登录二维码走通用弹窗——Esc 关闭、焦点陷阱、关闭后焦点回到「登录」按钮 */}
+      <Dialog open={Boolean(loginQr)} onClose={stopLoginPolling} aria-label="哔哩哔哩登录" className="max-w-[236px] p-4">
+        <div className="flex items-center justify-between">
+          <span className="font-tw text-xs font-bold text-ink">哔哩哔哩登录</span>
+          <button
+            type="button"
+            onClick={stopLoginPolling}
+            className="px-2 py-1 font-tw text-xs font-bold text-ink3 hover:text-stamp"
+          >
+            关闭
+          </button>
         </div>
-      ) : null}
+        <div className="mt-3 flex h-[184px] w-[184px] items-center justify-center border border-line bg-white">
+          {loginQr?.dataUrl ? (
+            <img src={loginQr.dataUrl} alt="B 站登录二维码" className="h-[184px] w-[184px]" />
+          ) : (
+            <Loader2 className="h-5 w-5 animate-spin text-brown" />
+          )}
+        </div>
+        <p className="mt-2 truncate text-center font-tw text-xs font-semibold text-ink2" role="status">
+          {loginQr?.message || "等待扫码"}
+        </p>
+      </Dialog>
 
       <TrackRows tracks={streamingTracks} empty="暂无流媒体曲目" scopeName="流媒体" stateKey="tracks:streaming" />
     </div>

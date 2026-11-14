@@ -236,6 +236,10 @@ export interface PlayerStore {
   lyricsFolder: string;
   showLyricsCredits: boolean;
   ignoreLyricsFileOffset: boolean;
+  /** 流媒体页的三个导入偏好（UI4-02：离开页面再回来、重启后都记住） */
+  bilibiliPreferDolbyAtmos: boolean;
+  bilibiliPreferFlac: boolean;
+  bilibiliRemuxWithFfmpeg: boolean;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -310,7 +314,12 @@ export interface PlayerStore {
     options?: BilibiliImportOptions
   ) => Promise<boolean>;
   // 审2-R5：流媒体页 actions（生命周期归 store 管，组件卸载不清理）
-  refreshBilibiliState: () => Promise<void>;
+  /** `force` 为 false 时，已登录且上次刷新在有效期内就跳过联网（见 streamingActions） */
+  refreshBilibiliState: (options?: { force?: boolean }) => Promise<void>;
+  setBilibiliImportPreference: (
+    key: "bilibiliPreferDolbyAtmos" | "bilibiliPreferFlac" | "bilibiliRemuxWithFfmpeg",
+    value: boolean
+  ) => void;
   startFfmpegDownload: () => Promise<void>;
   startLoginPolling: () => Promise<void>;
   stopLoginPolling: () => void;

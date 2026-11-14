@@ -111,19 +111,47 @@ function startLoginPollInterval(
   }, 3500);
 }
 
+/** 已登录状态的有效期：期内进入流媒体页不再重新联网查询。 */
+export const LOGIN_STATUS_TTL_MS = 5 * 60 * 1000;
+let lastLoginStatusAt = 0;
+
+/** 仅供测试：清掉登录状态的刷新时间。 */
+export function resetLoginStatusFreshnessForTest() {
+  lastLoginStatusAt = 0;
+}
+
 export function createStreamingActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
 ): Pick<
   PlayerStore,
   | "refreshBilibiliState"
+  | "setBilibiliImportPreference"
   | "startFfmpegDownload"
   | "startLoginPolling"
   | "stopLoginPolling"
   | "logoutBilibili"
 > {
   return {
-    refreshBilibiliState: async () => {
+    setBilibiliImportPreference: (key, value) => {
+      if (get()[key] === value) return;
+      set({ [key]: value } as Pick<PlayerStore, typeof key>);
+    },
+
+    refreshBilibiliState: async (options) => {
+      // UI4-02：已登录时 `bilibili_login_status` 是一次带登录凭据的联网请求。每次进入流媒体页
+      // 都刷新没有必要——有效期内直接沿用；手动点「刷新状态」、登录 / 退出后强制刷新。
+      // 未登录时不带凭据，照常刷新（用户可能刚在别处登录）。
+      const fresh = Date.now() - lastLoginStatusAt < LOGIN_STATUS_TTL_MS;
+      if (!options?.force && fresh && get().bilibiliLoginStatus.loggedIn) {
+        try {
+          const ffmpeg = await invoke<BilibiliFfmpegStatus>("bilibili_ffmpeg_status");
+          set({ bilibiliFfmpegStatus: ffmpeg ?? get().bilibiliFfmpegStatus });
+        } catch (err) {
+          console.warn("Tauri command failed: bilibili_ffmpeg_status", err);
+        }
+        return;
+      }
       try {
         const [status, ffmpeg] = await Promise.all([
           invoke<BilibiliLoginStatus>("bilibili_login_status"),
@@ -135,6 +163,7 @@ export function createStreamingActions(
           bilibiliLoginStatus: status ?? get().bilibiliLoginStatus,
           bilibiliFfmpegStatus: ffmpeg ?? get().bilibiliFfmpegStatus,
         });
+        lastLoginStatusAt = Date.now();
       } catch (err) {
 
         console.warn("Tauri command failed: bilibili status", err);

@@ -60,6 +60,10 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   // B2 显示选项
   showLyricsCredits: "boolean",
   ignoreLyricsFileOffset: "boolean",
+  // 流媒体页导入偏好
+  bilibiliPreferDolbyAtmos: "boolean",
+  bilibiliPreferFlac: "boolean",
+  bilibiliRemuxWithFfmpeg: "boolean",
 };
 
 interface PersistedEnvelope {
