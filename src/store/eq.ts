@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { DEFAULT_EQ_BANDS } from "@/lib/eqPresets";
 import {
+  MAX_EQ_BANDS,
   sanitizeCrossfeed,
   sanitizeEqBandPatch,
   sanitizeEqBands,
@@ -81,7 +82,8 @@ function pushToEngine(settings: DspSettings) {
   }, 60);
 }
 
-const MAX_BANDS = 40;
+// EQ4-03：手动添加、APO 解析、消毒、后端兜底共用同一个上限
+const MAX_BANDS = MAX_EQ_BANDS;
 
 export const useEqStore = create<EqState>()(
   persist(

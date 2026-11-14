@@ -7,7 +7,11 @@ import type { CrossfeedSettings, EqBand, EqBandKind, EqPreset } from "@/types/ds
  * null/字符串抛 TypeError 造成启动白屏（H-1），因此宁可回落默认也不放行。
  */
 
-/** 频段数量硬上限（导入路径防异常文件生成巨量频段拖垮 UI/引擎） */
+/**
+ * 频段数量硬上限（导入路径防异常文件生成巨量频段拖垮 UI/引擎）。
+ * 全应用唯一的上限：手动添加（store/eq.ts）、APO 解析（eqApoParser.ts）都引用它，
+ * 后端 `seraph_dsp::eq::MAX_EQ_BANDS` 用同一个值兜底——改这里要同步改后端。
+ */
 export const MAX_EQ_BANDS = 64;
 
 export const EQ_FREQ_MIN = 1;
