@@ -30,6 +30,8 @@ pub struct SymphoniaDecoder {
     sample_rate: u32,
     // L-6: 复用 SampleBuffer 以避免每包重新分配
     sample_buffer: Option<SampleBuffer<f32>>,
+    /// 上一包用完还回来的样本缓冲（见 `Decoder::recycle`）
+    packet_pool: Vec<f32>,
     // L-6 修订：缓存对应的 spec/frames，
     // 包间 spec 漂移（VBR、可变声道 mapping）时强制重建，
     // 避免 copy_interleaved_ref 把新数据写进旧布局缓冲。
@@ -51,6 +53,7 @@ impl SymphoniaDecoder {
             time_base: None,
             sample_rate: 0,
             sample_buffer: None,
+            packet_pool: Vec::new(),
             buffer_spec: None,
             buffer_frames: 0,
             consecutive_decode_errors: 0,
@@ -215,7 +218,10 @@ impl Decoder for SymphoniaDecoder {
                 .expect("sample buffer must exist after rebuild");
             buffer.copy_interleaved_ref(decoded);
 
-            let mut samples = buffer.samples().to_vec();
+            // AUD-12：复用调用方还回来的缓冲（`recycle`），不再每包 `to_vec`
+            let mut samples = std::mem::take(&mut self.packet_pool);
+            samples.clear();
+            samples.extend_from_slice(buffer.samples());
             let mut effective_ts = packet.ts();
             // F-7：coarse seek 落点在 required_ts 之前，丢掉之前的帧实现样本精确 seek。
             if let Some(required_ts) = self.trim_before_ts {
@@ -240,6 +246,13 @@ impl Decoder for SymphoniaDecoder {
                 samples,
                 timestamp_seconds,
             }));
+        }
+    }
+
+    fn recycle(&mut self, samples: Vec<f32>) {
+        // 只留容量更大的那个：两包大小相近，留哪个都够下一包用
+        if samples.capacity() > self.packet_pool.capacity() {
+            self.packet_pool = samples;
         }
     }
 

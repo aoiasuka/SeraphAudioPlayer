@@ -370,6 +370,31 @@ struct PlaybackShared {
     spectrum: Arc<SpectrumTap>,
 }
 
+/// [`PlaybackEngine::open_output`] 的产物：一条已经启动的输出通路。
+struct OpenedOutput {
+    shared: Arc<PlaybackShared>,
+    producer: Producer<QueuedSample>,
+    stream: Option<Stream>,
+    render_worker: Option<JoinHandle<Result<()>>>,
+    output_format: PlayerEvent,
+    output_rate: u32,
+    output_channels: usize,
+}
+
+/// 独占模式起播失败时是否值得退回共享模式重试；值得则返回失败原因。
+/// 只认「独占不可用」这一类（格式不被支持、设备被占用、初始化超时），
+/// 设备丢失、文件损坏之类换个模式也没用。
+fn exclusive_fallback_reason(driver: OutputDriver, err: &BackendError) -> Option<&str> {
+    match err {
+        BackendError::ExclusiveModeUnavailable(reason)
+            if driver == OutputDriver::WasapiExclusive =>
+        {
+            Some(reason.as_str())
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct QueuedSample {
     // L-4: generation 用 u32 而非 u64，配合 f32 value 后单样本 8 字节（vs 16 字节）。
@@ -524,11 +549,93 @@ impl PlaybackEngine {
         // F-3：起播位置钳制到 [0, duration-0.1]，避免 seek 到曲尾之后导致解码失败/瞬间跳曲。
         let start_seconds = clamp_seek_seconds(start_seconds.unwrap_or(0.0), duration_seconds);
 
+        // AUD-04：独占模式起不来（设备不支持源文件的声道数 / 采样率，或被别的程序独占）时，
+        // 这一首自动退回共享模式——共享模式有声道重映射和重采样，基本都能放。
+        // 用户选的驱动不变，下一首照旧先试独占；界面的输出格式卡片会显示实际走的模式。
+        let mut driver = self.driver;
+        let opened = match self.open_output(driver, &info, &track_id, start_seconds) {
+            Err(err) if exclusive_fallback_reason(driver, &err).is_some() => {
+                warn!("{err}; falling back to shared mode for this track");
+                driver = OutputDriver::Shared;
+                // 共享模式也起不来时，报最初的独占错误（那才是用户设置对应的原因）
+                self.open_output(driver, &info, &track_id, start_seconds)
+                    .map_err(|_| err)?
+            }
+            other => other?,
+        };
+        let OpenedOutput {
+            shared,
+            producer,
+            stream,
+            render_worker,
+            output_format,
+            output_rate,
+            output_channels,
+        } = opened;
+
+        let worker = match spawn_decode_worker(DecodeWorkerInput {
+            decoder,
+            path: path.clone(),
+            track_id: track_id.clone(),
+            info,
+            shared: shared.clone(),
+            producer,
+            event_bus: self.event_bus.clone(),
+            start_seconds,
+            dsp: self.dsp.clone(),
+            is_dsd: is_dsd_file(&path),
+        }) {
+            Ok(worker) => worker,
+            Err(err) => {
+                // 解码线程没起来：让已经启动的渲染线程退出，不留下一个空转的输出流
+                shared.stopped.store(true, Ordering::Release);
+                if let Some(render) = render_worker {
+                    join_worker_bounded(render, "render");
+                }
+                return Err(err);
+            }
+        };
+
+        debug!(
+            "started playback: {} @ {} Hz / {} ch / {:?}",
+            path.display(),
+            output_rate,
+            output_channels,
+            driver
+        );
+        self.session = Some(PlaybackSession {
+            path,
+            track_id: track_id.clone(),
+            duration_seconds,
+            shared,
+            decode_worker: Some(worker),
+            render_worker,
+            _stream: stream,
+        });
+        self.event_bus.publish(PlayerEvent::TrackChanged {
+            track_id: track_id.clone(),
+        });
+        self.event_bus.publish(PlayerEvent::PlaybackStarted {
+            track_id: track_id.clone(),
+        });
+        // 排在 PlaybackStarted 之后：前端按曲目身份核对，先有曲目再有它的输出格式。
+        self.event_bus.publish(output_format);
+        Ok(())
+    }
+
+    /// 按指定驱动打开输出：选格式、建共享状态与环形缓冲、启动输出流或独占渲染线程。
+    fn open_output(
+        &self,
+        driver: OutputDriver,
+        info: &StreamInfo,
+        track_id: &str,
+        start_seconds: f64,
+    ) -> Result<OpenedOutput> {
         let device = self.output_device()?;
-        let (sample_format, config) = select_output_config(&device, &info, self.driver)?;
+        let (sample_format, config) = select_output_config(&device, info, driver)?;
         // OUT5-01：独占模式下 16 位及以下的源，设备支持时也用 24 位容器输出，
         // 软件音量衰减不再直接吃掉 16 位的分辨率。设备不支持（或探测失败）时保持 16 位。
-        let sample_format = if self.driver == OutputDriver::WasapiExclusive
+        let sample_format = if driver == OutputDriver::WasapiExclusive
             && sample_format == SampleFormat::I16
             && exclusive_supports_24_bit(
                 self.selected_device_id.as_deref(),
@@ -542,12 +649,12 @@ impl PlaybackEngine {
         let output_rate = config.sample_rate.0;
         let output_channels = usize::from(config.channels).max(1);
         let output_format = output_format_event(
-            &track_id,
-            self.driver,
+            track_id,
+            driver,
             sample_format,
             output_rate,
             output_channels,
-            &info,
+            info,
         );
         let shared = Arc::new(PlaybackShared::new(
             output_rate,
@@ -561,7 +668,7 @@ impl PlaybackEngine {
             Ordering::Relaxed,
         );
 
-        let (stream, render_worker) = match self.driver {
+        let (stream, render_worker) = match driver {
             OutputDriver::WasapiExclusive => {
                 let endpoint_id = self
                     .selected_device_id
@@ -592,47 +699,18 @@ impl PlaybackEngine {
                     .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
                 (Some(stream), None)
             }
-            OutputDriver::Asio => unreachable!("ASIO checked above"),
+            OutputDriver::Asio => return Err(BackendError::NotImplemented),
         };
 
-        let worker = spawn_decode_worker(DecodeWorkerInput {
-            decoder,
-            path: path.clone(),
-            track_id: track_id.clone(),
-            info,
-            shared: shared.clone(),
+        Ok(OpenedOutput {
+            shared,
             producer,
-            event_bus: self.event_bus.clone(),
-            start_seconds,
-            dsp: self.dsp.clone(),
-            is_dsd: is_dsd_file(&path),
-        });
-
-        debug!(
-            "started playback: {} @ {} Hz / {} ch / {:?}",
-            path.display(),
+            stream,
+            render_worker,
+            output_format,
             output_rate,
             output_channels,
-            self.driver
-        );
-        self.session = Some(PlaybackSession {
-            path,
-            track_id: track_id.clone(),
-            duration_seconds,
-            shared,
-            decode_worker: Some(worker),
-            render_worker,
-            _stream: stream,
-        });
-        self.event_bus.publish(PlayerEvent::TrackChanged {
-            track_id: track_id.clone(),
-        });
-        self.event_bus.publish(PlayerEvent::PlaybackStarted {
-            track_id: track_id.clone(),
-        });
-        // 排在 PlaybackStarted 之后：前端按曲目身份核对，先有曲目再有它的输出格式。
-        self.event_bus.publish(output_format);
-        Ok(())
+        })
     }
 
     pub fn set_driver(&mut self, driver: String) -> Result<()> {
@@ -1225,17 +1303,20 @@ fn spawn_wasapi_exclusive_render_worker(
 ) -> Result<JoinHandle<Result<()>>> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let shared_for_worker = shared.clone();
-    let worker = thread::spawn(move || {
-        run_wasapi_exclusive_render_worker(
-            endpoint_id,
-            config,
-            sample_format,
-            shared_for_worker,
-            consumer,
-            ready_tx,
-            event_bus,
-        )
-    });
+    let worker = thread::Builder::new()
+        .name("seraph-render".into())
+        .spawn(move || {
+            run_wasapi_exclusive_render_worker(
+                endpoint_id,
+                config,
+                sample_format,
+                shared_for_worker,
+                consumer,
+                ready_tx,
+                event_bus,
+            )
+        })
+        .map_err(|err| BackendError::Internal(format!("failed to spawn render thread: {err}")))?;
 
     // 等待 worker 完成 IAudioClient::Initialize + start_stream。
     // 慢速 DAC / 高采样率独占协商可能需要数秒，给 8 秒上限。
@@ -1369,30 +1450,21 @@ fn run_wasapi_exclusive_render_worker(
         let mut audio_client = device
             .get_iaudioclient()
             .map_err(|err| BackendError::DeviceLost(err.to_string()))?;
-        let sample_type = match sample_format {
-            SampleFormat::I16 | SampleFormat::I32 => SampleType::Int,
-            SampleFormat::F32 => SampleType::Float,
+        // 独占模式只用整数格式：16 位，或 24 位有效位装在 32 位容器里
+        // （`select_output_config` 不会给出别的格式）。
+        let (store_bits, valid_bits) = match sample_format {
+            SampleFormat::I16 => (16, 16),
+            SampleFormat::I32 => (32, 24),
             other => {
                 return Err(BackendError::UnsupportedFormat(format!(
                     "exclusive output sample format {other:?}"
                 )));
             }
         };
-        let valid_bits = match sample_format {
-            SampleFormat::I16 => 16,
-            SampleFormat::I32 => 24,
-            SampleFormat::F32 => 32,
-            _ => 32,
-        };
-        let store_bits = if sample_format == SampleFormat::I16 {
-            16
-        } else {
-            32
-        };
         let desired_format = WaveFormat::new(
             store_bits,
             valid_bits,
-            &sample_type,
+            &SampleType::Int,
             config.sample_rate.0 as usize,
             usize::from(config.channels),
             None,
@@ -1482,6 +1554,11 @@ fn run_wasapi_exclusive_render_worker(
             }
         };
 
+    // AUD-03：渲染线程登记为 MMCSS「Pro Audio」任务，CPU 繁忙时不被普通线程抢占。
+    // 登记失败（服务被禁用等）只是回到普通优先级，照常播放。守卫析构时还原。
+    // 睡眠精度不用另外处理：Rust 标准库的 `thread::sleep` 在 Windows 10 1803 起使用
+    // 高精度可等待定时器，不受系统默认 15.6 ms 时钟粒度影响。
+    let _mmcss = mmcss::ProAudioTask::register();
     let mut state = RenderState::new(shared.buffer_generation());
     let mut dither = TpdfDither::default();
     // F-13：scratch buffer 跨迭代复用，避免每 ~90ms 重建两个大 Vec。
@@ -1551,6 +1628,50 @@ fn run_wasapi_exclusive_render_worker(
     Ok(())
 }
 
+/// MMCSS（多媒体类调度服务）登记。只用到两个函数，直接按名字从 avrt.dll 导入，
+/// 不为此给 `windows` crate 加依赖。
+#[cfg(windows)]
+mod mmcss {
+    use std::ffi::c_void;
+
+    #[link(name = "avrt", kind = "raw-dylib")]
+    extern "system" {
+        fn AvSetMmThreadCharacteristicsW(
+            task_name: *const u16,
+            task_index: *mut u32,
+        ) -> *mut c_void;
+        fn AvRevertMmThreadCharacteristics(handle: *mut c_void) -> i32;
+    }
+
+    /// 当前线程的「Pro Audio」任务登记；析构时还原线程特性。
+    pub(super) struct ProAudioTask(*mut c_void);
+
+    impl ProAudioTask {
+        pub(super) fn register() -> Option<Self> {
+            let name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+            let mut task_index = 0_u32;
+            // SAFETY：`name` 是以 NUL 结尾的 UTF-16 字符串，在调用期间有效；
+            // `task_index` 是合法的输出指针。函数只作用于调用线程。
+            let handle = unsafe { AvSetMmThreadCharacteristicsW(name.as_ptr(), &mut task_index) };
+            if handle.is_null() {
+                tracing::debug!("MMCSS Pro Audio registration unavailable; using normal priority");
+                None
+            } else {
+                Some(Self(handle))
+            }
+        }
+    }
+
+    impl Drop for ProAudioTask {
+        fn drop(&mut self) {
+            // SAFETY：句柄来自本线程上成功的 AvSetMmThreadCharacteristicsW，且只还原一次。
+            unsafe {
+                AvRevertMmThreadCharacteristics(self.0);
+            }
+        }
+    }
+}
+
 fn exclusive_mode_unavailable(detail: String) -> BackendError {
     BackendError::ExclusiveModeUnavailable(detail)
 }
@@ -1587,78 +1708,75 @@ fn render_wasapi_output_bytes(
             bytes.reserve(sample_count * 4);
             for &sample in samples.iter() {
                 // 24-in-32：有效 24bit 左移到高位。
-                bytes.extend_from_slice(&(quantize_i24(sample) << 8).to_le_bytes());
-            }
-        }
-        SampleFormat::F32 => {
-            bytes.reserve(sample_count * 4);
-            for &sample in samples.iter() {
-                bytes.extend_from_slice(&sample.clamp(-1.0, 1.0).to_le_bytes());
+                bytes.extend_from_slice(&(quantize_i24_tpdf(sample, dither) << 8).to_le_bytes());
             }
         }
         _ => {}
     }
 }
 
-fn spawn_decode_worker(input: DecodeWorkerInput) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let DecodeWorkerInput {
-            decoder,
-            path,
-            track_id,
-            info,
-            shared,
-            producer,
-            event_bus,
-            start_seconds,
-            dsp,
-            is_dsd,
-        } = input;
-        // F-5：解码栈（symphonia/ffmpeg 等）对畸形文件可能 panic；catch_unwind 兜底，
-        // panic 时同 Err 分支处理，避免 stopped 不置位导致 UI 永久停在「播放中」假状态。
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_decode_worker(
+fn spawn_decode_worker(input: DecodeWorkerInput) -> Result<JoinHandle<()>> {
+    let spawned = thread::Builder::new()
+        .name("seraph-decode".into())
+        .spawn(move || {
+            let DecodeWorkerInput {
                 decoder,
-                &track_id,
-                &info,
-                &shared,
+                path,
+                track_id,
+                info,
+                shared,
                 producer,
-                &event_bus,
+                event_bus,
                 start_seconds,
-                &dsp,
+                dsp,
                 is_dsd,
-            )
-        }))
-        .unwrap_or_else(|_| Err(BackendError::Internal("decode worker panicked".into())));
-        if let Err(err) = result {
-            // L-1：用 swap 而非 store，与 stop_session/report_render_failure 并发时
-            // 保证“宣告结束”全局只发生一次。若渲染线程已因设备丢失先 swap→true 并发过
-            // Error/PlaybackStopped，这里不再重复补发。
-            if !shared.stopped.swap(true, Ordering::AcqRel) {
-                event_bus.publish(PlayerEvent::Error {
-                    message: format!("{}: {err}", path.display()),
-                });
-                event_bus.publish(PlayerEvent::PlaybackStopped);
+            } = input;
+            // F-5：解码栈（symphonia/ffmpeg 等）对畸形文件可能 panic；catch_unwind 兜底，
+            // panic 时同 Err 分支处理，避免 stopped 不置位导致 UI 永久停在「播放中」假状态。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_decode_worker(
+                    decoder,
+                    &track_id,
+                    &info,
+                    &shared,
+                    producer,
+                    &event_bus,
+                    start_seconds,
+                    &dsp,
+                    is_dsd,
+                )
+            }))
+            .unwrap_or_else(|_| Err(BackendError::Internal("decode worker panicked".into())));
+            if let Err(err) = result {
+                // L-1：用 swap 而非 store，与 stop_session/report_render_failure 并发时
+                // 保证“宣告结束”全局只发生一次。若渲染线程已因设备丢失先 swap→true 并发过
+                // Error/PlaybackStopped，这里不再重复补发。
+                if !shared.stopped.swap(true, Ordering::AcqRel) {
+                    event_bus.publish(PlayerEvent::Error {
+                        message: format!("{}: {err}", path.display()),
+                    });
+                    event_bus.publish(PlayerEvent::PlaybackStopped);
+                }
+                return;
             }
-            return;
-        }
 
-        // 审2-7：swap 而非 load-then-store——与 stop_session/report_render_failure
-        // 并发时保证「宣告结束」全局只发生一次，避免用户刚按停止/切歌，
-        // 这里又补发 PlaybackEnded 触发自动切下一曲，覆盖用户意图。
-        if !shared.stopped.swap(true, Ordering::AcqRel) {
-            event_bus.publish(PlayerEvent::Progress {
-                track_id: track_id.clone(),
-                seconds: info.duration_seconds,
-                total: info.duration_seconds,
-                output_latency: shared.output_latency_seconds(),
-            });
-            event_bus.publish(PlayerEvent::PlaybackEnded {
-                track_id: track_id.clone(),
-            });
-            debug!("finished playback: {track_id}");
-        }
-    })
+            // 审2-7：swap 而非 load-then-store——与 stop_session/report_render_failure
+            // 并发时保证「宣告结束」全局只发生一次，避免用户刚按停止/切歌，
+            // 这里又补发 PlaybackEnded 触发自动切下一曲，覆盖用户意图。
+            if !shared.stopped.swap(true, Ordering::AcqRel) {
+                event_bus.publish(PlayerEvent::Progress {
+                    track_id: track_id.clone(),
+                    seconds: info.duration_seconds,
+                    total: info.duration_seconds,
+                    output_latency: shared.output_latency_seconds(),
+                });
+                event_bus.publish(PlayerEvent::PlaybackEnded {
+                    track_id: track_id.clone(),
+                });
+                debug!("finished playback: {track_id}");
+            }
+        });
+    spawned.map_err(|err| BackendError::Internal(format!("failed to spawn decode thread: {err}")))
 }
 
 /// 解码线程侧的 DSP 会话：按版本号轮询共享配置，变化时重建系数（保留滤波状态，
@@ -1833,6 +1951,8 @@ fn run_decode_worker(
                 &mut remap_scratch,
                 &mut output_scratch,
             )?;
+            // AUD-12：把这一包的缓冲还给解码器复用，不必每包重新分配
+            decoder.recycle(packet.samples);
             // DSP 链：样本已是输出率/声道的 f32 交错，就地 EQ + crossfeed。
             dsp_session.process(dsp, &mut output_scratch);
             push_samples(
@@ -2092,10 +2212,18 @@ pub(crate) fn quantize_i16(value: f32) -> i16 {
 }
 
 /// 16bit 输出叠加 TPDF dither（HiFi：消除量化失真的信号相关性）。
+///
+/// AUD-06：样本本来就落在 16 位格点上时不加 dither——量化误差为零，没有失真需要打散。
+/// 16 位源在音量 100%、没开 EQ、没重采样时每个样本都在格点上，于是原样输出（位精确）；
+/// 信号一旦被改动过（音量、DSP、重采样、更高位深的源），样本几乎都不在格点上，照常 dither。
 pub(crate) fn quantize_i16_tpdf(value: f32, dither: &mut TpdfDither) -> i16 {
-    (value * 32_768.0 + dither.next_tpdf())
-        .round()
-        .clamp(-32_768.0, 32_767.0) as i16
+    let scaled = value * 32_768.0;
+    let dithered = if scaled.fract() == 0.0 {
+        scaled
+    } else {
+        scaled + dither.next_tpdf()
+    };
+    dithered.round().clamp(-32_768.0, 32_767.0) as i16
 }
 
 fn quantize_u16(value: f32) -> u16 {
@@ -2128,10 +2256,24 @@ fn quantize_u64(value: f32) -> u64 {
 }
 
 /// 24-in-32 有效位量化（独占模式 I32 容器）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn quantize_i24(value: f32) -> i32 {
     (value * 8_388_608.0)
         .round()
         .clamp(-8_388_608.0, 8_388_607.0) as i32
+}
+
+/// 24 位量化 + 按需 TPDF dither（AUD-07）。与 16 位同理：落在 24 位格点上的样本原样输出，
+/// 其余（浮点解码输出、乘过音量 / DSP 的信号）加 dither 再舍入，不再是无 dither 的硬截断。
+/// 用 f64 计算：f32 乘 2^23 之后已经没有小数位可言。
+pub(crate) fn quantize_i24_tpdf(value: f32, dither: &mut TpdfDither) -> i32 {
+    let scaled = f64::from(value) * 8_388_608.0;
+    let dithered = if scaled.fract() == 0.0 {
+        scaled
+    } else {
+        scaled + f64::from(dither.next_tpdf())
+    };
+    dithered.round().clamp(-8_388_608.0, 8_388_607.0) as i32
 }
 
 fn render_output_f32(
@@ -2302,12 +2444,20 @@ fn render_output<T>(
         // 旧代样本残留只可能位于 ring 头部且已被上面的批量清扫移除，
         // 因此 slots() 即有效样本数的可靠下界。
         if consumer.slots() < channels {
-            if !silenced {
+            if silenced {
+                for sample in frame.iter_mut() {
+                    state.gain = ramp_gain(state.gain, target, step);
+                    write_sample(sample, 0.0);
+                }
+            } else {
                 missing_frames += 1;
-            }
-            for sample in frame.iter_mut() {
-                state.gain = ramp_gain(state.gain, target, step);
-                write_sample(sample, 0.0);
+                // AUD-09：缺样期间增益归零，数据恢复后自然走 5 ms 淡入。
+                // 此前增益在输出静音时继续爬到目标音量，解码跟不上导致的短暂断流结束后，
+                // 波形从静音直接跳到满幅，可能有一声爆音。
+                state.gain = 0.0;
+                for sample in frame.iter_mut() {
+                    write_sample(sample, 0.0);
+                }
             }
             continue;
         }
@@ -2335,10 +2485,11 @@ fn render_output<T>(
                     Err(_) => break 0.0,
                 }
             };
-            let rendered = value * state.gain;
-            write_sample(sample, rendered);
+            write_sample(sample, value * state.gain);
+            // AUD-10：可视化 tap 取乘音量之前的样本。响度（LUFS / LRA）、峰值、频谱反映的是
+            // 曲目本身，不随音量滑块变化——此前把音量从 100% 拉到 50%，积分响度会掉约 6 LU。
             if let Some(writer) = spectrum_writer.as_mut() {
-                writer.push(rendered);
+                writer.push(value);
             }
         }
         consumed += channels;

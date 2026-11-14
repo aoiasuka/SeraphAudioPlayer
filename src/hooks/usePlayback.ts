@@ -11,10 +11,18 @@ import { syncPlaybackQueue } from "@/store/player/queueSync";
 /** device_lost 之后多久内的 "device lost: …" 通用错误视为同一次故障。 */
 const DEVICE_LOST_ERROR_WINDOW_MS = 2000;
 let deviceLostAt = 0;
+/** 独占 → 共享的自动退回是否已经提示过（见 output_format 事件处理）。 */
+let exclusiveFallbackNotified = false;
+
+/** 仅供测试：重置「已提示过退回」标记。 */
+export function resetExclusiveFallbackNoticeForTest() {
+  exclusiveFallbackNotified = false;
+}
 
 /**
- * 每秒推进播放进度（mock 时间轴）。
- * 真正接通音频后，进度由 Rust 侧 `Progress` 事件驱动，此 hook 即可移除。
+ * 播放事件桥：把后端 `seraph://event`（进度、切歌、设备丢失、输出格式、错误…）落到 store，
+ * 按需补当前曲目的歌词，并在队列相关状态变化时同步后端播放队列。
+ * 浏览器 stub 模式（非 Tauri）下另有一个每秒推进进度的定时器，仅供脱离后端调试界面。
  */
 export function usePlayback() {
   const tick = usePlayerStore((s) => s.tick);
@@ -106,7 +114,19 @@ export function usePlayback() {
     if (event.type === "output_format") {
       // 建流成功后引擎报告一次实际输出格式；右侧卡片按曲目身份核对后显示
       const outputFormat = parseOutputFormatEvent(event);
-      if (outputFormat) usePlayerStore.setState({ outputFormat });
+      if (outputFormat) {
+        usePlayerStore.setState({ outputFormat });
+        // AUD-04：选的是独占、实际走了共享 = 引擎因设备不支持这首歌的格式（或设备被占用）
+        // 自动退回。连续多首都退回时只在第一次提示，回到独占后重新计。
+        const fellBack =
+          outputFormat.mode === "shared" && usePlayerStore.getState().driverKind === "wasapi";
+        if (fellBack && !exclusiveFallbackNotified) {
+          usePlayerStore
+            .getState()
+            .showNotification("独占模式不支持当前曲目的格式或设备被占用，已改用共享模式播放");
+        }
+        exclusiveFallbackNotified = fellBack;
+      }
       return;
     }
 

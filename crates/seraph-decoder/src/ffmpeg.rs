@@ -275,6 +275,13 @@ impl Decoder for FfmpegDecoder {
         }))
     }
 
+    fn recycle(&mut self, samples: Vec<f32>) {
+        // 只留容量更大的那个：两包大小相近，留哪个都够下一包用
+        if samples.capacity() > self.sample_scratch.capacity() {
+            self.sample_scratch = samples;
+        }
+    }
+
     fn seek(&mut self, seconds: f64) -> Result<(), DecoderError> {
         // F-10：seek 是唯一清除 finished 标志的途径
         self.finished = false;

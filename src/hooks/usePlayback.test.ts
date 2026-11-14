@@ -6,7 +6,7 @@ import { usePlayerStore } from "@/store/player";
 import { seekGuard } from "@/store/player/playbackActions";
 import type { Track } from "@/types/track";
 import { usePlayerEvents } from "./usePlayerEvents";
-import { usePlayback } from "./usePlayback";
+import { resetExclusiveFallbackNoticeForTest, usePlayback } from "./usePlayback";
 import { invoke } from "@/lib/tauri";
 
 vi.mock("./usePlayerEvents", () => ({ usePlayerEvents: vi.fn() }));
@@ -201,5 +201,40 @@ describe("输出格式事件", () => {
 
     emit({ type: "output_format", track_id: "b", mode: "exclusive", output_rate: 0 });
     expect(usePlayerStore.getState().outputFormat?.trackId).toBe("a");
+  });
+
+  it("AUD-04：选了独占却走了共享时提示一次，回到独占后重新计", () => {
+    resetExclusiveFallbackNoticeForTest();
+    const format = (trackId: string, mode: "shared" | "exclusive") => ({
+      type: "output_format", track_id: trackId, mode,
+      source_rate: 11_025, source_bits: 16, source_channels: 1,
+      output_rate: 48_000, output_bits: 32, output_float: true, output_channels: 2,
+    });
+    const notices = () =>
+      usePlayerStore.getState().notificationHistory.filter((item) => item.text.includes("共享模式"));
+    usePlayerStore.setState({ driverKind: "wasapi" });
+    renderHook(usePlayback);
+
+    emit(format("a", "shared"));
+    expect(notices()).toHaveLength(1);
+    // 连续几首都退回：不重复提示
+    emit(format("b", "shared"));
+    expect(notices()).toHaveLength(1);
+    // 回到独占后再次退回：重新提示
+    emit(format("c", "exclusive"));
+    emit(format("d", "shared"));
+    expect(notices()).toHaveLength(2);
+  });
+
+  it("AUD-04：用户本来就选共享模式时不提示", () => {
+    resetExclusiveFallbackNoticeForTest();
+    usePlayerStore.setState({ driverKind: "direct" });
+    renderHook(usePlayback);
+    emit({
+      type: "output_format", track_id: "a", mode: "shared",
+      source_rate: 44_100, source_bits: 16, source_channels: 2,
+      output_rate: 48_000, output_bits: 32, output_float: true, output_channels: 2,
+    });
+    expect(usePlayerStore.getState().notificationHistory).toEqual([]);
   });
 });

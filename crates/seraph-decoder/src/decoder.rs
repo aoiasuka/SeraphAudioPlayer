@@ -4,8 +4,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DecoderError {
-    #[error("decoder not implemented yet")]
-    NotImplemented,
     #[error("file not found")]
     FileNotFound,
     #[error("format not supported: {0}")]
@@ -88,6 +86,9 @@ pub trait Decoder: Send {
     fn info(&self) -> Option<&StreamInfo>;
     fn next_packet(&mut self) -> Result<Option<Packet>, DecoderError>;
     fn seek(&mut self, seconds: f64) -> Result<(), DecoderError>;
+    /// 调用方用完一包后把样本缓冲还回来，解码器下一包直接复用它的容量（AUD-12 / DEC-02）。
+    /// 不还也没关系，只是下一包重新分配；默认实现直接丢弃。
+    fn recycle(&mut self, _samples: Vec<f32>) {}
 }
 
 pub fn open_decoder(path: &Path) -> Result<Box<dyn Decoder>, DecoderError> {

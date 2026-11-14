@@ -271,3 +271,123 @@ fn aud_08_stuck_worker_join_is_bounded() {
     let joined = join_worker_within(quick, "test", Duration::from_secs(5));
     assert_eq!(joined.and_then(|result| result.ok()), Some(7));
 }
+
+fn push_frames(producer: &mut rtrb::Producer<QueuedSample>, frames: usize, value: f32) {
+    for _ in 0..frames {
+        assert!(producer
+            .push(QueuedSample {
+                generation: 0,
+                value
+            })
+            .is_ok());
+    }
+}
+
+/// AUD-09：缺样（解码跟不上）之后恢复出声必须从 0 淡入，不能从满幅硬切回来。
+#[test]
+fn aud_09_output_fades_in_after_underrun() {
+    let shared = PlaybackShared::new(48_000, 1, 1.0, SpectrumTap::new());
+    let (mut producer, mut consumer) = RingBuffer::new(4_096);
+    let mut render = RenderState::new(0);
+
+    // 先正常播放一段，让增益爬到满值
+    push_frames(&mut producer, 1_024, 1.0);
+    let mut output = vec![0.0_f32; 1_024];
+    render_output_f32(&mut output, &shared, &mut consumer, &mut render);
+    assert!((output[1_023] - 1.0).abs() < 1.0e-6, "稳态应为满幅");
+
+    // 缓冲空了：整段静音
+    let mut silence = vec![1.0_f32; 512];
+    render_output_f32(&mut silence, &shared, &mut consumer, &mut render);
+    assert!(silence.iter().all(|sample| *sample == 0.0));
+
+    // 数据回来：第一个样本接近 0，随后单调爬升
+    push_frames(&mut producer, 1_024, 1.0);
+    let mut resumed = vec![0.0_f32; 1_024];
+    render_output_f32(&mut resumed, &shared, &mut consumer, &mut render);
+    assert!(
+        resumed[0] < 0.05,
+        "恢复后的首个样本应从静音淡入，实际 {}",
+        resumed[0]
+    );
+    assert!(resumed.windows(2).all(|pair| pair[1] >= pair[0]));
+    assert!((resumed[1_023] - 1.0).abs() < 1.0e-6);
+}
+
+/// AUD-10：可视化 tap 拿到的是乘音量之前的样本，响度读数不随音量滑块变化。
+#[test]
+fn aud_10_visualizer_tap_is_independent_of_volume() {
+    let tap = SpectrumTap::new();
+    let shared = PlaybackShared::new(48_000, 1, 0.25, tap.clone());
+    let (mut producer, mut consumer) = RingBuffer::new(4_096);
+    let mut render = RenderState::new(0);
+    push_frames(&mut producer, 2_048, 0.5);
+    let mut output = vec![0.0_f32; 2_048];
+    render_output_f32(&mut output, &shared, &mut consumer, &mut render);
+
+    // 出声的样本乘了音量
+    assert!((output[2_047] - 0.125).abs() < 1.0e-6);
+    // tap 里是原始幅度
+    let mut tapped = Vec::new();
+    tap.drain(&mut tapped);
+    assert!(!tapped.is_empty());
+    assert!(tapped.iter().all(|sample| (*sample - 0.5).abs() < 1.0e-6));
+}
+
+/// AUD-06：已经落在 16 位格点上的样本原样输出（位精确），其余才加 dither。
+#[test]
+fn aud_06_sixteen_bit_samples_on_the_grid_pass_through_bit_exact() {
+    let mut dither = TpdfDither::default();
+    for raw in [i16::MIN, -12_345, -1, 0, 1, 2, 777, 12_345, i16::MAX] {
+        let value = f32::from(raw) / 32_768.0;
+        for _ in 0..64 {
+            assert_eq!(quantize_i16_tpdf(value, &mut dither), raw);
+        }
+    }
+    // 不在格点上的样本仍然被 dither：同一个输入会落到相邻的两个码字上
+    let off_grid = 100.5 / 32_768.0;
+    let codes: std::collections::BTreeSet<i16> = (0..256)
+        .map(|_| quantize_i16_tpdf(off_grid, &mut dither))
+        .collect();
+    assert!(codes.len() > 1, "非格点样本应被 dither 打散：{codes:?}");
+}
+
+/// AUD-07：24 位输出同理——格点上的样本位精确，其余 dither 后舍入而不是硬截断。
+#[test]
+fn aud_07_twenty_four_bit_quantization_dithers_only_off_grid_samples() {
+    let mut dither = TpdfDither::default();
+    for raw in [-8_388_608_i32, -65_536, -256, 0, 256, 65_536, 8_388_352] {
+        let value = raw as f32 / 8_388_608.0;
+        assert_eq!(quantize_i24_tpdf(value, &mut dither), raw);
+    }
+    // 16 位源装进 24 位容器：每个 16 位码字都在 24 位格点上
+    for raw in [i16::MIN, -3, 0, 5, i16::MAX] {
+        let value = f32::from(raw) / 32_768.0;
+        assert_eq!(quantize_i24_tpdf(value, &mut dither), i32::from(raw) << 8);
+    }
+    let off_grid = 0.5_f32 / 8_388_608.0 + 0.25;
+    let codes: std::collections::BTreeSet<i32> = (0..256)
+        .map(|_| quantize_i24_tpdf(off_grid, &mut dither))
+        .collect();
+    assert!(codes.len() > 1, "非格点样本应被 dither 打散");
+}
+
+/// AUD-04：只有「独占不可用」值得退回共享模式重试。
+#[test]
+fn aud_04_only_exclusive_unavailable_triggers_shared_fallback() {
+    let unavailable = BackendError::ExclusiveModeUnavailable("format not supported".into());
+    assert_eq!(
+        exclusive_fallback_reason(OutputDriver::WasapiExclusive, &unavailable),
+        Some("format not supported")
+    );
+    // 已经是共享模式就不再重试
+    assert!(exclusive_fallback_reason(OutputDriver::Shared, &unavailable).is_none());
+    // 设备丢失、文件问题换模式也没用
+    for err in [
+        BackendError::DeviceLost("unplugged".into()),
+        BackendError::UnsupportedFormat("bad file".into()),
+        BackendError::DeviceNotFound,
+    ] {
+        assert!(exclusive_fallback_reason(OutputDriver::WasapiExclusive, &err).is_none());
+    }
+}

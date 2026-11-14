@@ -53,9 +53,6 @@ pub enum PlayerEvent {
     DeviceLost {
         reason: String,
     },
-    DeviceRecovered {
-        device_name: String,
-    },
     VolumeChanged {
         volume: f32,
     },
