@@ -8,6 +8,45 @@ import type { PersistedPlayerState } from "./types";
 // 测试等场景也能解锁）；useHydratePlayerStore 里在 rehydrate 前还会显式置位兜底。
 export const hydrationGate = { ready: false };
 
+/**
+ * FE2-01：持久化出问题时通知界面。本模块不能 import store（循环依赖），
+ * 由 useHydratePlayerStore 挂监听；每类事件每次会话只报一次。
+ * - write-failed：localStorage 写入失败，之后的改动只在内存里，关闭即丢。
+ * - corrupt-backed-up：存档解析失败，原文已另存到 `<name>.corrupt` 再重置。
+ * - corrupt-lost：存档解析失败且备份也写不进去。
+ */
+export type PersistProblem = "write-failed" | "corrupt-backed-up" | "corrupt-lost";
+export const persistProblems: {
+  listener: ((problem: PersistProblem) => void) | null;
+  pending: PersistProblem[];
+} = { listener: null, pending: [] };
+
+const reportedProblems = new Set<PersistProblem>();
+function reportProblem(problem: PersistProblem) {
+  if (reportedProblems.has(problem)) return;
+  reportedProblems.add(problem);
+  // 存档损坏发生在水合期间，监听可能还没挂上：先排队，挂上时补发。
+  if (persistProblems.listener) persistProblems.listener(problem);
+  else persistProblems.pending.push(problem);
+}
+
+export function subscribePersistProblems(listener: (problem: PersistProblem) => void) {
+  persistProblems.listener = listener;
+  persistProblems.pending.splice(0).forEach(listener);
+  return () => {
+    if (persistProblems.listener === listener) persistProblems.listener = null;
+  };
+}
+
+/** 仅测试用：清掉「已报告」记录。 */
+export function resetPersistProblemsForTest() {
+  reportedProblems.clear();
+  persistProblems.pending.length = 0;
+  persistProblems.listener = null;
+}
+
+export const corruptBackupKey = (name: string) => `${name}.corrupt`;
+
 function isSamePersistedState(
   previous: PersistedPlayerState,
   next: PersistedPlayerState
@@ -43,6 +82,7 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
           err
         );
         memoryStorage.set(name, serialized);
+        reportProblem("write-failed");
       }
     } else {
       memoryStorage.set(name, serialized);
@@ -91,6 +131,19 @@ export function createPlayerPersistStorage(): PersistStorage<PersistedPlayerStat
 
         console.warn("Failed to parse persisted player state, resetting it", err);
         lastValue = null;
+        // FE2-01：收藏和歌单都在这份存档里，重置前先把原文另存一份，
+        // 留下可供人工恢复的现场（与后端曲库的 `.corrupt` 做法一致）。
+        let backedUp = false;
+        try {
+          const local = storage();
+          if (local) {
+            local.setItem(corruptBackupKey(name), value);
+            backedUp = true;
+          }
+        } catch (backupErr) {
+          console.warn("Failed to back up corrupt player state", backupErr);
+        }
+        reportProblem(backedUp ? "corrupt-backed-up" : "corrupt-lost");
         storage()?.removeItem(name);
         memoryStorage.delete(name);
         return null;

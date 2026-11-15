@@ -5,7 +5,20 @@ import { volumeToGain } from "@/lib/volume";
 import { useEqStore } from "@/store/eq";
 import { usePlayerStore } from "@/store/player";
 import { lyricsDisplayOptionsOf } from "@/store/player/lyricsActions";
-import { hydrationGate } from "@/store/player/persistStorage";
+import {
+  hydrationGate,
+  subscribePersistProblems,
+  type PersistProblem,
+} from "@/store/player/persistStorage";
+
+const PERSIST_PROBLEM_TEXT: Record<PersistProblem, string> = {
+  "write-failed":
+    "播放器状态写入本地存储失败：本次的收藏、歌单与设置改动在关闭后会丢失。请到「设置 → 系统集成」导出个人数据",
+  "corrupt-backed-up":
+    "播放器状态存档已损坏并被重置（收藏、歌单、设置回到初始值）；损坏的原文已另存到本地存储的 seraph-player-state.corrupt",
+  "corrupt-lost":
+    "播放器状态存档已损坏并被重置（收藏、歌单、设置回到初始值），原文未能备份",
+};
 
 export function useHydratePlayerStore() {
   useEffect(() => {
@@ -19,6 +32,9 @@ export function useHydratePlayerStore() {
       if (cancelled) unlisten();
       else unlisteners.push(unlisten);
     }).catch((error) => { console.warn("曲库事件监听失败", error); }))) : Promise.resolve();
+    const unsubscribeProblems = subscribePersistProblems((problem) => {
+      usePlayerStore.getState().showNotification(PERSIST_PROBLEM_TEXT[problem], "error");
+    });
     // 播放配置立即水合；只把曲库扫描留到空闲时，避免首个点击使用默认音量。
     // 审2-R1：必须在 rehydrate 之前打开写门闩，version 迁移触发的回写才不会被丢弃
     hydrationGate.ready = true;
@@ -108,6 +124,7 @@ export function useHydratePlayerStore() {
     return () => {
       cancelled = true;
       cancelLibraryLoad?.();
+      unsubscribeProblems();
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, []);

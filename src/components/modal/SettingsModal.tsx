@@ -22,6 +22,11 @@ import {
 import { invoke, normalizeIpcError } from "@/lib/tauri";
 import { checkForUpdate, openReleasePage, type UpdateCheckResult } from "@/lib/update";
 import { usePlayerStore } from "@/store/player";
+import {
+  buildPersonalDataExport,
+  mergePersonalData,
+  parsePersonalDataImport,
+} from "@/store/player/personalData";
 import type { DriverKind } from "@/types/track";
 
 const drivers: {
@@ -291,10 +296,61 @@ export function SettingsModal() {
       window.setTimeout(() => window.location.reload(), 600);
     } catch (err) {
 
+      // UI-02：import_app_config 的错误是 { code, message } 普通对象，
+      // String(err) 会显示成 [object Object]。
       console.warn("import_app_config failed", err);
+      showNotification(`导入配置失败：${normalizeIpcError(err).message}`, "error");
+    }
+  };
+
+  const exportPersonalData = async () => {
+    try {
+      const { liked, likedAt, userPlaylists } = usePlayerStore.getState();
+      const content = buildPersonalDataExport({ liked, likedAt, userPlaylists });
+      if (!content) {
+        showNotification("还没有收藏或歌单可以导出");
+        return;
+      }
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        title: "导出收藏与歌单",
+        defaultPath: "seraph-personal-data.json",
+        filters: [{ name: "Seraph 个人数据", extensions: ["json"] }],
+      });
+      if (!target) return;
+      await invoke("export_app_config", { path: target, content });
+      showNotification("收藏与歌单已导出");
+    } catch (err) {
+      console.warn("export personal data failed", err);
+      showNotification(`导出收藏与歌单失败：${normalizeIpcError(err).message}`, "error");
+    }
+  };
+
+  const importPersonalData = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        multiple: false,
+        title: "导入收藏与歌单",
+        filters: [{ name: "Seraph 个人数据", extensions: ["json"] }],
+      });
+      if (typeof selected !== "string" || !selected.trim()) return;
+      const text = await invoke<string>("import_app_config", { path: selected });
+      const imported = parsePersonalDataImport(text);
+      // 读文件期间用户可能又改了收藏：合并时取最新状态，只追加不覆盖。
+      const { liked, likedAt, userPlaylists } = usePlayerStore.getState();
+      const merged = mergePersonalData({ liked, likedAt, userPlaylists }, imported);
+      usePlayerStore.setState({
+        liked: merged.liked,
+        likedAt: merged.likedAt,
+        userPlaylists: merged.userPlaylists,
+      });
       showNotification(
-        `导入配置失败：${err instanceof Error ? err.message : String(err)}`
+        `已合并：新增收藏 ${merged.addedLikes} 首、新增歌单 ${merged.addedPlaylists} 张、补全歌单 ${merged.mergedPlaylists} 张`
       );
+    } catch (err) {
+      console.warn("import personal data failed", err);
+      showNotification(`导入收藏与歌单失败：${normalizeIpcError(err).message}`, "error");
     }
   };
 
@@ -662,6 +718,32 @@ export function SettingsModal() {
               className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink hover:text-ink"
             >
               导入配置…
+            </button>
+          </div>
+        </div>
+        <div className="border-[1.5px] border-line bg-card p-3 space-y-2">
+          <h4 className="font-serif text-xs font-semibold text-ink">
+            收藏与歌单 · 导出 / 导入
+          </h4>
+          <p className="font-tw text-[10px] leading-relaxed text-ink2">
+            收藏和自建歌单只保存在本机的界面存储里，清理 WebView2 数据或重装系统
+            会丢失，建议定期导出备份。导入是合并：本机已有的收藏和歌单不会被删除
+            或覆盖。曲目按曲库里的 ID 对应，换了曲库路径的曲目需要重新收藏。
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void exportPersonalData()}
+              className="h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
+            >
+              导出收藏与歌单…
+            </button>
+            <button
+              type="button"
+              onClick={() => void importPersonalData()}
+              className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink hover:text-ink"
+            >
+              导入收藏与歌单…
             </button>
           </div>
         </div>

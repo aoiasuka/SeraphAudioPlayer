@@ -5,6 +5,11 @@ import { createLibraryActions } from "./player/libraryActions";
 import { createLyricsActions } from "./player/lyricsActions";
 import { createOutputActions } from "./player/outputActions";
 import { createPlaybackActions } from "./player/playbackActions";
+import {
+  sanitizeLiked,
+  sanitizeLikedAt,
+  sanitizeUserPlaylists,
+} from "./player/personalData";
 import { createPlayerPersistStorage } from "./player/persistStorage";
 import { createStreamingActions } from "./player/streamingActions";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
@@ -16,7 +21,7 @@ import {
   normalizeAmllTtmlDbUrl,
   sanitizeLyricsSourcePriority,
 } from "@/lib/lyrics/settings";
-import type { DriverKind, LibraryView, UserPlaylist } from "@/types/track";
+import type { DriverKind, LibraryView } from "@/types/track";
 
 export type {
   BilibiliBatchImportResult,
@@ -52,53 +57,12 @@ function stringArray(value: unknown) {
     : [];
 }
 
-function booleanRecord(value: unknown) {
-  const record = asRecord(value);
-  return Object.fromEntries(
-    Object.entries(record).filter((entry): entry is [string, boolean] => (
-      typeof entry[1] === "boolean"
-    ))
-  );
-}
-
-function finiteNumberRecord(value: unknown) {
-  const record = asRecord(value);
-  return Object.fromEntries(
-    Object.entries(record).filter((entry): entry is [string, number] => (
-      typeof entry[1] === "number" && Number.isFinite(entry[1])
-    ))
-  );
-}
-
 function finiteNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function clampVolume(value: unknown, fallback: number) {
   return Math.max(0, Math.min(1, finiteNumber(value, fallback)));
-}
-
-/**
- * W-03:歌单元素级消毒。原先只做数组级校验(`Array.isArray ? value : []`),
- * localStorage 被改坏(或导入了畸形配置)时,元素可能是 null / 缺 trackIds,
- * 渲染期 `item.trackIds.includes(...)` 直接 TypeError 白屏。
- * 逐字段校验并丢弃不合规元素——歌单少一条,好过整个页面崩掉。
- */
-function sanitizeUserPlaylists(value: unknown): UserPlaylist[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item): UserPlaylist[] => {
-    if (!item || typeof item !== "object") return [];
-    const raw = item as Record<string, unknown>;
-    if (typeof raw.id !== "string" || !raw.id) return [];
-    return [
-      {
-        id: raw.id,
-        name: typeof raw.name === "string" ? raw.name : "未命名歌单",
-        trackIds: stringArray(raw.trackIds),
-        createdAt: finiteNumber(raw.createdAt, 0),
-      },
-    ];
-  });
 }
 
 function migrateDriver(value: unknown): DriverKind {
@@ -143,9 +107,9 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     previousVolume: clampVolume(state.previousVolume, 0.7),
     shuffleMode: state.shuffleMode === true,
     loopMode: state.loopMode === true,
-    liked: booleanRecord(state.liked),
+    liked: sanitizeLiked(state.liked),
     // 旧存档没有收藏时间：留空，「我喜欢」里这些曲目按曲库顺序排在后面
-    likedAt: finiteNumberRecord(state.likedAt),
+    likedAt: sanitizeLikedAt(state.likedAt),
     userPlaylists: sanitizeUserPlaylists(state.userPlaylists),
     currentDeviceId:
       typeof state.currentDeviceId === "string" && state.currentDeviceId.trim()
