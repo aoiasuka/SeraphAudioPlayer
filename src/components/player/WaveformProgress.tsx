@@ -5,6 +5,9 @@ import { usePlayerStore } from "@/store/player";
 import { useWaveform, WAVEFORM_SIDE_PADDING } from "@/hooks/useWaveform";
 import { useImmersiveStore } from "@/store/immersive";
 
+const KEY_STEP_SECONDS = 5;
+const KEY_PAGE_SECONDS = 30;
+
 export function WaveformProgress() {
   const immersiveOpen = useImmersiveStore((s) => s.isOpen);
   const track = usePlayerStore((s) => s.currentTrack());
@@ -57,6 +60,25 @@ export function WaveformProgress() {
   if (!track) return null;
 
   const canSeek = track.duration > 0;
+  // FE-03：左右方向键步进 5 秒，PageUp / PageDown 步进 30 秒，Home / End 跳首尾。
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!canSeek) return;
+    const steps: Record<string, number> = {
+      ArrowLeft: -KEY_STEP_SECONDS,
+      ArrowDown: -KEY_STEP_SECONDS,
+      ArrowRight: KEY_STEP_SECONDS,
+      ArrowUp: KEY_STEP_SECONDS,
+      PageDown: -KEY_PAGE_SECONDS,
+      PageUp: KEY_PAGE_SECONDS,
+    };
+    let target: number;
+    if (e.key === "Home") target = 0;
+    else if (e.key === "End") target = track.duration;
+    else if (e.key in steps) target = currentTime + steps[e.key];
+    else return;
+    e.preventDefault();
+    seek(Math.max(0, Math.min(track.duration, target)));
+  };
   const currentLabel = formatSeconds(displayTime);
   const durationLabel = canSeek ? formatSeconds(track.duration) : "--:--";
 
@@ -64,10 +86,16 @@ export function WaveformProgress() {
     <div className="w-full pt-3">
       <div
         className="group grid h-11 w-full grid-cols-[52px_minmax(0,1fr)_52px] items-center gap-3 border-[1.5px] border-ink bg-paper2 px-3 transition-all"
-        role="progressbar"
+        role="slider"
+        aria-label="播放进度"
+        aria-orientation="horizontal"
+        tabIndex={canSeek ? 0 : -1}
+        aria-disabled={!canSeek}
         aria-valuemin={0}
         aria-valuemax={track.duration || 0}
         aria-valuenow={Math.min(displayTime, track.duration || 0)}
+        aria-valuetext={`${currentLabel} / ${durationLabel}`}
+        onKeyDown={onKeyDown}
       >
         <span className="px-1 text-center font-tw text-[11px] font-bold tabular-nums text-ink2">
           {currentLabel}
