@@ -140,7 +140,15 @@ fn expand_template(template: &str, dir: &str, id: &str) -> String {
         .replace("%s", id)
 }
 
+/// 预设与自定义模式的重定向策略不同，各缓存一个 client（LYR-04）。
 pub(crate) fn amll_client(custom: bool) -> Result<Client, String> {
+    static PRESET: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    static CUSTOM: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    let cell = if custom { &CUSTOM } else { &PRESET };
+    super::online_lyrics::cached_client(cell, || build_amll_client(custom))
+}
+
+fn build_amll_client(custom: bool) -> Result<Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("SeraphAudioPlayer"));
     let redirect = if custom {
@@ -310,6 +318,11 @@ struct ApiGetData {
 }
 
 pub(crate) fn amll_api_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    super::online_lyrics::cached_client(&CLIENT, build_amll_api_client)
+}
+
+fn build_amll_api_client() -> Result<Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("SeraphAudioPlayer"));
     Client::builder()

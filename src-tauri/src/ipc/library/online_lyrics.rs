@@ -8,7 +8,26 @@ pub(crate) fn online_lyrics_query(title: &str, artist: &str) -> String {
         .join(" ")
 }
 
+/// LYR-04：进程内复用同一个 client。`reqwest::Client` 内部是 `Arc`，克隆只加引用计数；
+/// 每次调用都重建的话，TLS 配置要重新初始化，连接池也无法跨调用复用——而歌词查找
+/// 是切歌时的高频路径。构建失败不缓存，下次调用重试。
+pub(crate) fn cached_client(
+    cell: &'static std::sync::OnceLock<Client>,
+    build: impl FnOnce() -> Result<Client, String>,
+) -> Result<Client, String> {
+    if let Some(client) = cell.get() {
+        return Ok(client.clone());
+    }
+    let built = build()?;
+    Ok(cell.get_or_init(|| built).clone())
+}
+
 pub(crate) fn online_lyrics_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    cached_client(&CLIENT, build_online_lyrics_client)
+}
+
+fn build_online_lyrics_client() -> Result<Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -58,6 +77,20 @@ impl LyricsSourcePriority {
     }
 }
 
+/// LYR-02：单个歌词源的总时限。源内是「搜索 + 逐个候选取词」的串行请求，client
+/// 单次超时 12 秒，半死不活的源最坏要等一分钟以上，期间候选列表一直出不来。
+/// 超时的源按失败计，其它源的候选照常返回。
+const LYRICS_SOURCE_DEADLINE: Duration = Duration::from_secs(15);
+
+async fn within_deadline<T>(
+    deadline: Duration,
+    request: impl std::future::Future<Output = Result<T, ()>>,
+) -> Result<T, ()> {
+    tokio::time::timeout(deadline, request)
+        .await
+        .unwrap_or(Err(()))
+}
+
 /// `title` / `artist` 分开传：网易云与 QQ 用 `online_lyrics_query` 拼成一句，酷狗歌词搜索
 /// 对关键词格式敏感，另走 `kugou_lyrics_keyword`（手动搜索时前端把整句放在 title、artist 传空）。
 pub(crate) async fn fetch_online_lyrics_from_sources(
@@ -70,9 +103,18 @@ pub(crate) async fn fetch_online_lyrics_from_sources(
     let query = online_lyrics_query(title, artist);
     // 三源并发：此前串行 await，半死接口的超时会逐源叠加（最坏数分钟）
     let (netease, kugou, qq) = tokio::join!(
-        fetch_netease_lyrics(client, &query, duration),
-        fetch_kugou_lyrics(client, title, artist, duration),
-        fetch_qq_lyrics(client, &query, duration),
+        within_deadline(
+            LYRICS_SOURCE_DEADLINE,
+            fetch_netease_lyrics(client, &query, duration)
+        ),
+        within_deadline(
+            LYRICS_SOURCE_DEADLINE,
+            fetch_kugou_lyrics(client, title, artist, duration)
+        ),
+        within_deadline(
+            LYRICS_SOURCE_DEADLINE,
+            fetch_qq_lyrics(client, &query, duration)
+        ),
     );
     let mut ordered = vec![
         (LyricsSourcePriority::Netease, netease),
@@ -1150,5 +1192,22 @@ mod tests {
         assert_eq!(texts(&lines), ["hello", "world"]);
         assert!(lines.iter().all(|line| line.roman.is_none()));
         assert!(parse_qq_play_lyric_payload(&json!({ "lyric": "" })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lyr02_slow_source_counts_as_failed_and_fast_source_is_kept() {
+        let slow = within_deadline(Duration::from_millis(40), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, ()>(1)
+        });
+        let fast = within_deadline(Duration::from_millis(40), async { Ok::<_, ()>(2) });
+        let (slow, fast) = tokio::join!(slow, fast);
+        assert_eq!(slow, Err(()));
+        assert_eq!(fast, Ok(2));
     }
 }
