@@ -254,7 +254,16 @@ fn cover_to_uri(cover: &str, covers_dir: Option<&Path>) -> Option<String> {
 
 /// 媒体键事件 → 播放控制。走与 IPC 命令相同的 AppState 路径，
 /// 引擎随后发布的 PlayerEvent 自然同步前端 UI 与 SMTC 显示。
+///
+/// SYS-01：回调由 WinRT 在系统线程上触发，而播放命令要同步等引擎回执（打开文件
+/// 几百毫秒，引擎无响应时最长 30 秒）。与任务栏缩略图按钮一样投递到阻塞线程池，
+/// 回调立即返回；动作的先后顺序仍由 `playback_control` 门闩串行化。
 fn handle_media_event(app: &AppHandle, event: MediaControlEvent) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || run_media_event(&app, event));
+}
+
+fn run_media_event(app: &AppHandle, event: MediaControlEvent) {
     let state = app.state::<AppState>();
     let result: Result<(), String> = match event {
         MediaControlEvent::Play => smtc_play(&state),

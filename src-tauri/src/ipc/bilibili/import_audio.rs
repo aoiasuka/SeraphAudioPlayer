@@ -63,7 +63,21 @@ pub(crate) async fn import_bilibili_audio_inner(
     )
     .await?;
     cancellation.check()?;
-    let track = track_from_resolved_audio(&resolved, &final_path, ffmpeg_path.is_some())?;
+    // BILI-02：落盘后读一次真实的采样率与声道数（此前写死 Unknown / Stereo，
+    // 杜比 5.1 也显示成 Stereo）。探测要打开并解析文件，放到阻塞线程；失败不影响导入。
+    let probe_path = final_path.clone();
+    let probed = tauri::async_runtime::spawn_blocking(move || {
+        seraph_decoder::probe_stream_info(&probe_path).ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    let track = track_from_resolved_audio(
+        &resolved,
+        &final_path,
+        ffmpeg_path.is_some(),
+        probed.as_ref(),
+    )?;
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
     // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
     let app_for_merge = app.clone();
@@ -498,7 +512,14 @@ pub(crate) async fn ensure_audio_file(
                     Ok(final_path) => {
                         // 写一个零字节 sentinel 标记缓存完整可用；
                         // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
-                        let _ = fs::write(ok_sentinel_path(&final_path), b"");
+                        // BILI-04：写失败时文件本身可用，但下次导入会因缺少标记重新下载，
+                        // 留一条日志方便定位「为什么每次都重下」。
+                        if let Err(err) = fs::write(ok_sentinel_path(&final_path), b"") {
+                            tracing::warn!(
+                                "failed to write cache completion marker for {}: {err}",
+                                final_path.display()
+                            );
+                        }
                         return Ok(final_path);
                     }
                     Err(err) => {
@@ -818,6 +839,7 @@ pub(crate) fn track_from_resolved_audio(
     resolved: &ResolvedAudio,
     path: &Path,
     remuxed: bool,
+    probed: Option<&seraph_decoder::StreamInfo>,
 ) -> Result<ImportedTrack, String> {
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed to read cached audio metadata: {err}"))?;
@@ -844,9 +866,18 @@ pub(crate) fn track_from_resolved_audio(
         cover: resolved.video.pic.clone().unwrap_or_default(),
         format: format.clone(),
         bitdepth: format_bilibili_quality(&format, bitrate, &resolved.stream.kind, remuxed),
-        sample_rate: "Unknown".into(),
+        sample_rate: crate::ipc::library::format_sample_rate(
+            &format,
+            probed.map(|info| info.sample_rate.0),
+        ),
         bitrate: format_bitrate(bitrate),
-        channels: "Stereo".into(),
+        // 探测不到时沿用旧默认值 Stereo（B 站普通流都是双声道）
+        channels: match probed.map(|info| info.channels.0) {
+            Some(count) if count > 0 => {
+                crate::ipc::library::format_channels(Some(count.min(u16::from(u8::MAX)) as u8))
+            }
+            _ => "Stereo".into(),
+        },
         size: format_file_size(metadata.len()),
         path: path.to_string_lossy().to_string(),
         source_url: Some(format!(
