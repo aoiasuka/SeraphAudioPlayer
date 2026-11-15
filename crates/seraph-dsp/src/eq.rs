@@ -5,6 +5,10 @@
 //! （数值稳定、每样本只需两个状态寄存器）。逐声道保存独立状态，
 //! 频段串联即整条 EQ 响应。
 //!
+//! DSP-02：系数与状态寄存器一律 `f64`，只在进出时与 `f32` 样本转换。低频高 Q 的
+//! 频段在高采样率下极点紧贴单位圆（192 kHz 下 30 Hz、Q 8 时 `1 − |p|` 约 6×10⁻⁵），
+//! `f32` 系数的舍入会让实际响应偏离设计值并抬高量化噪声。
+//!
 //! 位置：运行在解码线程（非实时回调），允许在 settings 变化时重算系数。
 
 use serde::{Deserialize, Serialize};
@@ -70,11 +74,11 @@ impl Default for EqBand {
 /// TDF-II biquad 系数（a0 已归一化为 1）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BiquadCoeffs {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
 }
 
 impl BiquadCoeffs {
@@ -92,17 +96,18 @@ impl BiquadCoeffs {
     /// 按 RBJ Audio EQ Cookbook 计算系数。
     /// 频率钳制到 (0, nyquist)，Q 与增益做兜底，避免除零 / NaN 渗入音频。
     fn design(band: &EqBand, sample_rate: f32) -> Self {
+        let sample_rate = f64::from(sample_rate);
         let nyquist = sample_rate * 0.5;
         // 坑 3：频率必须严格小于 nyquist，否则 tan/cos 在边界发散产生 NaN。
         // L-5（2026-08-16 审查）：clamp 上界先兜底到不小于下界——f32::clamp 在
         // min > max 时 panic，这是 pub API，退化采样率不该炸掉调用方。
         let freq_hi = (nyquist - 1.0).max(1.0);
-        let freq = band.freq.clamp(1.0, freq_hi).max(1.0);
+        let freq = f64::from(band.freq).clamp(1.0, freq_hi).max(1.0);
         if freq >= nyquist {
             return Self::identity();
         }
         let q = if band.q.is_finite() && band.q > 1.0e-3 {
-            band.q
+            f64::from(band.q)
         } else {
             0.707
         };
@@ -110,13 +115,13 @@ impl BiquadCoeffs {
         // 只查 is_finite 挡不住 1e30 dB 这类有限极端值——10^(g/40) 溢出为 Inf
         // 后系数进入滤波器，输出 NaN/Inf 直达 DAC（F32 渲染路径 clamp 传播 NaN）。
         let gain_db = if band.gain.is_finite() {
-            band.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB)
+            f64::from(band.gain.clamp(-MAX_EQ_GAIN_DB, MAX_EQ_GAIN_DB))
         } else {
             0.0
         };
 
-        let a = 10.0_f32.powf(gain_db / 40.0); // sqrt(线性增益)
-        let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate;
+        let a = 10.0_f64.powf(gain_db / 40.0); // sqrt(线性增益)
+        let w0 = 2.0 * std::f64::consts::PI * freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
         let alpha = sin_w0 / (2.0 * q);
@@ -176,7 +181,7 @@ impl BiquadCoeffs {
             }
         };
 
-        if a0.abs() < f32::EPSILON {
+        if a0.abs() < f64::EPSILON {
             return Self::identity();
         }
         let designed = Self {
@@ -207,30 +212,20 @@ impl BiquadCoeffs {
     /// 复频响幅值（用于前端曲线；此处仅测试用）。
     #[cfg(test)]
     fn magnitude_db(&self, freq: f32, sample_rate: f32) -> f32 {
-        let w = 2.0 * std::f32::consts::PI * freq / sample_rate;
-        let (cos1, sin1) = (w.cos(), w.sin());
-        let (cos2, sin2) = ((2.0 * w).cos(), (2.0 * w).sin());
-        // 分子 b0 + b1 z^-1 + b2 z^-2
-        let num_re = self.b0 + self.b1 * cos1 + self.b2 * cos2;
-        let num_im = -(self.b1 * sin1 + self.b2 * sin2);
-        let den_re = 1.0 + self.a1 * cos1 + self.a2 * cos2;
-        let den_im = -(self.a1 * sin1 + self.a2 * sin2);
-        let num = (num_re * num_re + num_im * num_im).sqrt();
-        let den = (den_re * den_re + den_im * den_im).sqrt();
-        20.0 * (num / den.max(1.0e-12)).log10()
+        coeffs_magnitude_db(self, freq, sample_rate)
     }
 }
 
 /// 单声道 biquad 运行状态（TDF-II 两个寄存器）。
 #[derive(Debug, Clone, Copy, Default)]
 struct BiquadState {
-    z1: f32,
-    z2: f32,
+    z1: f64,
+    z2: f64,
 }
 
 impl BiquadState {
     #[inline]
-    fn process(&mut self, coeffs: &BiquadCoeffs, input: f32) -> f32 {
+    fn process(&mut self, coeffs: &BiquadCoeffs, input: f64) -> f64 {
         // Transposed Direct Form II
         let output = coeffs.b0 * input + self.z1;
         self.z1 = coeffs.b1 * input - coeffs.a1 * output + self.z2;
@@ -258,7 +253,7 @@ impl ChannelEq {
     }
 
     #[inline]
-    fn process(&mut self, coeffs: &[BiquadCoeffs], input: f32) -> f32 {
+    fn process(&mut self, coeffs: &[BiquadCoeffs], input: f64) -> f64 {
         let mut sample = input;
         for (state, coeff) in self.states.iter_mut().zip(coeffs.iter()) {
             sample = state.process(coeff, sample);
@@ -327,11 +322,14 @@ impl Equalizer {
         let identity = self.coeffs.is_empty();
         for frame in samples.chunks_mut(channels) {
             for (channel_index, sample) in frame.iter_mut().enumerate() {
-                let mut value = *sample * self.preamp_gain;
-                if !identity {
-                    value = self.channels[channel_index].process(&self.coeffs, value);
-                }
-                *sample = value;
+                // 没有频段时只做预放大，保持单精度（0 dB 时逐位直通）；
+                // 有频段时整条级联在 f64 里算，末尾才舍回 f32。
+                *sample = if identity {
+                    *sample * self.preamp_gain
+                } else {
+                    let scaled = f64::from(*sample) * f64::from(self.preamp_gain);
+                    self.channels[channel_index].process(&self.coeffs, scaled) as f32
+                };
             }
         }
     }
@@ -360,7 +358,7 @@ pub fn combined_response_db(preamp_db: f32, bands: &[EqBand], freq: f32, sample_
 }
 
 fn coeffs_magnitude_db(coeffs: &BiquadCoeffs, freq: f32, sample_rate: f32) -> f32 {
-    let w = 2.0 * std::f32::consts::PI * freq / sample_rate.max(1.0);
+    let w = 2.0 * std::f64::consts::PI * f64::from(freq) / f64::from(sample_rate.max(1.0));
     let (cos1, sin1) = (w.cos(), w.sin());
     let (cos2, sin2) = ((2.0 * w).cos(), (2.0 * w).sin());
     let num_re = coeffs.b0 + coeffs.b1 * cos1 + coeffs.b2 * cos2;
@@ -369,7 +367,7 @@ fn coeffs_magnitude_db(coeffs: &BiquadCoeffs, freq: f32, sample_rate: f32) -> f3
     let den_im = -(coeffs.a1 * sin1 + coeffs.a2 * sin2);
     let num = (num_re * num_re + num_im * num_im).sqrt();
     let den = (den_re * den_re + den_im * den_im).sqrt();
-    20.0 * (num / den.max(1.0e-12)).log10()
+    (20.0 * (num / den.max(1.0e-12)).log10()) as f32
 }
 
 #[cfg(test)]
@@ -510,6 +508,37 @@ mod tests {
             .collect();
         eq.process_interleaved(&mut samples, 2);
         assert!(samples.iter().all(|s| s.is_finite() && s.abs() < 50.0));
+    }
+
+    /// DSP-02：192 kHz 下 30 Hz、Q 8、+12 dB 的峰化——实测中心增益要贴合设计值。
+    /// 单精度系数在这里的偏差是 0.1 dB 量级，双精度应在 0.01 dB 以内。
+    #[test]
+    fn dsp02_low_frequency_high_q_band_matches_design_at_high_sample_rate() {
+        let rate = 192_000.0_f32;
+        let band = peaking(30.0, 12.0, 8.0);
+        let coeffs = BiquadCoeffs::design(&band, rate);
+        // 极点半径紧贴单位圆：f32 表示不了 a2 与 1 的差的有效数字
+        assert!(coeffs.a2 < 1.0 && 1.0 - coeffs.a2 < 1.0e-3);
+        assert_ne!(coeffs.a2, f64::from(coeffs.a2 as f32));
+
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[band], rate, 1);
+        // 30 Hz 正弦跑 8 秒，量最后 1 秒（整 30 个周期）的 RMS
+        let total = 192_000 * 8;
+        let mut samples: Vec<f32> = (0..total)
+            .map(|n| {
+                (0.1 * (2.0 * std::f64::consts::PI * 30.0 * n as f64 / 192_000.0).sin()) as f32
+            })
+            .collect();
+        eq.process_interleaved(&mut samples, 1);
+        let tail = &samples[total - 192_000..];
+        let rms =
+            (tail.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / tail.len() as f64).sqrt();
+        let measured_db = 20.0 * (rms / (0.1 / std::f64::consts::SQRT_2)).log10();
+        assert!(
+            (measured_db - 12.0).abs() < 0.01,
+            "measured {measured_db} dB"
+        );
     }
 
     #[test]
