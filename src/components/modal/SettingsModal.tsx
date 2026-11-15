@@ -374,7 +374,7 @@ export function SettingsModal() {
                 当前输出设备
               </h4>
               <p className="font-tw text-[10px] text-ink2">
-                {currentDevice?.name ?? currentDeviceId}
+                {currentDevice?.name ?? (currentDeviceId || "正在读取设备…")}
               </p>
             </div>
             <button

@@ -299,3 +299,76 @@
   cursor: pointer;
 }
 
+/* ---- 启动画面（FE-05：纯 CSS 动画，不再依赖 framer-motion）---- */
+.splash-root {
+  transition: opacity 350ms ease-in-out, filter 350ms ease-in-out, transform 350ms ease-in-out;
+}
+.splash-root.is-leaving {
+  opacity: 0;
+  filter: blur(12px);
+  transform: scale(1.05);
+  pointer-events: none;
+}
+@keyframes splash-wave {
+  from { transform: scale(0.8); opacity: 0.6; }
+  to { transform: scale(1.5); opacity: 0; }
+}
+.splash-wave {
+  opacity: 0;
+  animation: splash-wave 2s ease-out infinite;
+}
+@keyframes splash-vinyl-in {
+  0% { transform: scale(0) rotate(-180deg); }
+  70% { transform: scale(1.06) rotate(8deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+.splash-vinyl-in {
+  animation: splash-vinyl-in 1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes splash-spin {
+  to { transform: rotate(360deg); }
+}
+.splash-vinyl-spin {
+  animation: splash-spin 2.5s linear infinite;
+}
+@keyframes splash-tonearm {
+  from { transform: rotate(-35deg); opacity: 0; }
+  to { transform: rotate(12deg); opacity: 1; }
+}
+.splash-tonearm {
+  animation: splash-tonearm 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
+}
+@keyframes splash-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.splash-fade {
+  animation: splash-fade 1s ease-out both;
+}
+@keyframes splash-letter {
+  from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+.splash-letter {
+  animation: splash-letter 0.6s ease-out both;
+}
+@keyframes splash-rule {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.splash-rule {
+  animation: splash-rule 0.8s ease-in-out 1.4s both;
+}
+
+/* 减弱动态效果（FE-08）：位移 / 缩放 / 旋转关闭，只保留淡入淡出 */
+@media (prefers-reduced-motion: reduce) {
+  .splash-root.is-leaving { filter: none; transform: none; }
+  .splash-wave { animation: none; }
+  .splash-vinyl-in,
+  .splash-vinyl-spin,
+  .splash-rule { animation: none; transform: none; }
+  .splash-tonearm { animation: splash-fade 0.6s ease-out 0.4s both; transform: rotate(12deg); }
+  .splash-letter { animation-name: splash-fade; }
+  .animate-spin-slow { animation: none; }
+  .type-caret::after { animation: none; }
+}

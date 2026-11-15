@@ -253,7 +253,7 @@ describe("player store startup and persistence", () => {
     expect(migrated.previousVolume).toBe(0.7);
     expect(migrated.liked).toEqual({ a: true });
     expect(migrated.userPlaylists).toEqual([]);
-    expect(migrated.currentDeviceId).toBe("wasapi:hd-dac1");
+    expect(migrated.currentDeviceId).toBe("");
     expect(migrated.driverKind).toBe("wasapi");
     expect(migrated.activeView).toBe("local");
     // v3：旧状态无 rememberPlayback 字段时默认开启（保持既有恢复行为）

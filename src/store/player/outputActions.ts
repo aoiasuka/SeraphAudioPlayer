@@ -1,4 +1,3 @@
-import { mockDevices } from "@/data/mock-playlist";
 import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
 import type { OutputDevice, Track } from "@/types/track";
 import { sendCommand, sendCommandAsync } from "./commands";
@@ -23,7 +22,7 @@ async function applyOutputConfiguration(
     if (!isStillCurrent()) return false;
     if (!configurationUnchanged()) continue;
     const selectedDevice =
-      devices !== mockDevices ? findDeviceByCurrentId(devices, currentDeviceId) : undefined;
+      devices.length > 0 && currentDeviceId ? findDeviceByCurrentId(devices, currentDeviceId) : undefined;
     if (selectedDevice) {
       if (selectedDevice.id !== currentDeviceId) {
         currentDeviceId = selectedDevice.id;

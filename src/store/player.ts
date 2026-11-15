@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { mockDevices } from "@/data/mock-playlist";
 import { createBilibiliActions } from "./player/bilibiliActions";
 import { createLibraryActions } from "./player/libraryActions";
 import { createLyricsActions } from "./player/lyricsActions";
@@ -151,7 +150,7 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     currentDeviceId:
       typeof state.currentDeviceId === "string" && state.currentDeviceId.trim()
         ? state.currentDeviceId
-        : "wasapi:hd-dac1",
+        : "",
     driverKind: migrateDriver(state.driverKind),
     activeView: migrateView(state.activeView),
     // 旧版本无此字段时默认启用（与既有行为一致）
@@ -218,8 +217,10 @@ export const usePlayerStore = create<PlayerStore>()(
         liked: {},
         likedAt: {},
         userPlaylists: [],
-        devices: mockDevices,
-        currentDeviceId: "wasapi:hd-dac1",
+        // FE2-03：设备枚举完成前是空列表和空 ID（此前是一份演示设备，
+        // 首次启动时设备菜单会短暂显示不存在的设备）。空 ID = 跟随系统默认设备。
+        devices: [],
+        currentDeviceId: "",
         // 默认使用系统共享输出（兼容性最高，适合普通扬声器/蓝牙），
         // 已选过其它 driver 的老用户仍从持久化状态恢复自己的选择。
         driverKind: "direct",

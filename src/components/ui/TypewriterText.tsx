@@ -9,6 +9,14 @@ import { useEffect, useMemo, useState } from "react";
  */
 const MAX_TYPEWRITER_CHARS = 512;
 
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 /**
  * 打字机逐字显示文本(歌词当前行的签名效果),尾随 `.type-caret` 光标。
  * 从 LyricsPanel 提炼,主窗口歌词稿与任务栏歌词条共用。
@@ -16,7 +24,8 @@ const MAX_TYPEWRITER_CHARS = 512;
 export function TypewriterText({ text }: { text: string }) {
   const [displayedLength, setDisplayedLength] = useState(0);
   // 超长文本退化为静态显示:动画本身才是卡死根源,不是渲染
-  const animated = text.length <= MAX_TYPEWRITER_CHARS;
+  // 系统开启「减弱动态效果」时不逐字打出，直接整句显示（FE-08）
+  const animated = text.length <= MAX_TYPEWRITER_CHARS && !prefersReducedMotion();
   // 按码点切分：按 UTF-16 码元截取会把代理对（emoji、扩展区汉字）切成半个，动画中途闪乱码
   const chars = useMemo(() => (animated ? Array.from(text) : []), [text, animated]);
   const total = chars.length;
