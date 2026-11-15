@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useShallow } from "zustand/react/shallow";
 import { CloudDownload, Copy, Download, Loader2, Pin, PinOff, Search, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { KaraokeLine } from "@/components/lyrics/KaraokeLine";
@@ -27,7 +28,7 @@ import { cn } from "@/lib/utils";
 import { showContextMenu, type ContextMenuEntry } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { LyricGroup } from "@/lib/lyrics/activeLine";
-import type { LyricLine, OnlineLyricsCandidate } from "@/types/track";
+import type { LyricLine, LyricWord, OnlineLyricsCandidate } from "@/types/track";
 
 function formatCandidateDuration(duration?: number | null) {
   // 审2-R12：与 formatSeconds 同修——Infinity 会绕过 <=0 判断产生 "Infinity:NaN"
@@ -46,10 +47,20 @@ function lyricPreview(lyrics: LyricLine[]) {
     .join(" / ");
 }
 
+/** 活动行的逐字高亮：播放位置只在这里订阅，进度事件不再重渲染整篇歌词（FE-02）。 */
+function ActiveKaraokeLine(props: {
+  words: LyricWord[];
+  lineEndMs?: number;
+  sungColor?: string;
+  unsungColor?: string;
+}) {
+  const currentMs = usePlayerStore((s) => lyricsPositionMs(s.currentTime, s.outputLatency));
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  return <KaraokeLine {...props} currentMs={currentMs} playing={isPlaying} />;
+}
+
 export function LyricsPanel() {
   const track = usePlayerStore((s) => s.currentTrack());
-  // 歌词定位按可听位置（毫秒）：引擎进度减去输出延迟（进度条等仍用原始 currentTime）
-  const currentMs = usePlayerStore((s) => lyricsPositionMs(s.currentTime, s.outputLatency));
   const seek = usePlayerStore((s) => s.seek);
   const importLyricsForCurrentTrack = usePlayerStore(
     (s) => s.importLyricsForCurrentTrack
@@ -94,7 +105,6 @@ export function LyricsPanel() {
   const rawLyrics = useMemo(() => lyricLines(track), [track]);
   const showTranslation = usePlayerStore((s) => s.showLyricsTranslation);
   const showRoman = usePlayerStore((s) => s.showLyricsRoman);
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const ttmlLyricsEnabled = usePlayerStore((s) => s.ttmlLyricsEnabled);
   // 排除规则由后端打 hidden 标记：全量分组用于定位、可见分组用于渲染，
   // 被隐藏句的时间区间不并入上一句（该区间内不高亮任何行）。
@@ -114,17 +124,23 @@ export function LyricsPanel() {
 
   // 纯文本歌词只有合成的假时间轴：静态展示，不高亮、不跟随、不 seek（BUG-03）
   const unsynced = isUnsyncedLyrics(track);
-  const activeRange = useMemo(
-    () => (unsynced ? NO_ACTIVE_RANGE : activeVisibleRange(resolvedGroups, currentMs)),
-    [unsynced, resolvedGroups, currentMs]
-  );
+  // FE-02：面板不直接订阅播放位置。位置约每 250 ms 变一次，此前整个面板（几百行歌词）
+  // 跟着重渲染；现在三个选择器只在「活动句集合 / 主句 / 是否间奏」变化时才触发重渲染，
+  // 逐字高亮需要的连续位置由活动行自己订阅（ActiveKaraokeLine）。沉浸页是同一做法。
+  // 歌词定位按可听位置（毫秒）：引擎进度减去输出延迟（进度条等仍用原始 currentTime）。
+  const rangeAt = (s: { currentTime: number; outputLatency: number }) =>
+    unsynced
+      ? NO_ACTIVE_RANGE
+      : activeVisibleRange(resolvedGroups, lyricsPositionMs(s.currentTime, s.outputLatency));
   // 主句（滚动与逐字锚定）+ 仍在唱的更早句（对唱重叠 / 和声延续）一起高亮
-  const activeIdx = activeRange.primary;
-  const activeSet = useMemo(() => new Set(activeRange.active), [activeRange]);
+  const activeList = usePlayerStore(useShallow((s) => rangeAt(s).active));
+  const activeIdx = usePlayerStore((s) => rangeAt(s).primary);
+  const activeSet = useMemo(() => new Set(activeList), [activeList]);
   // 逐字来源带行结束时间：一句唱完且距下一句尚远时，当前句淡出（间奏）
-  const intermission = useMemo(
-    () => !unsynced && isInIntermission(resolvedGroups, activeIdx, currentMs),
-    [unsynced, resolvedGroups, activeIdx, currentMs]
+  const intermission = usePlayerStore(
+    (s) =>
+      !unsynced &&
+      isInIntermission(resolvedGroups, activeIdx, lyricsPositionMs(s.currentTime, s.outputLatency))
   );
 
   useLayoutEffect(() => {
@@ -528,12 +544,7 @@ export function LyricsPanel() {
                             >
                               {active && lineIdx === 0 && !credit ? (
                                 hasWordTiming(line) ? (
-                                  <KaraokeLine
-                                    words={line.words}
-                                    currentMs={currentMs}
-                                    playing={isPlaying}
-                                    lineEndMs={line.endMs}
-                                  />
+                                  <ActiveKaraokeLine words={line.words} lineEndMs={line.endMs} />
                                 ) : (
                                   <TypewriterText text={line.text} />
                                 )
@@ -576,10 +587,8 @@ export function LyricsPanel() {
                               )}
                             >
                               {active && hasWordTiming(line) ? (
-                                <KaraokeLine
+                                <ActiveKaraokeLine
                                   words={line.words}
-                                  currentMs={currentMs}
-                                  playing={isPlaying}
                                   lineEndMs={line.endMs}
                                   sungColor="var(--ink2)"
                                   unsungColor="rgba(43, 39, 34, 0.3)"
