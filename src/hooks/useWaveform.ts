@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { Track } from "@/types/track";
 
+/** 播放时呼吸动画的帧间隔（约 20 fps）。 */
+const ANIMATION_FRAME_MS = 48;
 const BAR_COUNT = 96;
 const SIDE_PADDING = 0;
 const CSS_HEIGHT = 32;
@@ -109,11 +111,21 @@ export function useWaveform(
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
+    let lastDrawAt = 0;
+
     function draw(time = 0) {
       if (cssWidth <= 0 || document.visibilityState === "hidden") {
         raf = 0;
         return;
       }
+      // FE-01：播放时的重绘只为一个幅度 ±6% 的呼吸动画，20 fps 足够；此前每帧（60 fps）
+      // 都重画 96 个圆角矩形。进度变化、拖拽等由 scheduleDraw 触发的重绘不受节流影响
+      // （它们把 lastDrawAt 归零）。
+      if (time - lastDrawAt < ANIMATION_FRAME_MS) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawAt = time;
 
       context.clearRect(0, 0, cssWidth, cssHeight);
 
@@ -182,6 +194,7 @@ export function useWaveform(
     }
 
     const scheduleDraw = () => {
+      lastDrawAt = 0;
       cancelAnimationFrame(raf);
       raf = document.visibilityState === "hidden" ? 0 : requestAnimationFrame(draw);
     };
