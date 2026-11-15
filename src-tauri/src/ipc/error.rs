@@ -26,6 +26,16 @@ pub enum IpcErrorCode {
     Io,
     /// 网络请求失败（在线歌词/封面/更新检查）
     Network,
+    /// 队列增量同步的版本对不上（后端重启 / 队列被别的入口改写），前端应重发完整队列
+    QueueRevisionMismatch,
+    /// 上游拒绝访问（401 / 403）：需要登录或内容受限
+    AuthRequired,
+    /// 上游资源不存在（404）：链接已失效
+    LinkExpired,
+    /// 请求超时
+    Timeout,
+    /// 视频没有可用的音频流
+    NoAudioStream,
 }
 
 impl IpcErrorCode {
@@ -38,6 +48,11 @@ impl IpcErrorCode {
             IpcErrorCode::CacheCorrupt => "cache_corrupt",
             IpcErrorCode::Io => "io",
             IpcErrorCode::Network => "network",
+            IpcErrorCode::QueueRevisionMismatch => QUEUE_REVISION_MISMATCH,
+            IpcErrorCode::AuthRequired => "auth_required",
+            IpcErrorCode::LinkExpired => "link_expired",
+            IpcErrorCode::Timeout => "timeout",
+            IpcErrorCode::NoAudioStream => "no_audio_stream",
         }
     }
 }
@@ -77,12 +92,41 @@ impl IpcError {
 /// 此前文案在存储重构时改掉，这个码就再也不会产生（BUG-05）。
 pub(crate) const CACHE_CORRUPT_MARKER: &str = "曲库缓存损坏";
 
+/// 队列版本失配：`state.rs` 以这个字符串作为内部错误，命令边界映射为同名错误码。
+pub(crate) const QUEUE_REVISION_MISMATCH: &str = "queue_revision_mismatch";
+
+/// B 站命令的错误分类（BE-03 / FE3-01）：内部仍是 `Result<_, String>`，在命令边界按
+/// **后端自己生成的固定文案**归类成错误码，前端按码给中文提示，不再对任意消息做子串猜测
+/// （文件路径里带 `404`、标题里带 `BV` 都曾被误分类）。
+pub(crate) fn bilibili_error(message: String) -> IpcError {
+    let lower = message.to_ascii_lowercase();
+    let code = if lower.contains("no dash audio") || lower.contains("no usable audio") {
+        IpcErrorCode::NoAudioStream
+    } else if lower.contains("error (401") || lower.contains("error (403") {
+        IpcErrorCode::AuthRequired
+    } else if lower.contains("error (404") {
+        IpcErrorCode::LinkExpired
+    } else if lower.contains("timed out") || lower.contains("operation timeout") {
+        IpcErrorCode::Timeout
+    } else if message.contains("BV 号")
+        || message.contains("media_id")
+        || message.contains("二维码 key")
+    {
+        IpcErrorCode::InvalidInput
+    } else {
+        return IpcError::from(message);
+    };
+    IpcError::new(code, message)
+}
+
 /// 内部 `Result<_, String>` 在命令边界经 `?` 自动转为通用 Internal 错误。
 /// 需要具体错误码时在命令体内显式构造 [`IpcError`]。
 impl From<String> for IpcError {
     fn from(message: String) -> Self {
         let code = if message.starts_with(CACHE_CORRUPT_MARKER) {
             IpcErrorCode::CacheCorrupt
+        } else if message == QUEUE_REVISION_MISMATCH {
+            IpcErrorCode::QueueRevisionMismatch
         } else {
             IpcErrorCode::Internal
         };
@@ -127,6 +171,46 @@ mod tests {
     fn from_string_defaults_to_internal() {
         let err: IpcError = "something failed".to_string().into();
         assert_eq!(err.code, IpcErrorCode::Internal);
+    }
+
+    #[test]
+    fn queue_revision_mismatch_gets_its_own_code() {
+        let err: IpcError = QUEUE_REVISION_MISMATCH.to_string().into();
+        assert_eq!(err.code, IpcErrorCode::QueueRevisionMismatch);
+        assert_eq!(
+            serde_json::to_value(&err).unwrap()["code"],
+            "queue_revision_mismatch"
+        );
+    }
+
+    #[test]
+    fn bilibili_errors_are_classified_by_backend_generated_text() {
+        let code = |message: &str| bilibili_error(message.to_string()).code;
+        assert_eq!(
+            code("下载失败: HTTP status client error (403 Forbidden) for url (https://x)"),
+            IpcErrorCode::AuthRequired
+        );
+        assert_eq!(
+            code("HTTP status client error (404 Not Found) for url (https://x)"),
+            IpcErrorCode::LinkExpired
+        );
+        assert_eq!(
+            code("bilibili response has no dash audio streams"),
+            IpcErrorCode::NoAudioStream
+        );
+        assert_eq!(
+            code("error sending request: operation timed out"),
+            IpcErrorCode::Timeout
+        );
+        assert_eq!(
+            code("没有找到有效的 B 站 BV 号或视频链接"),
+            IpcErrorCode::InvalidInput
+        );
+        // 路径或标题里碰巧带数字 / BV 字样的普通失败不被误分类
+        assert_eq!(
+            code("写入 D:/cache/404/BV-live.m4a 失败: 磁盘已满"),
+            IpcErrorCode::Internal
+        );
     }
 
     #[test]

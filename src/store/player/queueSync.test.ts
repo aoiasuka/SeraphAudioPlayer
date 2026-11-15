@@ -125,7 +125,7 @@ describe("后端下一首预览", () => {
   it("后端版本失配时恢复完整快照，其他错误不盲目重试", async () => {
     await syncPlaybackQueue(get, set);
     set({ loopMode: true });
-    invokeMock.mockRejectedValueOnce("queue_revision_mismatch");
+    invokeMock.mockRejectedValueOnce({ code: "queue_revision_mismatch", message: "queue_revision_mismatch" });
     await syncPlaybackQueue(get, set);
     expect(invokeMock.mock.calls[1][1]).not.toHaveProperty("tracks");
     expect(invokeMock.mock.calls[2][1]?.tracks).toHaveLength(3);

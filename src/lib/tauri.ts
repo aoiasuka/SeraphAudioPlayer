@@ -163,7 +163,12 @@ export type IpcErrorCode =
   | "not_found"
   | "cache_corrupt"
   | "io"
-  | "network";
+  | "network"
+  | "queue_revision_mismatch"
+  | "auth_required"
+  | "link_expired"
+  | "timeout"
+  | "no_audio_stream";
 
 export interface IpcError {
   code: IpcErrorCode;

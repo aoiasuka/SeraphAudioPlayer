@@ -9,13 +9,14 @@ pub fn cancel_bilibili_favorites_import(task_id: Option<String>) {
     cancel_batch(task_id.as_deref());
 }
 
-#[tauri::command]
-pub async fn import_bilibili_audio(app: AppHandle, input: String) -> Result<ImportedTrack, String> {
-    import_bilibili_audio_with_options(app, input, None).await
+pub(crate) async fn import_bilibili_audio_inner_cmd(
+    app: AppHandle,
+    input: String,
+) -> Result<ImportedTrack, String> {
+    import_bilibili_audio_with_options_inner_cmd(app, input, None).await
 }
 
-#[tauri::command]
-pub async fn import_bilibili_audio_with_options(
+pub(crate) async fn import_bilibili_audio_with_options_inner_cmd(
     app: AppHandle,
     input: String,
     options: Option<BilibiliImportOptions>,
@@ -32,8 +33,7 @@ pub async fn import_bilibili_audio_with_options(
     .await
 }
 
-#[tauri::command]
-pub async fn import_bilibili_favorites(
+pub(crate) async fn import_bilibili_favorites_inner_cmd(
     app: AppHandle,
     input: String,
     options: Option<BilibiliImportOptions>,
@@ -136,8 +136,9 @@ pub async fn import_bilibili_favorites(
     })
 }
 
-#[tauri::command]
-pub async fn bilibili_login_qrcode(app: AppHandle) -> Result<BilibiliLoginQrCode, String> {
+pub(crate) async fn bilibili_login_qrcode_inner_cmd(
+    app: AppHandle,
+) -> Result<BilibiliLoginQrCode, String> {
     let client = bilibili_client_for_app(&app)?;
     let response = client
         .get(QR_GENERATE_API)
@@ -157,8 +158,7 @@ pub async fn bilibili_login_qrcode(app: AppHandle) -> Result<BilibiliLoginQrCode
     })
 }
 
-#[tauri::command]
-pub async fn bilibili_poll_login(
+pub(crate) async fn bilibili_poll_login_inner_cmd(
     app: AppHandle,
     qrcode_key: String,
 ) -> Result<BilibiliLoginPollResult, String> {
@@ -194,7 +194,7 @@ pub async fn bilibili_poll_login(
         .await
         .map_err(|err| format!("保存 B 站登录会话任务异常: {err}"))??;
 
-        let profile = bilibili_login_status(app.clone()).await?;
+        let profile = bilibili_login_status_inner_cmd(app.clone()).await?;
         return Ok(BilibiliLoginPollResult {
             code: api.code,
             message: api.message.unwrap_or_else(|| "登录成功".into()),
@@ -213,8 +213,9 @@ pub async fn bilibili_poll_login(
     })
 }
 
-#[tauri::command]
-pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus, String> {
+pub(crate) async fn bilibili_login_status_inner_cmd(
+    app: AppHandle,
+) -> Result<BilibiliLoginStatus, String> {
     // M-16：session 读取（文件 + Credential Manager）是同步 IO，挪出 tokio worker
     let app_for_load = app.clone();
     let session = tauri::async_runtime::spawn_blocking(move || load_session(&app_for_load))
@@ -300,8 +301,7 @@ pub async fn bilibili_login_status(app: AppHandle) -> Result<BilibiliLoginStatus
     })
 }
 
-#[tauri::command]
-pub fn bilibili_logout(app: AppHandle) -> Result<(), String> {
+pub(crate) fn bilibili_logout_inner_cmd(app: AppHandle) -> Result<(), String> {
     let path = session_path(&app)?;
     delete_secure_bilibili_cookies()?;
     if path.is_file() {
@@ -311,8 +311,9 @@ pub fn bilibili_logout(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn bilibili_ffmpeg_status(app: AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+pub(crate) fn bilibili_ffmpeg_status_inner_cmd(
+    app: AppHandle,
+) -> Result<BilibiliFfmpegStatus, String> {
     let path = find_ffmpeg(&app);
     Ok(BilibiliFfmpegStatus {
         available: path.is_some(),
@@ -323,8 +324,9 @@ pub fn bilibili_ffmpeg_status(app: AppHandle) -> Result<BilibiliFfmpegStatus, St
 /// 一键下载并安装 ffmpeg / ffprobe 到 `app_data_dir/ffmpeg`，使 EAC3 /
 /// 杜比全景声等 Symphonia 无法解码的格式可以走 ffmpeg fallback 播放。
 /// 下载进度通过 [`FFMPEG_DOWNLOAD_EVENT`] 实时推送给前端。
-#[tauri::command]
-pub async fn download_ffmpeg(app: AppHandle) -> Result<BilibiliFfmpegStatus, String> {
+pub(crate) async fn download_ffmpeg_inner_cmd(
+    app: AppHandle,
+) -> Result<BilibiliFfmpegStatus, String> {
     // 已经可用就直接返回，避免重复下载。
     if let Some(path) = find_ffmpeg(&app) {
         return Ok(BilibiliFfmpegStatus {
@@ -360,4 +362,91 @@ pub async fn download_ffmpeg(app: AppHandle) -> Result<BilibiliFfmpegStatus, Str
         ),
     }
     result
+}
+
+// ---- 命令边界（BE-03 / BE-04）----
+// 上面的 `*_inner_cmd` 保持 `Result<_, String>`；这里统一转成结构化错误（带错误码）。
+// 退出登录与 FFmpeg 探测有同步 IO（凭据管理器、删文件、逐个候选路径探测），
+// 同步命令会占住主线程，所以改成 async + 阻塞线程。
+
+use crate::ipc::error::{bilibili_error, IpcError, IpcResult};
+
+async fn blocking_command<T, F>(job: F) -> IpcResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|err| IpcError::from(format!("bilibili task panicked: {err}")))?
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn import_bilibili_audio(app: AppHandle, input: String) -> IpcResult<ImportedTrack> {
+    import_bilibili_audio_inner_cmd(app, input)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn import_bilibili_audio_with_options(
+    app: AppHandle,
+    input: String,
+    options: Option<BilibiliImportOptions>,
+) -> IpcResult<ImportedTrack> {
+    import_bilibili_audio_with_options_inner_cmd(app, input, options)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn import_bilibili_favorites(
+    app: AppHandle,
+    input: String,
+    options: Option<BilibiliImportOptions>,
+    task_id: Option<String>,
+) -> IpcResult<BilibiliBatchImportResult> {
+    import_bilibili_favorites_inner_cmd(app, input, options, task_id)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_login_qrcode(app: AppHandle) -> IpcResult<BilibiliLoginQrCode> {
+    bilibili_login_qrcode_inner_cmd(app)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_poll_login(
+    app: AppHandle,
+    qrcode_key: String,
+) -> IpcResult<BilibiliLoginPollResult> {
+    bilibili_poll_login_inner_cmd(app, qrcode_key)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_login_status(app: AppHandle) -> IpcResult<BilibiliLoginStatus> {
+    bilibili_login_status_inner_cmd(app)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_logout(app: AppHandle) -> IpcResult<()> {
+    blocking_command(move || bilibili_logout_inner_cmd(app)).await
+}
+
+#[tauri::command]
+pub async fn bilibili_ffmpeg_status(app: AppHandle) -> IpcResult<BilibiliFfmpegStatus> {
+    blocking_command(move || bilibili_ffmpeg_status_inner_cmd(app)).await
+}
+
+#[tauri::command]
+pub async fn download_ffmpeg(app: AppHandle) -> IpcResult<BilibiliFfmpegStatus> {
+    download_ffmpeg_inner_cmd(app).await.map_err(bilibili_error)
 }

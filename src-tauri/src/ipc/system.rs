@@ -10,13 +10,15 @@ use tauri::Manager;
 /// 唤起并聚焦主窗口（任务栏歌词条的 ⌂ 按钮）。
 /// async：窗口操作不占用主线程同步等待（同 set_taskbar_lyrics_enabled）。
 #[tauri::command]
-pub async fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn focus_main_window(app: tauri::AppHandle) -> IpcResult<()> {
     let Some(window) = app.get_webview_window("main") else {
-        return Err("主窗口不存在".into());
+        return Err(IpcError::not_found("主窗口不存在"));
     };
     let _ = window.unminimize();
     let _ = window.show();
-    window.set_focus().map_err(|err| err.to_string())
+    window
+        .set_focus()
+        .map_err(|err| IpcError::from(err.to_string()))
 }
 
 /// 校验待定位的文件路径：非空、绝对路径、且确实是一个存在的文件。

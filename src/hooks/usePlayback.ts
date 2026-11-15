@@ -200,6 +200,10 @@ export function usePlayback() {
       if (Date.now() - deviceLostAt < DEVICE_LOST_ERROR_WINDOW_MS && message.startsWith("device lost")) {
         return;
       }
+      // BE-03：播放命令失败时，命令的 reject（「播放失败：…」）和引擎的 Error 事件说的是同一件事。
+      // 正在显示的错误已经包含这条消息就不再弹一次。
+      const shown = usePlayerStore.getState().notification;
+      if (shown?.level === "error" && shown.text.includes(message)) return;
       usePlayerStore.getState().showNotification(message, "error");
     }
   }, []);

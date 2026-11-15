@@ -106,14 +106,9 @@ export function resetNextIndexCache() {
 }
 
 export function playbackErrorMessage(err: unknown) {
-  const message =
-    typeof err === "string"
-      ? err
-      : err instanceof Error
-        ? err.message
-        : "";
-
-  return message ? `播放失败：${message}` : "播放失败";
+  // 先归一化：命令 reject 的可能是字符串、Error，也可能是结构化的 { code, message }
+  const message = err == null ? "" : normalizeIpcError(err).message;
+  return message && message !== "[object Object]" ? `播放失败：${message}` : "播放失败";
 }
 
 function clampVolume(volume: number) {

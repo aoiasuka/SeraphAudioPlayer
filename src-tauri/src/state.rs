@@ -12,7 +12,7 @@ use std::{
 /// Tauri 全局应用状态。
 ///
 /// 真正实现音频功能后，这里会持有 `AudioEngine` / `Library` 等的句柄；
-/// 当前只暴露事件总线和状态机的占位。
+/// 持有音频引擎句柄、播放队列、播放状态与播控门闩。
 ///
 /// 所有字段都是 `Arc`/可克隆句柄，共享同一份底层状态；`Clone` 只复制句柄，
 /// 便于把 AppState 移入 `spawn_blocking`（H-1：让阻塞的播放命令离开主线程）。
@@ -153,7 +153,7 @@ impl AppState {
             )
         } else {
             Ok(self.sync_playback_queue(
-                tracks.ok_or("queue_revision_mismatch")?,
+                tracks.ok_or(crate::ipc::error::QUEUE_REVISION_MISMATCH)?,
                 current_track_index,
                 recent_track_ids,
                 shuffle_mode,
@@ -362,7 +362,7 @@ impl PlaybackQueue {
             if !self.sync_token.as_ref().is_some_and(|previous| {
                 previous.client_id == sync.client_id && previous.revision == sync.revision
             }) {
-                return Err("queue_revision_mismatch".into());
+                return Err(crate::ipc::error::QUEUE_REVISION_MISMATCH.into());
             }
             self.sync_selection(
                 current_track_index,

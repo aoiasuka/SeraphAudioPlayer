@@ -1,4 +1,4 @@
-import { invoke } from "@/lib/tauri";
+import { invoke, normalizeIpcError } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 import type { PlaybackQueuePreview, PlayScope, PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
@@ -133,7 +133,7 @@ export function syncPlaybackQueue(get: PlayerStoreGet, set: PlayerStoreSet): Pro
   request.promise = send(full)
     .catch((error: unknown) => {
       // 后端重启/旧客户端改写队列后恢复全量；过期请求不再重试。
-      if (!full && error === "queue_revision_mismatch" && requestSequence === sequence &&
+      if (!full && isQueueRevisionMismatch(error) && requestSequence === sequence &&
           sameQueueState(get(), state)) return send(true);
       throw error;
     })
@@ -151,3 +151,11 @@ export function syncPlaybackQueue(get: PlayerStoreGet, set: PlayerStoreSet): Pro
 
 // 模式更新与 effect 共用同一在途请求/序号，避免交叉覆盖。
 export const syncPlaybackModes = syncPlaybackQueue;
+
+/**
+ * 版本失配的识别（FE3-05）：后端返回结构化错误 `{ code: "queue_revision_mismatch" }`；
+ * 旧形态是同名的裸字符串，一并兼容。
+ */
+function isQueueRevisionMismatch(error: unknown) {
+  return error === "queue_revision_mismatch" || normalizeIpcError(error).code === "queue_revision_mismatch";
+}

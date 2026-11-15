@@ -1,4 +1,4 @@
-import { invoke } from "@/lib/tauri";
+import { invoke, normalizeIpcError } from "@/lib/tauri";
 import type { Track } from "@/types/track";
 import { mergeIncomingTrack, mergeTracksByPathWithStats } from "./libraryActions";
 import { streamingSourceInput, trackMergeKey } from "./trackIdentity";
@@ -74,27 +74,24 @@ export async function ensurePlayableTrack(
 }
 
 export function bilibiliImportErrorMessage(err: unknown) {
-  const message =
-    typeof err === "string"
-      ? err
-      : err instanceof Error
-        ? err.message
-        : "";
-
-  if (!message) return "导入 B 站音频失败";
-  if (message.includes("BV") || message.includes("B 站链接")) return message;
-  if (message.includes("no dash audio") || message.includes("no usable audio")) {
-    return "这个视频没有可用的 DASH 音频流";
+  if (err == null) return "导入 B 站音频失败";
+  // FE3-01：按后端给的错误码分支，不再对消息做子串猜测
+  // （文件路径里带 404、标题里带 BV 的失败都曾被误分类）。
+  const { code, message } = normalizeIpcError(err);
+  switch (code) {
+    case "invalid_input":
+      return message;
+    case "no_audio_stream":
+      return "这个视频没有可用的 DASH 音频流";
+    case "auth_required":
+      return "B 站拒绝了音频下载，可能需要登录或该内容受限";
+    case "link_expired":
+      return "B 站音频链接已失效，请重新导入";
+    case "timeout":
+      return "连接 B 站超时，请稍后重试";
+    default:
+      return message && message !== "[object Object]" ? `导入 B 站音频失败：${message}` : "导入 B 站音频失败";
   }
-  if (message.includes("403") || message.includes("401")) {
-    return "B 站拒绝了音频下载，可能需要登录或该内容受限";
-  }
-  if (message.includes("404")) return "B 站音频链接已失效，请重新导入";
-  if (message.includes("timed out") || message.includes("timeout")) {
-    return "连接 B 站超时，请稍后重试";
-  }
-
-  return `导入 B 站音频失败：${message}`;
 }
 
 export function createBilibiliActions(

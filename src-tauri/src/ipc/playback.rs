@@ -13,19 +13,25 @@ use std::path::PathBuf;
 use tauri::State;
 use tracing::debug;
 
-/// 把闭包丢到阻塞线程池执行并等待结果，join 失败归一化为错误字符串。
-async fn run_blocking<T, F>(job: F) -> Result<T, String>
+use super::error::{IpcError, IpcResult};
+
+/// 把闭包丢到阻塞线程池执行并等待结果。内部仍是 `Result<_, String>`，
+/// 在这里（命令边界）统一转成结构化的 [`IpcError`]（BE-03）。
+async fn run_blocking<T, F>(job: F) -> IpcResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(job)
         .await
-        .map_err(|err| format!("playback task panicked: {err}"))?
+        .map_err(|err| IpcError::from(format!("playback task panicked: {err}")))?
+        .map_err(IpcError::from)
 }
 
+/// async（BE-04）：同步命令在主线程执行，首次同步要反序列化整个队列（5 万首约 10 MB）。
+/// 请求乱序由 `sync.sequence` 在后端校验，不依赖命令的执行顺序。
 #[tauri::command]
-pub fn sync_playback_queue(
+pub async fn sync_playback_queue(
     state: State<'_, AppState>,
     tracks: Option<Vec<PlaybackQueueTrack>>,
     current_track_index: usize,
@@ -33,19 +39,23 @@ pub fn sync_playback_queue(
     shuffle_mode: bool,
     loop_mode: bool,
     sync: Option<QueueSyncToken>,
-) -> Result<PlaybackQueuePreview, String> {
+) -> IpcResult<PlaybackQueuePreview> {
     debug!(
         "ipc::sync_playback_queue -> {} tracks, index {current_track_index}",
         tracks.as_ref().map_or(0, Vec::len)
     );
-    state.update_playback_queue(
-        tracks,
-        current_track_index,
-        recent_track_ids,
-        shuffle_mode,
-        loop_mode,
-        sync,
-    )
+    let state = (*state).clone();
+    run_blocking(move || {
+        state.update_playback_queue(
+            tracks,
+            current_track_index,
+            recent_track_ids,
+            shuffle_mode,
+            loop_mode,
+            sync,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -53,7 +63,7 @@ pub fn set_playback_modes(
     state: State<'_, AppState>,
     shuffle_mode: bool,
     loop_mode: bool,
-) -> Result<PlaybackQueuePreview, String> {
+) -> IpcResult<PlaybackQueuePreview> {
     debug!("ipc::set_playback_modes -> shuffle={shuffle_mode}, loop={loop_mode}");
     Ok(state.set_playback_modes(shuffle_mode, loop_mode))
 }
@@ -64,7 +74,7 @@ pub async fn play(
     path: Option<String>,
     track_id: Option<String>,
     start_seconds: Option<f64>,
-) -> Result<(), String> {
+) -> IpcResult<()> {
     debug!("ipc::play");
     let state = (*state).clone();
     run_blocking(move || {
@@ -89,25 +99,27 @@ pub async fn play(
 }
 
 #[tauri::command]
-pub async fn pause(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn pause(state: State<'_, AppState>) -> IpcResult<()> {
     debug!("ipc::pause");
     let state = (*state).clone();
     run_blocking(move || state.pause_playback()).await
 }
 
 #[tauri::command]
-pub async fn stop(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop(state: State<'_, AppState>) -> IpcResult<()> {
     debug!("ipc::stop");
     let state = (*state).clone();
     run_blocking(move || state.stop_playback()).await
 }
 
 #[tauri::command]
-pub async fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
+pub async fn seek(state: State<'_, AppState>, seconds: f64) -> IpcResult<()> {
     debug!("ipc::seek -> {seconds}s");
     // P2-7：IPC 层最后防线，拒绝 NaN / Infinity / 负值直达音频引擎。
     if !seconds.is_finite() || seconds < 0.0 {
-        return Err(format!("无效的跳转位置: {seconds}"));
+        return Err(IpcError::invalid_input(format!(
+            "无效的跳转位置: {seconds}"
+        )));
     }
     let state = (*state).clone();
     run_blocking(move || {
@@ -119,25 +131,25 @@ pub async fn seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String
 }
 
 #[tauri::command]
-pub async fn next_track(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn next_track(state: State<'_, AppState>) -> IpcResult<()> {
     debug!("ipc::next_track");
     let state = (*state).clone();
     run_blocking(move || state.advance_track(TrackAdvance::Next)).await
 }
 
 #[tauri::command]
-pub async fn prev_track(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn prev_track(state: State<'_, AppState>) -> IpcResult<()> {
     debug!("ipc::prev_track");
     let state = (*state).clone();
     run_blocking(move || state.advance_track(TrackAdvance::Previous)).await
 }
 
 #[tauri::command]
-pub async fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
+pub async fn set_volume(state: State<'_, AppState>, volume: f32) -> IpcResult<()> {
     debug!("ipc::set_volume -> {volume}");
     // P2-7：NaN/Infinity 直接拒绝，范围收敛到 0..=1，防止异常增益爆音。
     if !volume.is_finite() {
-        return Err(format!("无效的音量值: {volume}"));
+        return Err(IpcError::invalid_input(format!("无效的音量值: {volume}")));
     }
     let volume = volume.clamp(0.0, 1.0);
     let state = (*state).clone();
@@ -151,10 +163,7 @@ pub async fn set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), S
 }
 
 #[tauri::command]
-pub async fn select_output_device(
-    state: State<'_, AppState>,
-    device_id: String,
-) -> Result<(), String> {
+pub async fn select_output_device(state: State<'_, AppState>, device_id: String) -> IpcResult<()> {
     debug!("ipc::select_output_device -> {device_id}");
     let state = (*state).clone();
     run_blocking(move || {
@@ -169,7 +178,7 @@ pub async fn select_output_device(
 }
 
 #[tauri::command]
-pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> Result<(), String> {
+pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> IpcResult<()> {
     debug!("ipc::set_output_driver -> {driver}");
     let state = (*state).clone();
     run_blocking(move || {
@@ -185,7 +194,7 @@ pub async fn set_output_driver(state: State<'_, AppState>, driver: String) -> Re
 
 /// 启用/停用系统媒体控件（SMTC）。设置由前端持久化，启动水合后同步。
 #[tauri::command]
-pub fn set_smtc_enabled(enabled: bool) -> Result<(), String> {
+pub fn set_smtc_enabled(enabled: bool) -> IpcResult<()> {
     debug!("ipc::set_smtc_enabled -> {enabled}");
     #[cfg(windows)]
     crate::smtc::set_enabled(enabled);
@@ -197,7 +206,7 @@ pub fn set_smtc_enabled(enabled: bool) -> Result<(), String> {
 /// 任务栏集成开关（缩略图播控按钮 / 图标进度条）。设置由前端持久化，
 /// 启动水合后同步；后端默认两者均启用。
 #[tauri::command]
-pub fn set_taskbar_features(buttons: bool, progress: bool) -> Result<(), String> {
+pub fn set_taskbar_features(buttons: bool, progress: bool) -> IpcResult<()> {
     debug!("ipc::set_taskbar_features -> buttons={buttons}, progress={progress}");
     #[cfg(windows)]
     crate::taskbar::set_features(buttons, progress);
@@ -214,10 +223,7 @@ pub fn set_taskbar_features(buttons: bool, progress: bool) -> Result<(), String>
 /// （Tauri 文档明确禁止在主线程同步命令中创建窗口）。set_lyrics_enabled
 /// 内部有等待旧窗口销毁的短阻塞循环，移到阻塞线程池执行。
 #[tauri::command]
-pub async fn set_taskbar_lyrics_enabled(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_taskbar_lyrics_enabled(app: tauri::AppHandle, enabled: bool) -> IpcResult<()> {
     debug!("ipc::set_taskbar_lyrics_enabled -> {enabled}");
     #[cfg(windows)]
     {
@@ -241,7 +247,7 @@ pub async fn set_taskbar_lyrics_enabled(
 pub async fn set_taskbar_lyrics_click_through(
     app: tauri::AppHandle,
     enabled: bool,
-) -> Result<(), String> {
+) -> IpcResult<()> {
     debug!("ipc::set_taskbar_lyrics_click_through -> {enabled}");
     #[cfg(windows)]
     {
@@ -268,11 +274,11 @@ pub async fn position_taskbar_bar(
     app: tauri::AppHandle,
     x: Option<f64>,
     y: Option<f64>,
-) -> Result<f64, String> {
+) -> IpcResult<f64> {
     let x = x.filter(|value| value.is_finite());
     let y = y.filter(|value| value.is_finite());
     #[cfg(windows)]
-    return crate::taskbar::position_lyric_bar(&app, x, y);
+    return crate::taskbar::position_lyric_bar(&app, x, y).map_err(IpcError::from);
     #[cfg(not(windows))]
     {
         let _ = (app, x, y);
@@ -284,13 +290,13 @@ pub async fn position_taskbar_bar(
 /// 1 = 最靠终点）。设置的单一事实来源是主窗口 store，水合后与设置页滑块
 /// 调整时同步过来；歌词条未开启时只记住比例，下次开启即用。
 #[tauri::command]
-pub async fn set_taskbar_lyrics_position(app: tauri::AppHandle, ratio: f64) -> Result<(), String> {
+pub async fn set_taskbar_lyrics_position(app: tauri::AppHandle, ratio: f64) -> IpcResult<()> {
     if !ratio.is_finite() {
-        return Err("位置比例无效".into());
+        return Err(IpcError::invalid_input("位置比例无效"));
     }
     debug!("ipc::set_taskbar_lyrics_position -> {ratio}");
     #[cfg(windows)]
-    return crate::taskbar::set_lyrics_position(&app, ratio);
+    return crate::taskbar::set_lyrics_position(&app, ratio).map_err(IpcError::from);
     #[cfg(not(windows))]
     {
         let _ = (app, ratio);
@@ -312,7 +318,7 @@ pub struct PlaybackSnapshot {
 }
 
 #[tauri::command]
-pub fn get_playback_snapshot(state: State<'_, AppState>) -> Result<PlaybackSnapshot, String> {
+pub fn get_playback_snapshot(state: State<'_, AppState>) -> IpcResult<PlaybackSnapshot> {
     let track_id = state.current_queue_track().map(|track| track.id);
     let fallback_playing = *state.player_state.read() == PlayerState::Playing;
     #[cfg(windows)]
@@ -337,7 +343,7 @@ pub fn get_playback_snapshot(state: State<'_, AppState>) -> Result<PlaybackSnaps
 /// 播放/暂停切换（任务栏歌词条按钮）。与 SMTC Toggle 同一语义：
 /// 无已加载会话时从队列当前曲目从头播放。
 #[tauri::command]
-pub async fn toggle_play(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn toggle_play(state: State<'_, AppState>) -> IpcResult<()> {
     debug!("ipc::toggle_play");
     let state = (*state).clone();
     run_blocking(move || {
