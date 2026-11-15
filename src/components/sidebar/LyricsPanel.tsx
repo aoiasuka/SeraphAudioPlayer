@@ -393,7 +393,7 @@ export function LyricsPanel() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".lrc,.qrc,.krc,.yrc,.txt,text/plain"
+            accept=".lrc,.qrc,.krc,.yrc,.ttml,.txt,text/plain"
             className="hidden"
             onChange={handleFileChange}
           />

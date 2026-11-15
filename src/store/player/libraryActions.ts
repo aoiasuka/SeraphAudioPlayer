@@ -657,7 +657,7 @@ export function createLibraryActions(
     } catch (err) {
 
       console.warn("Tauri command failed: import_tracks", err);
-      get().showNotification("导入本地音乐失败", "error");
+      get().showNotification(`导入本地音乐失败：${normalizeIpcError(err).message}`, "error");
     }
   },
 

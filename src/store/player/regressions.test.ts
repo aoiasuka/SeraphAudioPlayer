@@ -255,6 +255,22 @@ it("BUG-06（2026-09-27）：启动时系统集成设置同步失败要提示，
   expect(text).toContain("任务栏歌词条");
 });
 
+it("FE2-02：引擎音量与设备同步失败时曲库仍要加载，失败项汇总提示", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "set_volume") throw { code: "internal", message: "audio thread not running" };
+    if (command === "list_devices") throw "device enumeration failed";
+    if (command === "get_playlist") return [track("survivor")];
+    return undefined;
+  });
+  renderHook(() => useHydratePlayerStore());
+  await flush();
+  expect(usePlayerStore.getState().playlist.map((item) => item.id)).toEqual(["survivor"]);
+  const text = usePlayerStore.getState().notification?.text ?? "";
+  expect(text).toContain("音量");
+  expect(text).not.toContain("请重新启动播放器");
+});
+
 it("BUG-06：静音同步不等待空闲曲库加载", async () => {
   vi.mocked(runWhenIdle).mockImplementation(() => () => {});
   localStorage.setItem("seraph-player-state", JSON.stringify({

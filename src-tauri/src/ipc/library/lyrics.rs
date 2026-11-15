@@ -1039,15 +1039,20 @@ pub(crate) fn snap_lddc_translation_lines(lines: &mut [LyricLine]) {
 /// 下一组的起点补齐：末音节 end 与行 end 都设为下一个**时间更晚**的行的起点（同时间戳的
 /// 译文行跳过），并在行上打 `end_inferred`。最后一行没有后继，终点保持未知；没有 words
 /// 的普通行不合成 end（`lyrics_are_unsynced` 等判定依赖 `end_ms.is_none()`）。
+///
+/// LYR-01：要求输入已按起点升序。「下一个更晚的起点」随 index 单调后移，用双指针
+/// 单趟扫完；此前每行各自向后线性查找，几十万行同时间戳的 LRC 是行数平方的比较量。
 pub(crate) fn infer_line_ends(lines: &mut [LyricLine]) {
+    let mut next = 0;
     for index in 0..lines.len() {
         let current_start = lines[index].start_ms;
-        let Some(next_start) = lines[index + 1..]
-            .iter()
-            .map(|line| line.start_ms)
-            .find(|start| *start > current_start + 10)
-        else {
-            continue;
+        next = next.max(index + 1);
+        while next < lines.len() && lines[next].start_ms <= current_start.saturating_add(10) {
+            next += 1;
+        }
+        let Some(next_start) = lines.get(next).map(|line| line.start_ms) else {
+            // 升序下后面的行同样没有更晚的后继
+            break;
         };
         let line = &mut lines[index];
         let Some(words) = line.words.as_mut() else {
@@ -1705,6 +1710,47 @@ mod qrc_cloud_tests {
 #[cfg(test)]
 mod lyrics_limit_tests {
     use super::*;
+
+    #[test]
+    fn lyr01_many_same_timestamp_lines_parse_in_linear_time() {
+        // 20 万行同时间戳、文本各不相同：旧实现每行都向后扫到末尾（2×10¹⁰ 次比较）
+        let mut text = String::with_capacity(4 * 1024 * 1024);
+        for index in 0..200_000 {
+            text.push_str(&format!("[00:01.00]<00:01.00>l{index}\n"));
+        }
+        let started = std::time::Instant::now();
+        let lyrics = parse_lyrics_bytes(text.as_bytes());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(!lyrics.is_empty() && lyrics.len() <= MAX_LYRIC_LINES);
+    }
+
+    #[test]
+    fn lyr01_line_end_inference_matches_previous_semantics() {
+        let word = |start_ms| LyricWord::new(start_ms, None, "x");
+        let line = |start_ms, with_word: bool| {
+            let mut line = LyricLine::new(start_ms, "x".to_string());
+            if with_word {
+                line.words = Some(vec![word(start_ms)]);
+            }
+            line
+        };
+        // 1000 与 1005 视为同一组（间距 ≤ 10 ms），都指向 3000；末行没有后继
+        let mut lines = vec![
+            line(1000, true),
+            line(1005, true),
+            line(3000, false),
+            line(3000, true),
+            line(9000, true),
+        ];
+        infer_line_ends(&mut lines);
+        let ends: Vec<_> = lines.iter().map(|line| line.end_ms).collect();
+        assert_eq!(ends, vec![Some(3000), Some(3000), None, Some(9000), None]);
+        assert!(lines[0].end_inferred && lines[3].end_inferred && !lines[4].end_inferred);
+    }
 
     #[test]
     fn clamps_line_count_and_line_length() {

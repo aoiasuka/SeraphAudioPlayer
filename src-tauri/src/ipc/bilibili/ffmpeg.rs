@@ -47,6 +47,7 @@ pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfm
         .join("ffmpeg");
     fs::create_dir_all(&ffmpeg_dir)
         .map_err(|err| format!("无法创建 ffmpeg 目录 {}: {err}", ffmpeg_dir.display()))?;
+    sweep_stale_ffmpeg_temps(&ffmpeg_dir);
 
     let client = ffmpeg_download_client()?;
     let archive_path = ffmpeg_dir.join("ffmpeg-download.zip");
@@ -264,52 +265,90 @@ pub(crate) fn extract_ffmpeg_tools_with_limit(
     }
 
     let wanted = ["ffmpeg.exe", "ffprobe.exe"];
-    let mut extracted: Vec<String> = Vec::new();
+    // FFDL-01：先解压到唯一临时名，全部写完并落盘后再改名成最终文件名。
+    // find_ffmpeg 只看文件是否存在，直接写最终名的话，解压中途退出或断电会留下
+    // 截断的 ffmpeg.exe 并被当成「已安装」，之后既不重新下载也无法解码。
+    let mut staged: Vec<(&str, PathBuf)> = Vec::new();
+    let result = (|| {
+        for index in 0..archive.len() {
+            // 两个目标都拿到就没必要继续遍历
+            if staged.len() == wanted.len() {
+                break;
+            }
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|err| format!("读取压缩条目失败: {err}"))?;
+            if !entry.is_file() {
+                continue;
+            }
+            // zip 9：条目名解码可能失败（非法编码）；这种条目不可能是我们要的两个文件，跳过
+            let Ok(entry_name) = entry.name().map(|name| name.to_ascii_lowercase()) else {
+                continue;
+            };
+            let file_name = entry_name.rsplit(['/', '\\']).next().unwrap_or(&entry_name);
+            let Some(target) = wanted.iter().find(|name| **name == file_name) else {
+                continue;
+            };
+            if staged.iter().any(|(done, _)| done == target) {
+                continue;
+            }
 
-    for index in 0..archive.len() {
-        // 两个目标都拿到就没必要继续遍历
-        if extracted.len() == wanted.len() {
-            break;
-        }
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|err| format!("读取压缩条目失败: {err}"))?;
-        if !entry.is_file() {
-            continue;
-        }
-        // zip 9：条目名解码可能失败（非法编码）；这种条目不可能是我们要的两个文件，跳过
-        let Ok(entry_name) = entry.name().map(|name| name.to_ascii_lowercase()) else {
-            continue;
-        };
-        let file_name = entry_name.rsplit(['/', '\\']).next().unwrap_or(&entry_name);
-        let Some(target) = wanted.iter().find(|name| **name == file_name) else {
-            continue;
-        };
-        if extracted.iter().any(|done| done == *target) {
-            continue;
+            let temp_path = unique_temp_path(&dest_dir.join(target));
+            let mut out_file =
+                fs::File::create(&temp_path).map_err(|err| format!("无法写入 {target}: {err}"))?;
+            staged.push((*target, temp_path));
+            // 多读 1 字节以区分「恰好等于上限」与「超限被截断」。
+            let copied = std::io::copy(&mut (&mut entry).take(entry_limit + 1), &mut out_file)
+                .map_err(|err| format!("解压 {target} 失败: {err}"))?;
+            if copied > entry_limit {
+                return Err(format!(
+                    "压缩条目 {target} 解压后超过 {entry_limit} 字节上限，疑似恶意压缩包，已中止"
+                ));
+            }
+            out_file
+                .sync_all()
+                .map_err(|err| format!("落盘 {target} 失败: {err}"))?;
         }
 
-        let out_path = dest_dir.join(target);
-        let mut out_file =
-            fs::File::create(&out_path).map_err(|err| format!("无法写入 {target}: {err}"))?;
-        // 多读 1 字节以区分「恰好等于上限」与「超限被截断」。
-        let copied = std::io::copy(&mut (&mut entry).take(entry_limit + 1), &mut out_file)
-            .map_err(|err| format!("解压 {target} 失败: {err}"))?;
-        if copied > entry_limit {
-            drop(out_file);
-            let _ = fs::remove_file(&out_path);
-            return Err(format!(
-                "压缩条目 {target} 解压后超过 {entry_limit} 字节上限，疑似恶意压缩包，已中止"
-            ));
+        for name in wanted {
+            if !staged.iter().any(|(done, _)| *done == name) {
+                return Err(format!("压缩包内未找到 {name}"));
+            }
         }
-        extracted.push((*target).to_string());
+        // ffprobe 先就位、ffmpeg 最后：「ffmpeg.exe 存在」即代表两个文件都完整。
+        for name in ["ffprobe.exe", "ffmpeg.exe"] {
+            let (_, temp_path) = staged
+                .iter()
+                .find(|(done, _)| *done == name)
+                .expect("checked above");
+            fs::rename(temp_path, dest_dir.join(name))
+                .map_err(|err| format!("无法安装 {name}: {err}"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for (_, temp_path) in &staged {
+            let _ = fs::remove_file(temp_path);
+        }
     }
+    result
+}
 
-    if !extracted.iter().any(|name| name == "ffmpeg.exe") {
-        return Err("压缩包内未找到 ffmpeg.exe".into());
+/// FFDL-01：清掉上次解压 / 下载中断留下的临时文件（`<名字>.<纳秒>-<序号>.tmp`）。
+/// 调用方持有下载槽位，不会与正在进行的下载竞争。
+#[cfg(windows)]
+pub(crate) fn sweep_stale_ffmpeg_temps(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let stale = name.ends_with(".tmp")
+            && ["ffmpeg.exe.", "ffprobe.exe.", "ffmpeg-download.zip."]
+                .iter()
+                .any(|prefix| name.starts_with(prefix));
+        if stale && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
-    if !extracted.iter().any(|name| name == "ffprobe.exe") {
-        return Err("压缩包内未找到 ffprobe.exe".into());
-    }
-    Ok(())
 }

@@ -202,6 +202,39 @@ mod tests {
             "only wanted tools extracted"
         );
         assert_eq!(std::fs::read(dir.join("ffmpeg.exe")).unwrap(), b"FFMPEGBIN");
+        // FFDL-01：成功后不留临时文件
+        let leftovers = |dir: &std::path::Path| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count()
+        };
+        assert_eq!(leftovers(&dir), 0);
+
+        // FFDL-01：缺 ffprobe 的包解压失败时，不能留下任何「看起来已安装」的最终文件
+        let partial = dir.join("partial");
+        std::fs::create_dir_all(&partial).unwrap();
+        let partial_zip = partial.join("pkg.zip");
+        {
+            let file = std::fs::File::create(&partial_zip).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("bin/ffmpeg.exe", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"FFMPEGBIN").unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(extract_ffmpeg_tools(&partial_zip, &partial).is_err());
+        assert!(!partial.join("ffmpeg.exe").exists());
+        assert_eq!(leftovers(&partial), 0);
+
+        // 中断残留的临时文件在下次下载前被清掉，无关文件不动
+        std::fs::write(partial.join("ffmpeg.exe.123-0.tmp"), b"half").unwrap();
+        std::fs::write(partial.join("notes.tmp"), b"keep").unwrap();
+        super::sweep_stale_ffmpeg_temps(&partial);
+        assert!(!partial.join("ffmpeg.exe.123-0.tmp").exists());
+        assert!(partial.join("notes.tmp").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

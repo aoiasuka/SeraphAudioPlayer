@@ -251,7 +251,9 @@ export function TaskbarLyricsBar() {
       .then((info) => {
         if (!cancelled) setTrack(info ?? null);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        // FE2-04：歌词条里最后一处不记录的失败——表现为一直空白而日志没有线索。
+        logBarFailure("读取曲目信息")(error);
         if (!cancelled) setTrack(null);
       });
     return () => {

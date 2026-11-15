@@ -47,12 +47,26 @@ export function useHydratePlayerStore() {
       } else if (restored.driverKind === "asio") {
         usePlayerStore.setState({ driverKind: "direct" });
       }
+      // FE2-02：曲库读取与音量 / 设备同步没有依赖关系。此前这几步串在一条
+      // await 链上，任何一步抛错（例如音频引擎线程没起来）都会跳过曲库加载，
+      // 用户看到空曲库以为数据丢了。各步分别兜底，失败项汇总提示。
+      const failedSteps: string[] = [];
+      const guard = async (label: string, step: () => unknown) => {
+        try {
+          await step();
+        } catch (error) {
+          console.warn(`启动同步失败：${label}`, error);
+          failedSteps.push(label);
+        }
+      };
       if (isTauriRuntime()) {
-        await invoke("set_volume", { volume: restored.isMuted ? 0 : volumeToGain(restored.volume) });
+        await guard("音量", () =>
+          invoke("set_volume", { volume: restored.isMuted ? 0 : volumeToGain(restored.volume) })
+        );
       }
       if (cancelled) return;
       restored.normalizeLibrary();
-      await restored.loadDevices();
+      await guard("输出设备", () => restored.loadDevices());
       if (cancelled) return;
       await libraryEventsReady;
       if (cancelled) return;
@@ -103,11 +117,11 @@ export function useHydratePlayerStore() {
       }
       const results = await Promise.allSettled(syncs.map(([, request]) => request));
       if (cancelled) return;
-      const failed = results.flatMap((result, index) => {
+      const failed = failedSteps.concat(results.flatMap((result, index) => {
         if (result.status === "fulfilled") return [];
         console.warn(`启动同步失败：${syncs[index][0]}`, result.reason);
         return [syncs[index][0]];
-      });
+      }));
       if (failed.length > 0) {
         usePlayerStore.getState().showNotification(
           `以下设置未能应用到播放内核：${failed.join("、")}（可在设置里重新切换）`,

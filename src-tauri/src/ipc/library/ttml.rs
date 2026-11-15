@@ -184,6 +184,9 @@ pub(crate) fn parse_ttml_metadata(text: &str) -> TtmlMetadata {
     meta
 }
 
+/// LYR-05：`<span>` 嵌套深度上限。
+const MAX_SPAN_DEPTH: usize = 16;
+
 /// 解析 TTML 文本；不是 TTML 或没有可用行时返回空。
 pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
     let mut reader = Reader::from_str(text);
@@ -196,6 +199,8 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
     let mut finished_backgrounds: Vec<LineBuilder> = Vec::new();
     // span 嵌套栈：role + 起止时间 + 累积文本（Word 层在 End 时收成一个音节）
     let mut span_stack: Vec<(SpanRole, Option<f64>, Option<f64>, String)> = Vec::new();
+    // 栈里和声容器的个数（与 span_stack 同步增减），省掉每个 </span> 遍历整栈
+    let mut background_depth = 0_usize;
     let mut in_body = false;
     let mut saw_tt = false;
 
@@ -240,6 +245,7 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                 background = None;
                 finished_backgrounds.clear();
                 span_stack.clear();
+                background_depth = 0;
             }
             Event::End(end) if local_name(end.name().as_ref()) == b"p" => {
                 if let Some(line) = current.take().and_then(LineBuilder::finish) {
@@ -252,13 +258,20 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                     }
                 }
                 span_stack.clear();
+                background_depth = 0;
             }
             Event::Start(start)
                 if current.is_some() && local_name(start.name().as_ref()) == b"span" =>
             {
                 let role = span_role(&start);
                 let (begin, end) = time_attrs(&start);
+                // LYR-05：正常 TTML 的 span 至多三四层（和声容器 > 音节 > 注音）。
+                // 超过上限按畸形文件处理——2 MB 内可以构造十几万层嵌套。
+                if span_stack.len() >= MAX_SPAN_DEPTH {
+                    return Vec::new();
+                }
                 if role == SpanRole::Background {
+                    background_depth += 1;
                     // 畸形嵌套（和声里再开和声）：先把上一个收掉
                     if let Some(previous) = background.take() {
                         finished_backgrounds.push(previous);
@@ -273,6 +286,7 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                     continue;
                 };
                 if role == SpanRole::Background {
+                    background_depth = background_depth.saturating_sub(1);
                     // 容器自身的直接文本（无逐字子 span 时）：有起止时间当一个音节，否则整行文本
                     if let Some(mut builder) = background.take() {
                         if !text.trim().is_empty() {
@@ -288,9 +302,7 @@ pub(crate) fn parse_ttml_lyrics(text: &str) -> Vec<LyricLine> {
                     continue;
                 }
                 // 和声容器内的音节 / 译文 / 音译记到和声行，容器外记到主句
-                let inside_background = span_stack
-                    .iter()
-                    .any(|(role, ..)| *role == SpanRole::Background);
+                let inside_background = background_depth > 0;
                 let target = match (inside_background, background.as_mut()) {
                     (true, Some(builder)) => builder,
                     _ => current.as_mut().expect("checked above"),
@@ -483,6 +495,29 @@ pub(crate) fn parse_ttml_time(raw: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lyr05_deep_span_nesting_is_rejected_quickly() {
+        let depth = 100_000;
+        let text = format!(
+            r#"<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="5s">{}x{}</p></div></body></tt>"#,
+            "<span>".repeat(depth),
+            "</span>".repeat(depth)
+        );
+        let started = std::time::Instant::now();
+        assert!(parse_ttml_lyrics(&text).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // 上限以内的嵌套照常解析
+        let ok = format!(
+            r#"<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="5s">{}word{}</p></div></body></tt>"#,
+            "<span>".repeat(MAX_SPAN_DEPTH),
+            "</span>".repeat(MAX_SPAN_DEPTH)
+        );
+        let lines = parse_ttml_lyrics(&ok);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "word");
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:amll="http://www.example.com/ns/amll" xmlns:itunes="http://music.apple.com/lyric-ttml-internal">

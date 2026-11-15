@@ -172,7 +172,10 @@ pub(crate) fn write_session_file(
             tmp.display()
         )
     })?;
-    restrict_session_file_permissions(&tmp)?;
+    // SESS-02：收窄失败（icacls 超时等）时不留下空的临时文件。
+    restrict_session_file_permissions(&tmp).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })?;
     fs::write(&tmp, bytes).map_err(|err| {
         let _ = fs::remove_file(&tmp);
         format!(
