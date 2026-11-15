@@ -315,11 +315,13 @@ export function SettingsModal() {
       <span className="file-tab">FILE — SYSTEM / SETTINGS</span>
 
       {/* 功能分页：音频输出 / 缓存管理 / 系统集成 / 关于与更新 */}
-      <div className="flex flex-wrap gap-1.5 border-b-[1.5px] border-line pb-3">
+      <div role="tablist" aria-label="设置分类" className="flex flex-wrap gap-1.5 border-b-[1.5px] border-line pb-3">
         {SETTINGS_TABS.map((tab) => (
           <button
             key={tab.value}
             type="button"
+            role="tab"
+            aria-selected={activeTab === tab.value}
             onClick={() => setActiveTab(tab.value)}
             className={
               activeTab === tab.value

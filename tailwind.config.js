@@ -16,7 +16,7 @@ export default {
         card: "#fbf9f3",
         ink: "#2b2722",
         ink2: "#6e675c",
-        ink3: "#aaa193",
+        ink3: "#857d70",
         line: "#d9d2c2",
         brown: "#7a5c3e",
         stamp: "#b5482a",

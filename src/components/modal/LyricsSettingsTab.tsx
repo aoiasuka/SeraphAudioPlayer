@@ -90,6 +90,7 @@ export function LyricsSettingsTab() {
   };
 
   const [urlDialogOpen, setUrlDialogOpen] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [excludeDialogOpen, setExcludeDialogOpen] = useState(false);
 
   return (
@@ -265,16 +266,39 @@ export function LyricsSettingsTab() {
       >
         <button
           type="button"
-          onClick={() => {
-            if (!window.confirm("确定要把歌词设置全部恢复为默认值吗？排除规则会被清空。")) return;
-            resetLyricsSettings();
-          }}
+          onClick={() => setResetConfirmOpen(true)}
           className="inline-flex h-8 shrink-0 items-center gap-1.5 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-stamp hover:text-stamp"
         >
           <RotateCcw className="h-3.5 w-3.5" />
           恢复默认
         </button>
       </SettingRow>
+      {/* FE-09：用项目自己的弹窗做二次确认，不再弹系统原生 confirm */}
+      <Dialog open={resetConfirmOpen} onClose={() => setResetConfirmOpen(false)} className="max-w-sm space-y-4">
+        <h3 className="font-serif text-sm font-semibold text-ink">恢复歌词设置默认值</h3>
+        <p className="font-tw text-xs leading-5 text-ink2">
+          确定要把歌词设置全部恢复为默认值吗？排除规则会被清空。
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setResetConfirmOpen(false)}
+            className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 hover:border-ink"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setResetConfirmOpen(false);
+              resetLyricsSettings();
+            }}
+            className="h-8 border-[1.5px] border-stamp bg-stamp px-3 font-tw text-xs font-bold text-paper"
+          >
+            确认恢复
+          </button>
+        </div>
+      </Dialog>
 
       <h4 className="pt-2 font-tw text-[10px] tracking-[2px] text-ink3 uppercase">
         [ Taskbar / 任务栏歌词条 ]

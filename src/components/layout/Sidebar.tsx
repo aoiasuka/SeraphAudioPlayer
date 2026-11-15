@@ -84,6 +84,7 @@ export function Sidebar() {
                 <button
                   key={item.key}
                   type="button"
+                  aria-current={active ? "page" : undefined}
                   onClick={() => {
                     if (item.key === "settings") toggleSettings();
                     else setActiveView(item.key);

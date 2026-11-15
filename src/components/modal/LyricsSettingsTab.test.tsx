@@ -163,14 +163,14 @@ describe("歌词设置标签页", () => {
       showLyricsCredits: false,
       ignoreLyricsFileOffset: true,
     });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<LyricsSettingsTab />);
     const button = screen.getByRole("button", { name: "恢复默认" });
     fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(usePlayerStore.getState().lyricsSourcePriority).toBe("kugou");
 
-    confirmSpy.mockReturnValue(true);
     fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "确认恢复" }));
     expect(usePlayerStore.getState()).toMatchObject({
       lyricsSourcePriority: "auto",
       preferTraditionalLyrics: false,
