@@ -46,7 +46,7 @@ base64 = "0.22"
 quick-xml = "0.41"
 # 歌词简→繁（纯 Rust，内置 OpenCC 词表；关掉 compress 特性避免拉入 zstd-sys C 库）
 zhconv = { version = "0.3", default-features = false }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # S-01：ffmpeg 下载包 SHA-256 完整性校验
 sha2 = "0.10"
 qrcodegen = "=1.8.0"

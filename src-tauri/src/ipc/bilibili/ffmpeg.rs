@@ -277,7 +277,10 @@ pub(crate) fn extract_ffmpeg_tools_with_limit(
         if !entry.is_file() {
             continue;
         }
-        let entry_name = entry.name().to_ascii_lowercase();
+        // zip 9：条目名解码可能失败（非法编码）；这种条目不可能是我们要的两个文件，跳过
+        let Ok(entry_name) = entry.name().map(|name| name.to_ascii_lowercase()) else {
+            continue;
+        };
         let file_name = entry_name.rsplit(['/', '\\']).next().unwrap_or(&entry_name);
         let Some(target) = wanted.iter().find(|name| **name == file_name) else {
             continue;
