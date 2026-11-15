@@ -80,14 +80,16 @@ pub async fn play(
     run_blocking(move || {
         if let Some(path) = path {
             state.run_playback_control(Some(true), || {
+                let path = PathBuf::from(path);
                 state
                     .audio
                     .play_file(
-                        PathBuf::from(path),
+                        path.clone(),
                         track_id.unwrap_or_default(),
                         start_seconds.unwrap_or(0.0),
                     )
                     .map_err(|err| err.to_string())?;
+                crate::ipc::cache::note_playback_started(&path);
                 *state.player_state.write() = PlayerState::Playing;
                 Ok(())
             })

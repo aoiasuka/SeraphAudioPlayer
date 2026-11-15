@@ -593,7 +593,7 @@ export function SettingsModal() {
                   onChange={(event) => setAutoCleanup(event.target.checked)}
                   className="h-3.5 w-3.5 accent-ink"
                 />
-                接近上限时自动清理最旧的流媒体缓存
+                接近上限时自动清理最久未播放的流媒体缓存
               </label>
             </div>
           </div>

@@ -192,3 +192,49 @@ fn cache_marker_must_be_a_regular_file() {
     assert!(require_managed_cache_dir(&dir.0).is_err());
     assert!(ensure_cache_dir_safe(&dir.0).is_err());
 }
+
+#[test]
+fn playback_touch_makes_quota_evict_least_recently_played_not_oldest_download() {
+    let dir = TestDir::new();
+    dir.managed();
+    let registry = OperationRegistry::default();
+    let cleanup = registry.acquire_cleanup().unwrap();
+    // old 最早下载，但刚刚播放过；mid 下载得晚一些却没再听过
+    let old = dir.file("old.flac", 400, 3_000);
+    let mid = dir.file("mid.flac", 400, 2_000);
+    let new = dir.file("new.flac", 400, 1_000);
+    touch_managed_cache_file(&old).unwrap();
+
+    let result = cleanup_cache_files(&dir.0, &[], CleanupMode::Quota(1_200), &cleanup).unwrap();
+    assert_eq!(
+        result.removed_paths,
+        vec![mid.to_string_lossy().to_string()]
+    );
+    assert!(old.exists() && new.exists());
+}
+
+#[test]
+fn playback_touch_leaves_unmanaged_files_alone() {
+    let dir = TestDir::new();
+    // 没有缓存标记的目录 = 用户自己的音乐文件夹：修改时间不能被改
+    let song = dir.file("song.flac", 16, 5_000);
+    let before = fs::metadata(&song).unwrap().modified().unwrap();
+    touch_managed_cache_file(&song).unwrap();
+    assert_eq!(fs::metadata(&song).unwrap().modified().unwrap(), before);
+    touch_managed_cache_file(Path::new("relative.flac")).unwrap();
+    touch_managed_cache_file(&dir.0.join("missing.flac")).unwrap();
+}
+
+#[test]
+fn now_playing_file_is_preserved_even_by_clear() {
+    let dir = TestDir::new();
+    dir.managed();
+    let registry = OperationRegistry::default();
+    let cleanup = registry.acquire_cleanup().unwrap();
+    let playing = dir.file("playing.flac", 64, 9_000);
+    let other = dir.file("other.flac", 64, 10);
+    let preserve = vec![playing.clone()];
+    let result = cleanup_cache_files(&dir.0, &preserve, CleanupMode::Clear, &cleanup).unwrap();
+    assert_eq!(result.removed_files, 1);
+    assert!(playing.exists() && !other.exists());
+}

@@ -329,6 +329,7 @@ impl AppState {
                 PlayerState::Stopped
             };
             result.map_err(|err| err.to_string())?;
+            crate::ipc::cache::note_playback_started(std::path::Path::new(&track.path));
         }
 
         Ok(())

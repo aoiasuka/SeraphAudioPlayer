@@ -151,12 +151,63 @@ fn clear_cache_inner(app: &AppHandle) -> IpcResult<CacheCleanupResult> {
     let settings = load_cache_settings(app)?;
     let result = cleanup_cache_files(
         Path::new(&settings.cache_dir),
-        &[],
+        &with_now_playing(&[]),
         CleanupMode::Clear,
         &cleanup,
     )?;
     mark_cleanup_result(app, &result)?;
     Ok(result)
+}
+
+/// CACHE-02：最近一次起播的文件。清理（配额与手动）都保留它——走 ffmpeg 的曲目
+/// 在下一次 seek 时要重新打开文件，播放中被删就会失败。
+static NOW_PLAYING: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
+
+/// CACHE-02：起播时调用。记下当前播放的文件，并把受管缓存文件的修改时间刷新为
+/// 当前时间——配额清理按修改时间升序淘汰，刷新后淘汰顺序就是「最久未播放」，
+/// 而不是「最早下载」。不是受管缓存文件（本地音乐）时不触碰文件。
+pub(crate) fn note_playback_started(path: &Path) {
+    *NOW_PLAYING.lock() = Some(path.to_path_buf());
+    if let Err(err) = touch_managed_cache_file(path) {
+        tracing::debug!("cache touch skipped for {}: {err}", path.display());
+    }
+}
+
+fn now_playing_path() -> Option<PathBuf> {
+    NOW_PLAYING.lock().clone()
+}
+
+/// 只刷新「父目录带缓存标记」的受管音频文件；链接和重解析点一律不碰。
+fn touch_managed_cache_file(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() || !is_managed_cache_file(path) {
+        return Ok(());
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    match cache_delete_metadata(&parent.join(CACHE_MARKER_FILE))? {
+        Some(marker) if marker.is_file() => {}
+        _ => return Ok(()),
+    }
+    let Some(metadata) = cache_delete_metadata(path)? else {
+        return Ok(());
+    };
+    reject_cache_link(path, &metadata)?;
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now()))
+        .map_err(|err| err.to_string())
+}
+
+/// 调用方给的保留列表 + 正在播放的文件。
+fn with_now_playing(preserve_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut preserve = preserve_paths.to_vec();
+    preserve.extend(now_playing_path());
+    preserve
 }
 
 pub(crate) fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -202,7 +253,7 @@ fn enforce_cache_limit_with_lease(
     sweep_orphan_temp_files(Path::new(&settings.cache_dir), cleanup)?;
     let result = cleanup_cache_files(
         Path::new(&settings.cache_dir),
-        preserve_paths,
+        &with_now_playing(preserve_paths),
         mode,
         cleanup,
     )?;
