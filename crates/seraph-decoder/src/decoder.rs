@@ -200,7 +200,8 @@ mod tests {
         write_test_dsf(&path);
 
         let info = probe_stream_info(&path).expect("probe dsf by magic");
-        assert_eq!(info.sample_rate, SampleRate(44_100));
+        // DSP-01：DSD64 按 32:1 抽取，输出 88.2 kHz
+        assert_eq!(info.sample_rate, SampleRate(88_200));
         assert_eq!(info.channels, Channels(2));
 
         let _ = fs::remove_file(path);

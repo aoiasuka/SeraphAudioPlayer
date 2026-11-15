@@ -433,7 +433,7 @@ fn enriches_dsd_metadata_from_decoder_probe() {
     let metadata = parse_audio_metadata(&path);
     assert_eq!(metadata.duration, Some(1));
     assert_eq!(metadata.bit_depth, Some(24));
-    assert_eq!(metadata.sample_rate, Some(44_100));
+    assert_eq!(metadata.sample_rate, Some(88_200));
     assert_eq!(metadata.channels, Some(2));
 
     let _ = fs::remove_file(path);
@@ -496,7 +496,7 @@ fn extracts_dsd_id3_tags_and_cover() {
         2,
         "DSD 内嵌歌词应进入曲目元数据"
     );
-    assert_eq!(metadata.sample_rate, Some(44_100), "解码探测仍然生效");
+    assert_eq!(metadata.sample_rate, Some(88_200), "解码探测仍然生效");
 
     let _ = fs::remove_file(path);
 }
@@ -511,8 +511,8 @@ fn detects_dsd_by_magic_when_extension_differs() {
 
     let track = track_from_path(&path, None).expect("track from dsf magic");
     assert_eq!(track.format, "DSF");
-    assert_eq!(track.bitdepth, "DSF 24-bit / 44.1 kHz PCM");
-    assert_eq!(track.sample_rate, "44.1 kHz PCM");
+    assert_eq!(track.bitdepth, "DSF 24-bit / 88.2 kHz PCM");
+    assert_eq!(track.sample_rate, "88.2 kHz PCM");
     assert_eq!(track.channels, "Stereo");
     assert_eq!(track.duration, 1);
 

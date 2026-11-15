@@ -1,10 +1,13 @@
 //! Lightweight DSD decoder.
 //!
-//! DSF/DFF 被以 64:1 抽取为 interleaved f32 PCM。
-//! 抗混叠：相对原来的 boxcar (popcount/64) 取均值，
-//! 改为 Hann 加权积分 + 后置一阶 IIR DC blocker，
-//! 旁瓣从 -13 dB 抑制到 ≈ -30 dB，
-//! 同时去掉 DSD 调制器引入的低频偏置。
+//! DSF/DFF 经两级抽取转成 interleaved f32 PCM（DSP-01）：
+//! 1. 每个 DSD 字节（8 bit）出一个样本的 96 抽头 Kaiser 低通（8:1），按字节查表；
+//! 2. 再用一条长 FIR 低通抽取 4:1 或 8:1。
+//!
+//! 两级都在块之间保留状态。DSD64 输出 88.2 kHz（总 32:1），更高倍率保持 64:1。
+//! 旧实现是「每 64 bit 一个不重叠的 Hann 窗」：主瓣 −6 dB 点约 44 kHz，
+//! 22–80 kHz 的噪声整形能量几乎不衰减就被 64:1 抽取，混叠回可听频段。
+//! 后置一阶 IIR DC blocker 去掉调制器引入的低频偏置。
 
 use crate::decoder::{
     validate_stream_info, Decoder, DecoderError, Packet, StreamInfo, MAX_SUPPORTED_SAMPLE_RATE,
@@ -17,8 +20,28 @@ use std::{
     sync::OnceLock,
 };
 
+/// 高倍率 DSD（DSD128 及以上）的总抽取比；也是 PCM 率上界反推 DSD 率上界的口径。
 const DSD_TO_PCM_DECIMATION: usize = 64;
-const DSD_BYTES_PER_PCM_SAMPLE: usize = DSD_TO_PCM_DECIMATION / 8;
+/// 第一级：每个 DSD 字节出一个样本。
+const STAGE1_DECIMATION: usize = 8;
+/// 第一级滤波器跨越的字节数（96 抽头）。
+const STAGE1_BYTES: usize = 12;
+/// 两级共用的 Kaiser β：旁瓣约 −100 dB。
+const KAISER_BETA: f64 = 10.06;
+/// 第一级截止（相对 DSD 率）。通带到 0.0085·fs（DSD64 下 24 kHz）几乎无滚降，
+/// 0.092·fs 起进入阻带——第一级抽取后的镜像最早出现在 fs/8 − fs/64 = 0.109·fs。
+const STAGE1_CUTOFF: f64 = 0.059;
+/// 第二级每个抽取比对应的抽头数：32·M + 1。
+const STAGE2_TAPS_PER_RATIO: usize = 32;
+/// 第二级截止（相对输出率）：通带到 0.272·fo（88.2 kHz 输出下 24 kHz），
+/// 阻带从输出奈奎斯特 0.5·fo 开始。
+const STAGE2_CUTOFF: f64 = 0.386;
+/// 输出 PCM 率下限：DSD64 按 32:1 出 88.2 kHz，给 DAC 留出超声过渡带。
+const MIN_PCM_RATE: u32 = 88_200;
+/// DSD 的「数字静音」码型（01101001）：滤波器历史以它起步，开头不出满幅直流。
+const DSD_IDLE_BYTE: u8 = 0x69;
+/// seek 对齐粒度（字节 / 声道）：同时是两种第二级抽取比（4、8）的倍数。
+const DSD_SEEK_ALIGN_BYTES: usize = 8;
 const DFF_PACKET_BYTE_FRAMES: usize = 4096;
 /// SACD 0 dB 参考 = 50% 调制深度 → 直接抽取的 PCM 峰值只有 ±0.5（−6 dBFS）。
 /// 业界惯例（foobar SACD 插件等）补 +6.02 dB，使 DSD 与 PCM 曲目响度一致。
@@ -29,46 +52,87 @@ const DC_BLOCKER_CUTOFF_HZ: f32 = 2.0;
 /// 元数据类 chunk（fmt/PROP）载荷读入上限，防止损坏/恶意文件触发巨型分配。
 const MAX_METADATA_CHUNK_LEN: u64 = 1 << 20;
 
-/// 64-tap Hann 加权窗，预计算一次。
-fn hann_taps() -> &'static [f32; DSD_TO_PCM_DECIMATION] {
-    static TAPS: OnceLock<[f32; DSD_TO_PCM_DECIMATION]> = OnceLock::new();
-    TAPS.get_or_init(|| {
-        let mut taps = [0.0_f32; DSD_TO_PCM_DECIMATION];
-        let mut sum = 0.0_f32;
-        for (i, slot) in taps.iter_mut().enumerate() {
-            let theta = std::f32::consts::PI * (i as f32 + 0.5) / DSD_TO_PCM_DECIMATION as f32;
-            let value = 0.5 - 0.5 * (2.0 * theta).cos();
-            *slot = value;
-            sum += value;
+/// 零阶修正贝塞尔函数（Kaiser 窗用）。
+fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0;
+    let mut term = 1.0;
+    let half = x / 2.0;
+    for k in 1..64 {
+        term *= (half / k as f64) * (half / k as f64);
+        sum += term;
+        if term < sum * 1.0e-18 {
+            break;
         }
-        // 归一化使全 1 输入得到 +1，全 0 输入得到 -1
-        for slot in taps.iter_mut() {
-            *slot /= sum;
-        }
-        taps
-    })
+    }
+    sum
 }
 
-/// 按字节的 LUT：`lut[byte_pos][byte_value]` = 该字节 8 个 bit 对应 tap 的部分和。
-/// 把逐 bit 的 64 次乘加降为 8 次查表相加（F-16）。
-type DsdByteLut = [[f32; 256]; DSD_BYTES_PER_PCM_SAMPLE];
+/// Kaiser 窗 sinc 低通，`cutoff` 为相对采样率的截止（0–0.5），直流增益归一到 1。
+fn kaiser_lowpass(taps: usize, cutoff: f64, beta: f64) -> Vec<f64> {
+    let center = (taps as f64 - 1.0) / 2.0;
+    let denom = bessel_i0(beta);
+    let mut out: Vec<f64> = (0..taps)
+        .map(|index| {
+            let x = index as f64 - center;
+            let sinc = if x.abs() < 1.0e-12 {
+                2.0 * cutoff
+            } else {
+                (2.0 * std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x)
+            };
+            let ratio = if center > 0.0 { x / center } else { 0.0 };
+            let window = bessel_i0(beta * (1.0 - ratio * ratio).max(0.0).sqrt()) / denom;
+            sinc * window
+        })
+        .collect();
+    let sum: f64 = out.iter().sum();
+    for tap in &mut out {
+        *tap /= sum;
+    }
+    out
+}
+
+fn stage1_taps() -> &'static [f64] {
+    static TAPS: OnceLock<Vec<f64>> = OnceLock::new();
+    TAPS.get_or_init(|| kaiser_lowpass(STAGE1_BYTES * 8, STAGE1_CUTOFF, KAISER_BETA))
+}
+
+/// 第二级低通：抽取比 4 与 8 各一份，进程内共享。
+fn stage2_taps(ratio: usize) -> &'static [f64] {
+    static RATIO_4: OnceLock<Vec<f64>> = OnceLock::new();
+    static RATIO_8: OnceLock<Vec<f64>> = OnceLock::new();
+    let build = |ratio: usize| {
+        kaiser_lowpass(
+            STAGE2_TAPS_PER_RATIO * ratio + 1,
+            STAGE2_CUTOFF / ratio as f64,
+            KAISER_BETA,
+        )
+    };
+    match ratio {
+        4 => RATIO_4.get_or_init(|| build(4)),
+        _ => RATIO_8.get_or_init(|| build(8)),
+    }
+}
+
+/// 按字节的 LUT：`lut[slot][byte_value]` = 窗口里第 `slot` 个字节（0 = 最早）
+/// 的 8 个 bit 对应抽头的部分和。把逐 bit 的 96 次乘加降为 12 次查表相加（F-16）。
+type DsdByteLut = [[f64; 256]; STAGE1_BYTES];
 
 fn build_byte_lut(order: BitOrder) -> Box<DsdByteLut> {
-    let taps = hann_taps();
-    let mut lut: Box<DsdByteLut> = Box::new([[0.0; 256]; DSD_BYTES_PER_PCM_SAMPLE]);
-    for (byte_pos, table) in lut.iter_mut().enumerate() {
-        for (value, slot) in table.iter_mut().enumerate() {
+    let taps = stage1_taps();
+    let mut lut: Box<DsdByteLut> = Box::new([[0.0; 256]; STAGE1_BYTES]);
+    for (slot, table) in lut.iter_mut().enumerate() {
+        for (value, entry) in table.iter_mut().enumerate() {
             let byte = value as u8;
-            let mut acc = 0.0_f32;
+            let mut acc = 0.0_f64;
             for bit_in_byte in 0..8 {
                 let bit = match order {
                     BitOrder::LsbFirst => (byte >> bit_in_byte) & 1,
                     BitOrder::MsbFirst => (byte >> (7 - bit_in_byte)) & 1,
                 };
-                let signed = (bit as i8 * 2 - 1) as f32;
-                acc += signed * taps[byte_pos * 8 + bit_in_byte];
+                let signed = f64::from(bit as i8 * 2 - 1);
+                acc += signed * taps[slot * 8 + bit_in_byte];
             }
-            *slot = acc;
+            *entry = acc;
         }
     }
     lut
@@ -80,6 +144,81 @@ fn byte_lut(order: BitOrder) -> &'static DsdByteLut {
     match order {
         BitOrder::LsbFirst => LSB.get_or_init(|| build_byte_lut(BitOrder::LsbFirst)),
         BitOrder::MsbFirst => MSB.get_or_init(|| build_byte_lut(BitOrder::MsbFirst)),
+    }
+}
+
+/// 总抽取比：输出率不低于 88.2 kHz 时用 64:1，否则（DSD64）用 32:1。
+fn pcm_decimation(dsd_sample_rate: u32) -> usize {
+    if dsd_sample_rate / DSD_TO_PCM_DECIMATION as u32 >= MIN_PCM_RATE {
+        DSD_TO_PCM_DECIMATION
+    } else {
+        DSD_TO_PCM_DECIMATION / 2
+    }
+}
+
+fn pcm_rate_of(dsd_sample_rate: u32) -> u32 {
+    (dsd_sample_rate / pcm_decimation(dsd_sample_rate) as u32).max(1)
+}
+
+/// 单声道的两级抽取器。两级的延迟线都用「双写」环形缓冲，取窗口时是一段连续切片。
+struct ChannelDecimator {
+    lut: &'static DsdByteLut,
+    bytes: [u8; STAGE1_BYTES * 2],
+    byte_pos: usize,
+    taps: &'static [f64],
+    line: Vec<f64>,
+    line_pos: usize,
+    ratio: usize,
+    phase: usize,
+}
+
+impl ChannelDecimator {
+    fn new(order: BitOrder, ratio: usize) -> Self {
+        let taps = stage2_taps(ratio);
+        Self {
+            lut: byte_lut(order),
+            bytes: [DSD_IDLE_BYTE; STAGE1_BYTES * 2],
+            byte_pos: 0,
+            taps,
+            line: vec![0.0; taps.len() * 2],
+            line_pos: 0,
+            ratio,
+            phase: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.bytes = [DSD_IDLE_BYTE; STAGE1_BYTES * 2];
+        self.byte_pos = 0;
+        self.line.fill(0.0);
+        self.line_pos = 0;
+        self.phase = 0;
+    }
+
+    /// 喂入一个 DSD 字节；每 `ratio` 个字节产出一个 PCM 样本（已含 +6.02 dB 补偿）。
+    #[inline]
+    fn push(&mut self, byte: u8) -> Option<f32> {
+        self.bytes[self.byte_pos] = byte;
+        self.bytes[self.byte_pos + STAGE1_BYTES] = byte;
+        self.byte_pos = (self.byte_pos + 1) % STAGE1_BYTES;
+        let window = &self.bytes[self.byte_pos..self.byte_pos + STAGE1_BYTES];
+        let mut stage1 = 0.0_f64;
+        for (table, value) in self.lut.iter().zip(window) {
+            stage1 += table[*value as usize];
+        }
+
+        let len = self.taps.len();
+        self.line[self.line_pos] = stage1;
+        self.line[self.line_pos + len] = stage1;
+        self.line_pos = (self.line_pos + 1) % len;
+        self.phase += 1;
+        if self.phase < self.ratio {
+            return None;
+        }
+        self.phase = 0;
+        let history = &self.line[self.line_pos..self.line_pos + len];
+        let acc: f64 = history.iter().zip(self.taps).map(|(x, h)| x * h).sum();
+        Some((acc * f64::from(DSD_GAIN)) as f32)
     }
 }
 
@@ -115,6 +254,8 @@ pub struct DsdDecoder {
     pcm_frames_emitted: u64,
     dc_r: f32,
     dc_state: Vec<(f32, f32)>, // 每通道一份 (last_input, last_output)
+    /// 每声道一份两级抽取器（块之间保留滤波状态）。
+    decimators: Vec<ChannelDecimator>,
 }
 
 impl DsdDecoder {
@@ -133,6 +274,7 @@ impl DsdDecoder {
             pcm_frames_emitted: 0,
             dc_r: 0.995,
             dc_state: Vec::new(),
+            decimators: Vec::new(),
         }
     }
 }
@@ -185,10 +327,14 @@ impl Decoder for DsdDecoder {
         // F-2：一阶 DC blocker 的 −3 dB 点 ≈ fs·(1−R)/(2π)。
         // R 必须按流的实际 PCM 率换算（DSD128/256 的 PCM 率翻倍），
         // 否则截止频率随倍率翻倍，系统性削薄 sub-bass。目标 ~2 Hz。
-        let pcm_rate = (parsed.dsd_sample_rate / DSD_TO_PCM_DECIMATION as u32).max(1) as f32;
+        let pcm_rate = pcm_rate_of(parsed.dsd_sample_rate) as f32;
         self.dc_r = (1.0 - 2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ / pcm_rate)
             .clamp(0.995, 0.999_99);
         self.dc_state = vec![(0.0, 0.0); parsed.channels];
+        let ratio = pcm_decimation(parsed.dsd_sample_rate) / STAGE1_DECIMATION;
+        self.decimators = (0..parsed.channels)
+            .map(|_| ChannelDecimator::new(parsed.bit_order, ratio))
+            .collect();
         Ok(())
     }
 
@@ -205,7 +351,7 @@ impl Decoder for DsdDecoder {
             .layout
             .ok_or_else(|| DecoderError::Internal("decoder is not open".into()))?;
         let channels = self.channels;
-        let pcm_rate = (self.dsd_sample_rate as usize / DSD_TO_PCM_DECIMATION).max(1) as u64;
+        let pcm_rate = u64::from(pcm_rate_of(self.dsd_sample_rate));
         // 用已发出的 PCM 帧数算时戳，比从 byte 累计反推稳定（不会被块尾对齐截断）
         let timestamp_seconds = self.pcm_frames_emitted as f64 / pcm_rate as f64;
 
@@ -240,7 +386,6 @@ impl Decoder for DsdDecoder {
         raw.truncate(filled);
         self.data_read += filled as u64;
 
-        let order = self.bit_order;
         let mut samples = match layout {
             DsdLayout::Dsf {
                 block_size_per_channel,
@@ -257,9 +402,14 @@ impl Decoder for DsdDecoder {
                     return Ok(None);
                 }
                 let valid_bytes = (valid_per_channel.min(block_size_per_channel as u64)) as usize;
-                decode_dsf_block(&raw, channels, block_size_per_channel, valid_bytes, order)
+                decode_dsf_block(
+                    &raw,
+                    &mut self.decimators,
+                    block_size_per_channel,
+                    valid_bytes,
+                )
             }
-            DsdLayout::Dff => decode_dff_block(&raw, channels, order),
+            DsdLayout::Dff => decode_dff_block(&raw, &mut self.decimators),
         };
 
         if samples.is_empty() {
@@ -293,14 +443,14 @@ impl Decoder for DsdDecoder {
                 block_size_per_channel,
             } => {
                 let block_size = block_size_per_channel as u64;
-                let pcm_aligned_byte = byte_frame - (byte_frame % DSD_BYTES_PER_PCM_SAMPLE as u64);
+                let pcm_aligned_byte = byte_frame - (byte_frame % DSD_SEEK_ALIGN_BYTES as u64);
                 let block_index = pcm_aligned_byte / block_size;
                 block_index
                     .saturating_mul(block_size)
                     .saturating_mul(channels)
             }
             DsdLayout::Dff => {
-                let aligned = byte_frame - (byte_frame % DSD_BYTES_PER_PCM_SAMPLE as u64);
+                let aligned = byte_frame - (byte_frame % DSD_SEEK_ALIGN_BYTES as u64);
                 aligned.saturating_mul(channels)
             }
         };
@@ -315,12 +465,17 @@ impl Decoder for DsdDecoder {
         for state in self.dc_state.iter_mut() {
             *state = (0.0, 0.0);
         }
+        // 抽取滤波器的历史属于 seek 之前的位置，同样清掉
+        for decimator in self.decimators.iter_mut() {
+            decimator.reset();
+        }
         // L-26：PCM 帧计数按实际落点（对齐后的 byte_offset）反推。DSF 的读取
         // 位置向下对齐到 block 边界（DSD64 典型 block ≈11.6ms 音频），此前按
         // 请求秒数回设会让时间戳比实际音频恒定超前最多一个 block，进度显示、
         // 歌词对位持续偏移到曲尾/下次 seek。
         let bytes_per_channel = byte_offset / channels.max(1);
-        self.pcm_frames_emitted = bytes_per_channel * 8 / DSD_TO_PCM_DECIMATION as u64;
+        self.pcm_frames_emitted =
+            bytes_per_channel * 8 / pcm_decimation(self.dsd_sample_rate) as u64;
         Ok(())
     }
 }
@@ -341,6 +496,7 @@ struct ParsedDsd {
 /// R-01：DSD 率上界原为 100 MHz，抽取 64:1 后 PCM 率仍高达 1.56 MHz——超过引擎
 /// 支持的 768 kHz，会一路流到环形缓冲容量计算。改为按 PCM 上界反推：
 /// 768 kHz × 64 = 49.152 MHz，正好覆盖到 DSD1024（22.5792 MHz 的 2 倍）。
+/// （只有 PCM 率低于 88.2 kHz 的流才用 32:1，离上界很远。）
 const MAX_DSD_SAMPLE_RATE: u32 = MAX_SUPPORTED_SAMPLE_RATE * DSD_TO_PCM_DECIMATION as u32;
 
 fn validate_dsd_header(
@@ -351,6 +507,8 @@ fn validate_dsd_header(
     if !(1..=32).contains(&channels)
         || !(64_000..=MAX_DSD_SAMPLE_RATE).contains(&dsd_sample_rate)
         || block_size_per_channel.is_some_and(|size| !(8..=(1 << 20)).contains(&size))
+        // 流式抽取要求块大小是 seek 对齐粒度的倍数（规范值 4096）
+        || block_size_per_channel.is_some_and(|size| size % DSD_SEEK_ALIGN_BYTES != 0)
     {
         return Err(DecoderError::UnsupportedFormat(
             "implausible DSD header fields".into(),
@@ -643,14 +801,26 @@ fn read_dff_chunk_header(
     }
 }
 
+/// 把各声道的输出交错写入；所有声道喂入的字节数相同、相位一致，产出帧数必然相等。
+fn interleave(per_channel: &[Vec<f32>]) -> Vec<f32> {
+    let frames = per_channel.iter().map(Vec::len).min().unwrap_or(0);
+    let mut samples = Vec::with_capacity(frames * per_channel.len());
+    for frame in 0..frames {
+        for channel in per_channel {
+            samples.push(channel[frame]);
+        }
+    }
+    samples
+}
+
 fn decode_dsf_block(
     raw: &[u8],
-    channels: usize,
+    decimators: &mut [ChannelDecimator],
     block_size_per_channel: usize,
     valid_bytes_per_channel: usize,
-    order: BitOrder,
 ) -> Vec<f32> {
-    if channels == 0 || block_size_per_channel < DSD_BYTES_PER_PCM_SAMPLE {
+    let channels = decimators.len();
+    if channels == 0 || block_size_per_channel == 0 {
         return Vec::new();
     }
 
@@ -667,62 +837,38 @@ fn decode_dsf_block(
     let usable_bytes = (raw.len() - last_channel_start)
         .min(block_size_per_channel)
         .min(valid_bytes_per_channel);
-    let pcm_frames = usable_bytes / DSD_BYTES_PER_PCM_SAMPLE;
-    if pcm_frames == 0 {
-        return Vec::new();
-    }
-    let mut samples = Vec::with_capacity(pcm_frames * channels);
 
-    for frame in 0..pcm_frames {
-        let frame_offset = frame * DSD_BYTES_PER_PCM_SAMPLE;
-        for channel in 0..channels {
-            let channel_offset = channel * block_size_per_channel + frame_offset;
-            samples.push(dsd_64_to_pcm(
-                &raw[channel_offset..channel_offset + DSD_BYTES_PER_PCM_SAMPLE],
-                order,
-            ));
-        }
-    }
-
-    samples
+    let per_channel: Vec<Vec<f32>> = decimators
+        .iter_mut()
+        .enumerate()
+        .map(|(channel, decimator)| {
+            let start = channel * block_size_per_channel;
+            raw[start..start + usable_bytes]
+                .iter()
+                .filter_map(|byte| decimator.push(*byte))
+                .collect()
+        })
+        .collect();
+    interleave(&per_channel)
 }
 
-fn decode_dff_block(raw: &[u8], channels: usize, order: BitOrder) -> Vec<f32> {
+fn decode_dff_block(raw: &[u8], decimators: &mut [ChannelDecimator]) -> Vec<f32> {
+    let channels = decimators.len();
     if channels == 0 {
         return Vec::new();
     }
 
     let byte_frames = raw.len() / channels;
-    let pcm_frames = byte_frames / DSD_BYTES_PER_PCM_SAMPLE;
-    if pcm_frames == 0 {
-        return Vec::new();
-    }
-    let mut samples = Vec::with_capacity(pcm_frames * channels);
-
-    for frame in 0..pcm_frames {
-        let byte_frame_offset = frame * DSD_BYTES_PER_PCM_SAMPLE;
-        for channel in 0..channels {
-            let mut bytes = [0_u8; DSD_BYTES_PER_PCM_SAMPLE];
-            for (index, byte) in bytes.iter_mut().enumerate() {
-                *byte = raw[(byte_frame_offset + index) * channels + channel];
+    let mut samples = Vec::with_capacity(byte_frames / 4 * channels + channels);
+    // DFF 按字节在声道间交错；各声道相位一致，同一个字节帧要么都出样本要么都不出。
+    for frame in raw[..byte_frames * channels].chunks_exact(channels) {
+        for (byte, decimator) in frame.iter().zip(decimators.iter_mut()) {
+            if let Some(sample) = decimator.push(*byte) {
+                samples.push(sample);
             }
-            samples.push(dsd_64_to_pcm(&bytes, order));
         }
     }
-
     samples
-}
-
-/// 把 64 bit DSD 抽取成 1 个 PCM 样本，Hann 加权抑制高频混叠。
-/// 按字节 LUT（8 次查表相加）代替逐 bit 64 次乘加（F-16），
-/// 并施加 +6.02 dB 增益补偿（F-5）。
-fn dsd_64_to_pcm(bytes: &[u8], order: BitOrder) -> f32 {
-    let lut = byte_lut(order);
-    let mut acc = 0.0_f32;
-    for (byte_pos, byte) in bytes.iter().enumerate() {
-        acc += lut[byte_pos][*byte as usize];
-    }
-    acc * DSD_GAIN
 }
 
 /// 一阶高通 DC blocker：y[n] = x[n] - x[n-1] + R*y[n-1]
@@ -744,7 +890,7 @@ fn apply_dc_blocker(samples: &mut [f32], channels: usize, state: &mut Vec<(f32, 
 }
 
 fn dsd_stream_info(dsd_sample_rate: u32, channels: usize, sample_count: u64) -> StreamInfo {
-    let pcm_rate = (dsd_sample_rate / DSD_TO_PCM_DECIMATION as u32).max(1);
+    let pcm_rate = pcm_rate_of(dsd_sample_rate);
     StreamInfo {
         sample_rate: SampleRate(pcm_rate),
         bit_depth: BitDepth(24),
@@ -794,7 +940,8 @@ mod tests {
         let mut decoder = DsdDecoder::new();
         decoder.open(&path).expect("open dsf");
         let info = decoder.info().expect("stream info");
-        assert_eq!(info.sample_rate, SampleRate(44_100));
+        // DSP-01：DSD64 按 32:1 输出 88.2 kHz
+        assert_eq!(info.sample_rate, SampleRate(88_200));
         assert_eq!(info.bit_depth, BitDepth(24));
         assert_eq!(info.channels, Channels(2));
 
@@ -802,10 +949,10 @@ mod tests {
             .next_packet()
             .expect("packet result")
             .expect("first packet");
-        // F-5：+6.02 dB 增益补偿后，全 1 → +2.0，全 0 → -2.0
-        assert_eq!(packet.samples.len(), 2);
-        assert!((packet.samples[0] - 2.0).abs() < 1.0e-4);
-        assert!((packet.samples[1] + 2.0).abs() < 1.0e-4);
+        // 每声道 8 字节 → 2 帧；滤波器还在建立，只核对帧数与极性（ch0 全 1、ch1 全 0）
+        assert_eq!(packet.samples.len(), 4);
+        assert!(packet.samples.iter().all(|sample| sample.is_finite()));
+        assert!(packet.samples[2] > packet.samples[3]);
         assert!(decoder.next_packet().unwrap().is_none());
 
         let _ = fs::remove_file(path);
@@ -819,16 +966,16 @@ mod tests {
         let mut decoder = DsdDecoder::new();
         decoder.open(&path).expect("open dff");
         let info = decoder.info().expect("stream info");
-        assert_eq!(info.sample_rate, SampleRate(44_100));
+        assert_eq!(info.sample_rate, SampleRate(88_200));
         assert_eq!(info.channels, Channels(2));
 
         let packet = decoder
             .next_packet()
             .expect("packet result")
             .expect("first packet");
-        assert_eq!(packet.samples.len(), 2);
-        assert!((packet.samples[0] - 2.0).abs() < 1.0e-4);
-        assert!((packet.samples[1] + 2.0).abs() < 1.0e-4);
+        assert_eq!(packet.samples.len(), 4);
+        assert!(packet.samples.iter().all(|sample| sample.is_finite()));
+        assert!(packet.samples[2] > packet.samples[3]);
         assert!(decoder.next_packet().unwrap().is_none());
 
         let _ = fs::remove_file(path);
@@ -848,9 +995,8 @@ mod tests {
             .next_packet()
             .expect("packet result")
             .expect("first packet");
-        // 只应产出 1 个 PCM 帧（2 声道 = 2 样本），填充部分被截断
-        assert_eq!(packet.samples.len(), 2);
-        assert!((packet.samples[0] - 2.0).abs() < 1.0e-4);
+        // 每声道只有 8 字节有效 → 2 个 PCM 帧（2 声道 = 4 样本），填充部分被截断
+        assert_eq!(packet.samples.len(), 4);
         assert!(decoder.next_packet().unwrap().is_none());
 
         let _ = fs::remove_file(path);
@@ -924,10 +1070,8 @@ mod tests {
 
     #[test]
     fn dsf_msb_first_variant_uses_msb_bit_order() {
-        // F-12：bits_per_sample=8 → MSB first。ch0 数据只有第一个字节是 0x01，
-        // LSB-first 下 +1 位落在 tap 0，MSB-first 下落在 tap 7 —— Hann 权重不同。
-        // （若用 0x01 重复 8 次，两种位序的 tap 集合互为 Hann 对称镜像、结果相同，
-        // 无法区分位序。）
+        // F-12：bits_per_sample=8 → MSB first。ch0 数据只有第一个字节是 0x01：
+        // 两种位序下这个 +1 位落在不同的抽头上，解码结果不同。
         let path = temp_audio_path("seraph-dsd-msb", "dsf");
         let mut ch0 = [0x00_u8; 8];
         ch0[0] = 0x01;
@@ -938,10 +1082,15 @@ mod tests {
             .next_packet()
             .expect("packet result")
             .expect("first packet");
-        let expected = dsd_64_to_pcm(&ch0, BitOrder::MsbFirst);
-        let unexpected = dsd_64_to_pcm(&ch0, BitOrder::LsbFirst);
-        assert!((packet.samples[0] - expected).abs() < 1.0e-5);
-        assert!((expected - unexpected).abs() > 1.0e-3, "位序应产生不同结果");
+        // DC blocker 对首个样本是直通（初始状态为 0），可直接与抽取器对比
+        let first = |order| {
+            let mut decimator = ChannelDecimator::new(order, 4);
+            ch0.iter().find_map(|byte| decimator.push(*byte)).unwrap()
+        };
+        let expected = first(BitOrder::MsbFirst);
+        let unexpected = first(BitOrder::LsbFirst);
+        assert_eq!(packet.samples[0], expected);
+        assert_ne!(expected, unexpected, "位序应产生不同结果");
         let _ = fs::remove_file(path);
     }
 
@@ -959,7 +1108,7 @@ mod tests {
             .next_packet()
             .expect("packet result")
             .expect("first packet");
-        assert!((packet.samples[0] - 2.0).abs() < 1.0e-4);
+        assert_eq!(packet.samples.len(), 4);
 
         let _ = fs::remove_file(path);
     }
@@ -967,25 +1116,38 @@ mod tests {
     #[test]
     fn byte_lut_matches_bitwise_reference() {
         // LUT 解码必须与逐 bit 参考实现一致
-        let taps = hann_taps();
+        let taps = stage1_taps();
         for order in [BitOrder::LsbFirst, BitOrder::MsbFirst] {
-            let bytes: [u8; 8] = [0x69, 0xaa, 0x01, 0x80, 0xff, 0x00, 0x5a, 0xc3];
-            let mut reference = 0.0_f32;
-            for (byte_pos, byte) in bytes.iter().enumerate() {
+            let bytes: [u8; STAGE1_BYTES] = [
+                0x69, 0xaa, 0x01, 0x80, 0xff, 0x00, 0x5a, 0xc3, 0x17, 0xe8, 0x3c, 0x96,
+            ];
+            let mut reference = 0.0_f64;
+            for (slot, byte) in bytes.iter().enumerate() {
                 for bit_in_byte in 0..8 {
                     let bit = match order {
                         BitOrder::LsbFirst => (byte >> bit_in_byte) & 1,
                         BitOrder::MsbFirst => (byte >> (7 - bit_in_byte)) & 1,
                     };
-                    reference += (bit as i8 * 2 - 1) as f32 * taps[byte_pos * 8 + bit_in_byte];
+                    reference += f64::from(bit as i8 * 2 - 1) * taps[slot * 8 + bit_in_byte];
                 }
             }
-            let lut_value = dsd_64_to_pcm(&bytes, order);
+            let lut = byte_lut(order);
+            let lut_value: f64 = bytes
+                .iter()
+                .enumerate()
+                .map(|(slot, byte)| lut[slot][*byte as usize])
+                .sum();
             assert!(
-                (lut_value - reference * DSD_GAIN).abs() < 1.0e-5,
+                (lut_value - reference).abs() < 1.0e-12,
                 "{order:?}: {lut_value} vs {reference}"
             );
         }
+    }
+
+    fn decimators(channels: usize) -> Vec<ChannelDecimator> {
+        (0..channels)
+            .map(|_| ChannelDecimator::new(BitOrder::LsbFirst, 4))
+            .collect()
     }
 
     #[test]
@@ -993,16 +1155,125 @@ mod tests {
         // 复现旧越界 bug：channels=2, block_size=4096，末块组只短读到 5000 字节。
         // 旧实现按完整 block 步长索引第 2 声道 → &raw[6584..6592] 越界 panic。
         let raw = vec![0xaa_u8; 5000];
-        let samples = decode_dsf_block(&raw, 2, 4096, usize::MAX, BitOrder::LsbFirst);
-        // 末声道起点 4096，仅剩 904 字节 → 113 帧 × 2 声道，且不 panic
-        assert_eq!(samples.len(), 113 * 2);
+        let samples = decode_dsf_block(&raw, &mut decimators(2), 4096, usize::MAX);
+        // 末声道起点 4096，仅剩 904 字节 → 226 帧 × 2 声道，且不 panic
+        assert_eq!(samples.len(), 226 * 2);
     }
 
     #[test]
     fn decode_dsf_block_drops_block_with_missing_last_channel() {
         // raw 不足以覆盖末声道起点（4096）→ 无完整帧，安全返回空
         let raw = vec![0xaa_u8; 4096];
-        assert!(decode_dsf_block(&raw, 2, 4096, usize::MAX, BitOrder::LsbFirst).is_empty());
+        assert!(decode_dsf_block(&raw, &mut decimators(2), 4096, usize::MAX).is_empty());
+    }
+
+    /// 滤波器在归一化频率 `f`（相对其采样率）处的幅度响应。
+    fn magnitude(taps: &[f64], f: f64) -> f64 {
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for (index, tap) in taps.iter().enumerate() {
+            let phase = 2.0 * std::f64::consts::PI * f * index as f64;
+            re += tap * phase.cos();
+            im -= tap * phase.sin();
+        }
+        re.hypot(im)
+    }
+
+    /// DSP-01 回归闸：两级级联后，通带平坦，且所有会折叠进输出频带的频率
+    /// （输出奈奎斯特以上直到 DSD 奈奎斯特）抑制 > 90 dB。旧的 64 抽头 Hann 窗
+    /// 在 30–80 kHz 只有 0–10 dB 的衰减。
+    #[test]
+    fn dsp01_cascade_is_flat_in_band_and_rejects_everything_that_aliases() {
+        for (dsd_rate, ratio) in [(2_822_400.0_f64, 4_usize), (5_644_800.0, 8)] {
+            let stage1 = stage1_taps();
+            let stage2 = stage2_taps(ratio);
+            let stage2_rate = dsd_rate / STAGE1_DECIMATION as f64;
+            let output_nyquist = stage2_rate / ratio as f64 / 2.0;
+            let response = |hz: f64| {
+                // 第二级工作在 fs/8，其响应对 fs/8 周期重复
+                magnitude(stage1, hz / dsd_rate) * magnitude(stage2, hz / stage2_rate)
+            };
+
+            let mut hz = 0.0;
+            while hz <= 20_000.0 {
+                let db = 20.0 * response(hz).log10();
+                assert!(db.abs() < 0.05, "passband {hz} Hz: {db} dB");
+                hz += 250.0;
+            }
+            let mut hz = output_nyquist;
+            let mut worst = f64::NEG_INFINITY;
+            while hz <= dsd_rate / 2.0 {
+                worst = worst.max(20.0 * response(hz).max(1.0e-12).log10());
+                hz += 500.0;
+            }
+            assert!(worst < -90.0, "DSD {dsd_rate}: worst stopband {worst} dB");
+        }
+    }
+
+    /// 用一阶 Σ-Δ 调制器把正弦调成 DSD64 位流，解码后幅度应为输入 × DSD_GAIN，
+    /// 且跨块连续（状态保留）——整段一次解码与分块解码结果一致。
+    #[test]
+    fn dsp01_decodes_modulated_sine_with_expected_level_and_block_continuity() {
+        let dsd_rate = 2_822_400.0_f64;
+        let amplitude = 0.25_f64;
+        let bytes: Vec<u8> = {
+            let mut integrator = 0.0_f64;
+            (0..40_000)
+                .map(|byte_index| {
+                    let mut byte = 0_u8;
+                    for bit in 0..8 {
+                        let n = (byte_index * 8 + bit) as f64;
+                        let input =
+                            amplitude * (2.0 * std::f64::consts::PI * 1_000.0 * n / dsd_rate).sin();
+                        let output = if integrator >= 0.0 { 1.0 } else { -1.0 };
+                        integrator += input - output;
+                        if output > 0.0 {
+                            byte |= 1 << bit; // LSB first
+                        }
+                    }
+                    byte
+                })
+                .collect()
+        };
+
+        let mut whole = ChannelDecimator::new(BitOrder::LsbFirst, 4);
+        let all: Vec<f32> = bytes.iter().filter_map(|byte| whole.push(*byte)).collect();
+        assert_eq!(all.len(), bytes.len() / 4);
+
+        let mut chunked = ChannelDecimator::new(BitOrder::LsbFirst, 4);
+        let pieces: Vec<f32> = bytes
+            .chunks(4097) // 故意不是抽取比的倍数
+            .flat_map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|byte| chunked.push(*byte))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(all, pieces);
+
+        // 跳过滤波器建立段，按 1 kHz 整周期（88.2 帧/周期 → 取 441 帧 = 5 周期的整数倍）量 RMS
+        let steady = &all[1_000..1_000 + 4_410];
+        let rms = (steady
+            .iter()
+            .map(|sample| f64::from(*sample).powi(2))
+            .sum::<f64>()
+            / steady.len() as f64)
+            .sqrt();
+        let expected = amplitude * f64::from(DSD_GAIN) / std::f64::consts::SQRT_2;
+        assert!(
+            (rms / expected - 1.0).abs() < 0.02,
+            "rms {rms} vs expected {expected}"
+        );
+    }
+
+    #[test]
+    fn dsp01_rate_selection_keeps_output_at_or_above_88k2() {
+        assert_eq!(pcm_rate_of(2_822_400), 88_200); // DSD64
+        assert_eq!(pcm_rate_of(3_072_000), 96_000); // DSD64 (48k 系)
+        assert_eq!(pcm_rate_of(5_644_800), 88_200); // DSD128
+        assert_eq!(pcm_rate_of(11_289_600), 176_400); // DSD256
+        assert_eq!(pcm_rate_of(22_579_200), 352_800); // DSD512
+        assert!(pcm_rate_of(MAX_DSD_SAMPLE_RATE) <= MAX_SUPPORTED_SAMPLE_RATE);
     }
 
     fn write_dsf_fixture(
