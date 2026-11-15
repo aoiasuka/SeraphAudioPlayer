@@ -40,6 +40,41 @@ impl Drop for TestDir {
     }
 }
 
+/// 找一个本机不存在的盘符；全部占用（极少见）时返回 None，测试跳过。
+#[cfg(windows)]
+fn missing_drive_root() -> Option<PathBuf> {
+    (b'D'..=b'Z')
+        .rev()
+        .map(|letter| PathBuf::from(format!("{}:/", letter as char)))
+        .find(|root| fs::metadata(root).is_err())
+}
+
+#[cfg(windows)]
+#[test]
+fn saved_dir_on_missing_volume_is_unreachable_not_unsafe() {
+    let Some(root) = missing_drive_root() else {
+        return;
+    };
+    let dir = root.join("seraph-cache");
+    assert!(cache_volume_unreachable(&dir));
+    assert!(matches!(
+        saved_dir_state(&dir),
+        SavedDirState::Unreachable(_)
+    ));
+}
+
+#[test]
+fn saved_dir_on_present_volume_keeps_strict_safety_checks() {
+    let dir = TestDir::new();
+    assert!(!cache_volume_unreachable(&dir.0));
+    // 卷在、目录非空且无标记：仍按不安全处理，不因 CACHE-01 放宽。
+    fs::write(dir.0.join("song.flac"), b"user file").unwrap();
+    assert!(matches!(saved_dir_state(&dir.0), SavedDirState::Unsafe(_)));
+    assert!(!cache_volume_unreachable(Path::new("relative/dir")));
+    let managed = TestDir::new();
+    assert_eq!(saved_dir_state(&managed.0), SavedDirState::Usable);
+}
+
 #[test]
 fn unmarked_nonempty_directory_is_neither_adopted_nor_cleaned() {
     let dir = TestDir::new();

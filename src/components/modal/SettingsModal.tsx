@@ -64,6 +64,8 @@ interface CacheStatus {
   usedMb: number;
   usagePercent: number;
   fileCount: number;
+  /** CACHE-01：缓存目录所在磁盘当前不可用时的说明；设置本身保留。 */
+  unavailableReason?: string;
 }
 
 interface CacheCleanupResult {
@@ -125,6 +127,10 @@ export function SettingsModal() {
   const [maxSizeMb, setMaxSizeMb] = useState("5120");
   const [autoCleanup, setAutoCleanup] = useState(true);
   const [cacheBusy, setCacheBusy] = useState(false);
+  // UI-01：清理缓存是一次点击删光全部已下载音频，先确认。
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  // UI-04：缓存表单有未保存改动时，✕ / Esc / 点遮罩不再直接丢弃。
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
 
   // 歌词稿「打开歌词设置」等入口派发该事件直达指定标签页（v0.6.0）
   useEffect(() => {
@@ -213,12 +219,31 @@ export function SettingsModal() {
     toggleSettings();
   };
 
+  const requestClose = () => {
+    if (cacheSettingsDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    toggleSettings();
+  };
+
+  const discardAndClose = () => {
+    setDiscardConfirmOpen(false);
+    if (cacheStatus) {
+      setCacheDir(cacheStatus.settings.cacheDir);
+      setMaxSizeMb(String(cacheStatus.settings.maxSizeMb));
+      setAutoCleanup(cacheStatus.settings.autoCleanup);
+    }
+    toggleSettings();
+  };
+
   const saveCacheSettings = (event: FormEvent) => {
     event.preventDefault();
     void persistCacheSettings();
   };
 
   const clearAppCache = async () => {
+    setClearConfirmOpen(false);
     if (cacheBusy) return;
     setCacheBusy(true);
     try {
@@ -357,11 +382,11 @@ export function SettingsModal() {
   return (
     <Dialog
       open={open}
-      onClose={toggleSettings}
+      onClose={requestClose}
       className="max-h-[88vh] max-w-2xl space-y-6 overflow-y-auto"
     >
       <button
-        onClick={toggleSettings}
+        onClick={requestClose}
         className="absolute top-4 right-4 text-ink3 hover:text-stamp"
         aria-label="关闭"
       >
@@ -508,6 +533,12 @@ export function SettingsModal() {
             </button>
           </div>
 
+          {cacheStatus?.unavailableReason ? (
+            <p role="alert" className="border-[1.5px] border-stamp bg-stamp-soft p-2 font-tw text-[10px] leading-relaxed text-stamp">
+              {cacheStatus.unavailableReason}
+            </p>
+          ) : null}
+
           <div className="space-y-1.5">
             <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
               Cache Path
@@ -570,7 +601,7 @@ export function SettingsModal() {
           <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">
             <button
               type="button"
-              onClick={clearAppCache}
+              onClick={() => setClearConfirmOpen(true)}
               disabled={cacheBusy || (cacheStatus?.fileCount ?? 0) === 0}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 font-tw text-xs font-bold text-stamp transition-colors hover:bg-stamp-soft disabled:cursor-not-allowed disabled:text-ink3 disabled:hover:bg-transparent"
             >
@@ -762,6 +793,57 @@ export function SettingsModal() {
           {cacheSettingsDirty ? "保存并关闭" : "完成"}
         </button>
       </div>
+
+      <Dialog open={clearConfirmOpen} onClose={() => setClearConfirmOpen(false)} className="max-w-sm space-y-4">
+        <h3 className="font-serif text-sm font-semibold text-ink">清理全部缓存</h3>
+        <p className="font-tw text-xs leading-5 text-ink2">
+          将删除 {cacheStatus?.fileCount ?? 0} 个已下载的流媒体音频文件（共{" "}
+          {formatMb(cacheStatus?.usedMb ?? 0)}）。曲目记录会保留，但再次播放需要重新下载。
+          此操作不可撤销。
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setClearConfirmOpen(false)}
+            className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 hover:border-ink"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void clearAppCache()}
+            className="h-8 border-[1.5px] border-stamp bg-stamp px-3 font-tw text-xs font-bold text-paper"
+          >
+            确认清理
+          </button>
+        </div>
+      </Dialog>
+
+      <Dialog open={discardConfirmOpen} onClose={() => setDiscardConfirmOpen(false)} className="max-w-sm space-y-4">
+        <h3 className="font-serif text-sm font-semibold text-ink">缓存设置尚未保存</h3>
+        <p className="font-tw text-xs leading-5 text-ink2">
+          缓存目录或容量上限有改动还没有保存。要保存后再关闭吗？
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={discardAndClose}
+            className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 hover:border-ink"
+          >
+            放弃改动
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDiscardConfirmOpen(false);
+              void finishAndClose();
+            }}
+            className="h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper"
+          >
+            保存并关闭
+          </button>
+        </div>
+      </Dialog>
     </Dialog>
   );
 }

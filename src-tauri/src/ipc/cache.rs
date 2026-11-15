@@ -41,6 +41,10 @@ pub struct CacheStatus {
     pub max_bytes: u64,
     pub usage_percent: f64,
     pub file_count: usize,
+    /// CACHE-01：已保存的缓存目录所在磁盘当前不可用时给出原因；此时用量全为 0，
+    /// 设置本身原样保留，盘接回后自动恢复。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,7 +100,9 @@ fn update_cache_settings_inner(
     settings: UpdateCacheSettings,
 ) -> IpcResult<CacheStatus> {
     let cleanup = operations::OPERATIONS.acquire_cleanup()?;
-    let mut current = load_cache_settings(app)?;
+    // CACHE-01：这里读未经目录校验的已保存值——原目录所在磁盘不可用时，
+    // 用户仍要能把目录改到别处；最终生效的目录在下面统一校验。
+    let mut current = read_saved_cache_settings(app)?;
 
     if let Some(cache_dir) = settings.cache_dir {
         let cache_dir = cache_dir.trim();
@@ -116,6 +122,10 @@ fn update_cache_settings_inner(
         current.auto_cleanup = auto_cleanup;
     }
 
+    // 没改目录而原目录所在磁盘不可用：给出可读的原因，不保存半截改动。
+    if let SavedDirState::Unreachable(reason) = saved_dir_state(Path::new(&current.cache_dir)) {
+        return Err(reason.into());
+    }
     ensure_cache_dir(Path::new(&current.cache_dir))?;
     save_cache_settings(app, &current)?;
     enforce_cache_limit_with_lease(app, &[], &cleanup)?;
@@ -438,6 +448,19 @@ fn normalized_path_key(path: &Path) -> String {
 }
 
 fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
+    let saved = read_saved_cache_settings(app)?;
+    if let SavedDirState::Unreachable(reason) = saved_dir_state(Path::new(&saved.cache_dir)) {
+        let max_bytes = saved.max_size_mb.saturating_mul(1024 * 1024);
+        return Ok(CacheStatus {
+            settings: saved,
+            used_bytes: 0,
+            used_mb: 0.0,
+            max_bytes,
+            usage_percent: 0.0,
+            file_count: 0,
+            unavailable_reason: Some(reason),
+        });
+    }
     let settings = load_cache_settings(app)?;
     let cache_dir = PathBuf::from(&settings.cache_dir);
     ensure_cache_dir(&cache_dir)?;
@@ -461,10 +484,68 @@ fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
         max_bytes,
         usage_percent,
         file_count: entries.len(),
+        unavailable_reason: None,
     })
 }
 
+/// CACHE-01：已保存缓存目录的三种状态。
+#[derive(Debug, PartialEq, Eq)]
+enum SavedDirState {
+    Usable,
+    /// 目录所在磁盘当前不存在或未就绪（移动硬盘没接、盘符没挂载）。
+    /// 属于暂时状况：报错，但**不**改写已保存的设置。
+    Unreachable(String),
+    /// 目录本身不安全（链接、伪造标记、非空且无标记等）：退回默认目录。
+    Unsafe(String),
+}
+
+/// 路径所在卷的根目录取不到元数据即视为「暂时不可达」。
+/// 只看卷根：卷在而目录有问题的情况一律按不安全处理，不放宽。
+fn cache_volume_unreachable(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    match path.ancestors().last() {
+        Some(root) if root != path => fs::metadata(root).is_err(),
+        _ => false,
+    }
+}
+
+fn saved_dir_state(path: &Path) -> SavedDirState {
+    if cache_volume_unreachable(path) {
+        return SavedDirState::Unreachable(format!(
+            "缓存目录 {} 所在的磁盘当前不可用；设置已保留，接回磁盘后恢复，也可以在设置里改用其他目录",
+            path.display()
+        ));
+    }
+    match ensure_cache_dir_safe(path) {
+        Ok(()) => SavedDirState::Usable,
+        Err(err) => SavedDirState::Unsafe(err),
+    }
+}
+
+/// 读取并校验缓存设置。目录暂时不可达时返回错误（缓存相关功能本次不可用），
+/// 不会悄悄把下载改落到系统盘，也不改写设置文件。
 fn load_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
+    let mut settings = read_saved_cache_settings(app)?;
+    match saved_dir_state(Path::new(&settings.cache_dir)) {
+        SavedDirState::Usable => return Ok(settings),
+        SavedDirState::Unreachable(reason) => return Err(reason),
+        SavedDirState::Unsafe(reason) => {
+            tracing::warn!(
+                "cache dir {} rejected, falling back to default: {reason}",
+                settings.cache_dir
+            );
+            settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
+            save_cache_settings(app, &settings)?;
+        }
+    }
+    ensure_cache_dir_safe(Path::new(&settings.cache_dir))?;
+    Ok(settings)
+}
+
+/// 只读出已保存的值（含损坏回退与数值钳位），不校验目录。
+fn read_saved_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
     let path = settings_path(app)?;
     if !path.is_file() {
         let settings = default_cache_settings(app)?;
@@ -496,12 +577,6 @@ fn load_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
         settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
     }
     settings.max_size_mb = settings.max_size_mb.clamp(128, 1024 * 1024);
-    let configured_dir = PathBuf::from(&settings.cache_dir);
-    if ensure_cache_dir_safe(&configured_dir).is_err() {
-        settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
-        save_cache_settings(app, &settings)?;
-    }
-    ensure_cache_dir_safe(Path::new(&settings.cache_dir))?;
     Ok(settings)
 }
 
@@ -516,7 +591,15 @@ fn save_cache_settings(app: &AppHandle, settings: &CacheSettings) -> Result<(), 
     // P2-5：temp+rename 原子写，避免写一半崩溃留下截断 JSON。
     // 审2-S4：固定 `{path}.tmp` 改为唯一临时名，防止并发保存交错写坏彼此的临时文件。
     let tmp = unique_temp_path(&path);
-    fs::write(&tmp, bytes).map_err(|err| {
+    // CACHE-04：改名前先落盘，断电不会留下长度为 0 的设置文件。
+    let written = (|| {
+        use std::io::Write;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()
+    })();
+    written.map_err(|err| {
+        let _ = fs::remove_file(&tmp);
         format!(
             "failed to write cache settings temp {}: {err}",
             tmp.display()
