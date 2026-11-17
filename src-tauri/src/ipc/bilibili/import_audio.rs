@@ -463,29 +463,18 @@ pub(crate) async fn ensure_audio_file(
     operation: &std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>,
 ) -> Result<PathBuf, String> {
     cancellation.check()?;
-    // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
-    // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
-    let sentinel = ok_sentinel_path(path);
-    if cached_audio_file_is_valid(path) {
-        return Ok(path.to_path_buf());
-    }
-
-    // 审2-S8：上次 remux 失败 fallback 落的 fMP4 也参与缓存命中检查，
-    // 否则同 BV 重复导入时只查原扩展名路径，会绕过 fallback 缓存重新下载。
-    let fallback_path = remux_fallback_cache_path(path);
-    if fallback_path != path && cached_audio_file_is_valid(&fallback_path) {
-        return Ok(fallback_path);
-    }
-
-    // 清理可能残留的不完整文件 + 旧 sentinel
-    let _ = fs::remove_file(&sentinel);
-    if path.is_file() {
-        let _ = fs::remove_file(path);
-    }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create bilibili cache dir: {err}"))?;
+    // BILI-04：缓存命中检查、残留清理、建目录都是同步文件操作，合成一步放到阻塞线程，
+    // 缓存目录在慢盘上时不占住异步工作线程。来源占用随任务一起持有。
+    let prepare_target = path.to_path_buf();
+    let prepare_operation = std::sync::Arc::clone(operation);
+    let cached = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = prepare_operation;
+        prepare_audio_cache_slot(&prepare_target)
+    })
+    .await
+    .map_err(|err| format!("缓存检查任务异常终止: {err}"))??;
+    if let Some(cached) = cached {
+        return Ok(cached);
     }
 
     let mut last_error = None;
@@ -504,24 +493,21 @@ pub(crate) async fn ensure_audio_file(
                 let outcome = tauri::async_runtime::spawn_blocking(move || {
                     // 丢弃异步调用不等于阻塞任务已结束，写盘线程退出前必须保留来源占用。
                     let _operation = operation;
-                    finalize_audio_file(&temp, &target, ffmpeg.as_deref(), must_remux, &cancel)
+                    let final_path = finalize_audio_file(
+                        &temp,
+                        &target,
+                        ffmpeg.as_deref(),
+                        must_remux,
+                        &cancel,
+                    )?;
+                    // BILI-04：完成标记与落盘在同一个阻塞任务里写。
+                    write_ok_sentinel(&final_path);
+                    Ok(final_path)
                 })
                 .await
                 .unwrap_or_else(|err| Err(format!("finalize task panicked: {err}")));
                 match outcome {
-                    Ok(final_path) => {
-                        // 写一个零字节 sentinel 标记缓存完整可用；
-                        // 下次启动只要看到 path 存在但 sentinel 不存在，就视为坏缓存重下。
-                        // BILI-04：写失败时文件本身可用，但下次导入会因缺少标记重新下载，
-                        // 留一条日志方便定位「为什么每次都重下」。
-                        if let Err(err) = fs::write(ok_sentinel_path(&final_path), b"") {
-                            tracing::warn!(
-                                "failed to write cache completion marker for {}: {err}",
-                                final_path.display()
-                            );
-                        }
-                        return Ok(final_path);
-                    }
+                    Ok(final_path) => return Ok(final_path),
                     Err(err) => {
                         let _ = tokio::fs::remove_file(&temp_path).await;
                         cancellation.check()?;
@@ -538,6 +524,47 @@ pub(crate) async fn ensure_audio_file(
     }
 
     Err(last_error.unwrap_or_else(|| "bilibili response has no audio download url".into()))
+}
+
+/// 下载前的同步准备：命中有效缓存则返回其路径；否则清掉上次留下的不完整文件与
+/// 旧完成标记，并确保缓存目录存在。全是文件操作，调用方放在阻塞线程里执行。
+pub(crate) fn prepare_audio_cache_slot(path: &Path) -> Result<Option<PathBuf>, String> {
+    // 同时存在 path 和 path.ok sentinel 才认为缓存有效；
+    // 否则是上一次 remux/写入半途崩溃留下的不完整文件，需要重下。
+    if cached_audio_file_is_valid(path) {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    // 审2-S8：上次 remux 失败 fallback 落的 fMP4 也参与缓存命中检查，
+    // 否则同 BV 重复导入时只查原扩展名路径，会绕过 fallback 缓存重新下载。
+    let fallback_path = remux_fallback_cache_path(path);
+    if fallback_path != path && cached_audio_file_is_valid(&fallback_path) {
+        return Ok(Some(fallback_path));
+    }
+
+    // 清理可能残留的不完整文件 + 旧 sentinel
+    let _ = fs::remove_file(ok_sentinel_path(path));
+    if path.is_file() {
+        let _ = fs::remove_file(path);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create bilibili cache dir: {err}"))?;
+    }
+    Ok(None)
+}
+
+/// 写一个零字节 sentinel 标记缓存完整可用；下次只要看到音频存在但 sentinel 不存在，
+/// 就视为坏缓存重下。写失败时文件本身可用，但下次导入会因缺少标记重新下载，
+/// 留一条日志方便定位「为什么每次都重下」。
+pub(crate) fn write_ok_sentinel(final_path: &Path) {
+    if let Err(err) = fs::write(ok_sentinel_path(final_path), b"") {
+        tracing::warn!(
+            "failed to write cache completion marker for {}: {err}",
+            final_path.display()
+        );
+    }
 }
 
 /// remux 失败时的 fMP4 fallback 缓存路径：在完整文件名后追加 `.m4a`

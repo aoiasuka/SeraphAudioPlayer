@@ -161,6 +161,60 @@ mod tests {
         assert!(matches!(stream.kind, AudioKind::Normal));
     }
 
+    /// BILI-04：下载前的同步准备收进一个函数（调用方放阻塞线程）——
+    /// 有效缓存直接命中；缺完成标记的残留被清掉；fallback `.m4a` 也算命中。
+    #[test]
+    fn bili04_prepare_audio_cache_slot_hits_valid_cache_and_clears_partial_files() {
+        use super::{
+            ok_sentinel_path, prepare_audio_cache_slot, remux_fallback_cache_path,
+            write_ok_sentinel,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "seraph-bili04-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = dir.join("cache").join("BV1xx-1.flac");
+
+        // 目录不存在：创建目录，未命中
+        assert_eq!(prepare_audio_cache_slot(&target).unwrap(), None);
+        assert!(target.parent().unwrap().is_dir());
+
+        // 音频在但没有完成标记：视为残留，清掉
+        std::fs::write(&target, b"partial").unwrap();
+        assert_eq!(prepare_audio_cache_slot(&target).unwrap(), None);
+        assert!(!target.exists());
+
+        // 只有孤立的完成标记：同样清掉
+        std::fs::write(ok_sentinel_path(&target), b"").unwrap();
+        assert_eq!(prepare_audio_cache_slot(&target).unwrap(), None);
+        assert!(!ok_sentinel_path(&target).exists());
+
+        // fallback 文件完整：命中 fallback 路径
+        let fallback = remux_fallback_cache_path(&target);
+        std::fs::write(&fallback, b"audio").unwrap();
+        write_ok_sentinel(&fallback);
+        assert_eq!(
+            prepare_audio_cache_slot(&target).unwrap(),
+            Some(fallback.clone())
+        );
+
+        // 正主文件完整：优先命中正主
+        std::fs::write(&target, b"audio").unwrap();
+        write_ok_sentinel(&target);
+        assert_eq!(
+            prepare_audio_cache_slot(&target).unwrap(),
+            Some(target.clone())
+        );
+        assert!(target.is_file() && ok_sentinel_path(&target).is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(windows)]
     #[test]
     fn extracts_ffmpeg_tools_from_nested_zip() {
