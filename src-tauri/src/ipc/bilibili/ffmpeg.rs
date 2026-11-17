@@ -72,8 +72,13 @@ pub(crate) async fn download_ffmpeg_inner(app: &AppHandle) -> Result<BilibiliFfm
         match download_to_file(&client, source.url, &archive_path, app).await {
             // S-01：解压前先校验 SHA-256——下载物与官方公布哈希不符
             // （上游被篡改 / TLS 中间人 / 传输损坏）一律拒绝执行。
-            Ok(()) => match verify_file_sha256(&archive_path, source.sha256)
-                .and_then(|()| extract_ffmpeg_tools(&archive_path, &ffmpeg_dir))
+            // FFDL-02：约 100 MB 的哈希与解压要跑几秒，放到阻塞线程。
+            Ok(()) => match verify_and_extract_blocking(
+                archive_path.clone(),
+                ffmpeg_dir.clone(),
+                source.sha256,
+            )
+            .await
             {
                 Ok(()) => {
                     let _ = fs::remove_file(&archive_path);
@@ -140,13 +145,30 @@ pub(crate) async fn download_to_file(
 ) -> Result<(), String> {
     let temp_path = unique_temp_path(dest);
     if let Err(err) = download_to_temp_file(client, url, &temp_path, app).await {
-        let _ = fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(err);
     }
-    fs::rename(&temp_path, dest).map_err(|err| {
-        let _ = fs::remove_file(&temp_path);
-        format!("无法落盘下载文件 {}: {err}", dest.display())
+    if let Err(err) = tokio::fs::rename(&temp_path, dest).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("无法落盘下载文件 {}: {err}", dest.display()));
+    }
+    Ok(())
+}
+
+/// FFDL-02：校验与解压都是同步的重活（整包 SHA-256 + 解出两个约 100 MB 的可执行文件），
+/// 放到阻塞线程，不占异步工作线程。
+#[cfg(windows)]
+pub(crate) async fn verify_and_extract_blocking(
+    archive_path: PathBuf,
+    dest_dir: PathBuf,
+    expected_sha256: &'static str,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_file_sha256(&archive_path, expected_sha256)
+            .and_then(|()| extract_ffmpeg_tools(&archive_path, &dest_dir))
     })
+    .await
+    .map_err(|err| format!("ffmpeg 校验解压任务异常终止: {err}"))?
 }
 
 #[cfg(windows)]
@@ -164,8 +186,14 @@ pub(crate) async fn download_to_temp_file(
         .error_for_status()
         .map_err(|err| format!("下载源返回错误: {err}"))?;
 
+    use tokio::io::AsyncWriteExt;
+
     let total = response.content_length().unwrap_or(0);
-    let mut file = fs::File::create(dest).map_err(|err| format!("无法写入临时文件: {err}"))?;
+    // FFDL-02：写盘走 tokio::fs（与 import_audio.rs 的音频下载同一写法），
+    // 每个数据块的落盘不再占住异步工作线程。
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|err| format!("无法写入临时文件: {err}"))?;
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
 
@@ -176,10 +204,14 @@ pub(crate) async fn download_to_temp_file(
     {
         downloaded += chunk.len() as u64;
         if downloaded > MAX_FFMPEG_DOWNLOAD_BYTES {
+            // Tokio 文件可能还有在途的阻塞写；先 flush 再让调用方删临时文件。
+            let _ = file.flush().await;
             return Err("下载内容超出体积上限，已中止".into());
         }
-        file.write_all(&chunk)
-            .map_err(|err| format!("写入失败: {err}"))?;
+        if let Err(err) = file.write_all(&chunk).await {
+            let _ = file.flush().await;
+            return Err(format!("写入失败: {err}"));
+        }
 
         // 每累积 ~1 MB 推送一次进度，避免事件风暴。
         if downloaded - last_emit >= 1024 * 1024 {
@@ -202,7 +234,13 @@ pub(crate) async fn download_to_temp_file(
         }
     }
 
-    file.flush().map_err(|err| format!("刷新文件失败: {err}"))?;
+    file.flush()
+        .await
+        .map_err(|err| format!("刷新文件失败: {err}"))?;
+    // 压缩包随后要整体校验哈希：落盘后再关闭。
+    file.sync_all()
+        .await
+        .map_err(|err| format!("落盘下载文件失败: {err}"))?;
     Ok(())
 }
 
