@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { DraftNumberInput } from "@/components/ui/DraftNumberInput";
 import { parseApoPreset, toApoText } from "@/lib/eqApoParser";
-import { GENRE_EQ_PRESETS } from "@/lib/eqPresets";
+import { GENRE_EQ_PRESETS, clipRisk } from "@/lib/eqPresets";
 import { combinedResponseDb, logFreqPoints } from "@/lib/eqResponse";
 import { sanitizeEqBands, sanitizeEqPreamp } from "@/lib/eqSanitize";
 import { invoke, normalizeIpcError } from "@/lib/tauri";
@@ -122,6 +122,7 @@ export function EqPage() {
   };
 
   const presetSelectValue = eq.activePresetId ?? "custom";
+  const risk = useMemo(() => clipRisk(eq.preamp, eq.bands), [eq.preamp, eq.bands]);
 
   const handlePresetChange = (value: string) => {
     if (value === "custom") return;
@@ -341,6 +342,25 @@ export function EqPage() {
             className="w-full accent-stamp"
             aria-label="预放大"
           />
+          {/* DSP-04：均衡器之后没有限幅器，提升量超过预放大留出的余量时提示并给出建议值 */}
+          {risk.clipping ? (
+            <div
+              role="status"
+              data-testid="eq-clip-warning"
+              className="mt-2 flex flex-wrap items-center justify-between gap-2 border-[1.5px] border-stamp px-2 py-1.5"
+            >
+              <span className="font-tw text-[10px] leading-relaxed text-ink2">
+                合成响应峰值超出 0 dB 约 {risk.overDb.toFixed(1)} dB，满幅素材会被削波。
+              </span>
+              <button
+                type="button"
+                onClick={() => eq.setPreamp(risk.suggestedPreamp)}
+                className="stamp-btn inline-flex h-7 shrink-0 items-center px-2 font-tw text-[11px] font-bold"
+              >
+                预放大设为 {risk.suggestedPreamp.toFixed(1)} dB
+              </button>
+            </div>
+          ) : null}
         </div>
         <div className="flex items-center justify-between border-[1.5px] border-line bg-card p-3">
           <div>
