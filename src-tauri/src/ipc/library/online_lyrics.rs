@@ -8,19 +8,9 @@ pub(crate) fn online_lyrics_query(title: &str, artist: &str) -> String {
         .join(" ")
 }
 
-/// LYR-04：进程内复用同一个 client。`reqwest::Client` 内部是 `Arc`，克隆只加引用计数；
-/// 每次调用都重建的话，TLS 配置要重新初始化，连接池也无法跨调用复用——而歌词查找
-/// 是切歌时的高频路径。构建失败不缓存，下次调用重试。
-pub(crate) fn cached_client(
-    cell: &'static std::sync::OnceLock<Client>,
-    build: impl FnOnce() -> Result<Client, String>,
-) -> Result<Client, String> {
-    if let Some(client) = cell.get() {
-        return Ok(client.clone());
-    }
-    let built = build()?;
-    Ok(cell.get_or_init(|| built).clone())
-}
+// LYR-04：歌词查找是切歌时的高频路径，client 进程内复用。实现挪到了 `http_util`
+// （B 站的固定配置 client 也用它，SESS-01），这里保留原路径供 `amll.rs` 引用。
+pub(crate) use crate::ipc::http_util::cached_client;
 
 pub(crate) fn online_lyrics_client() -> Result<Client, String> {
     static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();

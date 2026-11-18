@@ -161,6 +161,71 @@ mod tests {
         assert!(matches!(stream.kind, AudioKind::Normal));
     }
 
+    /// SESS-01：带登录态的 client 按 Cookie 内容缓存——Cookie 没变就复用同一个
+    /// client（连接池与 TLS 会话随之复用），变了才重建；退出登录时清空。
+    #[test]
+    fn sess01_cookie_client_cache_rebuilds_only_when_cookie_changes() {
+        use super::super::session::CookieClientCache;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CookieClientCache::new();
+        let builds = AtomicUsize::new(0);
+        let get = |cookie: Option<&str>| {
+            cache
+                .get_or_build(cookie, |cookie| {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    bilibili_client_with_cookie(cookie)
+                })
+                .expect("client builds")
+        };
+
+        get(Some("SESSDATA=a"));
+        get(Some("SESSDATA=a"));
+        // 首尾空白不算变化（请求头里本来就会 trim）
+        get(Some("  SESSDATA=a "));
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "同一 Cookie 只建一次");
+
+        get(Some("SESSDATA=b"));
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "Cookie 变了要重建");
+
+        // 未登录（无 Cookie）与空串是同一个键，和登录态互不混用
+        get(None);
+        get(Some(""));
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
+
+        // 退出登录后清空：带旧 Cookie 的 client 不再留在缓存里
+        get(Some("SESSDATA=b"));
+        assert_eq!(builds.load(Ordering::SeqCst), 4);
+        cache.clear();
+        get(Some("SESSDATA=b"));
+        assert_eq!(builds.load(Ordering::SeqCst), 5, "清空后必须重建");
+
+        // 构建失败不缓存，下次重试
+        let failing = CookieClientCache::new();
+        assert!(failing
+            .get_or_build(Some("x=1"), |_| Err("boom".into()))
+            .is_err());
+        assert!(failing
+            .get_or_build(Some("x=1"), bilibili_client_with_cookie)
+            .is_ok());
+    }
+
+    /// SESS-01：缓存键是 Cookie 的摘要，静态量里不多留一份 Cookie 明文。
+    #[test]
+    fn sess01_cookie_cache_key_is_a_digest_not_the_cookie() {
+        use super::super::session::cookie_cache_key;
+
+        let key = cookie_cache_key(Some("SESSDATA=secret-value"));
+        assert_eq!(key, cookie_cache_key(Some(" SESSDATA=secret-value ")));
+        assert_ne!(key, cookie_cache_key(Some("SESSDATA=other")));
+        assert_eq!(cookie_cache_key(None), cookie_cache_key(Some("   ")));
+        let needle = b"secret-value";
+        assert!(
+            !key.windows(needle.len()).any(|window| window == needle),
+            "键里不能出现 Cookie 原文"
+        );
+    }
+
     /// BILI-04：下载前的同步准备收进一个函数（调用方放阻塞线程）——
     /// 有效缓存直接命中；缺完成标记的残留被清掉；fallback `.m4a` 也算命中。
     #[test]

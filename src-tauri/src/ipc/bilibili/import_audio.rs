@@ -146,7 +146,7 @@ pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String
 
     // P0-1：解析短链/网页一律使用无 Cookie 的裸 client，
     // 避免 SESSDATA 等登录凭据随 default_headers 发往非预期主机。
-    let bare_client = bilibili_client_with_cookie(None)?;
+    let bare_client = bilibili_bare_client()?;
     let response = bare_client
         .get(url)
         .send()

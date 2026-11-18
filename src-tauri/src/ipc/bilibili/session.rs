@@ -1,8 +1,75 @@
 use super::prelude::*;
 
-pub(crate) fn bilibili_client_for_app(app: &AppHandle) -> Result<Client, String> {
-    let cookie = load_session(app)?.and_then(|session| session.cookie_header());
-    bilibili_client_with_cookie(cookie.as_deref())
+/// SESS-01：读会话是同步 IO（读文件 + Windows 凭据管理器，旧文件迁移分支还会启动
+/// `icacls`，最长等 10 秒），放到阻塞线程，不占异步工作线程；client 按 Cookie 内容
+/// 缓存——扫码期间反复轮询的 `bilibili_poll_login` 不再每次重新握手。
+pub(crate) async fn bilibili_client_for_app(app: &AppHandle) -> Result<Client, String> {
+    let app = app.clone();
+    let cookie = tauri::async_runtime::spawn_blocking(move || {
+        load_session(&app).map(|session| session.and_then(|session| session.cookie_header()))
+    })
+    .await
+    .map_err(|err| format!("读取 B 站登录会话任务异常: {err}"))??;
+    bilibili_client_cached(cookie.as_deref())
+}
+
+/// 带登录态的 client（Cookie 为空即未登录）。同一份 Cookie 复用同一个 client。
+pub(crate) fn bilibili_client_cached(cookie: Option<&str>) -> Result<Client, String> {
+    SESSION_CLIENT.get_or_build(cookie, bilibili_client_with_cookie)
+}
+
+/// 退出登录时调用：带旧 Cookie 的 client 不留在缓存里。
+pub(crate) fn clear_bilibili_client_cache() {
+    SESSION_CLIENT.clear();
+}
+
+/// 不带 Cookie 的 API / 短链 client（S-02 / P0-1 的「裸 client」）。配置固定，进程内复用。
+/// 与带登录态的缓存分开存放：两者交替使用时互不挤占，也绝不会把登录态 client 当裸的用。
+pub(crate) fn bilibili_bare_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    cached_client(&CLIENT, || bilibili_client_with_cookie(None))
+}
+
+static SESSION_CLIENT: CookieClientCache = CookieClientCache::new();
+
+/// 缓存键：Cookie 头（去首尾空白）的 SHA-256。用摘要而不是原文作键，
+/// 静态量里不再多留一份 Cookie 明文。
+pub(crate) fn cookie_cache_key(cookie: Option<&str>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(cookie.map(str::trim).unwrap_or_default().as_bytes()).into()
+}
+
+/// 单槽缓存：只保留最近一份 Cookie 对应的 client。登录态同一时刻只有一份，
+/// Cookie 变化（登录、过期、退出）后旧 client 立刻被替换，不会累积。
+pub(crate) struct CookieClientCache(parking_lot::Mutex<Option<([u8; 32], Client)>>);
+
+impl CookieClientCache {
+    pub(crate) const fn new() -> Self {
+        Self(parking_lot::Mutex::new(None))
+    }
+
+    /// 构建失败不写入缓存，下次调用重试。构建只做内存里的 TLS 配置初始化，
+    /// 不涉及网络与 await，持锁完成即可（并发调用也只建一次）。
+    pub(crate) fn get_or_build(
+        &self,
+        cookie: Option<&str>,
+        build: impl FnOnce(Option<&str>) -> Result<Client, String>,
+    ) -> Result<Client, String> {
+        let key = cookie_cache_key(cookie);
+        let mut slot = self.0.lock();
+        if let Some((cached_key, client)) = slot.as_ref() {
+            if *cached_key == key {
+                return Ok(client.clone());
+            }
+        }
+        let client = build(cookie)?;
+        *slot = Some((key, client.clone()));
+        Ok(client)
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.0.lock() = None;
+    }
 }
 
 pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client, String> {
@@ -32,7 +99,13 @@ pub(crate) fn bilibili_client_with_cookie(cookie: Option<&str>) -> Result<Client
 /// 下载物还会被写进缓存直接交给解码器。
 /// CDN 是第三方分发域，下载客户端不读取会话、不携带 Cookie；登录态只用于 API
 /// 获取可访问的音频地址。若某 CDN 要求额外认证，应报错而不是回退外发凭据。
+/// SESS-01：配置固定，进程内复用——批量导入几百首时连接池与 TLS 会话可以跨曲目复用。
 pub(crate) fn bilibili_download_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    cached_client(&CLIENT, build_bilibili_download_client)
+}
+
+fn build_bilibili_download_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
@@ -47,7 +120,13 @@ pub(crate) fn bilibili_download_client() -> Result<Client, String> {
 }
 
 /// F-07：头像下载专用 client。裸 client（无 Cookie），同样逐跳复验重定向目标。
+/// SESS-01：配置固定，进程内复用。
 pub(crate) fn bilibili_avatar_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    cached_client(&CLIENT, build_bilibili_avatar_client)
+}
+
+fn build_bilibili_avatar_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(guarded_redirect_policy(is_safe_avatar_url))

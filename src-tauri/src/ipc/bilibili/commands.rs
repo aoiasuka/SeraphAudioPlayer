@@ -21,7 +21,7 @@ pub(crate) async fn import_bilibili_audio_with_options_inner_cmd(
     input: String,
     options: Option<BilibiliImportOptions>,
 ) -> Result<ImportedTrack, String> {
-    let client = bilibili_client_for_app(&app)?;
+    let client = bilibili_client_for_app(&app).await?;
     import_bilibili_audio_inner(
         &app,
         &client,
@@ -46,7 +46,7 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
         "没有找到有效的 B 站收藏夹 media_id/fid，请粘贴收藏夹链接或数字 ID".to_string()
     })?;
     let options = options.unwrap_or_default();
-    let client = bilibili_client_for_app(&app)?;
+    let client = bilibili_client_for_app(&app).await?;
     let bvids = match cancellation
         .run(fetch_favorite_bvids(&client, &media_id, FAV_MAX_ITEMS))
         .await
@@ -139,7 +139,7 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
 pub(crate) async fn bilibili_login_qrcode_inner_cmd(
     app: AppHandle,
 ) -> Result<BilibiliLoginQrCode, String> {
-    let client = bilibili_client_for_app(&app)?;
+    let client = bilibili_client_for_app(&app).await?;
     let response = client
         .get(QR_GENERATE_API)
         .send()
@@ -167,7 +167,7 @@ pub(crate) async fn bilibili_poll_login_inner_cmd(
         return Err("缺少二维码 key".into());
     }
 
-    let client = bilibili_client_for_app(&app)?;
+    let client = bilibili_client_for_app(&app).await?;
     let response = client
         .get(QR_POLL_API)
         .query(&[("qrcode_key", qrcode_key)])
@@ -230,7 +230,8 @@ pub(crate) async fn bilibili_login_status_inner_cmd(
         });
     };
 
-    let client = bilibili_client_with_cookie(session.cookie_header().as_deref())?;
+    // SESS-01：前端会周期性查询登录状态，同一份 Cookie 复用同一个 client。
+    let client = bilibili_client_cached(session.cookie_header().as_deref())?;
     let response = client
         .get(NAV_API)
         .send()
@@ -303,6 +304,9 @@ pub(crate) async fn bilibili_login_status_inner_cmd(
 
 pub(crate) fn bilibili_logout_inner_cmd(app: AppHandle) -> Result<(), String> {
     let path = session_path(&app)?;
+    // SESS-01：先清缓存——带旧 Cookie 的 client 不能在退出登录后继续被复用。
+    // 放在最前面：后面删凭据即使失败，也不会留着一个随时可用的登录态 client。
+    clear_bilibili_client_cache();
     delete_secure_bilibili_cookies()?;
     if path.is_file() {
         fs::remove_file(&path)

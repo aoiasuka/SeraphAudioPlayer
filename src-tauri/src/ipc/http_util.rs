@@ -40,6 +40,21 @@ pub(crate) async fn read_json_capped<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|err| format!("failed to parse json: {err}"))
 }
 
+/// LYR-04 / SESS-01：进程内复用同一个 client。`reqwest::Client` 内部是 `Arc`，克隆只加
+/// 引用计数；每次调用都重建的话，TLS 配置要重新初始化，连接池也无法跨调用复用。
+/// 构建失败不缓存，下次调用重试。只用于配置固定的 client——随登录态变化的走
+/// `bilibili::session` 里按 Cookie 内容缓存的那一份。
+pub(crate) fn cached_client(
+    cell: &'static std::sync::OnceLock<reqwest::Client>,
+    build: impl FnOnce() -> Result<reqwest::Client, String>,
+) -> Result<reqwest::Client, String> {
+    if let Some(client) = cell.get() {
+        return Ok(client.clone());
+    }
+    let built = build()?;
+    Ok(cell.get_or_init(|| built).clone())
+}
+
 /// 跟随重定向的最大跳数。B 站 CDN 正常只有 1~2 跳。
 const MAX_REDIRECT_HOPS: usize = 5;
 
