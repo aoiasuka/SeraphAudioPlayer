@@ -81,6 +81,32 @@ async fn within_deadline<T>(
         .unwrap_or(Err(()))
 }
 
+/// 每个歌词源最多取词的候选数。
+const LYRICS_CANDIDATES_PER_SOURCE: usize = 5;
+
+/// LYR-02：源内候选并发取词。此前在 `for` 循环里逐个 `await`，一次搜索的耗时是
+/// 「最慢那个源的 5～10 次请求之和」；现在同一个源的候选一起发出，耗时接近最慢的
+/// 那一次。结果按接口原序收集（排序语义不变），取词失败的候选只丢它自己。
+/// 并发度就是候选上限（5），不会对上游形成突发洪峰。
+async fn collect_candidates<'a, F>(
+    items: Vec<&'a Value>,
+    fetch: impl Fn(&'a Value) -> F,
+) -> Vec<OnlineLyricsCandidate>
+where
+    F: std::future::Future<Output = Option<OnlineLyricsCandidate>>,
+{
+    let jobs = items
+        .into_iter()
+        .take(LYRICS_CANDIDATES_PER_SOURCE)
+        .map(fetch)
+        .collect();
+    super::amll::join_all(jobs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// `title` / `artist` 分开传：网易云与 QQ 用 `online_lyrics_query` 拼成一句，酷狗歌词搜索
 /// 对关键词格式敏感，另走 `kugou_lyrics_keyword`（手动搜索时前端把整句放在 title、artist 传空）。
 pub(crate) async fn fetch_online_lyrics_from_sources(
@@ -229,59 +255,63 @@ pub(crate) async fn fetch_netease_lyrics(
         return Ok(Vec::new());
     };
 
-    let mut results = Vec::new();
-    for song in ranked_provider_items(songs, duration).into_iter().take(5) {
-        let Some(song_id) = song.get("id").and_then(Value::as_u64) else {
-            continue;
-        };
-        // lv/tv/yv = 逐行 / 译文 / 逐字（yrc）；rv/ytv/yrv = 音译 / 与 yrc 对齐的译文 / 与 yrc
-        // 对齐的音译（2026-09-19 实测 Web 端匿名可取）。
-        let Ok(lyric_data) = client
-            .get("https://music.163.com/api/song/lyric")
-            .query(&[
-                ("id", song_id.to_string()),
-                ("lv", "-1".to_string()),
-                ("kv", "-1".to_string()),
-                ("tv", "-1".to_string()),
-                ("rv", "-1".to_string()),
-                ("yv", "-1".to_string()),
-                ("ytv", "-1".to_string()),
-                ("yrv", "-1".to_string()),
-            ])
-            .send()
-            .await
-            .and_then(|response| response.error_for_status())
-        else {
-            continue;
-        };
-        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
-        else {
-            continue;
-        };
-        let Some(lyrics) = parse_netease_lyric_payload(&lyric_data) else {
-            continue;
-        };
+    Ok(
+        collect_candidates(ranked_provider_items(songs, duration), |song| {
+            netease_candidate(client, song, query)
+        })
+        .await,
+    )
+}
 
-        let ttml_lookup_keys = vec![format!("ncm-lyrics/{song_id}")];
-        results.push(OnlineLyricsCandidate {
-            id: format!("netease-{song_id}"),
-            source: "网易云音乐".into(),
-            title: value_string(song, "name").unwrap_or_else(|| query.into()),
-            artist: netease_artists(song),
-            album: song
-                .get("album")
-                .and_then(|album| value_string(album, "name")),
-            duration: provider_duration_ms(song).map(|ms| ms / 1000),
-            lyrics: LyricDocument::from_lines(
-                lyrics,
-                LyricSource::online("netease", song_id.to_string())
-                    .with_lookup_keys(ttml_lookup_keys.clone()),
-            ),
-            ttml_lookup_keys,
-        });
-    }
+/// 取一个网易云候选的歌词；任何一步失败只丢这一个候选。
+async fn netease_candidate(
+    client: &Client,
+    song: &Value,
+    query: &str,
+) -> Option<OnlineLyricsCandidate> {
+    let song_id = song.get("id").and_then(Value::as_u64)?;
+    // lv/tv/yv = 逐行 / 译文 / 逐字（yrc）；rv/ytv/yrv = 音译 / 与 yrc 对齐的译文 / 与 yrc
+    // 对齐的音译（2026-09-19 实测 Web 端匿名可取）。
+    let Ok(lyric_data) = client
+        .get("https://music.163.com/api/song/lyric")
+        .query(&[
+            ("id", song_id.to_string()),
+            ("lv", "-1".to_string()),
+            ("kv", "-1".to_string()),
+            ("tv", "-1".to_string()),
+            ("rv", "-1".to_string()),
+            ("yv", "-1".to_string()),
+            ("ytv", "-1".to_string()),
+            ("yrv", "-1".to_string()),
+        ])
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+    else {
+        return None;
+    };
+    let lyric_data = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES)
+        .await
+        .ok()?;
+    let lyrics = parse_netease_lyric_payload(&lyric_data)?;
 
-    Ok(results)
+    let ttml_lookup_keys = vec![format!("ncm-lyrics/{song_id}")];
+    Some(OnlineLyricsCandidate {
+        id: format!("netease-{song_id}"),
+        source: "网易云音乐".into(),
+        title: value_string(song, "name").unwrap_or_else(|| query.into()),
+        artist: netease_artists(song),
+        album: song
+            .get("album")
+            .and_then(|album| value_string(album, "name")),
+        duration: provider_duration_ms(song).map(|ms| ms / 1000),
+        lyrics: LyricDocument::from_lines(
+            lyrics,
+            LyricSource::online("netease", song_id.to_string())
+                .with_lookup_keys(ttml_lookup_keys.clone()),
+        ),
+        ttml_lookup_keys,
+    })
 }
 
 /// 酷狗歌词搜索关键词。`lyrics.kugou.com/search` 对格式极其敏感（2026-09-19 实测）：
@@ -382,66 +412,61 @@ pub(crate) async fn fetch_kugou_lyrics(
         candidates = kugou_search(client, title_only, duration).await?;
     }
 
-    let mut results = Vec::new();
-    for candidate in ranked_kugou_candidates(&candidates, duration)
-        .into_iter()
-        .take(5)
-    {
-        let Some(id) = candidate.get("id").and_then(Value::as_u64) else {
-            continue;
-        };
-        let Some(access_key) = candidate.get("accesskey").and_then(Value::as_str) else {
-            continue;
-        };
-        let id = id.to_string();
-        let Ok(lyric_data) = client
-            .get("https://lyrics.kugou.com/download")
-            .query(&[
-                ("ver", "1"),
-                ("client", "pc"),
-                ("id", id.as_str()),
-                ("accesskey", access_key),
-                ("fmt", "krc"),
-                ("charset", "utf8"),
-            ])
-            .send()
-            .await
-            .and_then(|response| response.error_for_status())
-        else {
-            continue;
-        };
-        let Ok(lyric_data) = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES).await
-        else {
-            continue;
-        };
+    Ok(collect_candidates(
+        ranked_kugou_candidates(&candidates, duration),
+        |candidate| kugou_candidate(client, candidate, &keyword),
+    )
+    .await)
+}
 
-        let Some(content) = lyric_data.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(decoded) = BASE64_STANDARD.decode(content) else {
-            continue;
-        };
-        let lyrics = parse_lyrics_bytes(&decoded);
-        if lyrics.is_empty() {
-            continue;
-        }
+/// 取一个酷狗候选的歌词；任何一步失败只丢这一个候选。
+async fn kugou_candidate(
+    client: &Client,
+    candidate: &Value,
+    keyword: &str,
+) -> Option<OnlineLyricsCandidate> {
+    let id = candidate.get("id").and_then(Value::as_u64)?.to_string();
+    let access_key = candidate.get("accesskey").and_then(Value::as_str)?;
+    let Ok(lyric_data) = client
+        .get("https://lyrics.kugou.com/download")
+        .query(&[
+            ("ver", "1"),
+            ("client", "pc"),
+            ("id", id.as_str()),
+            ("accesskey", access_key),
+            ("fmt", "krc"),
+            ("charset", "utf8"),
+        ])
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+    else {
+        return None;
+    };
+    let lyric_data = read_json_capped::<Value>(lyric_data, MAX_EXTERNAL_JSON_BYTES)
+        .await
+        .ok()?;
 
-        let title = value_string(candidate, "song")
-            .or_else(|| value_string(candidate, "filename"))
-            .unwrap_or_else(|| keyword.clone());
-        results.push(OnlineLyricsCandidate {
-            id: format!("kugou-{id}"),
-            source: "酷狗音乐".into(),
-            title,
-            artist: value_string(candidate, "singer").unwrap_or_default(),
-            album: value_string(candidate, "album"),
-            duration: provider_duration_ms(candidate).map(|ms| ms / 1000),
-            lyrics: LyricDocument::from_lines(lyrics, LyricSource::online("kugou", id.clone())),
-            ttml_lookup_keys: Vec::new(),
-        });
+    let content = lyric_data.get("content").and_then(Value::as_str)?;
+    let decoded = BASE64_STANDARD.decode(content).ok()?;
+    let lyrics = parse_lyrics_bytes(&decoded);
+    if lyrics.is_empty() {
+        return None;
     }
 
-    Ok(results)
+    let title = value_string(candidate, "song")
+        .or_else(|| value_string(candidate, "filename"))
+        .unwrap_or_else(|| keyword.to_string());
+    Some(OnlineLyricsCandidate {
+        id: format!("kugou-{id}"),
+        source: "酷狗音乐".into(),
+        title,
+        artist: value_string(candidate, "singer").unwrap_or_default(),
+        album: value_string(candidate, "album"),
+        duration: provider_duration_ms(candidate).map(|ms| ms / 1000),
+        lyrics: LyricDocument::from_lines(lyrics, LyricSource::online("kugou", id.clone())),
+        ttml_lookup_keys: Vec::new(),
+    })
 }
 
 pub(crate) async fn fetch_qq_lyrics(
@@ -479,61 +504,60 @@ pub(crate) async fn fetch_qq_lyrics(
         return Ok(Vec::new());
     };
 
-    let mut results = Vec::new();
-    for song in ranked_provider_items(songs, duration).into_iter().take(5) {
-        let Some(song_mid) = song
-            .get("songmid")
-            .or_else(|| song.get("mid"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        // 数字 songid：客户端取词接口与 AMLL qq-lyrics 目录都按它索引（非 songmid）
-        let song_id = song
-            .get("songid")
-            .or_else(|| song.get("id"))
-            .and_then(Value::as_u64);
-        // 逐字 QRC + 译文 + 音译走客户端取词接口；请求失败或没内容时退回网页端逐行接口，
-        // 保证不比此前差
-        let lyrics = match song_id {
-            Some(song_id) => fetch_qq_play_lyric(client, song_id).await,
-            None => None,
-        };
-        let lyrics = match lyrics {
-            Some(lyrics) => lyrics,
-            None => match fetch_qq_web_lyric(client, song_mid).await {
-                Some(lyrics) => lyrics,
-                None => continue,
-            },
-        };
+    Ok(
+        collect_candidates(ranked_provider_items(songs, duration), |song| {
+            qq_candidate(client, song, query)
+        })
+        .await,
+    )
+}
 
-        let ttml_lookup_keys = song_id
-            .map(|id| vec![format!("qq-lyrics/{id}")])
-            .unwrap_or_default();
-        results.push(OnlineLyricsCandidate {
-            id: format!("qq-{song_mid}"),
-            source: "QQ音乐".into(),
-            title: value_string(song, "songname")
-                .or_else(|| value_string(song, "title"))
-                .unwrap_or_else(|| query.into()),
-            artist: qq_singers(song),
-            album: value_string(song, "albumname"),
-            duration: provider_duration_ms(song).map(|ms| ms / 1000),
-            lyrics: LyricDocument::from_lines(
-                lyrics,
-                LyricSource::online(
-                    "qq",
-                    song_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| song_mid.to_string()),
-                )
-                .with_lookup_keys(ttml_lookup_keys.clone()),
-            ),
-            ttml_lookup_keys,
-        });
-    }
+/// 取一个 QQ 候选的歌词；任何一步失败只丢这一个候选。
+async fn qq_candidate(client: &Client, song: &Value, query: &str) -> Option<OnlineLyricsCandidate> {
+    let song_mid = song
+        .get("songmid")
+        .or_else(|| song.get("mid"))
+        .and_then(Value::as_str)?;
+    // 数字 songid：客户端取词接口与 AMLL qq-lyrics 目录都按它索引（非 songmid）
+    let song_id = song
+        .get("songid")
+        .or_else(|| song.get("id"))
+        .and_then(Value::as_u64);
+    // 逐字 QRC + 译文 + 音译走客户端取词接口；请求失败或没内容时退回网页端逐行接口，
+    // 保证不比此前差
+    let lyrics = match song_id {
+        Some(song_id) => fetch_qq_play_lyric(client, song_id).await,
+        None => None,
+    };
+    let lyrics = match lyrics {
+        Some(lyrics) => lyrics,
+        None => fetch_qq_web_lyric(client, song_mid).await?,
+    };
 
-    Ok(results)
+    let ttml_lookup_keys = song_id
+        .map(|id| vec![format!("qq-lyrics/{id}")])
+        .unwrap_or_default();
+    Some(OnlineLyricsCandidate {
+        id: format!("qq-{song_mid}"),
+        source: "QQ音乐".into(),
+        title: value_string(song, "songname")
+            .or_else(|| value_string(song, "title"))
+            .unwrap_or_else(|| query.into()),
+        artist: qq_singers(song),
+        album: value_string(song, "albumname"),
+        duration: provider_duration_ms(song).map(|ms| ms / 1000),
+        lyrics: LyricDocument::from_lines(
+            lyrics,
+            LyricSource::online(
+                "qq",
+                song_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| song_mid.to_string()),
+            )
+            .with_lookup_keys(ttml_lookup_keys.clone()),
+        ),
+        ttml_lookup_keys,
+    })
 }
 
 /// QQ 客户端取词接口 `music.musichallSong.PlayLyricInfo`（2026-09-19 实测匿名可用）：
@@ -1199,5 +1223,65 @@ mod deadline_tests {
         let (slow, fast) = tokio::join!(slow, fast);
         assert_eq!(slow, Err(()));
         assert_eq!(fast, Ok(2));
+    }
+
+    fn candidate(id: &str) -> OnlineLyricsCandidate {
+        OnlineLyricsCandidate {
+            id: id.to_string(),
+            source: "测试".into(),
+            title: id.to_string(),
+            artist: String::new(),
+            album: None,
+            duration: None,
+            lyrics: LyricDocument::EMPTY,
+            ttml_lookup_keys: Vec::new(),
+        }
+    }
+
+    /// LYR-02：源内候选并发取词——5 个各耗时 120 ms 的请求总耗时接近一次请求，
+    /// 而不是五次之和；结果按接口原序收集，失败的候选只丢它自己。
+    #[tokio::test]
+    async fn lyr02_candidates_within_a_source_are_fetched_concurrently_in_order() {
+        let items = (0..5)
+            .map(|index| serde_json::json!({ "id": index }))
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let results = collect_candidates(items.iter().collect(), |item| async move {
+            let index = item.get("id").and_then(Value::as_u64)?;
+            // 排在前面的候选反而更慢：收集顺序不得随完成顺序变化
+            tokio::time::sleep(Duration::from_millis(120 - index * 10)).await;
+            (index != 2).then(|| candidate(&format!("c{index}")))
+        })
+        .await;
+        let elapsed = started.elapsed();
+
+        let ids = results
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["c0", "c1", "c3", "c4"]);
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "串行要 500 ms 以上，并发应接近 120 ms，实际 {elapsed:?}"
+        );
+    }
+
+    /// LYR-02：每个源最多取 `LYRICS_CANDIDATES_PER_SOURCE` 个候选，多出的不发请求。
+    #[tokio::test]
+    async fn lyr02_candidate_fan_out_is_capped_per_source() {
+        let items = (0..12)
+            .map(|index| serde_json::json!({ "id": index }))
+            .collect::<Vec<_>>();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let results = collect_candidates(items.iter().collect(), |item| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Some(candidate(&item["id"].to_string())) }
+        })
+        .await;
+        assert_eq!(results.len(), LYRICS_CANDIDATES_PER_SOURCE);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            LYRICS_CANDIDATES_PER_SOURCE
+        );
     }
 }

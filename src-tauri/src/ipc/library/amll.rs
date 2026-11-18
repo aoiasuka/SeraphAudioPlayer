@@ -805,7 +805,8 @@ pub(crate) async fn fetch_amll_ttml_candidates(
 }
 
 /// 极简 join_all：避免为此引入 futures crate。所有 future 并发推进，按原序收集。
-async fn join_all<F: std::future::Future>(futures: Vec<F>) -> Vec<F::Output> {
+/// 三个歌词源的源内候选取词也用它（LYR-02）。
+pub(crate) async fn join_all<F: std::future::Future>(futures: Vec<F>) -> Vec<F::Output> {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
