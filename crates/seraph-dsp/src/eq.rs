@@ -214,6 +214,36 @@ impl BiquadCoeffs {
     fn magnitude_db(&self, freq: f32, sample_rate: f32) -> f32 {
         coeffs_magnitude_db(self, freq, sample_rate)
     }
+
+    /// DSP-03：从当前系数走到 `target` 的每帧步进量。
+    fn step_towards(&self, target: &Self, frames: f64) -> Self {
+        Self {
+            b0: (target.b0 - self.b0) / frames,
+            b1: (target.b1 - self.b1) / frames,
+            b2: (target.b2 - self.b2) / frames,
+            a1: (target.a1 - self.a1) / frames,
+            a2: (target.a2 - self.a2) / frames,
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, step: &Self) {
+        self.b0 += step.b0;
+        self.b1 += step.b1;
+        self.b2 += step.b2;
+        self.a1 += step.a1;
+        self.a2 += step.a2;
+    }
+}
+
+/// DSP-03：系数过渡时长。播放中改 EQ 时，系数在这段时间内逐帧线性走到新值，
+/// 不再一步硬切（拖滑块的「拉链」噪声、开关频段的咔哒声都来自硬切）。
+/// 稳定的二阶极点在 (a1, a2) 平面上构成一个凸三角形，两组稳定系数之间的线性插值
+/// 始终落在三角形内，所以过渡途中的滤波器也是稳定的。
+const COEFF_RAMP_SECONDS: f32 = 0.02;
+
+fn coeff_ramp_frames(sample_rate: f32) -> u32 {
+    ((sample_rate * COEFF_RAMP_SECONDS) as u32).max(1)
 }
 
 /// 单声道 biquad 运行状态（TDF-II 两个寄存器）。
@@ -246,10 +276,9 @@ struct ChannelEq {
 }
 
 impl ChannelEq {
-    fn ensure_len(&mut self, len: usize) {
-        if self.states.len() != len {
-            self.states = vec![BiquadState::default(); len];
-        }
+    /// 调整滤波级数：保留已有各级的状态，新增的级从零状态起步，多出的尾部丢弃。
+    fn resize(&mut self, len: usize) {
+        self.states.resize(len, BiquadState::default());
     }
 
     #[inline]
@@ -269,16 +298,53 @@ impl ChannelEq {
 }
 
 /// 参数均衡器：预放大 + 若干频段，逐声道独立状态。
-#[derive(Debug, Clone, Default)]
+///
+/// DSP-03：播放中重新配置时不硬切——`coeffs` / `preamp_gain` 是「当前生效值」，
+/// 在 [`COEFF_RAMP_SECONDS`] 内逐帧线性走到 `targets` / `preamp_target`。频段数量
+/// 变化时不清状态：增加的滤波级从直通（零状态）渐变到目标，减少的尾部滤波级先渐变
+/// 回直通、过渡结束再丢弃，其余各级的状态原样保留。
+#[derive(Debug, Clone)]
 pub struct Equalizer {
+    /// 当前生效的预放大线性增益（过渡期间逐帧变化）。
     preamp_gain: f32,
+    preamp_target: f32,
+    preamp_step: f32,
+    /// 当前生效的系数（过渡期间逐帧变化，长度可能暂时大于 `target_len`）。
     coeffs: Vec<BiquadCoeffs>,
+    targets: Vec<BiquadCoeffs>,
+    steps: Vec<BiquadCoeffs>,
+    /// 过渡结束后保留的滤波级数。
+    target_len: usize,
+    /// 过渡还剩多少帧；0 = 稳态。
+    ramp_remaining: u32,
     channels: Vec<ChannelEq>,
     sample_rate: f32,
+    /// 自上次整体重建 / `reset` 以来是否处理过音频。没处理过就没有需要接续的声音，
+    /// 配置直接生效（起播、seek 之后的首次配置不该带着一段渐变）。
+    primed: bool,
+}
+
+impl Default for Equalizer {
+    fn default() -> Self {
+        Self {
+            preamp_gain: 1.0,
+            preamp_target: 1.0,
+            preamp_step: 0.0,
+            coeffs: Vec::new(),
+            targets: Vec::new(),
+            steps: Vec::new(),
+            target_len: 0,
+            ramp_remaining: 0,
+            channels: Vec::new(),
+            sample_rate: 0.0,
+            primed: false,
+        }
+    }
 }
 
 impl Equalizer {
-    /// 用给定的 preamp（dB）、频段与采样率重建系数。保留声道状态（连续播放不断流）。
+    /// 用给定的 preamp（dB）、频段与采样率重建系数。保留声道状态（连续播放不断流）；
+    /// 已经在出声时，新系数经一段渐变生效（DSP-03）。
     pub fn configure(
         &mut self,
         preamp_db: f32,
@@ -292,26 +358,91 @@ impl Equalizer {
         } else {
             0.0
         };
-        self.preamp_gain = 10.0_f32.powf(preamp_db / 20.0);
-        self.sample_rate = sample_rate.max(1.0);
-        self.coeffs = bands
+        let preamp_target = 10.0_f32.powf(preamp_db / 20.0);
+        let sample_rate = sample_rate.max(1.0);
+        let designed: Vec<BiquadCoeffs> = bands
             .iter()
             .filter(|band| band.enabled)
             .take(MAX_EQ_BANDS)
-            .map(|band| BiquadCoeffs::design(band, self.sample_rate))
+            .map(|band| BiquadCoeffs::design(band, sample_rate))
             .collect();
 
-        if self.channels.len() != channels {
-            self.channels = vec![ChannelEq::default(); channels];
+        let layout_changed = self.sample_rate != sample_rate || self.channels.len() != channels;
+        self.sample_rate = sample_rate;
+        if layout_changed || !self.primed {
+            // 采样率 / 声道布局变了（旧状态不再适用），或还没出过声：直接生效。
+            if layout_changed {
+                self.channels = vec![ChannelEq::default(); channels];
+                self.primed = false;
+            }
+            self.preamp_gain = preamp_target;
+            self.preamp_target = preamp_target;
+            self.target_len = designed.len();
+            self.targets = designed;
+            self.finish_ramp();
+            return;
         }
+
+        if self.preamp_target == preamp_target && self.targets[..self.target_len] == designed[..] {
+            // 目标没变（例如只改了 crossfeed）：不重启进行中的过渡。
+            return;
+        }
+
+        // 过渡期间滤波级数取新旧较大者，缺的一侧按直通补齐。
+        let slots = self.coeffs.len().max(designed.len());
+        self.coeffs.resize(slots, BiquadCoeffs::identity());
         for channel in &mut self.channels {
-            channel.ensure_len(self.coeffs.len());
+            channel.resize(slots);
+        }
+        self.target_len = designed.len();
+        self.targets = designed;
+        self.targets.resize(slots, BiquadCoeffs::identity());
+
+        let frames = coeff_ramp_frames(sample_rate);
+        self.steps.clear();
+        self.steps.extend(
+            self.coeffs
+                .iter()
+                .zip(&self.targets)
+                .map(|(current, target)| current.step_towards(target, f64::from(frames))),
+        );
+        self.preamp_target = preamp_target;
+        self.preamp_step = (preamp_target - self.preamp_gain) / frames as f32;
+        self.ramp_remaining = frames;
+    }
+
+    /// 过渡收尾：精确落到目标值（不留逐帧累加的浮点误差），丢弃已渐变回直通的尾部滤波级。
+    fn finish_ramp(&mut self) {
+        self.ramp_remaining = 0;
+        self.preamp_gain = self.preamp_target;
+        self.preamp_step = 0.0;
+        self.steps.clear();
+        self.targets.truncate(self.target_len);
+        self.coeffs.clone_from(&self.targets);
+        for channel in &mut self.channels {
+            channel.resize(self.target_len);
+        }
+    }
+
+    #[inline]
+    fn advance_ramp(&mut self) {
+        if self.ramp_remaining <= 1 {
+            self.finish_ramp();
+            return;
+        }
+        self.ramp_remaining -= 1;
+        self.preamp_gain += self.preamp_step;
+        for (coeffs, step) in self.coeffs.iter_mut().zip(&self.steps) {
+            coeffs.advance(step);
         }
     }
 
     /// 是否为纯直通（无频段且 preamp≈0dB）——上层据此走 zero-copy。
+    /// 过渡进行中不算直通：渐变回直通的那段也要处理完，上层才能旁路。
     pub fn is_identity(&self) -> bool {
-        self.coeffs.is_empty() && (self.preamp_gain - 1.0).abs() < 1.0e-6
+        self.ramp_remaining == 0
+            && self.coeffs.is_empty()
+            && (self.preamp_gain - 1.0).abs() < 1.0e-6
     }
 
     /// 就地处理交错样本。`channels` 必须与 configure 时一致。
@@ -319,26 +450,46 @@ impl Equalizer {
         if channels == 0 || self.channels.len() != channels {
             return;
         }
+        if !samples.is_empty() {
+            self.primed = true;
+        }
+        let mut frames = samples.chunks_mut(channels);
+        // 过渡段：每帧先推进一步系数再处理
+        while self.ramp_remaining > 0 {
+            let Some(frame) = frames.next() else {
+                return;
+            };
+            self.advance_ramp();
+            self.process_frame(frame);
+        }
+        for frame in frames {
+            self.process_frame(frame);
+        }
+    }
+
+    #[inline]
+    fn process_frame(&mut self, frame: &mut [f32]) {
         let identity = self.coeffs.is_empty();
-        for frame in samples.chunks_mut(channels) {
-            for (channel_index, sample) in frame.iter_mut().enumerate() {
-                // 没有频段时只做预放大，保持单精度（0 dB 时逐位直通）；
-                // 有频段时整条级联在 f64 里算，末尾才舍回 f32。
-                *sample = if identity {
-                    *sample * self.preamp_gain
-                } else {
-                    let scaled = f64::from(*sample) * f64::from(self.preamp_gain);
-                    self.channels[channel_index].process(&self.coeffs, scaled) as f32
-                };
-            }
+        for (channel_index, sample) in frame.iter_mut().enumerate() {
+            // 没有频段时只做预放大，保持单精度（0 dB 时逐位直通）；
+            // 有频段时整条级联在 f64 里算，末尾才舍回 f32。
+            *sample = if identity {
+                *sample * self.preamp_gain
+            } else {
+                let scaled = f64::from(*sample) * f64::from(self.preamp_gain);
+                self.channels[channel_index].process(&self.coeffs, scaled) as f32
+            };
         }
     }
 
     /// 坑 1：seek 后必须清零所有 biquad 状态，否则跳转点残留历史样本渗出杂音。
+    /// 进行中的过渡直接落到目标——跳转点本身就是不连续的，没有需要接续的声音。
     pub fn reset(&mut self) {
+        self.finish_ramp();
         for channel in &mut self.channels {
             channel.reset();
         }
+        self.primed = false;
     }
 }
 
@@ -539,6 +690,206 @@ mod tests {
             (measured_db - 12.0).abs() < 0.01,
             "measured {measured_db} dB"
         );
+    }
+
+    fn sine(freq: f64, rate: f64, start: usize, frames: usize) -> Vec<f32> {
+        (start..start + frames)
+            .map(|n| (0.25 * (2.0 * std::f64::consts::PI * freq * n as f64 / rate).sin()) as f32)
+            .collect()
+    }
+
+    /// DSP-03：播放中改增益，系数在约 20 ms 内逐帧走到新值，不是一步硬切；
+    /// 走完后精确等于目标系数。
+    #[test]
+    fn dsp03_reconfigure_while_playing_ramps_coefficients() {
+        let rate = 48_000.0_f32;
+        let before = peaking(1_000.0, 0.0, 1.0);
+        let after = peaking(1_000.0, 12.0, 1.0);
+        let old = BiquadCoeffs::design(&before, rate);
+        let target = BiquadCoeffs::design(&after, rate);
+        let frames = coeff_ramp_frames(rate) as usize;
+        assert_eq!(frames, 960);
+
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[before], rate, 1);
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 0, 480), 1);
+        eq.configure(0.0, &[after], rate, 1);
+        assert_eq!(eq.coeffs[0], old, "重新配置的瞬间系数还没动");
+        assert!(!eq.is_identity());
+
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 480, frames / 2), 1);
+        let halfway = eq.coeffs[0].b0;
+        let expected = (old.b0 + target.b0) / 2.0;
+        assert!(
+            (halfway - expected).abs() < 1e-9,
+            "走到一半时系数应在中点：{halfway} vs {expected}"
+        );
+
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 960, frames / 2), 1);
+        assert_eq!(eq.coeffs[0], target, "过渡结束后精确落在目标系数");
+        assert_eq!(eq.ramp_remaining, 0);
+    }
+
+    /// DSP-03：预放大同样渐变——直流输入下输出没有阶跃（硬切时是 0.375 的一步）。
+    #[test]
+    fn dsp03_preamp_change_has_no_step() {
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[peaking(1_000.0, 0.0, 1.0)], 48_000.0, 1);
+        let mut warmup = vec![0.5_f32; 480];
+        eq.process_interleaved(&mut warmup, 1);
+        eq.configure(-12.0, &[peaking(1_000.0, 0.0, 1.0)], 48_000.0, 1);
+        let mut block = vec![0.5_f32; 2_400];
+        eq.process_interleaved(&mut block, 1);
+
+        let mut previous = warmup[479];
+        let mut largest_step = 0.0_f32;
+        for sample in &block {
+            largest_step = largest_step.max((sample - previous).abs());
+            previous = *sample;
+        }
+        assert!(largest_step < 1e-3, "最大阶跃 {largest_step}");
+        let settled = 0.5 * 10.0_f32.powf(-12.0 / 20.0);
+        assert!((block[2_399] - settled).abs() < 1e-6);
+    }
+
+    /// DSP-03：增加一个频段时，已有频段的滤波状态原样保留——新频段从直通起步，
+    /// 所以重新配置后的头几个样本与「什么都没改」的参照输出几乎一样。
+    /// （此前频段数量一变就把所有状态清零，谐振中的低频高 Q 频段会咔哒一声。）
+    #[test]
+    fn dsp03_adding_a_band_keeps_existing_filter_state() {
+        let rate = 48_000.0_f32;
+        let resonant = peaking(100.0, 12.0, 8.0);
+        let mut eq = Equalizer::default();
+        let mut reference = Equalizer::default();
+        eq.configure(0.0, &[resonant], rate, 1);
+        reference.configure(0.0, &[resonant], rate, 1);
+        let mut warmup = sine(100.0, 48_000.0, 0, 48_000);
+        let mut warmup_reference = warmup.clone();
+        eq.process_interleaved(&mut warmup, 1);
+        reference.process_interleaved(&mut warmup_reference, 1);
+
+        eq.configure(0.0, &[resonant, peaking(4_000.0, 6.0, 1.0)], rate, 1);
+        let mut head = sine(100.0, 48_000.0, 48_000, 8);
+        let mut head_reference = head.clone();
+        eq.process_interleaved(&mut head, 1);
+        reference.process_interleaved(&mut head_reference, 1);
+        for (actual, expected) in head.iter().zip(&head_reference) {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "状态被清零了：{actual} vs {expected}"
+            );
+        }
+        assert_eq!(eq.coeffs.len(), 2);
+    }
+
+    /// DSP-03：去掉频段时，多出来的尾部滤波级先渐变回直通，过渡结束才丢弃；
+    /// 全部去掉后回到纯直通（上层可以旁路）。
+    #[test]
+    fn dsp03_removing_bands_ramps_them_out_then_drops_them() {
+        let rate = 48_000.0_f32;
+        let bands = [peaking(100.0, 9.0, 4.0), peaking(4_000.0, 6.0, 1.0)];
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &bands, rate, 2);
+        let mut warmup: Vec<f32> = sine(100.0, 48_000.0, 0, 4_800)
+            .into_iter()
+            .flat_map(|sample| [sample, sample])
+            .collect();
+        eq.process_interleaved(&mut warmup, 2);
+
+        eq.configure(0.0, &[], rate, 2);
+        assert_eq!(eq.coeffs.len(), 2, "过渡期间滤波级还在");
+        assert!(!eq.is_identity());
+        let mut block: Vec<f32> = sine(100.0, 48_000.0, 4_800, 2_400)
+            .into_iter()
+            .flat_map(|sample| [sample, sample])
+            .collect();
+        let dry = block.clone();
+        let mut previous = warmup[warmup.len() - 2];
+        eq.process_interleaved(&mut block, 2);
+        for frame in block.chunks(2) {
+            // 100 Hz、幅度 0.25 的正弦相邻样本最多差 0.0033；留一倍余量给渐变本身
+            assert!((frame[0] - previous).abs() < 0.02, "输出出现阶跃");
+            previous = frame[0];
+        }
+        assert!(eq.is_identity());
+        assert!(eq.coeffs.is_empty());
+        assert_eq!(block[block.len() - 2..], dry[dry.len() - 2..]);
+    }
+
+    /// DSP-03：过渡途中再改一次，从当前值接着走（不跳回起点也不跳到旧目标）。
+    #[test]
+    fn dsp03_retarget_mid_ramp_continues_from_current_coefficients() {
+        let rate = 48_000.0_f32;
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[peaking(1_000.0, 0.0, 1.0)], rate, 1);
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 0, 64), 1);
+        eq.configure(0.0, &[peaking(1_000.0, 12.0, 1.0)], rate, 1);
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 64, 300), 1);
+        let mid = eq.coeffs[0];
+
+        eq.configure(0.0, &[peaking(1_000.0, -6.0, 1.0)], rate, 1);
+        assert_eq!(eq.coeffs[0], mid);
+        // 目标没变的重复配置不重启过渡
+        let remaining = eq.ramp_remaining;
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 364, 100), 1);
+        eq.configure(0.0, &[peaking(1_000.0, -6.0, 1.0)], rate, 1);
+        assert_eq!(eq.ramp_remaining, remaining - 100);
+
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 464, 960), 1);
+        assert_eq!(
+            eq.coeffs[0],
+            BiquadCoeffs::design(&peaking(1_000.0, -6.0, 1.0), rate)
+        );
+    }
+
+    /// DSP-03：极端参数之间的过渡全程稳定（稳定区是凸的，线性插值不会越界）。
+    #[test]
+    fn dsp03_ramp_between_extreme_bands_stays_bounded() {
+        let rate = 192_000.0_f32;
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[peaking(30.0, 24.0, 8.0)], rate, 1);
+        eq.process_interleaved(&mut sine(30.0, 192_000.0, 0, 19_200), 1);
+        let mut start = 19_200;
+        for band in [
+            peaking(18_000.0, -24.0, 0.3),
+            EqBand {
+                kind: BandKind::LowShelf,
+                ..peaking(40.0, 24.0, 0.5)
+            },
+            EqBand {
+                kind: BandKind::HighPass,
+                ..peaking(20.0, 0.0, 8.0)
+            },
+            peaking(30.0, 24.0, 8.0),
+        ] {
+            eq.configure(0.0, &[band], rate, 1);
+            let mut block = sine(30.0, 192_000.0, start, 9_600);
+            start += 9_600;
+            eq.process_interleaved(&mut block, 1);
+            assert!(block
+                .iter()
+                .all(|sample| sample.is_finite() && sample.abs() < 50.0));
+        }
+    }
+
+    /// DSP-03：seek（`reset`）让进行中的过渡直接落到目标；之后的首次配置也直接生效。
+    #[test]
+    fn dsp03_reset_finishes_a_pending_ramp() {
+        let rate = 48_000.0_f32;
+        let mut eq = Equalizer::default();
+        eq.configure(0.0, &[peaking(1_000.0, 0.0, 1.0)], rate, 1);
+        eq.process_interleaved(&mut sine(1_000.0, 48_000.0, 0, 64), 1);
+        eq.configure(-6.0, &[peaking(1_000.0, 12.0, 1.0)], rate, 1);
+        assert!(eq.ramp_remaining > 0);
+        eq.reset();
+        assert_eq!(eq.ramp_remaining, 0);
+        assert_eq!(
+            eq.coeffs[0],
+            BiquadCoeffs::design(&peaking(1_000.0, 12.0, 1.0), rate)
+        );
+
+        eq.configure(0.0, &[peaking(2_000.0, 3.0, 1.0)], rate, 1);
+        assert_eq!(eq.ramp_remaining, 0, "seek 之后还没出声，配置直接生效");
     }
 
     #[test]

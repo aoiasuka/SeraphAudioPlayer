@@ -46,7 +46,6 @@ pub struct DspProcessor {
     crossfeed: Crossfeed,
     sample_rate: f32,
     channels: usize,
-    eq_active: bool,
     crossfeed_active: bool,
 }
 
@@ -59,19 +58,22 @@ impl DspProcessor {
         if settings.enabled {
             self.equalizer
                 .configure(settings.preamp, &settings.bands, self.sample_rate, channels);
-            self.eq_active = !self.equalizer.is_identity();
             self.crossfeed
                 .configure(&settings.crossfeed, self.sample_rate);
             self.crossfeed_active = self.crossfeed.is_active();
         } else {
-            self.eq_active = false;
+            // DSP-03：关总开关也走过渡——EQ 渐变回直通，过渡走完整条链才零成本旁路。
+            // 还没出过声时（起播前）配置直接生效，等同于原先的立即旁路。
+            self.equalizer
+                .configure(0.0, &[], self.sample_rate, channels);
             self.crossfeed_active = false;
         }
     }
 
     /// 整条链是否需要处理（否则上层可 zero-copy 跳过）。坑 5。
+    /// EQ 一侧按实时状态判断：渐变回直通的过渡没走完之前仍算活跃。
     pub fn is_active(&self) -> bool {
-        self.eq_active || self.crossfeed_active
+        !self.equalizer.is_identity() || self.crossfeed_active
     }
 
     /// 就地处理一段交错样本。链不活跃时零成本返回。
@@ -79,7 +81,7 @@ impl DspProcessor {
         if channels == 0 {
             return;
         }
-        if self.eq_active {
+        if !self.equalizer.is_identity() {
             self.equalizer.process_interleaved(samples, channels);
         }
         if self.crossfeed_active {
@@ -172,6 +174,38 @@ mod tests {
         assert!(json.contains("cutoffHz"));
         let back: DspSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(settings, back);
+    }
+
+    /// DSP-03：播放中关掉 DSP 总开关不硬切——输出从处理后的电平渐变回原始电平，
+    /// 过渡走完后整条链才旁路，且旁路后逐位直通。
+    #[test]
+    fn dsp03_disabling_the_chain_mid_playback_ramps_back_to_passthrough() {
+        let enabled = DspSettings {
+            enabled: true,
+            preamp: -12.0,
+            ..DspSettings::default()
+        };
+        let mut proc = DspProcessor::default();
+        proc.configure(&enabled, 48_000.0, 1);
+        let mut warmup = vec![0.5_f32; 480];
+        proc.process(&mut warmup, 1);
+        let attenuated = warmup[479];
+        assert!((attenuated - 0.5 * 10.0_f32.powf(-12.0 / 20.0)).abs() < 1e-6);
+
+        proc.configure(&DspSettings::default(), 48_000.0, 1);
+        assert!(proc.is_active(), "过渡没走完之前不能旁路");
+        let mut block = vec![0.5_f32; 4_800];
+        proc.process(&mut block, 1);
+
+        // 第一个样本紧挨着关闭前的电平；全程没有大于千分之一满幅的阶跃
+        assert!((block[0] - attenuated).abs() < 1e-3);
+        let largest_step = block
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(largest_step < 1e-3, "最大阶跃 {largest_step}");
+        assert_eq!(block[4_799], 0.5, "过渡结束后逐位直通");
+        assert!(!proc.is_active());
     }
 
     #[test]
