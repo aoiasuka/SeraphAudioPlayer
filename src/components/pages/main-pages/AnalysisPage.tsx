@@ -35,7 +35,6 @@ import {
   ANALYSIS_BIN_COUNT,
   HISTORY_ROWS,
   HISTORY_WINDOW_SEC,
-  type AnalysisFrame,
 } from "@/lib/analysis/types";
 import { isTauriRuntime } from "@/lib/tauri";
 import { createAnalysisSession, pollVisualizer, visualizerPoller } from "@/lib/analysis/polling";
@@ -430,7 +429,7 @@ export function AnalysisPage() {
     if (visibleCount === 0 || editing || immersiveOpen) return undefined;
     if (isTauriRuntime()) {
       if (!isPlaying) return undefined;
-      return pollVisualizer<AnalysisFrame>("get_analysis_frame", sessionId,
+      return pollVisualizer("get_analysis_frame", sessionId,
         (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000), {
           spectrum: panels.spectrum || panels.spectrogram,
           loudness: panels.loudness, levels: panels.levels, field: panels.field, scope: panels.scope,

@@ -155,9 +155,14 @@ export function applyAnalysisFrame(
   view.loud.tp = frame.truePeakDb ?? view.loud.tp;
   view.loud.tpMax = frame.truePeakMaxDb ?? view.loud.tpMax;
 
-  // 声场
+  // 声场。余晖 trail 靠「每帧一个新数组」的引用变化推进：二进制帧解码出的
+  // Float32Array 每帧都是新视图，直接引用即可；普通数组（模拟器、测试）才拷贝。
+  // 之后只会整体替换 pts（见断流衰减），不会原地改写这块 IPC 响应缓冲。
   if (frame.scatter.length >= 2) {
-    view.stereo.pts = Float32Array.from(frame.scatter);
+    view.stereo.pts =
+      frame.scatter instanceof Float32Array
+        ? frame.scatter
+        : Float32Array.from(frame.scatter);
     view.stereo.count = frame.scatter.length / 2;
   }
   view.stereo.corr += (frame.correlation - view.stereo.corr) * Math.min(1, dt * 6);

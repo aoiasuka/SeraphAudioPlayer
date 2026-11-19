@@ -23,9 +23,15 @@ export const FREQ_MAX = 20000;
 /** 示波器波形 i16 量化满幅 */
 export const WAVE_I16_SCALE = 32767;
 
-/** 后端 get_analysis_frame 返回的一帧（serde camelCase） */
+/**
+ * 后端 get_analysis_frame 的一帧。
+ *
+ * 桌面端由 `wire.ts` 从二进制帧解码（VIZ-01），三个数组是直接架在 IPC 响应缓冲上的
+ * `Float32Array` / `Int16Array`；浏览器模拟器和测试给的是普通数组。两者都满足
+ * `ArrayLike<number>`，消费方只按下标和 `length` 读，不要调用数组专有的方法。
+ */
 export interface AnalysisFrame {
-  spectrum: number[];
+  spectrum: ArrayLike<number>;
   peakLeft: number;
   peakRight: number;
   rmsLeft: number;
@@ -37,9 +43,9 @@ export interface AnalysisFrame {
   truePeakDb: number | null;
   truePeakMaxDb: number | null;
   correlation: number;
-  scatter: number[];
+  scatter: ArrayLike<number>;
   /** 交错 L,R 的 i16 量化波形（时间正序，约 43ms 窗、每 2 帧 1 点） */
-  waveform: number[];
+  waveform: ArrayLike<number>;
   sampleRate: number;
 }
 

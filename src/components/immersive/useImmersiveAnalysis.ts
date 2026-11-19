@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 import { createAnalysisSession, pollVisualizer } from "@/lib/analysis/polling";
 import { applyAnalysisFrame, createAnalysisView, stepAnalysisView } from "@/lib/analysis/view";
-import { ANALYSIS_BIN_COUNT, SPECTRUM_DB_FLOOR, LEVEL_DB_FLOOR, type AnalysisFrame } from "@/lib/analysis/types";
+import { ANALYSIS_BIN_COUNT, SPECTRUM_DB_FLOOR, LEVEL_DB_FLOOR } from "@/lib/analysis/types";
 import { binFreq, prepCanvas, resolveArchiveColors, spectrumBinFromX, type SpectrumGeometry } from "@/lib/analysis/render";
 import { formatSeconds } from "@/lib/format";
 import { isTauriRuntime } from "@/lib/tauri";
@@ -112,7 +112,7 @@ export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
   useEffect(() => {
     // 桌面只显示真实引擎帧；浏览器无音频后端时保持等待状态。
     if (!isTauriRuntime() || !playing || frozen) return;
-    return pollVisualizer<AnalysisFrame>("get_analysis_frame", context.sessionId, (frame) => {
+    return pollVisualizer("get_analysis_frame", context.sessionId, (frame) => {
       applyAnalysisFrame(context.view, frame, performance.now() / 1000);
       context.frameTime = usePlayerStore.getState().currentTime;
       scheduleRef.current?.();

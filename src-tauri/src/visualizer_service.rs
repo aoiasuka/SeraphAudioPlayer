@@ -1,10 +1,11 @@
 //! 唯一的 tap 读侧。IPC 续租需求并读取已完成帧，FFT / 声学分析在专用线程执行。
 
 use crate::ipc::error::{IpcError, IpcResult};
+use crate::visualizer_wire::{encode_analysis_frame, encode_spectrum_frame};
 use parking_lot::{Condvar, Mutex};
 use seraph_audio::{SpectrumTap, TapMeta};
 use seraph_visualizer::{AnalysisEngine, AnalysisFeatures, SimpleVisualizer, Visualizer};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     sync::Arc,
     thread,
@@ -64,8 +65,8 @@ pub(crate) enum Demand {
     Analysis(AnalysisDemand),
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// 侧栏频谱的一帧。经 `visualizer_wire` 编码成二进制后出 IPC（VIZ-01）。
+#[derive(Debug, Clone)]
 pub struct SpectrumFrameDto {
     pub bins: Vec<f32>,
     pub peak_left: f32,
@@ -74,8 +75,8 @@ pub struct SpectrumFrameDto {
     pub sequence: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// 分析页 / 沉浸页的一帧。经 `visualizer_wire` 编码成二进制后出 IPC（VIZ-01）。
+#[derive(Debug, Clone)]
 pub struct AnalysisFrameDto {
     pub spectrum: Vec<f32>,
     pub peak_left: f32,
@@ -183,27 +184,40 @@ impl VisualizerService {
         Ok(control)
     }
 
-    pub(crate) fn spectrum(&self, request: FrameRequest) -> IpcResult<Option<SpectrumFrameDto>> {
+    /// 续租侧栏频谱需求并取最新一帧的二进制编码；还没有帧时返回空字节串。
+    /// 在控制锁内直接从帧引用编码，不再先克隆一份 DTO。
+    pub(crate) fn spectrum_bytes(&self, request: FrameRequest) -> IpcResult<Vec<u8>> {
         let control = self.touch(request, Demand::Sidebar)?;
         if let Some(error) = &control.error {
             return Err(error.clone());
         }
-        Ok(control.frames.spectrum.clone())
+        Ok(control
+            .frames
+            .spectrum
+            .as_ref()
+            .map(encode_spectrum_frame)
+            .unwrap_or_default())
     }
 
-    pub(crate) fn analysis(
+    /// 续租分析需求并取最新一帧的二进制编码；需求为空或还没有帧时返回空字节串。
+    pub(crate) fn analysis_bytes(
         &self,
         request: FrameRequest,
         demand: AnalysisDemand,
-    ) -> IpcResult<Option<AnalysisFrameDto>> {
+    ) -> IpcResult<Vec<u8>> {
         if demand.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let control = self.touch(request, Demand::Analysis(demand))?;
         if let Some(error) = &control.error {
             return Err(error.clone());
         }
-        Ok(control.frames.analysis.clone())
+        Ok(control
+            .frames
+            .analysis
+            .as_ref()
+            .map(encode_analysis_frame)
+            .unwrap_or_default())
     }
 
     pub(crate) fn reset(&self) {

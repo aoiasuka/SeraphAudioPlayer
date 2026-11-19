@@ -5,12 +5,6 @@ import { smoothingFactor } from "@/lib/analysis/smoothing";
 import { usePlayerStore } from "@/store/player";
 import { useImmersiveStore } from "@/store/immersive";
 
-interface SpectrumFrame {
-  bins: number[];
-  peakLeft: number;
-  peakRight: number;
-}
-
 const BIN_COUNT = 48;
 /**
  * 柱体快攻慢放的时间常数（秒），消除逐帧 FFT 硬跳变。按时间而不是按帧平滑：
@@ -33,7 +27,8 @@ export function SpectrumPanel() {
   const sessionId = useMemo(() => createAnalysisSession(), [currentTrackId]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const binsRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
-  const targetRef = useRef<number[]>(new Array(BIN_COUNT).fill(0));
+  // 轮询目标：后端二进制帧里的 Float32Array 视图，或暂停后的全零数组
+  const targetRef = useRef<ArrayLike<number>>(new Array(BIN_COUNT).fill(0));
   const rafRef = useRef<number>(0);
 
   useEffect(() => {
@@ -126,7 +121,7 @@ export function SpectrumPanel() {
     onVisibilityChange();
 
     if (isPlaying) {
-      stopPolling = pollVisualizer<SpectrumFrame>("get_spectrum_frame", sessionId, (frame) => {
+      stopPolling = pollVisualizer("get_spectrum_frame", sessionId, (frame) => {
         targetRef.current = frame.bins;
       });
     } else {

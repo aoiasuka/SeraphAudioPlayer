@@ -15,6 +15,7 @@ mod state;
 #[cfg(windows)]
 mod taskbar;
 mod visualizer_service;
+mod visualizer_wire;
 
 use state::AppState;
 use tauri::Manager;

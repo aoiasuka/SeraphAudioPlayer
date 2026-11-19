@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnalysisFrame } from "@/lib/analysis/types";
+import { encodeAnalysisFrame } from "@/lib/analysis/wire.testutil";
 import { usePlayerStore } from "@/store/player";
 import { useImmersiveStore } from "@/store/immersive";
 import { AnalysisPage } from "@/components/pages/main-pages/AnalysisPage";
@@ -15,12 +16,14 @@ vi.mock("@/lib/tauri", async (importOriginal) => ({
   invoke: bridge.invoke,
 }));
 
-function frame(requestId: string, sequence: number, correlation = 0.9): AnalysisFrame & { requestId: string; sequence: number } {
-  return {
+/** 后端返回的是二进制帧（VIZ-01）：按同一布局编码后交给被 mock 的 invoke。 */
+function frame(requestId: string, sequence: number, correlation = 0.9): ArrayBuffer {
+  const value: AnalysisFrame & { requestId: string; sequence: number } = {
     requestId, sequence, spectrum: Array(96).fill(0.65), peakLeft: 0.5, peakRight: 0.4, rmsLeft: 0.25, rmsRight: 0.2,
     correlation, scatter: [0.1, 0.1, -0.1, -0.1], waveform: [], sampleRate: 48000,
     momentaryLufs: null, shortTermLufs: null, integratedLufs: null, loudnessRangeLu: null, truePeakDb: null, truePeakMaxDb: null,
   };
+  return encodeAnalysisFrame(value);
 }
 
 async function advance(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
