@@ -1,88 +1,13 @@
-import {
-  CheckCircle2,
-  DownloadCloud,
-  Folder,
-  HardDrive,
-  Loader2,
-  MonitorSpeaker,
-  RotateCw,
-  Sliders,
-  Sparkles,
-  Trash2,
-  X,
-} from "lucide-react";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Dialog } from "@/components/ui/dialog";
+import { X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AboutSettingsTab } from "@/components/modal/AboutSettingsTab";
+import { AudioSettingsTab } from "@/components/modal/AudioSettingsTab";
+import { CacheSettingsTab } from "@/components/modal/CacheSettingsTab";
 import { LyricsSettingsTab } from "@/components/modal/LyricsSettingsTab";
-import {
-  buildConfigExport,
-  parseConfigImport,
-  stashPendingImport,
-} from "@/lib/configTransfer";
-import { invoke, normalizeIpcError } from "@/lib/tauri";
-import { checkForUpdate, openReleasePage, type UpdateCheckResult } from "@/lib/update";
+import { SystemSettingsTab } from "@/components/modal/SystemSettingsTab";
+import { useCacheSettingsForm } from "@/components/modal/useCacheSettingsForm";
+import { Dialog } from "@/components/ui/dialog";
 import { usePlayerStore } from "@/store/player";
-import {
-  buildPersonalDataExport,
-  mergePersonalData,
-  parsePersonalDataImport,
-} from "@/store/player/personalData";
-import type { DriverKind } from "@/types/track";
-
-const drivers: {
-  value: DriverKind;
-  label: string;
-  hint: string;
-  disabled?: boolean;
-}[] = [
-  {
-    value: "wasapi",
-    label: "WASAPI 独占",
-    hint: "已接入 Windows 独占输出；当前仍经过 PCM 混音链路，bit-perfect 旁路尚未开放。",
-  },
-  {
-    value: "asio",
-    label: "ASIO 专业驱动（未开放）",
-    hint: "ASIO 后端尚未实现，发布前不会作为可选输出路径开放。",
-    disabled: true,
-  },
-  {
-    value: "direct",
-    label: "系统共享输出",
-    hint: "使用系统共享音频栈，兼容性最高，适合普通扬声器和蓝牙设备。",
-  },
-];
-
-interface CacheSettings {
-  cacheDir: string;
-  maxSizeMb: number;
-  autoCleanup: boolean;
-}
-
-interface CacheStatus {
-  settings: CacheSettings;
-  usedMb: number;
-  usagePercent: number;
-  fileCount: number;
-  /** CACHE-01：缓存目录所在磁盘当前不可用时的说明；设置本身保留。 */
-  unavailableReason?: string;
-}
-
-interface CacheCleanupResult {
-  removedFiles: number;
-  removedBytes: number;
-  removedPaths: string[];
-}
-
-function formatMb(value: number) {
-  if (!Number.isFinite(value)) return "0 MB";
-  if (value >= 1024) return `${(value / 1024).toFixed(2)} GB`;
-  return `${value.toFixed(1)} MB`;
-}
-
-function formatBytes(value: number) {
-  return formatMb(value / 1024 / 1024);
-}
 
 type SettingsTab = "audio" | "lyrics" | "cache" | "system" | "about";
 
@@ -94,41 +19,18 @@ const SETTINGS_TABS: { value: SettingsTab; label: string }[] = [
   { value: "about", label: "关于与更新" },
 ];
 
+/**
+ * 设置弹窗的壳：标签栏、关闭流程，以及当前标签页的挂载。
+ *
+ * UI-05：各标签页是独立组件，各自订阅自己用到的 store 字段、持有自己的本地状态。
+ * 壳只留跨标签页的东西——当前标签，以及缓存表单（设置页里唯一需要「保存」的表单：
+ * 未保存的改动要在切换标签页后保留，关闭时要询问或自动保存，所以它的状态挂在这里）。
+ */
 export function SettingsModal() {
   const open = usePlayerStore((s) => s.settingsOpen);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
-  const driverKind = usePlayerStore((s) => s.driverKind);
-  const setDriver = usePlayerStore((s) => s.setDriver);
-  const currentDeviceId = usePlayerStore((s) => s.currentDeviceId);
-  const devices = usePlayerStore((s) => s.devices);
-  const loadDevices = usePlayerStore((s) => s.loadDevices);
-  const selectDevice = usePlayerStore((s) => s.selectDevice);
-  const showNotification = usePlayerStore((s) => s.showNotification);
-  const smtcEnabled = usePlayerStore((s) => s.smtcEnabled);
-  const setSmtcEnabled = usePlayerStore((s) => s.setSmtcEnabled);
-  const taskbarButtonsEnabled = usePlayerStore((s) => s.taskbarButtonsEnabled);
-  const setTaskbarButtonsEnabled = usePlayerStore(
-    (s) => s.setTaskbarButtonsEnabled
-  );
-  const taskbarProgressEnabled = usePlayerStore(
-    (s) => s.taskbarProgressEnabled
-  );
-  const setTaskbarProgressEnabled = usePlayerStore(
-    (s) => s.setTaskbarProgressEnabled
-  );
-  const rememberPlayback = usePlayerStore((s) => s.rememberPlayback);
-  const setRememberPlayback = usePlayerStore((s) => s.setRememberPlayback);
-  const markTracksCacheMissingByPaths = usePlayerStore(
-    (s) => s.markTracksCacheMissingByPaths
-  );
   const [activeTab, setActiveTab] = useState<SettingsTab>("audio");
-  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
-  const [cacheDir, setCacheDir] = useState("");
-  const [maxSizeMb, setMaxSizeMb] = useState("5120");
-  const [autoCleanup, setAutoCleanup] = useState(true);
-  const [cacheBusy, setCacheBusy] = useState(false);
-  // UI-01：清理缓存是一次点击删光全部已下载音频，先确认。
-  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const cache = useCacheSettingsForm(open);
   // UI-04：缓存表单有未保存改动时，✕ / Esc / 点遮罩不再直接丢弃。
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
 
@@ -144,75 +46,12 @@ export function SettingsModal() {
     return () => window.removeEventListener("seraph:open-settings-tab", onOpenTab);
   }, []);
 
-  const currentDevice = devices.find((device) => device.id === currentDeviceId);
-  const currentDriver = drivers.find((driver) => driver.value === driverKind);
-  const usagePercent = Math.min(cacheStatus?.usagePercent ?? 0, 100);
-
-  const refreshCacheStatus = useCallback(async () => {
-    try {
-      const status = await invoke<CacheStatus>("get_cache_status");
-      setCacheStatus(status);
-      setCacheDir(status.settings.cacheDir);
-      setMaxSizeMb(String(status.settings.maxSizeMb));
-      setAutoCleanup(status.settings.autoCleanup);
-    } catch (err) {
-
-      console.warn("Tauri command failed: get_cache_status", err);
-      showNotification("读取缓存设置失败", "error");
-    }
-  }, [showNotification]);
-
-  useEffect(() => {
-    if (!open) return;
-    void refreshCacheStatus();
-  }, [open, refreshCacheStatus]);
-
   // M-18：驱动/设备/SMTC 等设置全部即时生效，弹窗从不存在“待保存”的输出
   // 配置——旧「保存配置/取消」双按钮语义均为假（保存只是关窗+假通知，取消
   // 不回滚）。收敛为单个「完成」：若缓存 tab 有未提交的表单改动则先自动提交。
-  const cacheSettingsDirty =
-    cacheStatus !== null &&
-    (cacheDir !== cacheStatus.settings.cacheDir ||
-      maxSizeMb !== String(cacheStatus.settings.maxSizeMb) ||
-      autoCleanup !== cacheStatus.settings.autoCleanup);
-
-  const persistCacheSettings = async (): Promise<boolean> => {
-    if (cacheBusy) return false;
-
-    const parsedMax = Number(maxSizeMb);
-    if (!Number.isFinite(parsedMax) || parsedMax < 128) {
-      showNotification("缓存上限不能低于 128 MB");
-      return false;
-    }
-
-    setCacheBusy(true);
-    try {
-      const status = await invoke<CacheStatus>("update_cache_settings", {
-        settings: {
-          cacheDir,
-          maxSizeMb: Math.round(parsedMax),
-          autoCleanup,
-        },
-      });
-      setCacheStatus(status);
-      setCacheDir(status.settings.cacheDir);
-      setMaxSizeMb(String(status.settings.maxSizeMb));
-      setAutoCleanup(status.settings.autoCleanup);
-      showNotification("缓存设置已保存");
-      return true;
-    } catch (err) {
-
-      console.warn("Tauri command failed: update_cache_settings", err);
-      showNotification(`保存缓存设置失败：${normalizeIpcError(err).message}`, "error");
-      return false;
-    } finally {
-      setCacheBusy(false);
-    }
-  };
-
   const finishAndClose = async () => {
-    if (cacheSettingsDirty) {
-      const saved = await persistCacheSettings();
+    if (cache.dirty) {
+      const saved = await cache.save();
       // 保存失败留在弹窗，让用户修正或明确放弃
       if (!saved) return;
     }
@@ -220,7 +59,7 @@ export function SettingsModal() {
   };
 
   const requestClose = () => {
-    if (cacheSettingsDirty) {
+    if (cache.dirty) {
       setDiscardConfirmOpen(true);
       return;
     }
@@ -229,154 +68,8 @@ export function SettingsModal() {
 
   const discardAndClose = () => {
     setDiscardConfirmOpen(false);
-    if (cacheStatus) {
-      setCacheDir(cacheStatus.settings.cacheDir);
-      setMaxSizeMb(String(cacheStatus.settings.maxSizeMb));
-      setAutoCleanup(cacheStatus.settings.autoCleanup);
-    }
+    cache.discard();
     toggleSettings();
-  };
-
-  const saveCacheSettings = (event: FormEvent) => {
-    event.preventDefault();
-    void persistCacheSettings();
-  };
-
-  const clearAppCache = async () => {
-    setClearConfirmOpen(false);
-    if (cacheBusy) return;
-    setCacheBusy(true);
-    try {
-      const result = await invoke<CacheCleanupResult>("clear_cache");
-      markTracksCacheMissingByPaths(result.removedPaths);
-      await refreshCacheStatus();
-      showNotification(
-        `已清理 ${result.removedFiles} 个缓存文件，释放 ${formatBytes(result.removedBytes)}`
-      );
-    } catch (err) {
-
-      console.warn("Tauri command failed: clear_cache", err);
-      showNotification(`清理缓存失败：${normalizeIpcError(err).message}`, "error");
-    } finally {
-      setCacheBusy(false);
-    }
-  };
-
-  const chooseCacheDir = async () => {
-    if (cacheBusy) return;
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "选择缓存文件夹",
-        defaultPath: cacheDir || undefined,
-      });
-      if (typeof selected === "string" && selected.trim()) {
-        setCacheDir(selected);
-      }
-    } catch (err) {
-
-      console.warn("Tauri dialog unavailable", err);
-      showNotification("无法打开文件夹选择窗口");
-    }
-  };
-
-  const exportConfig = async () => {
-    try {
-      const content = buildConfigExport();
-      if (!content) {
-        showNotification("没有可导出的设置");
-        return;
-      }
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        title: "导出应用配置",
-        defaultPath: "seraph-config.json",
-        filters: [{ name: "Seraph 配置", extensions: ["json"] }],
-      });
-      if (!target) return;
-      await invoke("export_app_config", { path: target, content });
-      showNotification("配置已导出");
-    } catch (err) {
-
-      console.warn("export_app_config failed", err);
-      showNotification(`导出配置失败：${normalizeIpcError(err).message}`, "error");
-    }
-  };
-
-  const importConfig = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        multiple: false,
-        title: "导入应用配置",
-        filters: [{ name: "Seraph 配置", extensions: ["json"] }],
-      });
-      if (typeof selected !== "string" || !selected.trim()) return;
-      const text = await invoke<string>("import_app_config", { path: selected });
-      const stores = parseConfigImport(text);
-      stashPendingImport(stores);
-      showNotification("配置已导入，界面即将重载…");
-      window.setTimeout(() => window.location.reload(), 600);
-    } catch (err) {
-
-      // UI-02：import_app_config 的错误是 { code, message } 普通对象，
-      // String(err) 会显示成 [object Object]。
-      console.warn("import_app_config failed", err);
-      showNotification(`导入配置失败：${normalizeIpcError(err).message}`, "error");
-    }
-  };
-
-  const exportPersonalData = async () => {
-    try {
-      const { liked, likedAt, userPlaylists } = usePlayerStore.getState();
-      const content = buildPersonalDataExport({ liked, likedAt, userPlaylists });
-      if (!content) {
-        showNotification("还没有收藏或歌单可以导出");
-        return;
-      }
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        title: "导出收藏与歌单",
-        defaultPath: "seraph-personal-data.json",
-        filters: [{ name: "Seraph 个人数据", extensions: ["json"] }],
-      });
-      if (!target) return;
-      await invoke("export_app_config", { path: target, content });
-      showNotification("收藏与歌单已导出");
-    } catch (err) {
-      console.warn("export personal data failed", err);
-      showNotification(`导出收藏与歌单失败：${normalizeIpcError(err).message}`, "error");
-    }
-  };
-
-  const importPersonalData = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        multiple: false,
-        title: "导入收藏与歌单",
-        filters: [{ name: "Seraph 个人数据", extensions: ["json"] }],
-      });
-      if (typeof selected !== "string" || !selected.trim()) return;
-      const text = await invoke<string>("import_app_config", { path: selected });
-      const imported = parsePersonalDataImport(text);
-      // 读文件期间用户可能又改了收藏：合并时取最新状态，只追加不覆盖。
-      const { liked, likedAt, userPlaylists } = usePlayerStore.getState();
-      const merged = mergePersonalData({ liked, likedAt, userPlaylists }, imported);
-      usePlayerStore.setState({
-        liked: merged.liked,
-        likedAt: merged.likedAt,
-        userPlaylists: merged.userPlaylists,
-      });
-      showNotification(
-        `已合并：新增收藏 ${merged.addedLikes} 首、新增歌单 ${merged.addedPlaylists} 张、补全歌单 ${merged.mergedPlaylists} 张`
-      );
-    } catch (err) {
-      console.warn("import personal data failed", err);
-      showNotification(`导入收藏与歌单失败：${normalizeIpcError(err).message}`, "error");
-    }
   };
 
   return (
@@ -395,7 +88,7 @@ export function SettingsModal() {
 
       <span className="file-tab">FILE — SYSTEM / SETTINGS</span>
 
-      {/* 功能分页：音频输出 / 缓存管理 / 系统集成 / 关于与更新 */}
+      {/* 功能分页：音频输出 / 歌词设置 / 缓存管理 / 系统集成 / 关于与更新 */}
       <div role="tablist" aria-label="设置分类" className="flex flex-wrap gap-1.5 border-b-[1.5px] border-line pb-3">
         {SETTINGS_TABS.map((tab) => (
           <button
@@ -415,409 +108,20 @@ export function SettingsModal() {
         ))}
       </div>
 
-      {activeTab === "audio" && (
-      <div className="space-y-4">
-        <div className="space-y-2">
-          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
-            <Sliders className="w-4 h-4 text-brown" />
-            音频输出设置
-          </h3>
-          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
-            管理当前播放设备和输出偏好。
-          </p>
-        </div>
-        <div className="space-y-1.5">
-          <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
-            Driver Interface
-          </label>
-          <select
-            value={driverKind}
-            onChange={(e) => setDriver(e.target.value as DriverKind)}
-            className="w-full bg-paper2 border-[1.5px] border-ink p-2 font-tw text-xs text-ink focus:outline-none focus:border-stamp"
-          >
-            {drivers.map((driver) => (
-              <option
-                key={driver.value}
-                value={driver.value}
-                disabled={driver.disabled}
-              >
-                {driver.label}
-              </option>
-            ))}
-          </select>
-          <p className="font-tw text-[10px] text-ink3">
-            {currentDriver?.hint}
-          </p>
-        </div>
-
-        <div className="p-3 bg-paper2 border-[1.5px] border-ink space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h4 className="font-serif text-xs font-semibold text-ink">
-                当前输出设备
-              </h4>
-              <p className="font-tw text-[10px] text-ink2">
-                {currentDevice?.name ?? (currentDeviceId || "正在读取设备…")}
-              </p>
-            </div>
-            <button
-              onClick={loadDevices}
-              className="stamp-btn px-2 py-1 font-tw text-[10px] font-bold"
-            >
-              刷新
-            </button>
-          </div>
-          <select
-            value={currentDeviceId}
-            onChange={(event) => selectDevice(event.target.value)}
-            className="w-full bg-card border-[1.5px] border-ink p-2 font-tw text-xs text-ink focus:outline-none focus:border-stamp"
-          >
-            {devices.map((device) => (
-              <option key={device.id} value={device.id}>
-                {device.name}
-                {device.isDefault ? " · Default" : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="p-3 bg-stamp-soft border-[1.5px] border-stamp space-y-1.5">
-          <h4 className="font-serif text-xs font-semibold text-stamp flex items-center gap-1.5">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            当前输出能力
-          </h4>
-          <p className="font-tw text-[10px] text-ink2 leading-relaxed">
-            本地解码、播放进度事件、系统共享输出和 WASAPI 独占输出已经由 Rust 音频线程驱动；DSD 当前使用 PCM Conversion，DoP、Native DSD、ASIO 与 bit-perfect 旁路尚未开放。
-          </p>
-        </div>
-      </div>
-      )}
-
+      {activeTab === "audio" && <AudioSettingsTab />}
       {activeTab === "lyrics" && <LyricsSettingsTab />}
-
-      {activeTab === "cache" && (
-      <div className="space-y-4">
-        <div className="space-y-2">
-          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
-            <HardDrive className="w-4 h-4 text-brown" />
-            缓存管理
-          </h3>
-          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
-            管理流媒体音频的本地缓存目录与容量上限。
-          </p>
-        </div>
-        <form
-          onSubmit={saveCacheSettings}
-          className="p-3 bg-paper2 border-[1.5px] border-ink space-y-3"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h4 className="font-serif text-xs font-semibold text-ink flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5 text-brown" />
-                缓存管理
-              </h4>
-              <p className="font-tw text-[10px] text-ink2">
-                {cacheStatus
-                  ? `${cacheStatus.fileCount} 个文件 · ${formatMb(cacheStatus.usedMb)}`
-                  : "正在读取缓存状态"}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => void refreshCacheStatus()}
-              disabled={cacheBusy}
-              className="stamp-btn inline-flex h-7 items-center gap-1.5 px-2 font-tw text-[10px] font-bold disabled:opacity-50"
-            >
-              <RotateCw className="h-3 w-3" />
-              刷新
-            </button>
-          </div>
-
-          {cacheStatus?.unavailableReason ? (
-            <p role="alert" className="border-[1.5px] border-stamp bg-stamp-soft p-2 font-tw text-[10px] leading-relaxed text-stamp">
-              {cacheStatus.unavailableReason}
-            </p>
-          ) : null}
-
-          <div className="space-y-1.5">
-            <label className="font-tw text-[9px] font-bold text-ink3 uppercase">
-              Cache Path
-            </label>
-            <div className="grid grid-cols-[28px_minmax(0,1fr)] items-center gap-2 bg-card border-[1.5px] border-ink px-1.5 py-1.5">
-              <button
-                type="button"
-                onClick={chooseCacheDir}
-                disabled={cacheBusy}
-                className="flex h-7 w-7 items-center justify-center text-ink2 transition-colors hover:bg-paper2 hover:text-brown disabled:cursor-not-allowed disabled:opacity-50"
-                title="选择缓存文件夹"
-                aria-label="选择缓存文件夹"
-              >
-                <Folder className="h-4 w-4" />
-              </button>
-              <input
-                value={cacheDir}
-                onChange={(event) => setCacheDir(event.target.value)}
-                className="min-w-0 bg-transparent pr-2 font-tw text-xs text-ink outline-none"
-                placeholder="输入缓存目录路径"
-              />
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-[140px_minmax(0,1fr)]">
-            <label className="space-y-1.5">
-              <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">
-                Max Size (MB)
-              </span>
-              <input
-                value={maxSizeMb}
-                onChange={(event) => setMaxSizeMb(event.target.value)}
-                inputMode="numeric"
-                className="w-full border-[1.5px] border-ink bg-card p-2 font-tw text-xs text-ink outline-none focus:border-stamp"
-              />
-            </label>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between font-tw text-[10px] font-bold text-ink2">
-                <span>已用 {formatMb(cacheStatus?.usedMb ?? 0)}</span>
-                <span>{usagePercent.toFixed(1)}%</span>
-              </div>
-              <div className="h-2.5 overflow-hidden border border-ink bg-card">
-                <div
-                  className="h-full bg-brown transition-all"
-                  style={{ width: `${usagePercent}%` }}
-                />
-              </div>
-              <label className="flex items-center gap-2 font-tw text-[10px] font-bold text-ink2">
-                <input
-                  type="checkbox"
-                  checked={autoCleanup}
-                  onChange={(event) => setAutoCleanup(event.target.checked)}
-                  className="h-3.5 w-3.5 accent-ink"
-                />
-                接近上限时自动清理最久未播放的流媒体缓存
-              </label>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">
-            <button
-              type="button"
-              onClick={() => setClearConfirmOpen(true)}
-              disabled={cacheBusy || (cacheStatus?.fileCount ?? 0) === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 font-tw text-xs font-bold text-stamp transition-colors hover:bg-stamp-soft disabled:cursor-not-allowed disabled:text-ink3 disabled:hover:bg-transparent"
-            >
-              {cacheBusy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Trash2 className="h-3.5 w-3.5" />
-              )}
-              清理缓存
-            </button>
-            <button
-              type="submit"
-              disabled={cacheBusy}
-              className="border-[1.5px] border-ink bg-ink px-3 py-1.5 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp disabled:bg-line disabled:border-line disabled:text-ink2"
-            >
-              保存缓存设置
-            </button>
-          </div>
-        </form>
-      </div>
-      )}
-
-      {activeTab === "system" && (
-      <div className="space-y-4">
-        <div className="space-y-2">
-          <h3 className="font-serif text-base font-bold text-ink flex items-center gap-2">
-            <MonitorSpeaker className="w-4 h-4 text-brown" />
-            系统集成
-          </h3>
-          <p className="font-tw text-[11px] text-ink2 leading-relaxed">
-            与 Windows 系统的集成能力。
-          </p>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-          <div className="min-w-0">
-            <h4 className="font-serif text-xs font-semibold text-ink">
-              系统媒体控件（SMTC）
-            </h4>
-            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
-              键盘/蓝牙媒体键控制播放；系统音量浮窗与锁屏显示曲目标题、艺术家与封面。
-              停用后系统界面不再展示本应用的播放内容，媒体键也不再生效。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setSmtcEnabled(!smtcEnabled)}
-            className={
-              smtcEnabled
-                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
-            }
-            aria-pressed={smtcEnabled}
-          >
-            {smtcEnabled ? "已启用" : "已停用"}
-          </button>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-          <div className="min-w-0">
-            <h4 className="font-serif text-xs font-semibold text-ink">
-              任务栏播控按钮
-            </h4>
-            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
-              鼠标悬停任务栏图标时，缩略图下方显示上一首 / 播放暂停 / 下一首按钮，
-              不切换窗口即可控制播放。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setTaskbarButtonsEnabled(!taskbarButtonsEnabled)}
-            className={
-              taskbarButtonsEnabled
-                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
-            }
-            aria-pressed={taskbarButtonsEnabled}
-          >
-            {taskbarButtonsEnabled ? "已启用" : "已停用"}
-          </button>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-          <div className="min-w-0">
-            <h4 className="font-serif text-xs font-semibold text-ink">
-              任务栏播放进度
-            </h4>
-            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
-              在任务栏图标上以进度条形式显示当前曲目的播放进度，暂停时变为黄色。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setTaskbarProgressEnabled(!taskbarProgressEnabled)}
-            className={
-              taskbarProgressEnabled
-                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
-            }
-            aria-pressed={taskbarProgressEnabled}
-          >
-            {taskbarProgressEnabled ? "已启用" : "已停用"}
-          </button>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-          <div className="min-w-0">
-            <h4 className="font-serif text-xs font-semibold text-ink">
-              记忆播放
-            </h4>
-            <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
-              重启应用后自动恢复上次播放的曲目与播放位置。关闭后每次启动都从头开始，
-              且不会在本地记录上次的播放进度。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setRememberPlayback(!rememberPlayback)}
-            className={
-              rememberPlayback
-                ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-                : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
-            }
-            aria-pressed={rememberPlayback}
-          >
-            {rememberPlayback ? "已启用" : "已停用"}
-          </button>
-        </div>
-        <div className="border-[1.5px] border-line bg-card p-3 space-y-2">
-          <h4 className="font-serif text-xs font-semibold text-ink">
-            配置备份 · 导出 / 导入
-          </h4>
-          <p className="font-tw text-[10px] leading-relaxed text-ink2">
-            把播放偏好、EQ 与 DSP、声学分析设置一键导出为 JSON 文件；导入后界面
-            自动重载并应用。不包含曲库、收藏、歌单与缓存数据——导入不会覆盖本机
-            的个人数据。
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={exportConfig}
-              className="h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-            >
-              导出配置…
-            </button>
-            <button
-              type="button"
-              onClick={importConfig}
-              className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink hover:text-ink"
-            >
-              导入配置…
-            </button>
-          </div>
-        </div>
-        <div className="border-[1.5px] border-line bg-card p-3 space-y-2">
-          <h4 className="font-serif text-xs font-semibold text-ink">
-            收藏与歌单 · 导出 / 导入
-          </h4>
-          <p className="font-tw text-[10px] leading-relaxed text-ink2">
-            收藏和自建歌单只保存在本机的界面存储里，清理 WebView2 数据或重装系统
-            会丢失，建议定期导出备份。导入是合并：本机已有的收藏和歌单不会被删除
-            或覆盖。曲目按曲库里的 ID 对应，换了曲库路径的曲目需要重新收藏。
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => void exportPersonalData()}
-              className="h-8 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-            >
-              导出收藏与歌单…
-            </button>
-            <button
-              type="button"
-              onClick={() => void importPersonalData()}
-              className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink hover:text-ink"
-            >
-              导入收藏与歌单…
-            </button>
-          </div>
-        </div>
-      </div>
-      )}
-
-      {activeTab === "about" && (
-        <UpdateSection showNotification={showNotification} />
-      )}
+      {activeTab === "cache" && <CacheSettingsTab form={cache} />}
+      {activeTab === "system" && <SystemSettingsTab />}
+      {activeTab === "about" && <AboutSettingsTab />}
 
       <div className="flex justify-end gap-3 pt-3 border-t border-line">
         <button
           onClick={() => void finishAndClose()}
           className="border-[1.5px] border-ink bg-ink px-4 py-1.5 font-tw text-xs font-bold text-paper hover:bg-stamp hover:border-stamp transition-all"
         >
-          {cacheSettingsDirty ? "保存并关闭" : "完成"}
+          {cache.dirty ? "保存并关闭" : "完成"}
         </button>
       </div>
-
-      <Dialog open={clearConfirmOpen} onClose={() => setClearConfirmOpen(false)} className="max-w-sm space-y-4">
-        <h3 className="font-serif text-sm font-semibold text-ink">清理全部缓存</h3>
-        <p className="font-tw text-xs leading-5 text-ink2">
-          将删除 {cacheStatus?.fileCount ?? 0} 个已下载的流媒体音频文件（共{" "}
-          {formatMb(cacheStatus?.usedMb ?? 0)}）。曲目记录会保留，但再次播放需要重新下载。
-          此操作不可撤销。
-        </p>
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => setClearConfirmOpen(false)}
-            className="h-8 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 hover:border-ink"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={() => void clearAppCache()}
-            className="h-8 border-[1.5px] border-stamp bg-stamp px-3 font-tw text-xs font-bold text-paper"
-          >
-            确认清理
-          </button>
-        </div>
-      </Dialog>
 
       <Dialog open={discardConfirmOpen} onClose={() => setDiscardConfirmOpen(false)} className="max-w-sm space-y-4">
         <h3 className="font-serif text-sm font-semibold text-ink">缓存设置尚未保存</h3>
@@ -845,115 +149,5 @@ export function SettingsModal() {
         </div>
       </Dialog>
     </Dialog>
-  );
-}
-
-function UpdateSection({
-  showNotification,
-}: {
-  showNotification: (message: string, level?: "info" | "error") => void;
-}) {
-  const [checking, setChecking] = useState(false);
-  const [result, setResult] = useState<UpdateCheckResult | null>(null);
-  const autoUpdateCheck = usePlayerStore((s) => s.autoUpdateCheck);
-  const setAutoUpdateCheck = usePlayerStore((s) => s.setAutoUpdateCheck);
-
-  const runCheck = async () => {
-    if (checking) return;
-    setChecking(true);
-    try {
-      const checked = await checkForUpdate();
-      setResult(checked);
-      if (!checked.updateAvailable) {
-        showNotification(`已是最新版本 v${checked.currentVersion}`);
-      }
-    } catch (err) {
-
-      console.warn("check_for_update failed", err);
-      showNotification("检查更新失败，请稍后重试", "error");
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const openDownload = async () => {
-    if (!result?.releaseUrl) return;
-    try {
-      await openReleasePage(result.releaseUrl);
-    } catch (err) {
-
-      console.warn("open_release_page failed", err);
-      showNotification("打开下载页失败", "error");
-    }
-  };
-
-  return (
-    <div className="space-y-2">
-      <h3 className="font-tw text-[10px] tracking-[2px] text-ink3 uppercase">
-        [ 04 // About / 关于与更新 ]
-      </h3>
-      <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-        <div className="min-w-0">
-          <p className="font-serif text-xs font-semibold text-ink">
-            Seraph Audio Player
-            {result ? ` v${result.currentVersion}` : ""}
-          </p>
-          <p className="mt-0.5 font-tw text-[10px] text-ink2">
-            {result === null
-              ? "检查是否有新版本可用"
-              : result.updateAvailable
-                ? `发现新版本 v${result.latestVersion}，可前往下载页获取安装包`
-                : `已是最新版本`}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {result?.updateAvailable ? (
-            <button
-              type="button"
-              onClick={() => void openDownload()}
-              className="inline-flex h-8 items-center gap-1.5 border-[1.5px] border-ink bg-ink px-2.5 font-tw text-[11px] font-bold text-paper transition-colors hover:bg-stamp"
-            >
-              <DownloadCloud className="h-3.5 w-3.5" />
-              前往下载
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => void runCheck()}
-            disabled={checking}
-            className="stamp-btn inline-flex h-8 items-center gap-1.5 px-2.5 font-tw text-[11px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {checking ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Sparkles className="h-3.5 w-3.5" />
-            )}
-            检查更新
-          </button>
-        </div>
-      </div>
-      <div className="flex items-center justify-between gap-3 border-[1.5px] border-line bg-card p-3">
-        <div className="min-w-0">
-          <h4 className="font-serif text-xs font-semibold text-ink">启动时检查更新</h4>
-          <p className="mt-0.5 font-tw text-[10px] leading-relaxed text-ink2">
-            每次启动后向 GitHub 查询一次是否有新版本。关闭后应用不会自动联网检查，
-            只在点击上方「检查更新」时查询。
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setAutoUpdateCheck(!autoUpdateCheck)}
-          className={
-            autoUpdateCheck
-              ? "h-8 shrink-0 border-[1.5px] border-ink bg-ink px-3 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp hover:border-stamp"
-              : "h-8 shrink-0 border-[1.5px] border-line bg-card px-3 font-tw text-xs font-bold text-ink2 transition-colors hover:border-ink"
-          }
-          aria-pressed={autoUpdateCheck}
-          aria-label="启动时检查更新"
-        >
-          {autoUpdateCheck ? "已启用" : "已停用"}
-        </button>
-      </div>
-    </div>
   );
 }

@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
 import { DEFAULT_AMLL_TTML_DB_URL } from "@/lib/lyrics/settings";
 import type { Track } from "@/types/track";
-import { CREDITS_EXCLUDE_PRESET_PATTERN, LyricsSettingsTab } from "./LyricsSettingsTab";
+import { CREDITS_EXCLUDE_PRESET_PATTERN } from "./ExcludeRulesDialog";
+import { LyricsSettingsTab } from "./LyricsSettingsTab";
 
 const bridge = vi.hoisted(() => ({
   invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => undefined),

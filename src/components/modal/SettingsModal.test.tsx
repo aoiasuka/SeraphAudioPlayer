@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePlayerStore } from "@/store/player";
 import { SettingsModal } from "./SettingsModal";
@@ -115,5 +115,93 @@ describe("设置页（issues-2）", () => {
       expect(notification?.text).toBe("导入配置失败：配置文件过大（4096 KB），上限 2 MB");
       expect(notification?.level).toBe("error");
     });
+  });
+
+  it("UI-05：缓存表单的未保存改动在切换标签页后保留，从别的标签页也能「保存并关闭」", async () => {
+    bridge.invoke.mockImplementation(async (command, args) => {
+      if (command === "get_cache_status") return status();
+      if (command === "update_cache_settings") {
+        const settings = (args as { settings: Record<string, unknown> }).settings;
+        return status({ settings });
+      }
+      return undefined;
+    });
+    await openCacheTab();
+    fireEvent.change(screen.getByDisplayValue("5120"), { target: { value: "2048" } });
+    expect(screen.getByRole("button", { name: "保存并关闭" })).toBeInTheDocument();
+
+    // 缓存标签页卸载（切到音频输出），表单状态挂在壳上，不随它丢失
+    fireEvent.click(screen.getByRole("tab", { name: "音频输出" }));
+    expect(screen.queryByDisplayValue("2048")).toBeNull();
+    expect(screen.getByRole("button", { name: "保存并关闭" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "缓存管理" }));
+    expect(screen.getByDisplayValue("2048")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "系统集成" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并关闭" }));
+    await waitFor(() =>
+      expect(bridge.invoke).toHaveBeenCalledWith("update_cache_settings", {
+        settings: { cacheDir: "D:\\cache", maxSizeMb: 2048, autoCleanup: true },
+      })
+    );
+    await waitFor(() => expect(usePlayerStore.getState().settingsOpen).toBe(false));
+  });
+
+  it("UI-05：缓存上限不合法时「保存并关闭」不提交也不关闭", async () => {
+    await openCacheTab();
+    fireEvent.change(screen.getByDisplayValue("5120"), { target: { value: "64" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并关闭" }));
+    await waitFor(() =>
+      expect(usePlayerStore.getState().notification?.text).toBe("缓存上限不能低于 128 MB")
+    );
+    expect(bridge.invoke).not.toHaveBeenCalledWith("update_cache_settings", expect.anything());
+    expect(usePlayerStore.getState().settingsOpen).toBe(true);
+  });
+
+  it("UI-05：保存失败时提示后端原因，弹窗留着让用户修正", async () => {
+    bridge.invoke.mockImplementation(async (command) => {
+      if (command === "get_cache_status") return status();
+      if (command === "update_cache_settings") {
+        throw { code: "invalid_input", message: "目录 D:\\music 已包含其他文件且缺少缓存标记" };
+      }
+      return undefined;
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await openCacheTab();
+    fireEvent.change(screen.getByDisplayValue("D:\\cache"), { target: { value: "D:\\music" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存缓存设置" }));
+    await waitFor(() => {
+      const notification = usePlayerStore.getState().notification;
+      expect(notification?.text).toBe("保存缓存设置失败：目录 D:\\music 已包含其他文件且缺少缓存标记");
+      expect(notification?.level).toBe("error");
+    });
+    expect(usePlayerStore.getState().settingsOpen).toBe(true);
+    // 表单保持用户填的值，仍处于未保存状态
+    expect(screen.getByDisplayValue("D:\\music")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存并关闭" })).toBeInTheDocument();
+  });
+
+  it("UI-05：每个标签页只挂载自己的内容，事件可以直达指定标签页", async () => {
+    render(<SettingsModal />);
+    expect(screen.getByRole("tab", { name: "音频输出" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("音频输出设置")).toBeInTheDocument();
+    expect(screen.queryByText("与 Windows 系统的集成能力。")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("seraph:open-settings-tab", { detail: "lyrics" }));
+    });
+    expect(screen.getByRole("tab", { name: "歌词设置" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("歌词源优先级")).toBeInTheDocument();
+    expect(screen.queryByText("音频输出设置")).toBeNull();
+
+    // 不认识的标签名不切换
+    act(() => {
+      window.dispatchEvent(new CustomEvent("seraph:open-settings-tab", { detail: "nope" }));
+    });
+    expect(screen.getByRole("tab", { name: "歌词设置" })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "关于与更新" }));
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(screen.queryByText("歌词源优先级")).toBeNull();
   });
 });
