@@ -10,10 +10,12 @@
 //!   用户拖拽则由 `position` 反解成比例;单一事实来源是主窗口 store,
 //!   水合与拖拽后都同步到这里,纵向(水平任务栏时)始终吸附回任务栏;
 //! - 跟随线程 100ms 心跳 + `EVENT_SYSTEM_FOREGROUND` 钩子(切换应用时
-//!   Shell 会重排置顶带把任务栏抬到条之上,须即时重申 TOPMOST),
-//!   窗口不存在时空转,开销可忽略。
+//!   Shell 会重排置顶带把任务栏抬到条之上,须即时重申 TOPMOST)。线程只在
+//!   歌词条开着时存在:关闭歌词条即卸钩子、销毁计时器并退出(SYS-03)。
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tauri::{
@@ -22,18 +24,19 @@ use tauri::{
 };
 use tracing::{debug, warn};
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, KillTimer, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, HWND_TOPMOST, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT,
-    WM_TIMER, WS_EX_NOACTIVATE,
+    GetWindowLongPtrW, GetWindowRect, KillTimer, PeekMessageW, PostThreadMessageW, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
+    GWL_EXSTYLE, HWND_TOPMOST, MSG, PM_NOREMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WM_QUIT, WM_TIMER, WM_USER, WS_EX_NOACTIVATE,
 };
 
 /// 歌词条窗口 label(capabilities/taskbar-lyrics.json 按此授权)。
@@ -42,7 +45,9 @@ const WINDOW_LABEL: &str = "taskbar-lyrics";
 /// 歌词条沿任务栏长边的位置比例(0.0 = 最靠起点,1.0 = 最靠终点;
 /// None = 默认位置)。设置页滑块与用户拖拽都收敛到这一个量。
 static STORED_RATIO: Mutex<Option<f64>> = Mutex::new(None);
-static FOLLOW_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
+/// 当前的跟随线程(SYS-03)。只在歌词条开着时为 `Some`;起停都在
+/// [`TOGGLE_LOCK`] 之内进行。
+static FOLLOW_THREAD: Mutex<Option<FollowThread>> = Mutex::new(None);
 /// 开关串行锁:async 命令并发执行,快速 关→开 时旧窗口的异步销毁与新窗口
 /// 创建交错会"丢窗口"(开关显示开、窗口已被旧销毁带走)。
 static TOGGLE_LOCK: Mutex<()> = Mutex::new(());
@@ -63,6 +68,9 @@ const HEARTBEAT_MS: u32 = 100;
 const AVOID_EVERY: u32 = 5;
 /// 任务栏 rect 复查节拍:每 20 拍 = 2s。
 const REPOSITION_EVERY: u32 = 20;
+/// 等跟随线程退出的上限。正常情况下 WM_QUIT 一到线程就退出,用不到这么久;
+/// 只有它正卡在跨线程窗口调用里(主线程无响应)时才会等满,届时分离不再等。
+const FOLLOW_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 任务栏停靠边(APPBARDATA::uEdge)。
 const ABE_LEFT: u32 = 0;
@@ -259,6 +267,10 @@ fn query_taskbar() -> Option<TaskbarInfo> {
 pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let _guard = TOGGLE_LOCK.lock();
 
+    // SYS-03:跟随线程跟着窗口一起退场——关闭时不再留下每秒 10 次的定时唤醒和
+    // 系统级前台钩子;开启走"销毁重建",线程同样重新起一个。
+    stop_follow_thread();
+
     if !enabled {
         *BAR_HWND.lock() = None;
         AVOID_HIDDEN.store(false, Ordering::SeqCst);
@@ -312,7 +324,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
         warn!("taskbar lyrics initial position failed: {err}");
     }
     window.show().map_err(|err| err.to_string())?;
-    ensure_follow_thread(app.clone());
+    start_follow_thread(app.clone());
     debug!("taskbar lyrics window created");
     Ok(())
 }
@@ -473,8 +485,14 @@ fn follow_tick(app: &AppHandle, state: &mut FollowState) {
         return;
     }
 
-    if RESETTLE_TICKS.load(Ordering::SeqCst) > 0 {
-        RESETTLE_TICKS.fetch_sub(1, Ordering::SeqCst);
+    // 原子地「大于 0 才减 1」:停止超时被分离的旧线程可能与新线程短暂并存,
+    // 分两步读改会把计数减穿成 u32::MAX。
+    if RESETTLE_TICKS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |ticks| {
+            ticks.checked_sub(1)
+        })
+        .is_ok()
+    {
         reassert_topmost();
     }
 
@@ -517,59 +535,209 @@ fn follow_tick(app: &AppHandle, state: &mut FollowState) {
     }
 }
 
-/// 起跟随线程。线程跑 Win32 消息泵:WINEVENT_OUTOFCONTEXT 钩子回调只在安装
-/// 线程的消息泵中派发,心跳也就顺势改用线程计时器(SetTimer hwnd=None)。
-/// 全程只起一次,永不退出;窗口不存在时空转。
-fn ensure_follow_thread(app: AppHandle) {
-    if FOLLOW_THREAD_STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    std::thread::Builder::new()
-        .name("taskbar-lyrics-follow".into())
-        .spawn(move || unsafe {
-            let hook = SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_FOREGROUND,
-                None,
-                Some(on_foreground_changed),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            );
-            if hook.is_invalid() {
-                // 降级:仍有心跳兜底,只是切换应用时可能看到条闪一下
-                warn!("taskbar lyrics: foreground hook unavailable, heartbeat only");
-            }
-            let timer = SetTimer(None, 0, HEARTBEAT_MS, None);
-            if timer == 0 {
-                warn!("taskbar lyrics: heartbeat timer creation failed");
-                return;
-            }
+/// 一个跟随线程实例(SYS-03)。线程只在歌词条开着时存在:此前它「全程只起
+/// 一次、永不退出」,用户开过一次歌词条再关掉,进程里就一直留着 100 ms 的
+/// 定时唤醒和系统级前台切换钩子。
+struct FollowThread {
+    /// 这个实例独有的停止标志。停止超时被分离的旧线程只认自己的标志,不会被
+    /// 随后新起的线程「复活」。
+    stop: Arc<AtomicBool>,
+    /// Win32 线程 ID,投递 `WM_QUIT` 用;0 = 线程还没建好消息队列。
+    thread_id: Arc<AtomicU32>,
+    /// 线程函数返回(或 panic)时发送端随之析构,接收端立刻醒来。
+    exited: mpsc::Receiver<()>,
+    handle: std::thread::JoinHandle<()>,
+}
 
-            let mut state = FollowState::default();
+impl FollowThread {
+    /// 起线程并跑消息泵,每拍调用一次 `tick`。
+    fn spawn(tick: impl FnMut() + Send + 'static) -> std::io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_id = Arc::new(AtomicU32::new(0));
+        let (exit_signal, exited) = mpsc::channel::<()>();
+        let handle = std::thread::Builder::new()
+            .name("taskbar-lyrics-follow".into())
+            .spawn({
+                let stop = Arc::clone(&stop);
+                let thread_id = Arc::clone(&thread_id);
+                move || {
+                    let _exit_signal = exit_signal;
+                    run_follow_loop(&stop, &thread_id, tick);
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread_id,
+            exited,
+            handle,
+        })
+    }
+
+    /// 让线程卸钩子、销毁计时器并退出。返回它是否在 [`FOLLOW_STOP_TIMEOUT`]
+    /// 内退出;超时即分离(线程 join 必须有界),它在下一拍看到停止标志后
+    /// 仍会自行退出。
+    fn stop(self) -> bool {
+        // 先置标志再读线程 ID;线程那边是先公布 ID 再读标志。两边都用 SeqCst,
+        // 不会出现「这里读到 ID 为 0、线程又读到标志为假」的组合——要么线程
+        // 进消息循环前就看到标志,要么下面的 WM_QUIT 一定投得出去。
+        self.stop.store(true, Ordering::SeqCst);
+        let thread_id = self.thread_id.load(Ordering::SeqCst);
+        if thread_id != 0 {
+            // 这里还持有 JoinHandle,线程对象没销毁,ID 不会被系统分给别的线程。
+            // 投递失败也无妨:心跳那一拍会看到停止标志。
+            unsafe {
+                let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+        }
+        match self.exited.recv_timeout(FOLLOW_STOP_TIMEOUT) {
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            // 发送端从不发送,只会因线程函数结束而断开
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = self.handle.join();
+                true
+            }
+        }
+    }
+}
+
+/// 跟随线程主体。跑 Win32 消息泵:WINEVENT_OUTOFCONTEXT 钩子回调只在安装
+/// 线程的消息泵中派发,心跳也就顺势改用线程计时器(SetTimer hwnd=None)。
+/// 收到 `WM_QUIT` 或看到停止标志后卸钩子、销毁计时器并返回。
+fn run_follow_loop(stop: &AtomicBool, thread_id: &AtomicU32, mut tick: impl FnMut()) {
+    unsafe {
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(on_foreground_changed),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if hook.is_invalid() {
+            // 降级:仍有心跳兜底,只是切换应用时可能看到条闪一下
+            warn!("taskbar lyrics: foreground hook unavailable, heartbeat only");
+        }
+        let timer = SetTimer(None, 0, HEARTBEAT_MS, None);
+        if timer == 0 {
+            warn!("taskbar lyrics: heartbeat timer creation failed");
+        } else {
             let mut msg = MSG::default();
+            // 强制建好消息队列再公布线程 ID,否则 PostThreadMessageW 会落空
+            let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+            thread_id.store(GetCurrentThreadId(), Ordering::SeqCst);
+
             // GetMessageW 出错返回 -1,`> 0` 同时挡掉出错与 WM_QUIT
-            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            while !stop.load(Ordering::SeqCst) && GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                 if msg.message == WM_TIMER && msg.wParam.0 == timer {
-                    follow_tick(&app, &mut state);
+                    // 停止标志可能是在等消息期间置上的:不再多跑一拍
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tick();
                     continue;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-
             let _ = KillTimer(None, timer);
-            if !hook.is_invalid() {
-                let _ = UnhookWinEvent(hook);
-            }
-        })
-        .map(|_| ())
-        .unwrap_or_else(|err| warn!("taskbar lyrics follow thread spawn failed: {err}"));
+        }
+        if !hook.is_invalid() {
+            let _ = UnhookWinEvent(hook);
+        }
+    }
+}
+
+/// 起跟随线程(歌词条窗口建好之后调用,持有 [`TOGGLE_LOCK`])。
+fn start_follow_thread(app: AppHandle) {
+    // 上一个实例理应已由 set_enabled 开头停掉;这里再收一次,保证同一时刻
+    // 最多只有一个由本模块管理的跟随线程。
+    stop_follow_thread();
+    RESETTLE_TICKS.store(0, Ordering::SeqCst);
+    let mut state = FollowState::default();
+    match FollowThread::spawn(move || follow_tick(&app, &mut state)) {
+        Ok(thread) => {
+            *FOLLOW_THREAD.lock() = Some(thread);
+            debug!("taskbar lyrics follow thread started");
+        }
+        // 降级:条照常显示,只是不再跟随任务栏变化、也不重申置顶
+        Err(err) => warn!("taskbar lyrics follow thread spawn failed: {err}"),
+    }
+}
+
+/// 停掉跟随线程(没有在跑则什么都不做)。
+fn stop_follow_thread() {
+    // 先把句柄取出、放开锁再等线程退出,不持锁等待
+    let thread = FOLLOW_THREAD.lock().take();
+    let Some(thread) = thread else {
+        return;
+    };
+    if thread.stop() {
+        debug!("taskbar lyrics follow thread stopped");
+    } else {
+        warn!("taskbar lyrics follow thread did not exit in time; detached");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    /// SYS-03:跟随线程随歌词条起停。停止后线程真的退出(卸钩子、销毁计时器),
+    /// 而不是像以前那样留在进程里空转。
+    #[test]
+    fn follow_thread_ticks_until_stopped_and_then_exits() {
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&ticks);
+        let thread = FollowThread::spawn(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("spawn follow thread");
+
+        // 心跳 100 ms 一拍;留足余量等到至少两拍,证明计时器和消息泵在跑
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ticks.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "跟随线程没有心跳");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(thread.stop(), "停止后线程应在时限内退出");
+        // stop 返回真 = 线程已 join;此后不可能再有心跳
+        let after_stop = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(u64::from(HEARTBEAT_MS) * 3));
+        assert_eq!(ticks.load(Ordering::SeqCst), after_stop);
+    }
+
+    /// 快速 开→关:线程还没建好消息队列(线程 ID 未公布、WM_QUIT 投不出去)时
+    /// 也要能停下来,靠的是进循环前检查停止标志。
+    #[test]
+    fn follow_thread_stops_even_before_its_message_loop_is_up() {
+        for _ in 0..16 {
+            let thread = FollowThread::spawn(|| {}).expect("spawn follow thread");
+            assert!(thread.stop(), "刚起的线程也应在时限内退出");
+        }
+    }
+
+    /// 停止的线程不影响随后新起的线程(每个实例各有自己的停止标志)。
+    #[test]
+    fn a_new_follow_thread_runs_after_the_previous_one_was_stopped() {
+        let first = FollowThread::spawn(|| {}).expect("spawn follow thread");
+        assert!(first.stop());
+
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&ticks);
+        let second = FollowThread::spawn(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("spawn follow thread");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ticks.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "新线程没有心跳");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(second.stop());
+    }
 
     /// 1080p 100% 缩放的标准底部任务栏(高 40)。
     fn bottom_taskbar() -> TaskbarInfo {
