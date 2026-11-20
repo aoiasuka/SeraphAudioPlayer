@@ -49,7 +49,7 @@ impl ImportCancellation {
             Ok(())
         }
     }
-    fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.notify.notify_waiters();
     }

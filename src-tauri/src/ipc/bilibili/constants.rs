@@ -16,6 +16,17 @@ pub(crate) const FAV_MAX_ITEMS: usize = 200;
 pub(crate) const MAX_AVATAR_BYTES: usize = 512 * 1024;
 /// 单次音频下载上限。普通 m4a < 50 MB，FLAC 流可达数百 MB，给到 1.5 GB 已远超合理上限。
 pub(crate) const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
+/// BILI-03：同一地址下载中断后，每次续传前的等待。连续这么多次续传都没有拿到新数据才放弃
+/// （合计约 30 秒，覆盖短暂断网）；期间只要有新数据写入就从第一档重新计。
+pub(crate) const DOWNLOAD_RESUME_BACKOFF: [std::time::Duration; 5] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(8),
+    std::time::Duration::from_secs(15),
+];
+/// BILI-03：一次下载的续传总次数上限，防止「每次只挤出一点数据」的连接无限拖下去。
+pub(crate) const MAX_DOWNLOAD_RESUMES: u32 = 30;
 /// B 站视频页 HTML 抓取上限：BVID 一般在前若干 KB 出现，给 1 MB 防御性裁剪。
 pub(crate) const MAX_HTML_BYTES: u64 = 1024 * 1024;
 

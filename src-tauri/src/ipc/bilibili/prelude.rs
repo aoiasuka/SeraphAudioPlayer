@@ -48,5 +48,6 @@ pub(crate) use crate::ipc::{
 // 兄弟模块共享项（glob 汇聚，供子模块一站式引入）
 #[allow(unused_imports)]
 pub(crate) use super::{
-    commands::*, constants::*, ffmpeg::*, import_audio::*, parsing::*, session::*, types::*,
+    commands::*, constants::*, download::*, ffmpeg::*, import_audio::*, parsing::*, session::*,
+    types::*,
 };
