@@ -4,16 +4,18 @@ import { AboutSettingsTab } from "@/components/modal/AboutSettingsTab";
 import { AudioSettingsTab } from "@/components/modal/AudioSettingsTab";
 import { CacheSettingsTab } from "@/components/modal/CacheSettingsTab";
 import { LyricsSettingsTab } from "@/components/modal/LyricsSettingsTab";
+import { StreamingSettingsTab } from "@/components/modal/StreamingSettingsTab";
 import { SystemSettingsTab } from "@/components/modal/SystemSettingsTab";
 import { useCacheSettingsForm } from "@/components/modal/useCacheSettingsForm";
 import { Dialog } from "@/components/ui/dialog";
 import { usePlayerStore } from "@/store/player";
 
-type SettingsTab = "audio" | "lyrics" | "cache" | "system" | "about";
+type SettingsTab = "audio" | "lyrics" | "streaming" | "cache" | "system" | "about";
 
 const SETTINGS_TABS: { value: SettingsTab; label: string }[] = [
   { value: "audio", label: "音频输出" },
   { value: "lyrics", label: "歌词设置" },
+  { value: "streaming", label: "流媒体" },
   { value: "cache", label: "缓存管理" },
   { value: "system", label: "系统集成" },
   { value: "about", label: "关于与更新" },
@@ -88,7 +90,7 @@ export function SettingsModal() {
 
       <span className="file-tab">FILE — SYSTEM / SETTINGS</span>
 
-      {/* 功能分页：音频输出 / 歌词设置 / 缓存管理 / 系统集成 / 关于与更新 */}
+      {/* 功能分页：音频输出 / 歌词设置 / 流媒体 / 缓存管理 / 系统集成 / 关于与更新 */}
       <div role="tablist" aria-label="设置分类" className="flex flex-wrap gap-1.5 border-b-[1.5px] border-line pb-3">
         {SETTINGS_TABS.map((tab) => (
           <button
@@ -110,6 +112,7 @@ export function SettingsModal() {
 
       {activeTab === "audio" && <AudioSettingsTab />}
       {activeTab === "lyrics" && <LyricsSettingsTab />}
+      {activeTab === "streaming" && <StreamingSettingsTab />}
       {activeTab === "cache" && <CacheSettingsTab form={cache} />}
       {activeTab === "system" && <SystemSettingsTab />}
       {activeTab === "about" && <AboutSettingsTab />}

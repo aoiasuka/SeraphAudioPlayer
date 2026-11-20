@@ -111,6 +111,8 @@ pub(crate) fn bilibili_error(message: String) -> IpcError {
     } else if message.contains("BV 号")
         || message.contains("media_id")
         || message.contains("二维码 key")
+        // BILI-05：指定的分 P 不存在、分 P 数超过全量导入上限
+        || message.contains("分 P")
     {
         IpcErrorCode::InvalidInput
     } else {
@@ -204,6 +206,10 @@ mod tests {
         );
         assert_eq!(
             code("没有找到有效的 B 站 BV 号或视频链接"),
+            IpcErrorCode::InvalidInput
+        );
+        assert_eq!(
+            code("这个视频共 3 个分 P，没有第 9 P"),
             IpcErrorCode::InvalidInput
         );
         // 路径或标题里碰巧带数字 / BV 字样的普通失败不被误分类

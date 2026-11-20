@@ -4,7 +4,9 @@ import { mergeIncomingTrack, mergeTracksByPathWithStats } from "./libraryActions
 import { streamingSourceInput, trackMergeKey } from "./trackIdentity";
 import type {
   BilibiliBatchImportResult,
+  BilibiliBatchProgress,
   BilibiliImportOptions,
+  BilibiliVideoInfo,
   PlayerStore,
   PlayerStoreGet,
   PlayerStoreSet,
@@ -94,11 +96,56 @@ export function bilibiliImportErrorMessage(err: unknown) {
   }
 }
 
+function newTaskId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+/**
+ * 把后端的批量进度事件并入 store 里的进度。只在导入中（`current` 非 null）且任务一致时
+ * 更新——结果落定清空后，滞后到达的事件不能把进度复活（返回 null 表示忽略）。
+ * 事件里没有 `kind`（后端不区分收藏夹与分 P），沿用发起时记下的。
+ */
+export function mergeBatchProgress(
+  current: BilibiliBatchProgress | null,
+  incoming: BilibiliBatchProgress
+): BilibiliBatchProgress | null {
+  if (!current || (current.taskId && incoming.taskId !== current.taskId)) return null;
+  return { ...incoming, kind: current.kind };
+}
+
 export function createBilibiliActions(
   set: PlayerStoreSet,
   get: PlayerStoreGet
-): Pick<PlayerStore, "importBilibiliAudio" | "importBilibiliFavorites" | "cancelBilibiliFavoritesImport" | "reloadStreamingTrack"> {
+): Pick<
+  PlayerStore,
+  | "probeBilibiliVideo"
+  | "importBilibiliAudio"
+  | "importBilibiliFavorites"
+  | "cancelBilibiliFavoritesImport"
+  | "reloadStreamingTrack"
+> {
   return {
+  // BILI-05：导入前先看视频有几个分 P——多 P 又没指定分 P 时，页面要先问导入范围。
+  probeBilibiliVideo: async (input) => {
+    const cleanInput = input.trim();
+    if (!cleanInput) {
+      get().showNotification("请输入 B 站视频链接或 BV 号");
+      return null;
+    }
+    try {
+      const info = await invoke<BilibiliVideoInfo>("bilibili_video_info", { input: cleanInput });
+      if (!info || !Array.isArray(info.pages) || info.pages.length === 0) {
+        get().showNotification("没有解析到可用的 B 站音频");
+        return null;
+      }
+      return info;
+    } catch (err) {
+      console.warn("Tauri command failed: bilibili_video_info", err);
+      get().showNotification(bilibiliImportErrorMessage(err), "error");
+      return null;
+    }
+  },
+
   importBilibiliAudio: async (input, options) => {
     // 审2-R10：返回是否导入成功，调用方（StreamingPage）据此决定是否清空输入框（L-7）
     const cleanInput = input.trim();
@@ -107,60 +154,73 @@ export function createBilibiliActions(
       return false;
     }
 
+    // BILI-05：全量导入多个分 P 是一次批量——后端占批量槽位、逐 P 推进度、可取消。
+    // 只出一首的导入（单 P、指定了分 P、只要首 P）不占槽位，也没有进度事件。
+    const batch = options?.multiPage === "all";
+    if (batch && get().bilibiliBatchProgress) {
+      get().showNotification("已有批量导入正在进行，请等待完成或取消");
+      return false;
+    }
+    const taskId = newTaskId();
+    if (batch) {
+      set({
+        bilibiliBatchProgress: { taskId, kind: "video", current: 0, total: 0, title: "", ok: true },
+      });
+    }
+
     try {
-      const imported = await invoke<Track>("import_bilibili_audio_with_options", {
+      const result = await invoke<BilibiliBatchImportResult>("import_bilibili_video", {
+        taskId,
         input: cleanInput,
         options,
       });
+      const tracks = (Array.isArray(result?.tracks) ? result.tracks : []).filter(
+        (track) => Boolean(track?.path)
+      );
+      const failed = Array.isArray(result?.failed) ? result.failed : [];
+      const cancelled = result?.cancelled === true;
 
-      if (!imported?.path) {
-        get().showNotification("没有解析到可用的 B 站音频");
+      if (tracks.length === 0) {
+        if (cancelled) {
+          get().showNotification("导入已取消");
+        } else if (failed.length > 0) {
+          get().showNotification(`导入 B 站音频失败：${failed[0].reason}`, "error");
+        } else {
+          get().showNotification("没有解析到可用的 B 站音频");
+        }
         return false;
       }
 
-      let added = false;
-      let updated = false;
+      // 按来源身份并入：已有同一来源的记录原位更新（保留 id / 收藏 / 歌单归属），其余追加。
+      // 各分 P 的来源 ID 互不相同（第 1 P 是 BV 号，其余是 BV…-pN），不会并成一首。
       const previousLength = get().playlist.length;
-
-      set((state) => {
-        const incomingKey = trackMergeKey(imported);
-        const existingIndex = state.playlist.findIndex(
-          (track) => trackMergeKey(track) === incomingKey
-        );
-
-        if (existingIndex >= 0) {
-          updated = true;
-          const playlist = state.playlist.map((track, index) =>
-            index === existingIndex ? mergeIncomingTrack(track, imported) : track
-          );
-          return {
-            playlist,
-            currentTrackIndex: state.currentTrackIndex,
-            activeView: "streaming",
-          };
-        }
-
-        added = true;
-        return {
-          playlist: [...state.playlist, imported],
-          currentTrackIndex: previousLength === 0 ? 0 : state.currentTrackIndex,
-          activeView: "streaming",
-        };
+      const stats = mergeTracksByPathWithStats(get().playlist, tracks);
+      set({
+        playlist: stats.playlist,
+        currentTrackIndex: previousLength === 0 ? 0 : get().currentTrackIndex,
+        activeView: "streaming",
       });
 
-      get().showNotification(
-        added
-          ? `已添加 B 站音频: ${imported.title}`
-          : updated
-            ? `已更新 B 站音频: ${imported.title}`
-            : "B 站音频已在曲库中"
-      );
+      if (tracks.length === 1 && failed.length === 0 && !cancelled) {
+        get().showNotification(
+          stats.addedCount > 0
+            ? `已添加 B 站音频: ${tracks[0].title}`
+            : `已更新 B 站音频: ${tracks[0].title}`
+        );
+      } else {
+        const summary = `新增 ${stats.addedCount} 首，更新 ${stats.updatedCount} 首，失败 ${failed.length} 首`;
+        get().showNotification(
+          cancelled ? `分 P 导入已取消：${summary}` : `分 P 导入完成：${summary}`
+        );
+      }
       return true;
     } catch (err) {
 
-      console.warn("Tauri command failed: import_bilibili_audio", err);
+      console.warn("Tauri command failed: import_bilibili_video", err);
       get().showNotification(bilibiliImportErrorMessage(err), "error");
       return false;
+    } finally {
+      if (batch) set({ bilibiliBatchProgress: null });
     }
   },
 
@@ -174,8 +234,10 @@ export function createBilibiliActions(
 
     // M-15：立刻进入“导入中”态（total 未知先置 0），真实进度由
     // seraph://bilibili-batch 事件写入；结束/异常都在 finally 清理。
-    const taskId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-    set({ bilibiliBatchProgress: { taskId, current: 0, total: 0, title: "", ok: true } });
+    const taskId = newTaskId();
+    set({
+      bilibiliBatchProgress: { taskId, kind: "favorites", current: 0, total: 0, title: "", ok: true },
+    });
     try {
       const result = await invoke<BilibiliBatchImportResult>("import_bilibili_favorites", {
         taskId,
@@ -225,7 +287,9 @@ export function createBilibiliActions(
     if (!progress) return;
     try {
       await invoke("cancel_bilibili_favorites_import", { taskId: progress.taskId });
-      get().showNotification("正在取消收藏夹导入…");
+      get().showNotification(
+        progress.kind === "video" ? "正在取消分 P 导入…" : "正在取消收藏夹导入…"
+      );
     } catch (err) {
 
       console.warn("Tauri command failed: cancel_bilibili_favorites_import", err);

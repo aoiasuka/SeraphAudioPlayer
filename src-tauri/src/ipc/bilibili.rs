@@ -10,6 +10,7 @@ mod download;
 mod ffmpeg;
 mod impls_and_tests;
 mod import_audio;
+mod pages;
 mod parsing;
 mod prelude;
 mod qr;

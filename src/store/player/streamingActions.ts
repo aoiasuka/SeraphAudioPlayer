@@ -127,6 +127,7 @@ export function createStreamingActions(
   PlayerStore,
   | "refreshBilibiliState"
   | "setBilibiliImportPreference"
+  | "setBilibiliMultiPageMode"
   | "startFfmpegDownload"
   | "startLoginPolling"
   | "stopLoginPolling"
@@ -136,6 +137,11 @@ export function createStreamingActions(
     setBilibiliImportPreference: (key, value) => {
       if (get()[key] === value) return;
       set({ [key]: value } as Pick<PlayerStore, typeof key>);
+    },
+
+    setBilibiliMultiPageMode: (mode) => {
+      if (get().bilibiliMultiPageMode === mode) return;
+      set({ bilibiliMultiPageMode: mode });
     },
 
     refreshBilibiliState: async (options) => {

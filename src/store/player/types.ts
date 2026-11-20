@@ -40,12 +40,36 @@ export interface BackendDevice {
   legacy_ids?: string[];
 }
 
+/** BILI-05：链接没有指定分 P 的多 P 视频，只导入第 1 P 还是全部分 P。 */
+export type BilibiliMultiPageMode = "first" | "all";
+
 export interface BilibiliImportOptions {
   preferFlac: boolean;
   preferDolbyAtmos: boolean;
   remuxWithFfmpeg: boolean;
   /** 重缓存只更新仍存在的曲目，不能把下载期间删除的记录重新插入。 */
   existingTrackId?: string;
+  /**
+   * BILI-05：输入没有指定分 P 时的导入范围（缺省 = 只导入第 1 P）。
+   * 带 `?p=N` 的输入只导入那一 P；重新缓存 / 重新加载只出一首，都不看这个值。
+   */
+  multiPage?: BilibiliMultiPageMode;
+}
+
+/** BILI-05：`bilibili_video_info` 的返回——视频有几个分 P、链接有没有指定分 P。 */
+export interface BilibiliVideoInfo {
+  bvid: string;
+  title: string;
+  /** 链接里指定的分 P（`?p=N`）；没有指定为 null */
+  requestedPage?: number | null;
+  pages: BilibiliVideoPageInfo[];
+}
+
+export interface BilibiliVideoPageInfo {
+  page: number;
+  title: string;
+  /** 秒 */
+  duration: number;
 }
 
 export interface BilibiliImportFailure {
@@ -60,13 +84,18 @@ export interface BilibiliBatchImportResult {
   cancelled?: boolean;
 }
 
-/** 收藏夹批量导入进度（`seraph://bilibili-batch` 事件 payload） */
+/** 批量导入进度（`seraph://bilibili-batch` 事件 payload，外加前端自己记的 `kind`） */
 export interface BilibiliBatchProgress {
   taskId?: string;
   current: number;
   total: number;
   title: string;
   ok: boolean;
+  /**
+   * 哪一种批量：收藏夹，还是一个视频的全部分 P（BILI-05）。发起时由前端写入，
+   * 后端事件里没有这个字段。缺省按收藏夹处理。
+   */
+  kind?: "favorites" | "video";
 }
 
 // 审2-R5：以下流媒体页状态从 StreamingPage 组件提升到 store（非持久化，不进 partialize），
@@ -240,6 +269,8 @@ export interface PlayerStore {
   bilibiliPreferDolbyAtmos: boolean;
   bilibiliPreferFlac: boolean;
   bilibiliRemuxWithFfmpeg: boolean;
+  /** BILI-05：多 P 视频无特定分 P 时的默认导入范围（设置 → 流媒体） */
+  bilibiliMultiPageMode: BilibiliMultiPageMode;
   deviceMenuOpen: boolean;
   settingsOpen: boolean;
   notification: NotificationPayload | null;
@@ -249,7 +280,7 @@ export interface PlayerStore {
   bilibiliLoginStatus: BilibiliLoginStatus;
   bilibiliFfmpegStatus: BilibiliFfmpegStatus;
   ffmpegDownload: FfmpegDownloadState;
-  /** 收藏夹批量导入进度（导入中非 null；App 级事件监听写入，切页不丢） */
+  /** 批量导入进度：收藏夹，或一个视频的全部分 P（导入中非 null；App 级事件监听写入，切页不丢） */
   bilibiliBatchProgress: BilibiliBatchProgress | null;
   loginQr: BilibiliLoginQrState | null;
   isLoginBusy: boolean;
@@ -298,6 +329,12 @@ export interface PlayerStore {
   ) => void;
   importPlaylistFromM3u8: () => Promise<void>;
   exportUserPlaylistToM3u8: (playlistId: string) => Promise<void>;
+  /** BILI-05：查视频有几个分 P、链接有没有指定分 P；失败时已提示并返回 null */
+  probeBilibiliVideo: (input: string) => Promise<BilibiliVideoInfo | null>;
+  /**
+   * 按视频导入。`options.multiPage === "all"` 时导入全部分 P——那是一次批量：
+   * 有进度、可取消、与收藏夹导入互斥。返回是否至少导入了一首。
+   */
   importBilibiliAudio: (
     input: string,
     options?: BilibiliImportOptions
@@ -306,7 +343,7 @@ export interface PlayerStore {
     input: string,
     options?: BilibiliImportOptions
   ) => Promise<BilibiliBatchImportResult | null>;
-  /** 请求中断进行中的收藏夹批量导入（当前一首完成后停止） */
+  /** 请求中断进行中的批量导入（收藏夹或分 P；已下载的照常入库） */
   cancelBilibiliFavoritesImport: () => Promise<void>;
   // v0.4.4：按当次勾选的音质选项重新加载 B 站流媒体曲目，原位替换。
   reloadStreamingTrack: (
@@ -320,6 +357,7 @@ export interface PlayerStore {
     key: "bilibiliPreferDolbyAtmos" | "bilibiliPreferFlac" | "bilibiliRemuxWithFfmpeg",
     value: boolean
   ) => void;
+  setBilibiliMultiPageMode: (mode: BilibiliMultiPageMode) => void;
   startFfmpegDownload: () => Promise<void>;
   startLoginPolling: () => Promise<void>;
   stopLoginPolling: () => void;

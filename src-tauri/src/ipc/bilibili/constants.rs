@@ -16,6 +16,8 @@ pub(crate) const FAV_MAX_ITEMS: usize = 200;
 pub(crate) const MAX_AVATAR_BYTES: usize = 512 * 1024;
 /// 单次音频下载上限。普通 m4a < 50 MB，FLAC 流可达数百 MB，给到 1.5 GB 已远超合理上限。
 pub(crate) const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
+/// BILI-05：一个视频一次全量导入的分 P 数上限（与收藏夹一次导入的视频数上限同量级）。
+pub(crate) const MAX_VIDEO_PAGES_PER_IMPORT: usize = 200;
 /// BILI-01：批量导入攒够这么多首就合并写一次曲库。
 pub(crate) const BATCH_COMMIT_MAX_TRACKS: usize = 20;
 /// BILI-01：待提交队列里最早一首最多等这么久。下载慢时不必等凑满一批；

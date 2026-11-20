@@ -1,7 +1,10 @@
 use super::cancellation::ImportCancellation;
 use super::prelude::*;
 
-/// 单曲导入（含重新缓存 / 重新加载）：下载、入库、按配额清理缓存。
+/// 只出一首的导入：重新缓存 / 重新加载，以及旧的单曲命令。下载、入库、按配额清理缓存。
+///
+/// BILI-05：输入里指定了分 P（曲目的来源链接带 `?p=N`）就取那一 P，否则取首 P——
+/// `options.multi_page` 在这里不起作用。一次导入多个分 P 走 `import_bilibili_video`。
 pub(crate) async fn import_bilibili_audio_inner(
     app: &AppHandle,
     client: &Client,
@@ -9,10 +12,10 @@ pub(crate) async fn import_bilibili_audio_inner(
     options: &BilibiliImportOptions,
     cancellation: &ImportCancellation,
 ) -> Result<ImportedTrack, String> {
-    let bvid = cancellation.run(resolve_bvid(client, input)).await?;
-    // 同一来源的下载、缓存命中、入库与删除互斥，且跨音质/缓存目录使用同一身份。
+    let target = cancellation.run(resolve_video_ref(input)).await?;
+    // 同一来源的下载、缓存命中、入库与删除互斥，且跨音质/缓存目录/分 P 使用同一身份（BV 号）。
     // guard 只登记占用，不跨 await 持有 mutex；一直保留到入库完成。
-    let operation = std::sync::Arc::new(acquire_audio_operation(&bvid)?);
+    let operation = std::sync::Arc::new(acquire_audio_operation(&target.bvid)?);
     if let Some(track_id) = options.existing_track_id.clone() {
         let app_for_check = app.clone();
         let exists = tauri::async_runtime::spawn_blocking(move || {
@@ -24,8 +27,23 @@ pub(crate) async fn import_bilibili_audio_inner(
             return Err("曲目已被移除，已取消重新缓存".into());
         }
     }
-    let track =
-        download_bilibili_track(app, client, &bvid, options, cancellation, &operation).await?;
+    let video = cancellation
+        .run(fetch_video_data(client, &target.bvid))
+        .await?;
+    let page = select_pages(&video, target.page, MultiPageMode::First)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "bilibili video has no playable page".to_string())?;
+    let track = download_bilibili_track(
+        app,
+        client,
+        &video,
+        &page,
+        options,
+        cancellation,
+        &operation,
+    )
+    .await?;
     let final_path = PathBuf::from(&track.path);
     // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
     // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
@@ -61,13 +79,14 @@ pub(crate) async fn import_bilibili_audio_inner(
         .ok_or_else(|| "failed to import bilibili audio".to_string())
 }
 
-/// 下载一首并生成曲目记录，**不入库**（BILI-01）。调用方已持有该来源的占用，
+/// 下载视频的一个分 P 并生成曲目记录，**不入库**（BILI-01）。调用方已持有该来源的占用，
 /// 并负责在入库完成之前一直持有它：单曲导入下载完立即入库，批量导入攒一批再写
 /// （见 `batch.rs`）。返回的 `track.path` 是最终落盘路径（含 remux fallback）。
 pub(crate) async fn download_bilibili_track(
     app: &AppHandle,
     client: &Client,
-    bvid: &str,
+    video: &VideoData,
+    page: &SelectedPage,
     options: &BilibiliImportOptions,
     cancellation: &ImportCancellation,
     operation: &std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>,
@@ -79,27 +98,26 @@ pub(crate) async fn download_bilibili_track(
         .unwrap_or(true)
         .then(|| find_ffmpeg(app))
         .flatten();
-    let resolved = cancellation
-        .run(resolve_audio(client, bvid, options, ffmpeg_path.is_some()))
+    // BILI-05：按这一 P 自己的 cid 取流（此前一律用视频信息里的首个 cid）。
+    let stream = cancellation
+        .run(fetch_audio_stream(
+            client,
+            &video.bvid,
+            page.cid,
+            options,
+            ffmpeg_path.is_some(),
+        ))
         .await?;
-    let cache_path = audio_cache_path(
-        app,
-        &resolved.video.bvid,
-        resolved.video.cid,
-        resolved.stream.output_extension(),
-    )?;
+    let cache_path = audio_cache_path(app, &video.bvid, page.cid, stream.output_extension())?;
 
     // P1-1：下载走专用 client（无总超时，仅连接/读空闲超时），
     // 避免大文件在 30 秒总超时下必然失败。
     let download_client = bilibili_download_client()?;
     // P2-4：EAC3 等必须 remux 的流，remux 失败时不允许 fallback 落盘。
-    let must_remux = matches!(
-        resolved.stream.kind,
-        AudioKind::Dolby | AudioKind::DolbyAtmos
-    );
+    let must_remux = matches!(stream.kind, AudioKind::Dolby | AudioKind::DolbyAtmos);
     let final_path = ensure_audio_file(
         &download_client,
-        &resolved.stream.audio_urls(),
+        &stream.audio_urls(),
         &cache_path,
         ffmpeg_path.as_deref(),
         must_remux,
@@ -118,7 +136,11 @@ pub(crate) async fn download_bilibili_track(
     .ok()
     .flatten();
     track_from_resolved_audio(
-        &resolved,
+        &ResolvedAudio {
+            video,
+            page,
+            stream,
+        },
         &final_path,
         ffmpeg_path.is_some(),
         probed.as_ref(),
@@ -140,9 +162,19 @@ pub(crate) fn is_bilibili_host(url: &reqwest::Url) -> bool {
 
 pub(crate) use crate::ipc::url_guard::is_safe_bilibili_download_url;
 
-pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String, String> {
+/// 一条输入指向的视频：BV 号，以及输入里指定的分 P（没有指定为 None）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VideoRef {
+    pub(crate) bvid: String,
+    pub(crate) page: Option<u32>,
+}
+
+pub(crate) async fn resolve_video_ref(input: &str) -> Result<VideoRef, String> {
     if let Some(bvid) = extract_bvid(input) {
-        return Ok(bvid);
+        return Ok(VideoRef {
+            bvid,
+            page: extract_page_number(input),
+        });
     }
 
     let trimmed = input.trim();
@@ -172,8 +204,10 @@ pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String
     if !is_bilibili_host(&final_url) {
         return Err("B 站短链重定向到了非 B 站域名，已拒绝解析".into());
     }
+    // BILI-05：短链自己带的分 P 优先，其次是它跳转到的地址里的。
+    let page = extract_page_number(trimmed).or_else(|| extract_page_number(final_url.as_str()));
     if let Some(bvid) = extract_bvid(final_url.as_str()) {
-        return Ok(bvid);
+        return Ok(VideoRef { bvid, page });
     }
 
     // 限制 HTML 抓取大小：避免恶意服务器/重定向到大文件导致内存爆炸。
@@ -181,19 +215,9 @@ pub(crate) async fn resolve_bvid(_client: &Client, input: &str) -> Result<String
         .await
         .map_err(|err| format!("无法读取 B 站页面内容: {err}"))?;
     let body_str = String::from_utf8_lossy(&body);
-    extract_bvid(&body_str).ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
-}
-
-pub(crate) async fn resolve_audio(
-    client: &Client,
-    bvid: &str,
-    options: &BilibiliImportOptions,
-    ffmpeg_available: bool,
-) -> Result<ResolvedAudio, String> {
-    let video = fetch_video_data(client, bvid).await?;
-    let stream =
-        fetch_audio_stream(client, &video.bvid, video.cid, options, ffmpeg_available).await?;
-    Ok(ResolvedAudio { video, stream })
+    extract_bvid(&body_str)
+        .map(|bvid| VideoRef { bvid, page })
+        .ok_or_else(|| "链接中没有找到可解析的 BV 号".into())
 }
 
 pub(crate) async fn fetch_video_data(client: &Client, bvid: &str) -> Result<VideoData, String> {
@@ -791,34 +815,32 @@ pub(crate) fn remux_audio(
 }
 
 pub(crate) fn track_from_resolved_audio(
-    resolved: &ResolvedAudio,
+    resolved: &ResolvedAudio<'_>,
     path: &Path,
     remuxed: bool,
     probed: Option<&seraph_decoder::StreamInfo>,
 ) -> Result<ImportedTrack, String> {
+    let (video, page) = (resolved.video, resolved.page);
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed to read cached audio metadata: {err}"))?;
     let mut hasher = DefaultHasher::new();
-    format!("{}:{}", resolved.video.bvid, resolved.video.cid).hash(&mut hasher);
+    format!("{}:{}", video.bvid, page.cid).hash(&mut hasher);
     let hash = hasher.finish();
     let bitrate = resolved.stream.bandwidth.map(|value| value / 1000);
     let (glow1, glow2) = color_pair(hash);
     let format = resolved.stream.format_label().to_string();
 
     Ok(ImportedTrack {
-        id: format!(
-            "bilibili-{}-{}",
-            resolved.video.bvid.to_ascii_lowercase(),
-            resolved.video.cid
-        ),
-        title: resolved.video.title.clone(),
-        artist: resolved.video.owner.name.clone(),
-        album: "Bilibili".into(),
+        id: format!("bilibili-{}-{}", video.bvid.to_ascii_lowercase(), page.cid),
+        // BILI-05：标题、专辑、音轨号、来源身份都按分 P 给（规则见 `pages.rs`）。
+        title: page_title(video, page),
+        artist: video.owner.name.clone(),
+        album: page_album(video, page),
         album_year: None,
-        track_number: None,
+        track_number: (page.naming == PageNaming::Part).then_some(page.number),
         disc_number: None,
         album_artist: None,
-        cover: resolved.video.pic.clone().unwrap_or_default(),
+        cover: video.pic.clone().unwrap_or_default(),
         format: format.clone(),
         bitdepth: format_bilibili_quality(&format, bitrate, &resolved.stream.kind, remuxed),
         sample_rate: crate::ipc::library::format_sample_rate(
@@ -835,13 +857,10 @@ pub(crate) fn track_from_resolved_audio(
         },
         size: format_file_size(metadata.len()),
         path: path.to_string_lossy().to_string(),
-        source_url: Some(format!(
-            "https://www.bilibili.com/video/{}",
-            resolved.video.bvid
-        )),
-        source_id: Some(resolved.video.bvid.clone()),
+        source_url: Some(page_source_url(&video.bvid, page)),
+        source_id: Some(page_source_id(&video.bvid, page)),
         cache_missing: false,
-        duration: resolved.video.duration,
+        duration: page_duration(video, page),
         glow_color: glow1.clone(),
         glow1,
         glow2,

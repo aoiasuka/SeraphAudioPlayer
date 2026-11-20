@@ -60,6 +60,8 @@ pub fn run() {
             ipc::bilibili::bilibili_poll_login,
             ipc::bilibili::import_bilibili_audio,
             ipc::bilibili::import_bilibili_audio_with_options,
+            ipc::bilibili::bilibili_video_info,
+            ipc::bilibili::import_bilibili_video,
             ipc::bilibili::import_bilibili_favorites,
             ipc::bilibili::cancel_bilibili_favorites_import,
             ipc::library::apply_online_lyrics,

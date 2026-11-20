@@ -91,7 +91,7 @@ impl BatchImportGuard {
         };
         let mut active = ACTIVE_BATCH.lock();
         if active.is_some() {
-            return Err("已有收藏夹正在导入，请等待完成或取消".into());
+            return Err("已有批量导入正在进行，请等待完成或取消".into());
         }
         *active = Some(cancellation.clone());
         Ok(Self(cancellation))

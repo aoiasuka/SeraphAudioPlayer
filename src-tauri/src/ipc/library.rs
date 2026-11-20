@@ -35,6 +35,9 @@ mod zh;
 pub use commands::*;
 // playlist_io 复用歌词模块的编码探测链（UTF-16 → UTF-8 → GBK）解码 .m3u
 pub(crate) use lyrics::decode_lyric_bytes;
+// B 站分 P 的回归测试要核对「各分 P 的曲库键互不相同」
+#[cfg(test)]
+pub(crate) use media_library::import_track_key;
 pub(crate) use media_library::{
     mark_tracks_cache_missing_by_paths, merge_tracks_into_cache, read_cached_track,
     replace_track_in_cache,

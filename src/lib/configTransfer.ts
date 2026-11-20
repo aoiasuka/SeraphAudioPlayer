@@ -64,6 +64,8 @@ const PLAYER_SETTINGS_FIELDS: Record<string, "boolean" | "number" | "string"> = 
   bilibiliPreferDolbyAtmos: "boolean",
   bilibiliPreferFlac: "boolean",
   bilibiliRemuxWithFfmpeg: "boolean",
+  // 取值由 store 水合时清洗（认不出的值回到 "first"）
+  bilibiliMultiPageMode: "string",
 };
 
 interface PersistedEnvelope {

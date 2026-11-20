@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@/lib/tauri";
 import { usePlayerStore } from "@/store/player";
+import { mergeBatchProgress } from "@/store/player/bilibiliActions";
 import {
   ffmpegDownloadStateFromProgress,
   shouldIgnoreLaggingFfmpegProgress,
@@ -51,12 +52,11 @@ export function useStreamingEvents() {
       usePlayerStore.setState({ ffmpegDownload: next });
     });
 
-    // M-15：收藏夹批量导入进度。仅在导入中（progress 非 null）时更新，
-    // 避免结果落定清空后又被滞后事件复活。
+    // M-15：批量导入进度（收藏夹 / 分 P）。仅在导入中（progress 非 null）时更新，
+    // 避免结果落定清空后又被滞后事件复活；规则见 mergeBatchProgress。
     register<BilibiliBatchProgress>("seraph://bilibili-batch", (progress) => {
-      const current = usePlayerStore.getState().bilibiliBatchProgress;
-      if (!current || (current.taskId && progress.taskId !== current.taskId)) return;
-      usePlayerStore.setState({ bilibiliBatchProgress: progress });
+      const next = mergeBatchProgress(usePlayerStore.getState().bilibiliBatchProgress, progress);
+      if (next) usePlayerStore.setState({ bilibiliBatchProgress: next });
     });
 
     // 任务栏歌词条 ✕ 按钮：设置的单一事实来源在主窗口 store（歌词条窗口

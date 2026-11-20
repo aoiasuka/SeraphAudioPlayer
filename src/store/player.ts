@@ -12,7 +12,12 @@ import {
 } from "./player/personalData";
 import { createPlayerPersistStorage } from "./player/persistStorage";
 import { createStreamingActions } from "./player/streamingActions";
-import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./player/types";
+import type {
+  BilibiliMultiPageMode,
+  PlayerStore,
+  PlayerStoreGet,
+  PlayerStoreSet,
+} from "./player/types";
 import { createUiActions } from "./player/uiActions";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import {
@@ -27,6 +32,8 @@ export type {
   BilibiliBatchImportResult,
   BilibiliImportFailure,
   BilibiliImportOptions,
+  BilibiliMultiPageMode,
+  BilibiliVideoInfo,
   PersistedPlayerState,
   PlayerStore,
 } from "./player/types";
@@ -63,6 +70,10 @@ function finiteNumber(value: unknown, fallback: number) {
 
 function clampVolume(value: unknown, fallback: number) {
   return Math.max(0, Math.min(1, finiteNumber(value, fallback)));
+}
+
+function migrateMultiPageMode(value: unknown): BilibiliMultiPageMode {
+  return value === "all" ? "all" : "first";
 }
 
 function migrateDriver(value: unknown): DriverKind {
@@ -152,6 +163,8 @@ export function migratePersistedPlayerState(persistedState: unknown) {
     bilibiliPreferDolbyAtmos: state.bilibiliPreferDolbyAtmos === true,
     bilibiliPreferFlac: state.bilibiliPreferFlac === true,
     bilibiliRemuxWithFfmpeg: state.bilibiliRemuxWithFfmpeg === true,
+    // BILI-05：缺省（旧存储）与认不出的值都是只导入第 1 P——与此前的行为一致
+    bilibiliMultiPageMode: migrateMultiPageMode(state.bilibiliMultiPageMode),
   };
 }
 
@@ -211,6 +224,7 @@ export const usePlayerStore = create<PlayerStore>()(
         bilibiliPreferDolbyAtmos: false,
         bilibiliPreferFlac: false,
         bilibiliRemuxWithFfmpeg: false,
+        bilibiliMultiPageMode: "first",
         deviceMenuOpen: false,
         settingsOpen: false,
         notification: null,
@@ -309,6 +323,7 @@ export const usePlayerStore = create<PlayerStore>()(
         bilibiliPreferDolbyAtmos: state.bilibiliPreferDolbyAtmos,
         bilibiliPreferFlac: state.bilibiliPreferFlac,
         bilibiliRemuxWithFfmpeg: state.bilibiliRemuxWithFfmpeg,
+        bilibiliMultiPageMode: state.bilibiliMultiPageMode,
       }),
     }
   )

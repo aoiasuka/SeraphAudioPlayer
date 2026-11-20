@@ -16,6 +16,54 @@ pub(crate) struct VideoData {
     pub(crate) duration: u64,
     pub(crate) pic: Option<String>,
     pub(crate) owner: OwnerData,
+    /// BILI-05：分 P 列表。接口没给、或格式出乎意料时为空（退回上面的首个 cid），
+    /// 不让这一个字段拖垮整条导入。
+    #[serde(default, deserialize_with = "lenient_video_pages")]
+    pub(crate) pages: Vec<VideoPage>,
+}
+
+/// 视频信息接口里的一个分 P（原始数据，规整见 `pages.rs`）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct VideoPage {
+    pub(crate) cid: i64,
+    /// 分 P 序号，从 1 起；缺失为 0
+    pub(crate) page: u32,
+    /// 分 P 标题
+    pub(crate) part: String,
+    /// 这一 P 的时长（秒）；缺失为 0
+    pub(crate) duration: u64,
+}
+
+fn lenient_video_pages<'de, D>(deserializer: D) -> Result<Vec<VideoPage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| VideoPage {
+                    cid: item.get("cid").and_then(Value::as_i64).unwrap_or_default(),
+                    page: item
+                        .get("page")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or_default(),
+                    part: item
+                        .get("part")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    duration: item
+                        .get("duration")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,9 +112,22 @@ pub(crate) struct AudioStream {
     pub(crate) kind: AudioKind,
 }
 
-pub(crate) struct ResolvedAudio {
-    pub(crate) video: VideoData,
+pub(crate) struct ResolvedAudio<'a> {
+    pub(crate) video: &'a VideoData,
+    /// BILI-05：要导入的那个分 P
+    pub(crate) page: &'a SelectedPage,
     pub(crate) stream: AudioStream,
+}
+
+/// BILI-05：输入没有指定分 P 的多 P 视频怎么处理。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MultiPageMode {
+    /// 只导入第 1 P（默认，与分 P 功能出现之前一致）
+    #[default]
+    First,
+    /// 导入全部分 P
+    All,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -76,6 +137,28 @@ pub struct BilibiliImportOptions {
     pub(crate) prefer_dolby_atmos: Option<bool>,
     pub(crate) remux_with_ffmpeg: Option<bool>,
     pub(crate) existing_track_id: Option<String>,
+    /// BILI-05：输入没有指定分 P 时的处理方式。带 `?p=N` 的输入只导入那一 P，不看这个值；
+    /// 重新缓存 / 重新加载永远只出一首，同样不看。
+    pub(crate) multi_page: Option<MultiPageMode>,
+}
+
+/// BILI-05：视频概况，前端据此决定要不要问「只导入首 P 还是全部」。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BilibiliVideoInfo {
+    pub(crate) bvid: String,
+    pub(crate) title: String,
+    /// 输入里指定的分 P（`?p=N`）；没有指定为 null
+    pub(crate) requested_page: Option<u32>,
+    pub(crate) pages: Vec<BilibiliVideoPageInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BilibiliVideoPageInfo {
+    pub(crate) page: u32,
+    pub(crate) title: String,
+    pub(crate) duration: u64,
 }
 
 #[derive(Debug, Serialize)]

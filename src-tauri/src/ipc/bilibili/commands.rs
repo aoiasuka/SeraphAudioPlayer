@@ -1,6 +1,8 @@
 use super::batch::{commit_pending, PendingImport, PendingImports};
 use super::cancellation::{cancel_batch, BatchImportGuard, ImportCancellation};
 use super::prelude::*;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// 批量导入进度事件通道（模式同 `seraph://ffmpeg-download`）。
 const BATCH_PROGRESS_EVENT: &str = "seraph://bilibili-batch";
@@ -31,6 +33,93 @@ pub(crate) async fn import_bilibili_audio_with_options_inner_cmd(
         &ImportCancellation::default(),
     )
     .await
+}
+
+/// BILI-05：视频概况——有几个分 P、输入有没有指定分 P。前端在单链接导入前调用，
+/// 多 P 且没有指定时先问用户「只导入首 P 还是全部」。
+pub(crate) async fn bilibili_video_info_inner_cmd(
+    app: AppHandle,
+    input: String,
+) -> Result<BilibiliVideoInfo, String> {
+    let client = bilibili_client_for_app(&app).await?;
+    let target = resolve_video_ref(&input).await?;
+    let video = fetch_video_data(&client, &target.bvid).await?;
+    Ok(video_info(&video, target.page))
+}
+
+/// BILI-05：按视频导入。输入指定了分 P 就导入那一 P；没有指定的多 P 视频按
+/// `options.multi_page` 导入首 P 或全部。
+///
+/// 只出一首时与此前的单曲导入一样：不占批量槽位，失败直接作为错误返回。
+/// 出多首时占批量槽位（与收藏夹导入互斥、可用同一个取消命令中断），逐 P 推进度，
+/// 个别分 P 失败记进 `failed`，不影响其余分 P。
+pub(crate) async fn import_bilibili_video_inner_cmd(
+    app: AppHandle,
+    input: String,
+    options: Option<BilibiliImportOptions>,
+    task_id: Option<String>,
+) -> Result<BilibiliBatchImportResult, String> {
+    let options = options.unwrap_or_default();
+    let client = bilibili_client_for_app(&app).await?;
+    let target = resolve_video_ref(&input).await?;
+    let video = fetch_video_data(&client, &target.bvid).await?;
+    let pages = select_pages(&video, target.page, options.multi_page.unwrap_or_default())?;
+    let total = pages.len();
+    let single = total == 1;
+    let task = if single {
+        None
+    } else {
+        Some(BatchImportGuard::start(task_id)?)
+    };
+    let cancellation = task.as_ref().map(|task| task.0.clone()).unwrap_or_default();
+    let operation: SourceOperation = Arc::new(acquire_audio_operation(&target.bvid)?);
+    let emit_progress = |current: usize, title: &str, ok: bool| {
+        if single {
+            return;
+        }
+        let _ = app.emit(
+            BATCH_PROGRESS_EVENT,
+            &BilibiliBatchProgress {
+                task_id: cancellation.id().to_string(),
+                current,
+                total,
+                title: title.to_string(),
+                ok,
+            },
+        );
+    };
+    // 一开始就把总数告诉前端（此时一首都还没下完）
+    emit_progress(0, &video.title, true);
+
+    let mut run = BatchRun::new();
+    let cancelled = queue_video_pages(
+        &app,
+        &client,
+        VideoJob {
+            video: &video,
+            pages: &pages,
+            operation: &operation,
+            source: &target.bvid,
+            label: &video.title,
+        },
+        &options,
+        &cancellation,
+        &mut run,
+        emit_progress,
+    )
+    .await;
+    drop(operation);
+    let (tracks, mut failed) = run.finish(&app).await;
+    if single && tracks.is_empty() {
+        if let Some(failure) = failed.pop() {
+            return Err(failure.reason);
+        }
+    }
+    Ok(BilibiliBatchImportResult {
+        tracks,
+        failed,
+        cancelled,
+    })
 }
 
 pub(crate) async fn import_bilibili_favorites_inner_cmd(
@@ -66,11 +155,9 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
     }
 
     let total = bvids.len();
-    let mut tracks = Vec::new();
-    let mut failed = Vec::new();
     let mut cancelled = false;
     // BILI-01：下载好的曲目先压在待提交队列里，攒一批再写曲库，不再逐首整库重写。
-    let mut pending = PendingImports::new();
+    let mut run = BatchRun::new();
     for (index, item) in bvids.into_iter().enumerate() {
         if cancellation.is_cancelled() {
             cancelled = true;
@@ -79,35 +166,27 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
         let bvid = item.bvid.clone().unwrap_or_default();
         let display_name = item.title.clone().unwrap_or_else(|| bvid.clone());
         // 收藏夹里的重复条目：上一份还压在队列里、占着来源，先提交再下。
-        if pending.holds_source(&bvid) {
-            flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
+        if run.pending.holds_source(&bvid) {
+            run.flush(&app).await;
         }
-        let ok = match download_batch_item(&app, &client, &bvid, &options, cancellation).await {
-            Ok((track, operation)) => {
-                pending.push(
-                    PendingImport {
-                        track,
-                        label: display_name.clone(),
-                        source: bvid,
-                        operation,
-                    },
-                    std::time::Instant::now(),
-                );
-                true
-            }
-            Err(_) if cancellation.is_cancelled() => {
+        let ok = match import_favorite_video(
+            &app,
+            &client,
+            &bvid,
+            &display_name,
+            &options,
+            cancellation,
+            &mut run,
+        )
+        .await
+        {
+            VideoOutcome::Cancelled => {
                 cancelled = true;
                 break;
             }
-            Err(reason) => {
-                failed.push(BilibiliImportFailure {
-                    input: display_name.clone(),
-                    reason,
-                });
-                false
-            }
+            VideoOutcome::Done { ok } => ok,
         };
-        // M-15：每首完成即推进度事件，前端展示 N/total 与当前曲目
+        // M-15：每个视频完成即推进度事件，前端展示 N/total 与当前条目
         let _ = app.emit(
             BATCH_PROGRESS_EVENT,
             &BilibiliBatchProgress {
@@ -118,33 +197,8 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
                 ok,
             },
         );
-        if pending.is_due(std::time::Instant::now()) {
-            flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
-        }
     }
-    // 结束、取消都把已下载的一并提交：取消不丢已经下好的曲目。
-    flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
-
-    // 审2-S3：整批只在结束后清理一次缓存并 preserve 本批全部成功导入的文件
-    // （ImportedTrack.path 即最终落盘路径，含 remux fallback），
-    // 替代逐首清理只 preserve 当前一首（超限时会把同批先导入的文件删掉）。
-    // 同步磁盘遍历放 spawn_blocking，失败只 warn 不影响导入结果（对齐 S2 语义）。
-    let imported_paths = tracks
-        .iter()
-        .map(|track| PathBuf::from(&track.path))
-        .collect::<Vec<_>>();
-    if !imported_paths.is_empty() {
-        let app_for_cache = app.clone();
-        match tauri::async_runtime::spawn_blocking(move || {
-            enforce_cache_limit_preserving_many(&app_for_cache, &imported_paths)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => tracing::warn!("收藏夹批量导入后缓存清理失败: {err}"),
-            Err(err) => tracing::warn!("收藏夹批量导入后缓存清理任务异常终止: {err}"),
-        }
-    }
+    let (tracks, failed) = run.finish(&app).await;
 
     Ok(BilibiliBatchImportResult {
         tracks,
@@ -153,55 +207,222 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
     })
 }
 
-type SourceOperation = std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>;
+type SourceOperation = Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>;
 
-/// 批量导入里的一首：登记来源占用并下载，不入库。占用随返回值交给待提交队列。
-async fn download_batch_item(
+/// 一次批量导入（收藏夹，或一个视频的多个分 P）累计的状态。
+struct BatchRun {
+    pending: PendingImports,
+    tracks: Vec<ImportedTrack>,
+    failed: Vec<BilibiliImportFailure>,
+}
+
+impl BatchRun {
+    fn new() -> Self {
+        Self {
+            pending: PendingImports::new(),
+            tracks: Vec::new(),
+            failed: Vec::new(),
+        }
+    }
+
+    /// BILI-01：把待提交队列一次写进曲库。写盘在阻塞线程里做，来源占用随队列一起移交，
+    /// 写完才释放；写失败的那一批逐首记进 `failed`。
+    async fn flush(&mut self, app: &AppHandle) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let items = self.pending.take();
+        let labels = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
+        let app_for_merge = app.clone();
+        let commit = tauri::async_runtime::spawn_blocking(move || {
+            commit_pending(items, |batch| {
+                merge_tracks_into_cache(&app_for_merge, batch)
+            })
+        })
+        .await;
+        match commit {
+            Ok(commit) => {
+                self.tracks.extend(commit.tracks);
+                self.failed.extend(commit.failed);
+            }
+            Err(err) => self
+                .failed
+                .extend(labels.into_iter().map(|input| BilibiliImportFailure {
+                    input,
+                    reason: format!("曲库合并任务异常终止: {err}"),
+                })),
+        }
+    }
+
+    async fn flush_if_due(&mut self, app: &AppHandle) {
+        if self.pending.is_due(Instant::now()) {
+            self.flush(app).await;
+        }
+    }
+
+    /// 结束、取消都把已下载的一并提交（取消不丢已经下好的曲目），再按配额清理一次缓存。
+    ///
+    /// 审2-S3：整批只在结束后清理一次，并 preserve 本批全部成功导入的文件
+    /// （ImportedTrack.path 即最终落盘路径，含 remux fallback）；逐首清理只 preserve
+    /// 当前一首，超限时会把同批先导入的文件删掉。调用方必须先释放自己手里的来源占用，
+    /// 否则清理会与它冲突。同步磁盘遍历放 spawn_blocking，失败只 warn 不影响导入结果。
+    async fn finish(mut self, app: &AppHandle) -> (Vec<ImportedTrack>, Vec<BilibiliImportFailure>) {
+        self.flush(app).await;
+        let imported_paths = self
+            .tracks
+            .iter()
+            .map(|track| PathBuf::from(&track.path))
+            .collect::<Vec<_>>();
+        if !imported_paths.is_empty() {
+            let app_for_cache = app.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                enforce_cache_limit_preserving_many(&app_for_cache, &imported_paths)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => tracing::warn!("批量导入后缓存清理失败: {err}"),
+                Err(err) => tracing::warn!("批量导入后缓存清理任务异常终止: {err}"),
+            }
+        }
+        (self.tracks, self.failed)
+    }
+}
+
+/// 一个视频里要导入的分 P，连同它的来源占用。
+struct VideoJob<'a> {
+    video: &'a VideoData,
+    pages: &'a [SelectedPage],
+    /// 整个视频共用一份来源占用（按 BV 号）：各分 P 的待提交项各持一份引用，
+    /// 最后一份释放时才解除占用。
+    operation: &'a SourceOperation,
+    /// 来源占用的键（BV 号）
+    source: &'a str,
+    /// 失败时报给用户的名字（收藏夹里的标题，或视频标题）
+    label: &'a str,
+}
+
+/// 逐个下载一个视频里选定的分 P，压进待提交队列。每个分 P 结束后调用
+/// `on_page(已完成数, 名字, 是否成功)`。返回 true 表示中途被取消。
+async fn queue_video_pages(
+    app: &AppHandle,
+    client: &Client,
+    job: VideoJob<'_>,
+    options: &BilibiliImportOptions,
+    cancellation: &ImportCancellation,
+    run: &mut BatchRun,
+    mut on_page: impl FnMut(usize, &str, bool),
+) -> bool {
+    for (index, page) in job.pages.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return true;
+        }
+        let label = match page.naming {
+            PageNaming::Part => page_label(job.label, page),
+            PageNaming::Video => job.label.to_string(),
+        };
+        let ok = match download_bilibili_track(
+            app,
+            client,
+            job.video,
+            page,
+            options,
+            cancellation,
+            job.operation,
+        )
+        .await
+        {
+            Ok(track) => {
+                run.pending.push(
+                    PendingImport {
+                        track,
+                        label: label.clone(),
+                        source: job.source.to_string(),
+                        operation: Arc::clone(job.operation),
+                    },
+                    Instant::now(),
+                );
+                true
+            }
+            Err(_) if cancellation.is_cancelled() => return true,
+            Err(reason) => {
+                run.failed.push(BilibiliImportFailure {
+                    input: label.clone(),
+                    reason,
+                });
+                false
+            }
+        };
+        on_page(index + 1, &label, ok);
+        run.flush_if_due(app).await;
+    }
+    false
+}
+
+enum VideoOutcome {
+    /// `ok`：选定的分 P 全部下载成功
+    Done {
+        ok: bool,
+    },
+    Cancelled,
+}
+
+/// 收藏夹里的一个视频：登记来源占用、取视频信息、按全局设置选分 P，再逐 P 下载。
+async fn import_favorite_video(
     app: &AppHandle,
     client: &Client,
     input: &str,
+    label: &str,
     options: &BilibiliImportOptions,
     cancellation: &ImportCancellation,
-) -> Result<(ImportedTrack, SourceOperation), String> {
-    let bvid = cancellation.run(resolve_bvid(client, input)).await?;
-    let operation = std::sync::Arc::new(acquire_audio_operation(&bvid)?);
-    let track =
-        download_bilibili_track(app, client, &bvid, options, cancellation, &operation).await?;
-    Ok((track, operation))
-}
-
-/// BILI-01：把待提交队列一次写进曲库。写盘在阻塞线程里做，来源占用随队列一起移交，
-/// 写完才释放；写失败的那一批逐首记进 `failed`。
-async fn flush_pending(
-    app: &AppHandle,
-    pending: &mut PendingImports,
-    tracks: &mut Vec<ImportedTrack>,
-    failed: &mut Vec<BilibiliImportFailure>,
-) {
-    if pending.is_empty() {
-        return;
+    run: &mut BatchRun,
+) -> VideoOutcome {
+    let prepared = async {
+        let target = cancellation.run(resolve_video_ref(input)).await?;
+        let operation: SourceOperation = Arc::new(acquire_audio_operation(&target.bvid)?);
+        let video = cancellation
+            .run(fetch_video_data(client, &target.bvid))
+            .await?;
+        // BILI-05：收藏夹条目不带分 P，多 P 视频跟随全局设置（options.multi_page）。
+        let pages = select_pages(&video, target.page, options.multi_page.unwrap_or_default())?;
+        Ok::<_, String>((target, operation, video, pages))
     }
-    let items = pending.take();
-    let labels = items
-        .iter()
-        .map(|item| item.label.clone())
-        .collect::<Vec<_>>();
-    let app_for_merge = app.clone();
-    let commit = tauri::async_runtime::spawn_blocking(move || {
-        commit_pending(items, |batch| {
-            merge_tracks_into_cache(&app_for_merge, batch)
-        })
-    })
     .await;
-    match commit {
-        Ok(commit) => {
-            tracks.extend(commit.tracks);
-            failed.extend(commit.failed);
+    let (target, operation, video, pages) = match prepared {
+        Ok(prepared) => prepared,
+        Err(_) if cancellation.is_cancelled() => return VideoOutcome::Cancelled,
+        Err(reason) => {
+            run.failed.push(BilibiliImportFailure {
+                input: label.to_string(),
+                reason,
+            });
+            return VideoOutcome::Done { ok: false };
         }
-        Err(err) => failed.extend(labels.into_iter().map(|input| BilibiliImportFailure {
-            input,
-            reason: format!("曲库合并任务异常终止: {err}"),
-        })),
+    };
+    let mut all_ok = true;
+    let cancelled = queue_video_pages(
+        app,
+        client,
+        VideoJob {
+            video: &video,
+            pages: &pages,
+            operation: &operation,
+            source: &target.bvid,
+            label,
+        },
+        options,
+        cancellation,
+        run,
+        |_, _, ok| all_ok &= ok,
+    )
+    .await;
+    if cancelled {
+        VideoOutcome::Cancelled
+    } else {
+        VideoOutcome::Done { ok: all_ok }
     }
 }
 
@@ -469,6 +690,25 @@ pub async fn import_bilibili_audio_with_options(
     options: Option<BilibiliImportOptions>,
 ) -> IpcResult<ImportedTrack> {
     import_bilibili_audio_with_options_inner_cmd(app, input, options)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn bilibili_video_info(app: AppHandle, input: String) -> IpcResult<BilibiliVideoInfo> {
+    bilibili_video_info_inner_cmd(app, input)
+        .await
+        .map_err(bilibili_error)
+}
+
+#[tauri::command]
+pub async fn import_bilibili_video(
+    app: AppHandle,
+    input: String,
+    options: Option<BilibiliImportOptions>,
+    task_id: Option<String>,
+) -> IpcResult<BilibiliBatchImportResult> {
+    import_bilibili_video_inner_cmd(app, input, options, task_id)
         .await
         .map_err(bilibili_error)
 }

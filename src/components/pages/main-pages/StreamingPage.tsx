@@ -3,7 +3,13 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { coverSrc } from "@/lib/tauri";
-import { usePlayerStore, type BilibiliImportOptions } from "@/store/player";
+import {
+  usePlayerStore,
+  type BilibiliImportOptions,
+  type BilibiliMultiPageMode,
+  type BilibiliVideoInfo,
+} from "@/store/player";
+import { MultiPageImportDialog } from "./MultiPageImportDialog";
 import { TrackRows } from "./TrackRows";
 import { isStreamingTrack } from "./trackFilters";
 
@@ -14,6 +20,7 @@ export function StreamingPage() {
     [playlist]
   );
   const importBilibiliAudio = usePlayerStore((s) => s.importBilibiliAudio);
+  const probeBilibiliVideo = usePlayerStore((s) => s.probeBilibiliVideo);
   const importBilibiliFavorites = usePlayerStore((s) => s.importBilibiliFavorites);
   const cancelBilibiliFavoritesImport = usePlayerStore(
     (s) => s.cancelBilibiliFavoritesImport
@@ -37,6 +44,17 @@ export function StreamingPage() {
   const [favoriteInput, setFavoriteInput] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const isBatchImporting = batchProgress !== null;
+  // BILI-05：全量导入一个视频的多个分 P 也是一次批量，进度与取消显示在单链接这一栏。
+  const isVideoBatch = batchProgress?.kind === "video";
+  const isFavoritesBatch = isBatchImporting && !isVideoBatch;
+  const singleBusy = isImporting || isVideoBatch;
+  // 多 P 视频无特定分 P 时的默认导入范围（设置 → 流媒体）：
+  // 单链接导入用它决定询问弹窗的默认选中项，收藏夹批量导入直接照它办。
+  const multiPageMode = usePlayerStore((s) => s.bilibiliMultiPageMode);
+  const [multiPagePrompt, setMultiPagePrompt] = useState<{
+    input: string;
+    info: BilibiliVideoInfo;
+  } | null>(null);
   // B 站流媒体默认走普通音质：杜比 / FLAC / 混流三项默认全不勾选，
   // 需要时用户在工具条上手动开启。
   // UI4-02：选择存进 store 并持久化，离开页面再回来不再恢复成全不勾选。
@@ -57,16 +75,41 @@ export function StreamingPage() {
     void refreshBilibiliState();
   }, [refreshBilibiliState]);
 
+  const runImport = async (input: string, multiPage: BilibiliMultiPageMode) => {
+    // 审2-R10（L-7）：导入失败保留输入框内容便于修正重试，与收藏夹分支行为对齐
+    const imported = await importBilibiliAudio(input, { ...importOptions, multiPage });
+    if (imported) setBilibiliInput("");
+  };
+
   const handleImportBilibili = async (event: FormEvent) => {
     event.preventDefault();
     const input = bilibiliInput.trim();
-    if (!input || isImporting) return;
+    if (!input || singleBusy) return;
 
     setIsImporting(true);
     try {
-      // 审2-R10（L-7）：导入失败保留输入框内容便于修正重试，与收藏夹分支行为对齐
-      const imported = await importBilibiliAudio(input, importOptions);
-      if (imported) setBilibiliInput("");
+      // BILI-05：先看视频有几个分 P。多 P 又没有指定分 P（链接不带 ?p=）时先问导入范围；
+      // 其余情况只会出一首，直接导入。
+      const info = await probeBilibiliVideo(input);
+      if (!info) return;
+      if (info.pages.length > 1 && info.requestedPage == null) {
+        setMultiPagePrompt({ input, info });
+        return;
+      }
+      await runImport(input, "first");
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const confirmMultiPage = async (mode: BilibiliMultiPageMode) => {
+    const prompt = multiPagePrompt;
+    setMultiPagePrompt(null);
+    if (!prompt) return;
+
+    setIsImporting(true);
+    try {
+      await runImport(prompt.input, mode);
     } finally {
       setIsImporting(false);
     }
@@ -78,7 +121,11 @@ export function StreamingPage() {
     if (!input || isBatchImporting) return;
 
     // “导入中”态由 store 的 bilibiliBatchProgress 承载（action 内 set/finally 清理）
-    const result = await importBilibiliFavorites(input, importOptions);
+    // BILI-05：收藏夹条目不带分 P，多 P 视频不逐个询问，跟随全局设置。
+    const result = await importBilibiliFavorites(input, {
+      ...importOptions,
+      multiPage: multiPageMode,
+    });
     if (result && result.tracks.length > 0) {
       setFavoriteInput("");
     }
@@ -102,20 +149,36 @@ export function StreamingPage() {
                 onChange={(event) => setBilibiliInput(event.target.value)}
                 placeholder="链接 / BV号 — 自动识别归档…"
                 className="min-w-0 bg-transparent font-tw text-[13px] text-ink outline-none placeholder:text-ink3"
-                disabled={isImporting}
+                disabled={singleBusy}
               />
             </label>
+            {isVideoBatch && (
+              <button
+                type="button"
+                onClick={() => void cancelBilibiliFavoritesImport()}
+                className="inline-flex items-center border-l-[1.5px] border-ink px-3 font-tw text-xs font-bold text-stamp transition-colors hover:bg-paper2 shrink-0"
+              >
+                取消
+              </button>
+            )}
             <button
               type="submit"
-              disabled={!bilibiliInput.trim() || isImporting}
+              disabled={!bilibiliInput.trim() || singleBusy}
+              title={isVideoBatch ? batchProgress?.title || undefined : undefined}
               className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-ink px-4 font-tw text-xs font-bold text-paper transition-colors hover:bg-stamp disabled:cursor-not-allowed disabled:bg-line disabled:text-ink2 shrink-0"
             >
-              {isImporting ? (
+              {singleBusy ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <DownloadCloud className="h-4 w-4" />
               )}
-              <span>{isImporting ? "导入中" : "归档 →"}</span>
+              <span>
+                {isVideoBatch && batchProgress && batchProgress.total > 0
+                  ? `${batchProgress.current}/${batchProgress.total}`
+                  : singleBusy
+                    ? "导入中"
+                    : "归档 →"}
+              </span>
             </button>
           </form>
 
@@ -133,7 +196,7 @@ export function StreamingPage() {
                 disabled={isBatchImporting}
               />
             </label>
-            {isBatchImporting && (
+            {isFavoritesBatch && (
               <button
                 type="button"
                 onClick={() => void cancelBilibiliFavoritesImport()}
@@ -145,16 +208,16 @@ export function StreamingPage() {
             <button
               type="submit"
               disabled={!favoriteInput.trim() || isBatchImporting}
-              title={batchProgress?.title || undefined}
+              title={isFavoritesBatch ? batchProgress?.title || undefined : undefined}
               className="inline-flex items-center gap-2 border-l-[1.5px] border-ink bg-card px-4 font-tw text-xs font-bold text-ink transition-colors hover:bg-paper2 disabled:cursor-not-allowed disabled:text-ink3 shrink-0"
             >
-              {isBatchImporting ? (
+              {isFavoritesBatch ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <FolderHeart className="h-4 w-4" />
               )}
               <span>
-                {isBatchImporting
+                {isFavoritesBatch
                   ? batchProgress && batchProgress.total > 0
                     ? `${batchProgress.current}/${batchProgress.total}`
                     : "批量中"
@@ -345,6 +408,16 @@ export function StreamingPage() {
           {loginQr?.message || "等待扫码"}
         </p>
       </Dialog>
+
+      {multiPagePrompt ? (
+        <MultiPageImportDialog
+          key={`${multiPagePrompt.info.bvid}:${multiPagePrompt.input}`}
+          info={multiPagePrompt.info}
+          defaultMode={multiPageMode}
+          onConfirm={(mode) => void confirmMultiPage(mode)}
+          onCancel={() => setMultiPagePrompt(null)}
+        />
+      ) : null}
 
       <TrackRows tracks={streamingTracks} empty="暂无流媒体曲目" scopeName="流媒体" stateKey="tracks:streaming" />
     </div>

@@ -17,6 +17,40 @@ pub(crate) fn extract_bvid(input: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+/// BILI-05：输入里指定的分 P 序号（从 1 起）。认两种写法：
+/// 链接查询参数 `p=N`（`…/video/BV…?p=3`、`BV…?p=3`），以及曲库来源 ID 的 `BV…-pN`。
+/// 没有指定、不是正整数都返回 None。
+pub(crate) fn extract_page_number(input: &str) -> Option<u32> {
+    fn positive(digits: &str) -> Option<u32> {
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u32>().ok().filter(|number| *number > 0)
+    }
+
+    let trimmed = input.trim();
+    if let Some((_, rest)) = trimmed.split_once('?') {
+        // 查询串到 `#` 或空白为止（分享文案里链接后面常跟着别的文字）
+        let query = rest
+            .split(|ch: char| ch == '#' || ch.is_whitespace())
+            .next()
+            .unwrap_or_default();
+        return query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| *key == "p")
+            .and_then(|(_, value)| positive(value));
+    }
+
+    let (head, digits) = trimmed
+        .rsplit_once("-p")
+        .or_else(|| trimmed.rsplit_once("-P"))?;
+    if extract_bvid(head).as_deref() != Some(head) {
+        return None;
+    }
+    positive(digits)
+}
+
 pub(crate) fn extract_media_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.chars().all(|ch| ch.is_ascii_digit()) && !trimmed.is_empty() {
