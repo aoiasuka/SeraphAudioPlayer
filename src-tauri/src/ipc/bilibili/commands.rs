@@ -1,3 +1,4 @@
+use super::batch::{commit_pending, PendingImport, PendingImports};
 use super::cancellation::{cancel_batch, BatchImportGuard, ImportCancellation};
 use super::prelude::*;
 
@@ -27,7 +28,6 @@ pub(crate) async fn import_bilibili_audio_with_options_inner_cmd(
         &client,
         &input,
         &options.unwrap_or_default(),
-        true,
         &ImportCancellation::default(),
     )
     .await
@@ -69,9 +69,8 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
     let mut tracks = Vec::new();
     let mut failed = Vec::new();
     let mut cancelled = false;
-    // 审2-S3：收集本批全部成功导入的音频路径（ImportedTrack.path 即 ensure_audio_file
-    // 返回的最终落盘路径，含 remux fallback），批量结束后统一清理时整体 preserve。
-    let mut imported_paths = Vec::new();
+    // BILI-01：下载好的曲目先压在待提交队列里，攒一批再写曲库，不再逐首整库重写。
+    let mut pending = PendingImports::new();
     for (index, item) in bvids.into_iter().enumerate() {
         if cancellation.is_cancelled() {
             cancelled = true;
@@ -79,27 +78,35 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
         }
         let bvid = item.bvid.clone().unwrap_or_default();
         let display_name = item.title.clone().unwrap_or_else(|| bvid.clone());
-        let ok =
-            match import_bilibili_audio_inner(&app, &client, &bvid, &options, false, cancellation)
-                .await
-            {
-                Ok(track) => {
-                    imported_paths.push(PathBuf::from(&track.path));
-                    tracks.push(track);
-                    true
-                }
-                Err(_) if cancellation.is_cancelled() => {
-                    cancelled = true;
-                    break;
-                }
-                Err(reason) => {
-                    failed.push(BilibiliImportFailure {
-                        input: display_name.clone(),
-                        reason,
-                    });
-                    false
-                }
-            };
+        // 收藏夹里的重复条目：上一份还压在队列里、占着来源，先提交再下。
+        if pending.holds_source(&bvid) {
+            flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
+        }
+        let ok = match download_batch_item(&app, &client, &bvid, &options, cancellation).await {
+            Ok((track, operation)) => {
+                pending.push(
+                    PendingImport {
+                        track,
+                        label: display_name.clone(),
+                        source: bvid,
+                        operation,
+                    },
+                    std::time::Instant::now(),
+                );
+                true
+            }
+            Err(_) if cancellation.is_cancelled() => {
+                cancelled = true;
+                break;
+            }
+            Err(reason) => {
+                failed.push(BilibiliImportFailure {
+                    input: display_name.clone(),
+                    reason,
+                });
+                false
+            }
+        };
         // M-15：每首完成即推进度事件，前端展示 N/total 与当前曲目
         let _ = app.emit(
             BATCH_PROGRESS_EVENT,
@@ -111,11 +118,21 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
                 ok,
             },
         );
+        if pending.is_due(std::time::Instant::now()) {
+            flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
+        }
     }
+    // 结束、取消都把已下载的一并提交：取消不丢已经下好的曲目。
+    flush_pending(&app, &mut pending, &mut tracks, &mut failed).await;
 
-    // 审2-S3：整批只在结束后清理一次缓存并 preserve 本批全部成功导入的文件，
+    // 审2-S3：整批只在结束后清理一次缓存并 preserve 本批全部成功导入的文件
+    // （ImportedTrack.path 即最终落盘路径，含 remux fallback），
     // 替代逐首清理只 preserve 当前一首（超限时会把同批先导入的文件删掉）。
     // 同步磁盘遍历放 spawn_blocking，失败只 warn 不影响导入结果（对齐 S2 语义）。
+    let imported_paths = tracks
+        .iter()
+        .map(|track| PathBuf::from(&track.path))
+        .collect::<Vec<_>>();
     if !imported_paths.is_empty() {
         let app_for_cache = app.clone();
         match tauri::async_runtime::spawn_blocking(move || {
@@ -134,6 +151,58 @@ pub(crate) async fn import_bilibili_favorites_inner_cmd(
         failed,
         cancelled,
     })
+}
+
+type SourceOperation = std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>;
+
+/// 批量导入里的一首：登记来源占用并下载，不入库。占用随返回值交给待提交队列。
+async fn download_batch_item(
+    app: &AppHandle,
+    client: &Client,
+    input: &str,
+    options: &BilibiliImportOptions,
+    cancellation: &ImportCancellation,
+) -> Result<(ImportedTrack, SourceOperation), String> {
+    let bvid = cancellation.run(resolve_bvid(client, input)).await?;
+    let operation = std::sync::Arc::new(acquire_audio_operation(&bvid)?);
+    let track =
+        download_bilibili_track(app, client, &bvid, options, cancellation, &operation).await?;
+    Ok((track, operation))
+}
+
+/// BILI-01：把待提交队列一次写进曲库。写盘在阻塞线程里做，来源占用随队列一起移交，
+/// 写完才释放；写失败的那一批逐首记进 `failed`。
+async fn flush_pending(
+    app: &AppHandle,
+    pending: &mut PendingImports,
+    tracks: &mut Vec<ImportedTrack>,
+    failed: &mut Vec<BilibiliImportFailure>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let items = pending.take();
+    let labels = items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+    let app_for_merge = app.clone();
+    let commit = tauri::async_runtime::spawn_blocking(move || {
+        commit_pending(items, |batch| {
+            merge_tracks_into_cache(&app_for_merge, batch)
+        })
+    })
+    .await;
+    match commit {
+        Ok(commit) => {
+            tracks.extend(commit.tracks);
+            failed.extend(commit.failed);
+        }
+        Err(err) => failed.extend(labels.into_iter().map(|input| BilibiliImportFailure {
+            input,
+            reason: format!("曲库合并任务异常终止: {err}"),
+        })),
+    }
 }
 
 pub(crate) async fn bilibili_login_qrcode_inner_cmd(

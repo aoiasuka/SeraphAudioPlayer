@@ -16,6 +16,11 @@ pub(crate) const FAV_MAX_ITEMS: usize = 200;
 pub(crate) const MAX_AVATAR_BYTES: usize = 512 * 1024;
 /// 单次音频下载上限。普通 m4a < 50 MB，FLAC 流可达数百 MB，给到 1.5 GB 已远超合理上限。
 pub(crate) const MAX_AUDIO_DOWNLOAD_BYTES: u64 = 1_500 * 1024 * 1024;
+/// BILI-01：批量导入攒够这么多首就合并写一次曲库。
+pub(crate) const BATCH_COMMIT_MAX_TRACKS: usize = 20;
+/// BILI-01：待提交队列里最早一首最多等这么久。下载慢时不必等凑满一批；
+/// 程序中途被结束时最多丢这段时间内下好的曲目（音频文件仍在缓存里，重新导入直接命中）。
+pub(crate) const BATCH_COMMIT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
 /// BILI-03：同一地址下载中断后，每次续传前的等待。连续这么多次续传都没有拿到新数据才放弃
 /// （合计约 30 秒，覆盖短暂断网）；期间只要有新数据写入就从第一档重新计。
 pub(crate) const DOWNLOAD_RESUME_BACKOFF: [std::time::Duration; 5] = [

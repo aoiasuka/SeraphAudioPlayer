@@ -1,15 +1,12 @@
 use super::cancellation::ImportCancellation;
 use super::prelude::*;
 
+/// 单曲导入（含重新缓存 / 重新加载）：下载、入库、按配额清理缓存。
 pub(crate) async fn import_bilibili_audio_inner(
     app: &AppHandle,
     client: &Client,
     input: &str,
     options: &BilibiliImportOptions,
-    // 审2-S3：单曲导入传 true；收藏夹批量循环传 false——批量时逐首清理只
-    // preserve 当前一首，缓存超限会把同批先导入的文件删掉，改由批量调用方在
-    // 整批结束后统一清理一次并 preserve 全部成功导入的文件。
-    enforce_cache_limit: bool,
     cancellation: &ImportCancellation,
 ) -> Result<ImportedTrack, String> {
     let bvid = cancellation.run(resolve_bvid(client, input)).await?;
@@ -27,6 +24,54 @@ pub(crate) async fn import_bilibili_audio_inner(
             return Err("曲目已被移除，已取消重新缓存".into());
         }
     }
+    let track =
+        download_bilibili_track(app, client, &bvid, options, cancellation, &operation).await?;
+    let final_path = PathBuf::from(&track.path);
+    // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
+    // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
+    let app_for_merge = app.clone();
+    let existing_track_id = options.existing_track_id.clone();
+    let imported = tauri::async_runtime::spawn_blocking(move || {
+        // 即便上层异步请求结束，入库工作线程完成前也不能释放来源占用。
+        let _operation = operation;
+        if let Some(track_id) = existing_track_id {
+            crate::ipc::library::replace_track_in_cache(&app_for_merge, &track_id, &track)
+                .map(|track| vec![track])
+        } else {
+            merge_tracks_into_cache(&app_for_merge, &[track])
+        }
+    })
+    .await
+    .map_err(|err| format!("曲库合并任务异常终止: {err}"))??;
+    // 必须在入库提交并释放来源占用后清理；否则会与自己的下载租约冲突。
+    let app_for_cache = app.clone();
+    let preserve = vec![final_path];
+    match tauri::async_runtime::spawn_blocking(move || {
+        enforce_cache_limit_preserving_many(&app_for_cache, &preserve)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => tracing::warn!("bilibili 导入后缓存清理跳过: {err}"),
+        Err(err) => tracing::warn!("bilibili 导入后缓存清理任务异常终止: {err}"),
+    }
+    imported
+        .into_iter()
+        .next()
+        .ok_or_else(|| "failed to import bilibili audio".to_string())
+}
+
+/// 下载一首并生成曲目记录，**不入库**（BILI-01）。调用方已持有该来源的占用，
+/// 并负责在入库完成之前一直持有它：单曲导入下载完立即入库，批量导入攒一批再写
+/// （见 `batch.rs`）。返回的 `track.path` 是最终落盘路径（含 remux fallback）。
+pub(crate) async fn download_bilibili_track(
+    app: &AppHandle,
+    client: &Client,
+    bvid: &str,
+    options: &BilibiliImportOptions,
+    cancellation: &ImportCancellation,
+    operation: &std::sync::Arc<crate::ipc::cache::operations::AudioOperationSlot<'static>>,
+) -> Result<ImportedTrack, String> {
     // 先确定 ffmpeg 是否可用：EAC3 / 杜比全景声流只能靠 ffmpeg 解码，
     // 缺少 ffmpeg 时必须在选流阶段就避开它们，否则会导入一个永远无法播放的文件。
     let ffmpeg_path = options
@@ -35,7 +80,7 @@ pub(crate) async fn import_bilibili_audio_inner(
         .then(|| find_ffmpeg(app))
         .flatten();
     let resolved = cancellation
-        .run(resolve_audio(client, &bvid, options, ffmpeg_path.is_some()))
+        .run(resolve_audio(client, bvid, options, ffmpeg_path.is_some()))
         .await?;
     let cache_path = audio_cache_path(
         app,
@@ -59,7 +104,7 @@ pub(crate) async fn import_bilibili_audio_inner(
         ffmpeg_path.as_deref(),
         must_remux,
         cancellation,
-        &operation,
+        operation,
     )
     .await?;
     cancellation.check()?;
@@ -72,46 +117,12 @@ pub(crate) async fn import_bilibili_audio_inner(
     .await
     .ok()
     .flatten();
-    let track = track_from_resolved_audio(
+    track_from_resolved_audio(
         &resolved,
         &final_path,
         ffmpeg_path.is_some(),
         probed.as_ref(),
-    )?;
-    // P1-3：合并曲库缓存是带锁的阻塞读改写，放进 spawn_blocking，
-    // 避免在 async 上下文里持有 parking_lot 锁阻塞调度线程。
-    let app_for_merge = app.clone();
-    let existing_track_id = options.existing_track_id.clone();
-    let imported = tauri::async_runtime::spawn_blocking(move || {
-        // 即便上层异步请求结束，入库工作线程完成前也不能释放来源占用。
-        let _operation = operation;
-        if let Some(track_id) = existing_track_id {
-            crate::ipc::library::replace_track_in_cache(&app_for_merge, &track_id, &track)
-                .map(|track| vec![track])
-        } else {
-            merge_tracks_into_cache(&app_for_merge, &[track])
-        }
-    })
-    .await
-    .map_err(|err| format!("曲库合并任务异常终止: {err}"))??;
-    // 必须在入库提交并释放来源占用后清理；否则会与自己的下载租约冲突。
-    if enforce_cache_limit {
-        let app_for_cache = app.clone();
-        let preserve = vec![final_path];
-        match tauri::async_runtime::spawn_blocking(move || {
-            enforce_cache_limit_preserving_many(&app_for_cache, &preserve)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => tracing::warn!("bilibili 导入后缓存清理跳过: {err}"),
-            Err(err) => tracing::warn!("bilibili 导入后缓存清理任务异常终止: {err}"),
-        }
-    }
-    imported
-        .into_iter()
-        .next()
-        .ok_or_else(|| "failed to import bilibili audio".to_string())
+    )
 }
 
 /// P0-1：仅允许 B 站官方域名，防止把请求（尤其是登录 Cookie）发往任意用户输入的 URL。
