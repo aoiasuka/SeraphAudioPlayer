@@ -8,13 +8,25 @@ export interface CacheSettings {
   autoCleanup: boolean;
 }
 
+/** CACHE-03：换过缓存目录后仍留有文件的旧目录。 */
+export interface PreviousCacheDirStatus {
+  path: string;
+  usedBytes: number;
+  fileCount: number;
+  /** 目录当前管不到（磁盘没接、目录或标记不在了）时的说明；此时不计入用量、不会被清理。 */
+  unavailableReason?: string;
+}
+
 export interface CacheStatus {
   settings: CacheSettings;
+  /** 用量与文件数是当前目录加上各旧目录的合计 */
   usedMb: number;
   usagePercent: number;
   fileCount: number;
   /** CACHE-01：缓存目录所在磁盘当前不可用时的说明；设置本身保留。 */
   unavailableReason?: string;
+  /** CACHE-03：各旧缓存目录的用量明细；没有旧目录时后端不带这个字段。 */
+  previousDirs?: PreviousCacheDirStatus[];
 }
 
 interface CacheCleanupResult {
@@ -29,7 +41,7 @@ export function formatMb(value: number) {
   return `${value.toFixed(1)} MB`;
 }
 
-function formatBytes(value: number) {
+export function formatBytes(value: number) {
   return formatMb(value / 1024 / 1024);
 }
 

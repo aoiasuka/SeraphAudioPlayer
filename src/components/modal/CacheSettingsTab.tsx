@@ -1,7 +1,7 @@
 import { Folder, HardDrive, Loader2, RotateCw, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Dialog } from "@/components/ui/dialog";
-import { formatMb, type CacheSettingsForm } from "./useCacheSettingsForm";
+import { formatBytes, formatMb, type CacheSettingsForm } from "./useCacheSettingsForm";
 
 /**
  * 设置弹窗里的「缓存管理」标签页。表单状态由壳通过 `form` 传入
@@ -12,6 +12,12 @@ export function CacheSettingsTab({ form }: { form: CacheSettingsForm }) {
   // UI-01：清理缓存是一次点击删光全部已下载音频，先确认。
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const usagePercent = Math.min(status?.usagePercent ?? 0, 100);
+  // CACHE-03：换目录不搬文件，旧目录继续受管——改路径时把这一点说在前面。
+  const dirChanged =
+    status !== null &&
+    form.cacheDir.trim() !== "" &&
+    form.cacheDir.trim() !== status.settings.cacheDir;
+  const previousDirs = status?.previousDirs ?? [];
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -93,7 +99,44 @@ export function CacheSettingsTab({ form }: { form: CacheSettingsForm }) {
               placeholder="输入缓存目录路径"
             />
           </div>
+          {dirChanged ? (
+            <p className="font-tw text-[10px] leading-relaxed text-ink3">
+              保存后新的下载落到新目录。原目录里已下载的文件不会移动：仍可播放，
+              并继续计入用量、参与自动清理与「清理缓存」。
+            </p>
+          ) : null}
         </div>
+
+        {previousDirs.length > 0 ? (
+          <div className="space-y-1.5">
+            <span className="block font-tw text-[9px] font-bold text-ink3 uppercase">
+              Previous Cache Paths
+            </span>
+            <p className="font-tw text-[10px] leading-relaxed text-ink2">
+              更换缓存目录之前下载的文件还留在下面这些旧目录里：照常播放，已计入上方用量，
+              自动清理与「清理缓存」同样作用于它们。清空后的旧目录会自动从这里消失。
+            </p>
+            <ul aria-label="旧缓存目录" className="space-y-1">
+              {previousDirs.map((dir) => (
+                <li key={dir.path} className="border-[1.5px] border-line bg-card px-2 py-1.5">
+                  <p className="truncate font-tw text-xs text-ink" title={dir.path}>
+                    {dir.path}
+                  </p>
+                  <p
+                    className={
+                      dir.unavailableReason
+                        ? "font-tw text-[10px] leading-relaxed text-stamp"
+                        : "font-tw text-[10px] text-ink2"
+                    }
+                  >
+                    {dir.unavailableReason ??
+                      `${dir.fileCount} 个文件 · ${formatBytes(dir.usedBytes)}`}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-[140px_minmax(0,1fr)]">
           <label className="space-y-1.5">

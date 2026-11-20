@@ -181,6 +181,48 @@ describe("设置页（issues-2）", () => {
     expect(screen.getByRole("button", { name: "保存并关闭" })).toBeInTheDocument();
   });
 
+  it("CACHE-03：旧缓存目录列出各自的用量，管不到的显示原因；合计仍按后端给的总数", async () => {
+    bridge.invoke.mockImplementation(async (command) =>
+      command === "get_cache_status"
+        ? status({
+            previousDirs: [
+              { path: "E:\\old-cache", usedBytes: 1536 * 1024 * 1024, fileCount: 30 },
+              {
+                path: "F:\\usb-cache",
+                usedBytes: 0,
+                fileCount: 0,
+                unavailableReason: "所在磁盘当前不可用，接回后继续计入用量与清理",
+              },
+            ],
+          })
+        : undefined
+    );
+    await openCacheTab();
+    const list = screen.getByRole("list", { name: "旧缓存目录" });
+    const items = within(list).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("E:\\old-cache");
+    expect(items[0]).toHaveTextContent("30 个文件 · 1.50 GB");
+    expect(items[1]).toHaveTextContent("F:\\usb-cache");
+    expect(items[1]).toHaveTextContent("所在磁盘当前不可用");
+    // 清理确认框里的数字是含旧目录的合计
+    fireEvent.click(screen.getByRole("button", { name: "清理缓存" }));
+    expect(screen.getByRole("dialog", { name: "清理全部缓存" })).toHaveTextContent(
+      "37 个已下载的流媒体音频文件"
+    );
+  });
+
+  it("CACHE-03：没有旧目录时不出现这一块；改了缓存目录时说明原目录的文件不会移动", async () => {
+    await openCacheTab();
+    expect(screen.queryByRole("list", { name: "旧缓存目录" })).toBeNull();
+    expect(screen.queryByText(/原目录里已下载的文件不会移动/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("Cache Path"), { target: { value: "E:\\new-cache" } });
+    expect(screen.getByText(/原目录里已下载的文件不会移动/)).toBeInTheDocument();
+    // 改回原值提示消失
+    fireEvent.change(screen.getByLabelText("Cache Path"), { target: { value: "D:\\cache" } });
+    expect(screen.queryByText(/原目录里已下载的文件不会移动/)).toBeNull();
+  });
+
   it("UI-05：每个标签页只挂载自己的内容，事件可以直达指定标签页", async () => {
     render(<SettingsModal />);
     expect(screen.getByRole("tab", { name: "音频输出" })).toHaveAttribute("aria-selected", "true");

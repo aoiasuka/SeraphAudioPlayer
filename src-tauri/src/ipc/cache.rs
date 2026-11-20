@@ -23,6 +23,9 @@ const CACHE_MARKER_FILE: &str = ".seraph-cache";
 const DEFAULT_MAX_SIZE_MB: u64 = 5 * 1024;
 const CLEANUP_THRESHOLD_PERCENT: u64 = 90;
 const CLEANUP_TARGET_PERCENT: u64 = 75;
+/// CACHE-03：最多记这么多个旧缓存目录。超出时丢掉最早的（记日志），
+/// 不因此拦住用户换目录。
+const MAX_PREVIOUS_CACHE_DIRS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +33,24 @@ pub struct CacheSettings {
     pub cache_dir: String,
     pub max_size_mb: u64,
     pub auto_cleanup: bool,
+    /// CACHE-03：换过缓存目录后，仍留有已下载文件的旧目录。新下载只落到
+    /// `cache_dir`；这些目录里的文件不搬动（曲库照旧引用、照常播放），但继续
+    /// 计入用量、参与配额清理与手动清理。只由换目录的流程维护，设置页不能直接改。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_dirs: Vec<String>,
+}
+
+/// CACHE-03：一个旧缓存目录当前的用量。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviousCacheDirStatus {
+    pub path: String,
+    pub used_bytes: u64,
+    pub file_count: usize,
+    /// 目录当前管不到（磁盘没接、目录或缓存标记不在了）时的说明；
+    /// 此时它不计入用量，其中的文件也不会被清理。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +66,9 @@ pub struct CacheStatus {
     /// 设置本身原样保留，盘接回后自动恢复。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// CACHE-03：各旧缓存目录的用量明细。上面的用量与文件数已经把它们算在内。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub previous_dirs: Vec<PreviousCacheDirStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,9 +132,13 @@ fn update_cache_settings_inner(
         let cache_dir = cache_dir.trim();
         if !cache_dir.is_empty() {
             let path = PathBuf::from(cache_dir);
+            // CACHE-03：先查与已有缓存目录的包含关系——下面的安全校验会建目录、
+            // 写标记，被拒绝的目录不该留下这些痕迹。
+            reject_overlapping_cache_dir(&current, &path)?;
             // 用户主动设置目录时执行严格校验：非空且无 marker → 拒绝
             ensure_cache_dir_safe(&path)?;
-            current.cache_dir = path.to_string_lossy().to_string();
+            // CACHE-03：旧目录里已下载的文件继续受管，不因换目录而被遗忘。
+            switch_cache_dir(&mut current, &path);
         }
     }
 
@@ -148,15 +176,33 @@ pub async fn clear_cache(app: AppHandle) -> IpcResult<CacheCleanupResult> {
 
 fn clear_cache_inner(app: &AppHandle) -> IpcResult<CacheCleanupResult> {
     let cleanup = operations::OPERATIONS.acquire_cleanup()?;
-    let settings = load_cache_settings(app)?;
+    let mut settings = load_cache_settings(app)?;
     let result = cleanup_cache_files(
         Path::new(&settings.cache_dir),
+        &previous_cache_dirs(&settings),
         &with_now_playing(&[]),
         CleanupMode::Clear,
         &cleanup,
     )?;
     mark_cleanup_result(app, &result)?;
+    // CACHE-03：清空之后已经没有文件的旧目录不必再记着。
+    forget_emptied_previous_dirs(app, &mut settings);
     Ok(result)
+}
+
+/// 把已经没有东西可管的旧缓存目录从设置里去掉。文件已经删完，保存失败只记日志，
+/// 不让清理因此报错；下次换目录或清理时还会再剔除一次。
+fn forget_emptied_previous_dirs(app: &AppHandle, settings: &mut CacheSettings) {
+    let before = settings.previous_dirs.len();
+    settings
+        .previous_dirs
+        .retain(|dir| previous_dir_still_relevant(Path::new(dir)));
+    if settings.previous_dirs.len() == before {
+        return;
+    }
+    if let Err(err) = save_cache_settings(app, settings) {
+        tracing::warn!("failed to save pruned previous cache dirs: {err}");
+    }
 }
 
 /// CACHE-02：最近一次起播的文件。清理（配额与手动）都保留它——走 ffmpeg 的曲目
@@ -245,14 +291,20 @@ fn enforce_cache_limit_with_lease(
     cleanup: &operations::CacheCleanupSlot<'_>,
 ) -> Result<CacheCleanupResult, String> {
     let settings = load_cache_settings(app)?;
+    let previous = previous_cache_dirs(&settings);
     let mode = if settings.auto_cleanup && settings.max_size_mb > 0 {
         CleanupMode::Quota(settings.max_size_mb.saturating_mul(1024 * 1024))
     } else {
         CleanupMode::Measure
     };
     sweep_orphan_temp_files(Path::new(&settings.cache_dir), cleanup)?;
+    for dir in &previous {
+        // 旧目录当前管不到（盘没接、标记没了）就跳过，不影响当前目录的清理
+        let _ = sweep_orphan_temp_files(dir, cleanup);
+    }
     let result = cleanup_cache_files(
         Path::new(&settings.cache_dir),
+        &previous,
         &with_now_playing(preserve_paths),
         mode,
         cleanup,
@@ -277,14 +329,27 @@ enum CleanupMode {
 }
 
 /// 与 AppHandle 无关的清理内核，使用隔离目录做回归；租约必须覆盖删除和曲库标记提交。
+///
+/// `primary` 是当前缓存目录，必须是受管目录，否则整体报错。`previous` 是 CACHE-03
+/// 的旧缓存目录：当前管不到的（盘没接、目录或标记不在了）直接跳过，其中的文件
+/// 既不计入用量也不删除。配额淘汰在所有目录的文件里统一按「最久未播放」排序。
 fn cleanup_cache_files(
-    path: &Path,
+    primary: &Path,
+    previous: &[PathBuf],
     preserve_paths: &[PathBuf],
     mode: CleanupMode,
     _cleanup: &operations::CacheCleanupSlot<'_>,
 ) -> Result<CacheCleanupResult, String> {
-    require_managed_cache_dir(path)?;
-    let mut entries = collect_cache_files(path)?;
+    require_managed_cache_dir(primary)?;
+    let mut entries = collect_cache_files(primary)?;
+    for dir in previous {
+        match scan_previous_cache_dir(dir) {
+            Ok(files) => entries.extend(files),
+            Err(reason) => {
+                tracing::debug!("previous cache dir {} skipped: {reason}", dir.display())
+            }
+        }
+    }
     let mut used_bytes = entries
         .iter()
         .fold(0_u64, |total, entry| total.saturating_add(entry.size));
@@ -498,6 +563,166 @@ fn normalized_path_key(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+/// 目录的比较键：规范化路径、统一分隔符与大小写、去掉末尾分隔符。
+/// 目录本身可能还不存在（刚选的新目录）——规范化最深的那个已存在的祖先，
+/// 再接上余下的部分；整条路径都解析不了（盘没接）时按原样比较。
+fn dir_key(path: &Path) -> String {
+    let mut base = path;
+    let mut tail = Vec::new();
+    let mut full = loop {
+        if let Ok(resolved) = base.canonicalize() {
+            break resolved;
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                base = parent;
+            }
+            _ => {
+                tail.clear();
+                break path.to_path_buf();
+            }
+        }
+    };
+    full.extend(tail.iter().rev());
+    let text = full.to_string_lossy().replace('/', "\\").to_lowercase();
+    text.strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// `child` 是否位于 `parent` 之内（两者都是 [`dir_key`]；相同不算）。
+fn dir_key_inside(child: &str, parent: &str) -> bool {
+    child.len() > parent.len()
+        && child.starts_with(parent)
+        && child.as_bytes()[parent.len()] == b'\\'
+}
+
+/// 两个目录是否重叠：同一个目录，或一个在另一个里面。
+/// 重叠的目录一起扫描时，同一个文件会被数两遍、删两遍。
+fn cache_dirs_overlap(a: &Path, b: &Path) -> bool {
+    let (a, b) = (dir_key(a), dir_key(b));
+    a == b || dir_key_inside(&a, &b) || dir_key_inside(&b, &a)
+}
+
+/// CACHE-03：实际参与统计与清理的旧缓存目录。
+///
+/// 与当前目录重叠、或与排在前面的条目重叠的一律跳过。正常的换目录流程不会
+/// 写出这样的清单（见 [`reject_overlapping_cache_dir`]），这里防的是手改过的
+/// 设置文件和「不安全目录退回默认目录」这类绕过它的路径。
+fn previous_cache_dirs(settings: &CacheSettings) -> Vec<PathBuf> {
+    let primary = Path::new(&settings.cache_dir);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in settings.previous_dirs.iter().take(MAX_PREVIOUS_CACHE_DIRS) {
+        let path = PathBuf::from(entry);
+        if cache_dirs_overlap(&path, primary)
+            || dirs.iter().any(|kept| cache_dirs_overlap(kept, &path))
+        {
+            continue;
+        }
+        dirs.push(path);
+    }
+    dirs
+}
+
+/// CACHE-03：读出一个旧缓存目录里的受管文件。目录当前管不到时返回原因——
+/// 调用方一律跳过它：不计入用量，更不删除其中的文件。校验与当前目录同一套
+/// （本机绝对路径、祖先链无链接、缓存标记是普通文件），不因为是旧目录而放宽。
+fn scan_previous_cache_dir(path: &Path) -> Result<Vec<CacheFile>, String> {
+    if cache_volume_unreachable(path) {
+        return Err("所在磁盘当前不可用，接回后继续计入用量与清理".into());
+    }
+    if require_managed_cache_dir(path).is_err() {
+        return Err(
+            "目录当前不受管理（已删除、缺少缓存标记或路径不安全），其中的文件不会被清理".into(),
+        );
+    }
+    collect_cache_files(path)
+}
+
+fn previous_dir_status(path: &Path) -> PreviousCacheDirStatus {
+    let (used_bytes, file_count, unavailable_reason) = match scan_previous_cache_dir(path) {
+        Ok(files) => (
+            files
+                .iter()
+                .fold(0_u64, |total, file| total.saturating_add(file.size)),
+            files.len(),
+            None,
+        ),
+        Err(reason) => (0, 0, Some(reason)),
+    };
+    PreviousCacheDirStatus {
+        path: path.to_string_lossy().to_string(),
+        used_bytes,
+        file_count,
+        unavailable_reason,
+    }
+}
+
+/// 旧缓存目录是否还要留在清单里。
+/// - 所在磁盘没接：留着，接回后继续管理；
+/// - 确定没有东西可管了（目录没了、标记没了、里面已经没有缓存文件）：剔除；
+/// - 卷在但一时读不了（权限、IO 错误）：留着，不因为一次读失败就忘掉它。
+fn previous_dir_still_relevant(path: &Path) -> bool {
+    if cache_volume_unreachable(path) {
+        return true;
+    }
+    let missing = |target: &Path| matches!(fs::symlink_metadata(target), Err(err) if err.kind() == std::io::ErrorKind::NotFound);
+    if missing(path) || missing(&path.join(CACHE_MARKER_FILE)) {
+        return false;
+    }
+    scan_previous_cache_dir(path).map_or(true, |files| !files.is_empty())
+}
+
+/// CACHE-03：新目录不能与当前或以前的缓存目录互相包含（换回以前用过的同一个
+/// 目录是允许的）。必须在 [`ensure_cache_dir_safe`] 之前调用。
+fn reject_overlapping_cache_dir(settings: &CacheSettings, new_dir: &Path) -> Result<(), String> {
+    let new_key = dir_key(new_dir);
+    let known = std::iter::once(settings.cache_dir.as_str())
+        .chain(settings.previous_dirs.iter().map(String::as_str));
+    for existing in known {
+        let key = dir_key(Path::new(existing));
+        if dir_key_inside(&new_key, &key) || dir_key_inside(&key, &new_key) {
+            return Err(format!(
+                "新的缓存目录不能位于已有缓存目录 {existing} 之内，也不能包含它；请另选一个互不包含的目录"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CACHE-03：把缓存目录换成 `new_dir`。原目录记进 `previous_dirs`（换回以前
+/// 用过的目录则把它移出清单），并顺手剔除已经没有文件可管的条目。
+/// 只是同一个目录换了写法时，仅更新写法。
+fn switch_cache_dir(settings: &mut CacheSettings, new_dir: &Path) {
+    let new_key = dir_key(new_dir);
+    let old_dir = std::mem::replace(
+        &mut settings.cache_dir,
+        new_dir.to_string_lossy().to_string(),
+    );
+    if dir_key(Path::new(&old_dir)) == new_key {
+        return;
+    }
+    let mut previous = std::mem::take(&mut settings.previous_dirs);
+    previous.push(old_dir);
+    let mut seen = HashSet::new();
+    previous.retain(|entry| {
+        let path = Path::new(entry);
+        let key = dir_key(path);
+        key != new_key && seen.insert(key) && previous_dir_still_relevant(path)
+    });
+    if previous.len() > MAX_PREVIOUS_CACHE_DIRS {
+        let excess = previous.len() - MAX_PREVIOUS_CACHE_DIRS;
+        for dropped in previous.drain(..excess) {
+            tracing::warn!(
+                "previous cache dir {dropped} is no longer managed: more than {MAX_PREVIOUS_CACHE_DIRS} retired cache directories"
+            );
+        }
+    }
+    settings.previous_dirs = previous;
+}
+
 fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
     let saved = read_saved_cache_settings(app)?;
     if let SavedDirState::Unreachable(reason) = saved_dir_state(Path::new(&saved.cache_dir)) {
@@ -510,6 +735,7 @@ fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
             usage_percent: 0.0,
             file_count: 0,
             unavailable_reason: Some(reason),
+            previous_dirs: Vec::new(),
         });
     }
     let settings = load_cache_settings(app)?;
@@ -520,7 +746,19 @@ fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
         let _ = sweep_orphan_temp_files(&cache_dir, &cleanup);
     }
     let entries = collect_cache_files(&cache_dir)?;
-    let used_bytes = entries.iter().map(|entry| entry.size).sum::<u64>();
+    let mut used_bytes = entries
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.size));
+    let mut file_count = entries.len();
+    // CACHE-03：旧缓存目录里的文件仍被曲库引用、占着磁盘，一并计入。
+    let previous_dirs = previous_cache_dirs(&settings)
+        .iter()
+        .map(|dir| previous_dir_status(dir))
+        .collect::<Vec<_>>();
+    for dir in &previous_dirs {
+        used_bytes = used_bytes.saturating_add(dir.used_bytes);
+        file_count += dir.file_count;
+    }
     let max_bytes = settings.max_size_mb.saturating_mul(1024 * 1024);
     let usage_percent = if max_bytes == 0 {
         0.0
@@ -534,8 +772,9 @@ fn cache_status(app: &AppHandle) -> Result<CacheStatus, String> {
         used_mb: used_bytes as f64 / 1024.0 / 1024.0,
         max_bytes,
         usage_percent,
-        file_count: entries.len(),
+        file_count,
         unavailable_reason: None,
+        previous_dirs,
     })
 }
 
@@ -588,6 +827,12 @@ fn load_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
                 settings.cache_dir
             );
             settings.cache_dir = default_cache_dir(app)?.to_string_lossy().to_string();
+            // CACHE-03：默认目录若曾作为旧目录记着，现在它是当前目录了，不再重复登记。
+            // 被判为不安全的原目录不记进旧目录清单——它本来就不该由我们清理。
+            let default_key = dir_key(Path::new(&settings.cache_dir));
+            settings
+                .previous_dirs
+                .retain(|dir| dir_key(Path::new(dir)) != default_key);
             save_cache_settings(app, &settings)?;
         }
     }
@@ -684,6 +929,7 @@ fn default_cache_settings(app: &AppHandle) -> Result<CacheSettings, String> {
         cache_dir: default_cache_dir(app)?.to_string_lossy().to_string(),
         max_size_mb: DEFAULT_MAX_SIZE_MB,
         auto_cleanup: true,
+        previous_dirs: Vec::new(),
     })
 }
 
@@ -966,6 +1212,7 @@ fn sweep_orphan_temp_files(
     Ok(())
 }
 
+#[derive(Debug)]
 struct CacheFile {
     path: PathBuf,
     size: u64,
