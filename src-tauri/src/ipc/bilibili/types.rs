@@ -151,6 +151,8 @@ pub struct BilibiliVideoInfo {
     /// 输入里指定的分 P（`?p=N`）；没有指定为 null
     pub(crate) requested_page: Option<u32>,
     pub(crate) pages: Vec<BilibiliVideoPageInfo>,
+    /// 一次全量导入最多多少个分 P；分 P 数超过它时全量导入会被拒绝，前端据此提前说明
+    pub(crate) full_import_limit: usize,
 }
 
 #[derive(Debug, Serialize)]

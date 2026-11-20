@@ -146,6 +146,40 @@ describe("流媒体页 · 多 P 视频导入（BILI-05）", () => {
     );
   });
 
+  it("分 P 数超过全量导入上限：全量导入不可选并说明原因，默认落在首 P", async () => {
+    usePlayerStore.setState({ bilibiliMultiPageMode: "all" });
+    actions.probeBilibiliVideo.mockResolvedValue({ ...videoInfo(6), fullImportLimit: 5 });
+    render(<StreamingPage />);
+    submitSingle(BVID);
+
+    const dialog = await screen.findByRole("dialog", { name: "这个视频有 6 个分 P" });
+    const all = within(dialog).getByRole("radio", { name: /全量导入/ });
+    expect(all).toBeDisabled();
+    expect(all).not.toBeChecked();
+    expect(within(dialog).getByRole("radio", { name: /仅导入首 P/ })).toBeChecked();
+    expect(dialog).toHaveTextContent("分 P 超过 5 个，不支持一次全量导入");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "导入" }));
+    await waitFor(() =>
+      expect(actions.importBilibiliAudio).toHaveBeenCalledWith(
+        BVID,
+        expect.objectContaining({ multiPage: "first" })
+      )
+    );
+  });
+
+  it("分 P 数刚好等于上限时仍可全量导入", async () => {
+    usePlayerStore.setState({ bilibiliMultiPageMode: "all" });
+    actions.probeBilibiliVideo.mockResolvedValue({ ...videoInfo(5), fullImportLimit: 5 });
+    render(<StreamingPage />);
+    submitSingle(BVID);
+
+    const dialog = await screen.findByRole("dialog");
+    const all = within(dialog).getByRole("radio", { name: /全量导入/ });
+    expect(all).toBeEnabled();
+    expect(all).toBeChecked();
+  });
+
   it("在弹窗里取消：不导入，输入框内容保留", async () => {
     actions.probeBilibiliVideo.mockResolvedValue(videoInfo(3));
     render(<StreamingPage />);

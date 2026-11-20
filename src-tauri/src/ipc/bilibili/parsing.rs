@@ -18,8 +18,8 @@ pub(crate) fn extract_bvid(input: &str) -> Option<String> {
 }
 
 /// BILI-05：输入里指定的分 P 序号（从 1 起）。认两种写法：
-/// 链接查询参数 `p=N`（`…/video/BV…?p=3`、`BV…?p=3`），以及曲库来源 ID 的 `BV…-pN`。
-/// 没有指定、不是正整数都返回 None。
+/// 链接查询参数 `p=N`（`…/video/BV…?p=3`、`BV…?p=3`），以及曲库来源 ID 的 `BV…-pN`
+/// （单独出现，或接在链接里的 BV 号后面）。没有指定、不是正整数都返回 None。
 pub(crate) fn extract_page_number(input: &str) -> Option<u32> {
     fn positive(digits: &str) -> Option<u32> {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -42,12 +42,16 @@ pub(crate) fn extract_page_number(input: &str) -> Option<u32> {
             .and_then(|(_, value)| positive(value));
     }
 
-    let (head, digits) = trimmed
-        .rsplit_once("-p")
-        .or_else(|| trimmed.rsplit_once("-P"))?;
-    if extract_bvid(head).as_deref() != Some(head) {
-        return None;
-    }
+    // 来源 ID 写法：BV 号后面紧跟 `-pN`，N 到这一段结束为止都是数字
+    let bvid = extract_bvid(trimmed)?;
+    let after = &trimmed[trimmed.find(bvid.as_str())? + bvid.len()..];
+    let suffix = after
+        .strip_prefix("-p")
+        .or_else(|| after.strip_prefix("-P"))?;
+    let digits = suffix
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or_default();
     positive(digits)
 }
 

@@ -50,9 +50,10 @@ pub(crate) async fn bilibili_video_info_inner_cmd(
 /// BILI-05：按视频导入。输入指定了分 P 就导入那一 P；没有指定的多 P 视频按
 /// `options.multi_page` 导入首 P 或全部。
 ///
-/// 只出一首时与此前的单曲导入一样：不占批量槽位，失败直接作为错误返回。
-/// 出多首时占批量槽位（与收藏夹导入互斥、可用同一个取消命令中断），逐 P 推进度，
-/// 个别分 P 失败记进 `failed`，不影响其余分 P。
+/// `multi_page` 为 `All` 时这是一次批量：**一开始**就占批量槽位（与收藏夹导入互斥、
+/// 可用同一个取消命令中断）、逐 P 推进度，个别分 P 失败记进 `failed`、不影响其余分 P。
+/// 否则与此前的单曲导入一样，不占批量槽位、没有进度事件。
+/// 只选出一首而它失败时，失败原因直接作为错误返回。
 pub(crate) async fn import_bilibili_video_inner_cmd(
     app: AppHandle,
     input: String,
@@ -60,21 +61,39 @@ pub(crate) async fn import_bilibili_video_inner_cmd(
     task_id: Option<String>,
 ) -> Result<BilibiliBatchImportResult, String> {
     let options = options.unwrap_or_default();
-    let client = bilibili_client_for_app(&app).await?;
-    let target = resolve_video_ref(&input).await?;
-    let video = fetch_video_data(&client, &target.bvid).await?;
-    let pages = select_pages(&video, target.page, options.multi_page.unwrap_or_default())?;
-    let total = pages.len();
-    let single = total == 1;
-    let task = if single {
-        None
-    } else {
-        Some(BatchImportGuard::start(task_id)?)
-    };
+    // 槽位要在取视频信息之前占：前端从发起那一刻起就显示「取消」，
+    // 等知道有几个分 P 再占，这段时间里的取消会落空。
+    let task = (options.multi_page == Some(MultiPageMode::All))
+        .then(|| BatchImportGuard::start(task_id))
+        .transpose()?;
+    let batch = task.is_some();
     let cancellation = task.as_ref().map(|task| task.0.clone()).unwrap_or_default();
-    let operation: SourceOperation = Arc::new(acquire_audio_operation(&target.bvid)?);
+
+    let client = bilibili_client_for_app(&app).await?;
+    let prepared = async {
+        let target = cancellation.run(resolve_video_ref(&input)).await?;
+        let video = cancellation
+            .run(fetch_video_data(&client, &target.bvid))
+            .await?;
+        let pages = select_pages(&video, target.page, options.multi_page.unwrap_or_default())?;
+        let operation: SourceOperation = Arc::new(acquire_audio_operation(&target.bvid)?);
+        Ok::<_, String>((target, video, pages, operation))
+    }
+    .await;
+    let (target, video, pages, operation) = match prepared {
+        Ok(prepared) => prepared,
+        Err(_) if cancellation.is_cancelled() => {
+            return Ok(BilibiliBatchImportResult {
+                tracks: Vec::new(),
+                failed: Vec::new(),
+                cancelled: true,
+            })
+        }
+        Err(error) => return Err(error),
+    };
+    let total = pages.len();
     let emit_progress = |current: usize, title: &str, ok: bool| {
-        if single {
+        if !batch {
             return;
         }
         let _ = app.emit(
@@ -110,7 +129,7 @@ pub(crate) async fn import_bilibili_video_inner_cmd(
     .await;
     drop(operation);
     let (tracks, mut failed) = run.finish(&app).await;
-    if single && tracks.is_empty() {
+    if total == 1 && tracks.is_empty() && !cancelled {
         if let Some(failure) = failed.pop() {
             return Err(failure.reason);
         }

@@ -63,12 +63,20 @@ export function useCacheSettingsForm(open: boolean) {
   const [autoCleanup, setAutoCleanup] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  /** 用后端返回的状态覆盖表单（读取、保存成功之后） */
-  const adopt = useCallback((next: CacheStatus) => {
+  /**
+   * 用后端返回的状态覆盖表单（读取、保存成功之后）。返回是否采纳。
+   *
+   * 没有后端的纯浏览器调试（`npm run dev`）里 `invoke` 的桩返回 undefined。不能把它存成
+   * 状态：「还没读到」只有 null 一种写法，存进 undefined 会让下面的 `dirty` 在渲染时读
+   * `status.settings`，整个界面掉进错误边界。
+   */
+  const adopt = useCallback((next: CacheStatus | null | undefined) => {
+    if (!next?.settings) return false;
     setStatus(next);
     setCacheDir(next.settings.cacheDir);
     setMaxSizeMb(String(next.settings.maxSizeMb));
     setAutoCleanup(next.settings.autoCleanup);
+    return true;
   }, []);
 
   const refresh = useCallback(async () => {
@@ -103,7 +111,7 @@ export function useCacheSettingsForm(open: boolean) {
 
     setBusy(true);
     try {
-      adopt(
+      const adopted = adopt(
         await invoke<CacheStatus>("update_cache_settings", {
           settings: {
             cacheDir,
@@ -112,6 +120,11 @@ export function useCacheSettingsForm(open: boolean) {
           },
         })
       );
+      if (!adopted) {
+        // 没拿到保存后的状态，就不能说「已保存」
+        showNotification("保存缓存设置失败：没有收到保存后的缓存状态", "error");
+        return false;
+      }
       showNotification("缓存设置已保存");
       return true;
     } catch (err) {

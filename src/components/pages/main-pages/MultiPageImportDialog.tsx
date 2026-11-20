@@ -27,21 +27,31 @@ export function MultiPageImportDialog({
   onConfirm: (mode: BilibiliMultiPageMode) => void;
   onCancel: () => void;
 }) {
-  const [mode, setMode] = useState<BilibiliMultiPageMode>(defaultMode);
   const count = info.pages.length;
+  // 分 P 太多时后端不接受一次全量导入：在这里就说明，而不是选了才报错。
+  const limit = info.fullImportLimit;
+  const overLimit = typeof limit === "number" && count > limit;
+  const [mode, setMode] = useState<BilibiliMultiPageMode>(overLimit ? "first" : defaultMode);
   const preview = info.pages.slice(0, PREVIEW_PAGES);
-  const firstTitle = info.pages[0]?.title.trim();
 
-  const options: { value: BilibiliMultiPageMode; label: string; hint: string }[] = [
+  const options: {
+    value: BilibiliMultiPageMode;
+    label: string;
+    hint: string;
+    disabled?: boolean;
+  }[] = [
     {
       value: "first",
       label: "仅导入首 P",
-      hint: firstTitle ? `只导入第 1 P「${firstTitle}」，按视频标题入库。` : "只导入第 1 P，按视频标题入库。",
+      hint: "只导入第 1 P，曲名用视频标题。",
     },
     {
       value: "all",
       label: "全量导入",
-      hint: `导入全部 ${count} 个分 P：每个分 P 一首，曲名用分 P 标题，专辑名用视频标题。`,
+      hint: overLimit
+        ? `分 P 超过 ${limit} 个，不支持一次全量导入；请用带 ?p= 的链接逐个导入。`
+        : `导入全部 ${count} 个分 P：每个分 P 一首，曲名用分 P 标题，专辑名用视频标题。`,
+      disabled: overLimit,
     },
   ];
 
@@ -73,8 +83,12 @@ export function MultiPageImportDialog({
           <label
             key={option.value}
             className={
-              (mode === option.value ? "border-ink" : "border-line hover:border-ink") +
-              " flex cursor-pointer items-start gap-2 border-[1.5px] bg-card p-2.5 transition-colors"
+              (option.disabled
+                ? "cursor-not-allowed border-line opacity-60"
+                : mode === option.value
+                  ? "cursor-pointer border-ink"
+                  : "cursor-pointer border-line hover:border-ink") +
+              " flex items-start gap-2 border-[1.5px] bg-card p-2.5 transition-colors"
             }
           >
             <input
@@ -82,6 +96,7 @@ export function MultiPageImportDialog({
               name="bilibili-multi-page"
               value={option.value}
               checked={mode === option.value}
+              disabled={option.disabled}
               onChange={() => setMode(option.value)}
               className="mt-0.5 h-3.5 w-3.5 accent-ink"
             />

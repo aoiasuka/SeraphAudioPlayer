@@ -179,6 +179,7 @@ pub(crate) fn video_info(video: &VideoData, requested_page: Option<u32>) -> Bili
         bvid: video.bvid.clone(),
         title: video.title.clone(),
         requested_page,
+        full_import_limit: MAX_VIDEO_PAGES_PER_IMPORT,
         pages: video_pages(video)
             .into_iter()
             .map(|page| BilibiliVideoPageInfo {
@@ -234,6 +235,13 @@ mod tests {
             // 曲库里的来源 ID 形式
             ("BV1xx411c7mD-p7", Some(7)),
             (" bv1xx411c7md-p7 ", Some(7)),
+            // 旧记录没有来源链接时，前后端都会用来源 ID 拼一个：分 P 不能因此丢掉
+            ("https://www.bilibili.com/video/BV1xx411c7mD-p7", Some(7)),
+            ("https://www.bilibili.com/video/bv1xx411c7md-p7/", Some(7)),
+            ("BV1xx411c7mD-P7", Some(7)),
+            ("BV1xx411c7mD-p0", None),
+            // 缓存文件名里 BV 号后面是 cid，不是分 P
+            ("D:/cache/BV1xx411c7mD-102.m4a", None),
             // 没有指定
             ("https://www.bilibili.com/video/BV1xx411c7mD", None),
             ("BV1xx411c7mD", None),
@@ -547,6 +555,7 @@ mod tests {
                 "bvid": BVID,
                 "title": "合集标题",
                 "requestedPage": 2,
+                "fullImportLimit": MAX_VIDEO_PAGES_PER_IMPORT,
                 "pages": [
                     { "page": 1, "title": "第一首", "duration": 180 },
                     { "page": 2, "title": "第二首", "duration": 200 },

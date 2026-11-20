@@ -63,6 +63,8 @@ export interface BilibiliVideoInfo {
   /** 链接里指定的分 P（`?p=N`）；没有指定为 null */
   requestedPage?: number | null;
   pages: BilibiliVideoPageInfo[];
+  /** 一次全量导入最多多少个分 P；分 P 数超过它时后端会拒绝全量导入 */
+  fullImportLimit?: number;
 }
 
 export interface BilibiliVideoPageInfo {

@@ -181,6 +181,40 @@ describe("设置页（issues-2）", () => {
     expect(screen.getByRole("button", { name: "保存并关闭" })).toBeInTheDocument();
   });
 
+  it("后端没有返回缓存状态时不崩溃：缓存页停在读取中，其他标签页照常可用", async () => {
+    // 纯浏览器调试（npm run dev）没有后端，invoke 的桩一律返回 undefined。
+    // 此前把 undefined 存成了状态，渲染时读 status.settings 直接掉进错误边界。
+    bridge.invoke.mockImplementation(async () => undefined);
+    render(<SettingsModal />);
+    await waitFor(() =>
+      expect(bridge.invoke).toHaveBeenCalledWith("get_cache_status", undefined)
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "缓存管理" }));
+    expect(await screen.findByText("正在读取缓存状态")).toBeInTheDocument();
+    // 没读到状态就谈不上「有未保存改动」
+    expect(screen.getByRole("button", { name: "完成" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "流媒体" }));
+    expect(
+      screen.getByRole("radiogroup", { name: "无特定分 P 时的默认导入范围" })
+    ).toBeInTheDocument();
+  });
+
+  it("保存后没有收到新的缓存状态时不报「已保存」，弹窗留着", async () => {
+    bridge.invoke.mockImplementation(async (command) =>
+      command === "get_cache_status" ? status() : undefined
+    );
+    await openCacheTab();
+    fireEvent.change(screen.getByDisplayValue("5120"), { target: { value: "4096" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并关闭" }));
+    await waitFor(() => {
+      const notification = usePlayerStore.getState().notification;
+      expect(notification?.text).toBe("保存缓存设置失败：没有收到保存后的缓存状态");
+      expect(notification?.level).toBe("error");
+    });
+    expect(usePlayerStore.getState().settingsOpen).toBe(true);
+    expect(screen.getByDisplayValue("4096")).toBeInTheDocument();
+  });
+
   it("CACHE-03：旧缓存目录列出各自的用量，管不到的显示原因；合计仍按后端给的总数", async () => {
     bridge.invoke.mockImplementation(async (command) =>
       command === "get_cache_status"
