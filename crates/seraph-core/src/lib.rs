@@ -5,6 +5,7 @@
 
 pub mod bus;
 pub mod event;
+pub mod stable_hash;
 pub mod state;
 pub mod types;
 

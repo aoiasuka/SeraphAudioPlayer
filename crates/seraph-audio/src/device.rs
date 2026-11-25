@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
 use crate::backend::{BackendError, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -292,9 +291,8 @@ fn legacy_hashed_device_id_with_occurrence(name: &str, occurrence: usize) -> Str
 
 fn legacy_hashed_device_id_for(name: &str) -> String {
     let sanitized = sanitize_device_id(name);
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
-    let hash = hasher.finish();
+    // LIB-01：旧版本把这个 ID 存进了前端设置，算法必须固定才能继续认出来
+    let hash = seraph_core::stable_hash::hash_str(name);
     format!("cpal:{hash:016x}:{sanitized}")
 }
 
@@ -348,6 +346,8 @@ mod tests {
         );
         assert!(id_a.starts_with("cpal:"));
         assert!(id_a.ends_with(":usb-dac-wasapi"));
+        // LIB-01：旧设置里存的就是这个值，哈希算法变了它也不能变
+        assert_eq!(id_a, "cpal:a6c87d21c470e6a0:usb-dac-wasapi");
         assert_eq!(
             legacy_hashed_device_id_with_occurrence("USB DAC (WASAPI)", 1),
             format!("{id_a}-1")

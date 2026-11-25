@@ -3,9 +3,8 @@
 //! 子模块统一 `use super::prelude::*;`，跨模块共享的顶层项标 `pub(crate)`。
 
 pub(crate) use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap},
+    collections::BTreeMap,
     fs,
-    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},

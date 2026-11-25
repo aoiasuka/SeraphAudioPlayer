@@ -690,6 +690,41 @@ fn trusts_riff_magic_over_dsf_extension() {
 }
 
 #[test]
+fn local_track_ids_are_pinned() {
+    // LIB-01：本地曲目 ID 是「路径 ASCII 小写」的稳定哈希。收藏、歌单、歌词都按它关联，
+    // 这里的值变了就等于所有用户的本地曲目一次全部换了身份。
+    assert_eq!(
+        local_track_id(r"D:\Music\Song.flac"),
+        "local-ee633971b3d09441"
+    );
+    assert_eq!(
+        local_track_id(r"d:\music\song.flac"),
+        local_track_id(r"D:\MUSIC\SONG.FLAC"),
+        "只做 ASCII 小写"
+    );
+    assert_ne!(
+        local_track_id(r"D:\Music\Ä.flac"),
+        local_track_id(r"D:\Music\ä.flac"),
+        "非 ASCII 字母不折叠大小写（与历史行为一致）"
+    );
+
+    // 导入路径算出来的就是这个 ID
+    let dir = TestLibraryDir::new();
+    let path = dir.0.join("Pinned.dsf");
+    write_test_dsf(&path);
+    let track = track_from_path(&path, None).unwrap();
+    assert_eq!(track.id, local_track_id(&path.to_string_lossy()));
+
+    // 封面文件名是内容的稳定哈希
+    let art = CoverArt {
+        data: b"\x89PNG\r\n\x1a\n".to_vec(),
+        ext: "png",
+    };
+    let saved = save_cover_art(&dir.0.join("covers"), &art).unwrap();
+    assert!(saved.ends_with("86b322c8dde2bcc0.png"), "{saved}");
+}
+
+#[test]
 fn known_non_audio_extensions_are_skipped_without_sniffing() {
     // LIB-03：内容故意写成 FLAC 文件头——如果还去打开嗅探，就会被认成音频。
     let dir = TestLibraryDir::new();

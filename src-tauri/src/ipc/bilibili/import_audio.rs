@@ -823,9 +823,8 @@ pub(crate) fn track_from_resolved_audio(
     let (video, page) = (resolved.video, resolved.page);
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed to read cached audio metadata: {err}"))?;
-    let mut hasher = DefaultHasher::new();
-    format!("{}:{}", video.bvid, page.cid).hash(&mut hasher);
-    let hash = hasher.finish();
+    // 只用来挑配色；与本地曲目一样用算法固定的哈希，重新缓存后配色不变（LIB-01）
+    let hash = seraph_core::stable_hash::hash_str(&format!("{}:{}", video.bvid, page.cid));
     let bitrate = resolved.stream.bandwidth.map(|value| value / 1000);
     let (glow1, glow2) = color_pair(hash);
     let format = resolved.stream.format_label().to_string();

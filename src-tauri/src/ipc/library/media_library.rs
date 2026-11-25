@@ -650,6 +650,20 @@ pub(crate) fn track_from_path(
     track_from_path_with_lyrics(path, covers_dir, external_lrc_lyrics(path))
 }
 
+/// 本地曲目 ID 里的那段哈希：文件路径（ASCII 小写）的稳定哈希，同时决定配色。
+///
+/// LIB-01：算法固定在 `seraph_core::stable_hash`（与此前的 `DefaultHasher` 逐位相同，
+/// 已有曲库的 ID 不变）。收藏、歌单、歌词都按这个 ID 关联，**别换算法、别改小写规则**——
+/// 回归闸是 `local_track_ids_are_pinned`。
+pub(crate) fn local_track_hash(path: &str) -> u64 {
+    seraph_core::stable_hash::hash_str(&path.to_ascii_lowercase())
+}
+
+/// 本地曲目的 ID：`local-` 加 16 位十六进制的 [`local_track_hash`]。
+pub(crate) fn local_track_id(path: &str) -> String {
+    format!("local-{:016x}", local_track_hash(path))
+}
+
 /// `sidecar_lyrics` 是调用方已经找好并读出的同名歌词文件（没有就是 `None`）。批量导入经
 /// [`SidecarLyricsIndex`] 查找，每个目录只枚举一次（LIB-02）；单首走 [`track_from_path`]。
 fn track_from_path_with_lyrics(
@@ -660,9 +674,7 @@ fn track_from_path_with_lyrics(
     let metadata = fs::metadata(path)
         .map_err(|err| format!("failed to read file metadata {}: {err}", path.display()))?;
     let path_string = path.to_string_lossy().to_string();
-    let mut hasher = DefaultHasher::new();
-    path_string.to_ascii_lowercase().hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = local_track_hash(&path_string);
     // L-2: 一次性探测 magic（带最多 64 字节读取），后续 format/is_dsd 沿用结果。
     let magic_format = audio_format_from_magic(path);
     let ext_format = path
@@ -705,7 +717,7 @@ fn track_from_path_with_lyrics(
         .unwrap_or_default();
 
     Ok(ImportedTrack {
-        id: format!("local-{hash:016x}"),
+        id: local_track_id(&path_string),
         title,
         artist,
         album,
@@ -870,9 +882,8 @@ pub(crate) fn save_cover_art(covers_dir: &Path, art: &CoverArt) -> Option<String
     if art.data.is_empty() || art.data.len() > MAX_EMBEDDED_COVER_BYTES {
         return None;
     }
-    let mut hasher = DefaultHasher::new();
-    art.data.hash(&mut hasher);
-    let content_hash = hasher.finish();
+    // LIB-01：文件名是内容的稳定哈希（算法固定，换工具链不会让已有封面变成孤儿）
+    let content_hash = seraph_core::stable_hash::hash_bytes(&art.data);
     let target = covers_dir.join(format!("{content_hash:016x}.{}", art.ext));
 
     if !target.is_file() {
