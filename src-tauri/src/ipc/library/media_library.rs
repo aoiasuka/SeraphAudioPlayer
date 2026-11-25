@@ -1,8 +1,8 @@
 use super::prelude::*;
 use super::snapshot::LibrarySnapshot;
-use super::storage::LibraryStorage;
 #[cfg(test)]
 pub(crate) use super::storage::{backup_corrupt_file, write_json_atomic};
+use super::storage::{LibraryStorage, LoadFailureMemo};
 use std::sync::Arc;
 
 pub(crate) const MAX_IMPORT_RECURSION_DEPTH: usize = 64;
@@ -16,6 +16,10 @@ pub(crate) static LIBRARY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new
 /// 读侧只在取 Arc 时持锁；单曲查询通过快照索引定位，不复制其他曲目和歌词。
 static LIBRARY_MEMORY: parking_lot::RwLock<Option<Arc<LibrarySnapshot>>> =
     parking_lot::RwLock::new(None);
+
+/// STO-01：曲库无法恢复时内存快照一直是空的，每条命令都会走到冷读。
+/// 存储文件没变就复用上一次的失败结果，不再重读磁盘（见 `storage::LoadFailureMemo`）。
+static LIBRARY_LOAD_FAILURE: LoadFailureMemo = LoadFailureMemo::new();
 
 pub(crate) fn collect_audio_files(
     path: PathBuf,
@@ -110,7 +114,8 @@ fn read_library_snapshot_for_update(app: &AppHandle) -> Result<Arc<LibrarySnapsh
 /// 主文件不存在视为空库；损坏则返回错误（读命令降级处理）。
 fn load_tracks_from_disk(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> {
     let path = library_cache_path(app)?;
-    let tracks = LibraryStorage::new(path.parent().expect("library cache has parent")).load()?;
+    let storage = LibraryStorage::new(path.parent().expect("library cache has parent"));
+    let tracks = LIBRARY_LOAD_FAILURE.load(&storage)?;
     Ok(tracks.into_iter().map(enrich_cached_track).collect())
 }
 

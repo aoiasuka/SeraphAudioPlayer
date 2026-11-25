@@ -294,6 +294,165 @@ fn snapshot_cleanup_only_removes_owned_unreferenced_generations() {
     );
 }
 
+/// 目录里的 `.corrupt` 现场文件名（排序后）。
+fn corrupt_backups(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".corrupt"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn repeated_loads_of_an_unrecoverable_library_do_not_pile_up_backups() {
+    // STO-01：当前一代和上一代都坏掉时没有可恢复的版本，内存快照一直是空的，
+    // 之后每条曲库命令都会重走一遍冷读。此前每次冷读都把坏文件再复制一份。
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let old = vec![test_imported_track("a", "C:/a.flac", "old")];
+    storage.save(&old, None).unwrap();
+    let mut updated = old.clone();
+    updated[0].title = "new".into();
+    storage.save(&updated, Some(&old)).unwrap();
+    let snapshots = dir.0.join("library-snapshots");
+    let mut broken = 0;
+    for entry in fs::read_dir(&snapshots).unwrap().flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with("-tracks.json")
+        {
+            fs::write(entry.path(), b"{broken").unwrap();
+            broken += 1;
+        }
+    }
+    assert_eq!(broken, 2, "两代各有一份元数据文件");
+
+    assert!(dir.storage().load().is_err());
+    let after_first = (corrupt_backups(&dir.0), corrupt_backups(&snapshots));
+    assert_eq!(after_first.1.len(), 2, "两个坏文件各留一份现场");
+    for _ in 0..5 {
+        assert!(dir.storage().load().is_err());
+    }
+    assert_eq!(
+        (corrupt_backups(&dir.0), corrupt_backups(&snapshots)),
+        after_first,
+        "同一份坏内容不能每读一次就再备份一次"
+    );
+}
+
+#[test]
+fn corrupt_backups_are_capped_per_directory_and_keep_the_newest() {
+    use super::storage::MAX_CORRUPT_BACKUPS_PER_DIR;
+    // STO-01：反复出现不同的坏内容时，现场数量也要有上限；不是本模块生成的 .corrupt 不动。
+    let dir = TestLibraryDir::new();
+    let manifest = dir.0.join("library-snapshot.json");
+    let foreign = [
+        "bilibili-session.json.corrupt",
+        "library-snapshot.json.corrupt",
+        "notes.txt.1-2-3.corrupt",
+    ];
+    for name in foreign {
+        fs::write(dir.0.join(name), b"keep").unwrap();
+    }
+    let rounds = MAX_CORRUPT_BACKUPS_PER_DIR + 4;
+    for round in 0..rounds {
+        fs::write(&manifest, format!("{{broken {round}")).unwrap();
+        assert!(dir.storage().load().is_err());
+    }
+    let owned: Vec<Vec<u8>> = corrupt_backups(&dir.0)
+        .into_iter()
+        .filter(|name| !foreign.contains(&name.as_str()))
+        .map(|name| fs::read(dir.0.join(name)).unwrap())
+        .collect();
+    assert_eq!(owned.len(), MAX_CORRUPT_BACKUPS_PER_DIR);
+    let newest = format!("{{broken {}", rounds - 1).into_bytes();
+    assert!(owned.contains(&newest), "最近一次的现场必须留着");
+    assert!(
+        !owned.contains(&b"{broken 0".to_vec()),
+        "超出上限时淘汰最早的"
+    );
+    for name in foreign {
+        assert_eq!(fs::read(dir.0.join(name)).unwrap(), b"keep");
+    }
+}
+
+#[test]
+fn load_failure_is_remembered_until_the_storage_files_change() {
+    use super::storage::LoadFailureMemo;
+    // STO-01：存储文件没变就不再重读磁盘；用户换回好文件后下一次照常读取。
+    let dir = TestLibraryDir::new();
+    let manifest = dir.0.join("library-snapshot.json");
+    fs::write(&manifest, b"{ broken").unwrap();
+    let memo = LoadFailureMemo::new();
+    let first = memo.load(&dir.storage()).unwrap_err();
+    assert_eq!(corrupt_backups(&dir.0).len(), 1);
+    // 把现场删掉：如果第二次真的重读了磁盘，就会再备份出一份
+    for name in corrupt_backups(&dir.0) {
+        fs::remove_file(dir.0.join(name)).unwrap();
+    }
+    let second = memo.load(&dir.storage()).unwrap_err();
+    assert_eq!(second, first);
+    assert!(
+        corrupt_backups(&dir.0).is_empty(),
+        "存储文件没变时不应再碰磁盘"
+    );
+    let ipc: crate::ipc::error::IpcError = second.into();
+    assert_eq!(ipc.code, crate::ipc::error::IpcErrorCode::CacheCorrupt);
+
+    // 换回一份好的曲库（另一个目录里正常提交出来的清单与数据文件）
+    let good = TestLibraryDir::new();
+    let tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
+    good.storage().save(&tracks, None).unwrap();
+    fs::create_dir_all(dir.0.join("library-snapshots")).unwrap();
+    for entry in fs::read_dir(good.0.join("library-snapshots"))
+        .unwrap()
+        .flatten()
+    {
+        fs::copy(
+            entry.path(),
+            dir.0.join("library-snapshots").join(entry.file_name()),
+        )
+        .unwrap();
+    }
+    fs::copy(good.0.join("library-snapshot.json"), &manifest).unwrap();
+    assert_eq!(memo.load(&dir.storage()).unwrap(), tracks);
+}
+
+#[cfg(windows)]
+#[test]
+fn transient_read_failure_is_not_remembered() {
+    use super::storage::LoadFailureMemo;
+    use std::os::windows::fs::OpenOptionsExt;
+    // STO-01：只记「文件不变就必然再失败」的那类错误。清单被别的进程（同步盘、备份软件）
+    // 独占打开的那一瞬间读不出来，文件本身没变——放开之后必须立刻恢复，不能判死到重启。
+    let dir = TestLibraryDir::new();
+    let tracks = vec![test_imported_track("a", "C:/a.flac", "A")];
+    dir.storage().save(&tracks, None).unwrap();
+    let memo = LoadFailureMemo::new();
+    let locked = {
+        let _exclusive = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.0.join("library-snapshot.json"))
+            .unwrap();
+        assert!(memo.load(&dir.storage()).is_err());
+        dir.storage().fingerprint()
+    };
+    assert_eq!(
+        locked,
+        dir.storage().fingerprint(),
+        "前后指纹相同，这条测试才是在考「瞬时失败不被记住」"
+    );
+    assert_eq!(memo.load(&dir.storage()).unwrap(), tracks);
+}
+
 #[test]
 fn library_snapshot_keeps_first_duplicate_and_replaces_index_with_contents() {
     use super::snapshot::LibrarySnapshot;

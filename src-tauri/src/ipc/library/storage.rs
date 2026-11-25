@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,6 +15,12 @@ use std::{
 const MANIFEST: &str = "library-snapshot.json";
 const PREVIOUS: &str = "library-snapshot.previous.json";
 const SNAPSHOTS: &str = "library-snapshots";
+/// 迁移到快照存储之前的两个文件，只在没有任何清单时读取。
+const LEGACY_TRACKS: &str = "library-cache.json";
+const LEGACY_LYRICS: &str = "library-lyrics.json";
+/// 同一个目录里最多保留多少份本模块生成的 `.corrupt` 现场（STO-01）。一次无法恢复的损坏
+/// 最多涉及两代的元数据与歌词共 4 个文件，8 份够留下最近两次事故；更早的按生成顺序淘汰。
+pub(crate) const MAX_CORRUPT_BACKUPS_PER_DIR: usize = 8;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
 fn unique_suffix() -> String {
@@ -139,6 +145,41 @@ pub(crate) struct SaveStats {
     pub(crate) lyrics_bytes: usize,
 }
 
+/// 冷读失败。`stable` 为真表示「存储文件不变，结果就不会变」（内容损坏、文件缺失、
+/// 版本不支持），可以在进程内记住（见 [`LoadFailureMemo`]）；读写盘的 IO 错误可能只是
+/// 一时的（文件被别的进程独占、网络盘抖动），不算。
+#[derive(Debug)]
+pub(crate) struct LoadFailure {
+    pub(crate) message: String,
+    pub(crate) stable: bool,
+}
+
+impl LoadFailure {
+    fn stable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            stable: true,
+        }
+    }
+
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            stable: false,
+        }
+    }
+}
+
+impl From<LoadFailure> for String {
+    fn from(failure: LoadFailure) -> Self {
+        failure.message
+    }
+}
+
+/// 冷读会碰到的全部文件的（名字、大小、修改时间），用来判断上次读失败之后存储有没有变过。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StorageFingerprint(Vec<(String, u64, Option<SystemTime>)>);
+
 pub(crate) struct LibraryStorage {
     root: PathBuf,
 }
@@ -151,29 +192,40 @@ impl LibraryStorage {
     }
 
     /// 调用者串行化磁盘读写（LIBRARY_LOCK），包括恢复和旧文件清理。
+    /// 生产路径经 [`LoadFailureMemo::load`] 进来；这个不带记忆的版本只给测试用。
+    #[cfg(test)]
     pub(crate) fn load(&self) -> Result<Vec<ImportedTrack>, String> {
+        self.try_load().map_err(String::from)
+    }
+
+    /// 冷读；失败时带一个「这次失败是否稳定」的标记。
+    pub(crate) fn try_load(&self) -> Result<Vec<ImportedTrack>, LoadFailure> {
         let path = self.root.join(MANIFEST);
         let current = read_optional_json::<Manifest>(&path);
         if let Ok(Some(manifest)) = &current {
             // 旧程序遇到未来格式应停止，不能用旧备份覆盖新版本的数据。
             if !SUPPORTED_MANIFEST_VERSIONS.contains(&manifest.version) {
-                return Err(format!("不支持的曲库快照版本：{}", manifest.version));
+                return Err(LoadFailure::stable(format!(
+                    "不支持的曲库快照版本：{}",
+                    manifest.version
+                )));
             }
-            match self.read_snapshot(manifest) {
-                Ok(tracks) => return Ok(tracks),
-                Err(err) => return self.recover(&err),
-            }
+            return match self.read_snapshot(manifest) {
+                Ok(tracks) => Ok(tracks),
+                Err(err) => self.recover(err),
+            };
         }
         match current {
-            Err(err) => self.recover(&err),
-            Ok(None) if self.root.join(PREVIOUS).exists() => self.recover("当前清单缺失"),
+            Err(err) => self.recover(err),
+            Ok(None) if self.root.join(PREVIOUS).exists() => {
+                self.recover(LoadFailure::stable("当前清单缺失"))
+            }
             Ok(None) => {
-                let tracks = read_optional_json::<Vec<ImportedTrack>>(
-                    &self.root.join("library-cache.json"),
-                )?
-                .unwrap_or_default();
+                let tracks =
+                    read_optional_json::<Vec<ImportedTrack>>(&self.root.join(LEGACY_TRACKS))?
+                        .unwrap_or_default();
                 let lyrics = read_optional_json::<BTreeMap<String, LyricDocument>>(
-                    &self.root.join("library-lyrics.json"),
+                    &self.root.join(LEGACY_LYRICS),
                 )?
                 .unwrap_or_default();
                 Ok(merge_lyrics(tracks, lyrics))
@@ -182,37 +234,72 @@ impl LibraryStorage {
         }
     }
 
-    fn read_snapshot(&self, manifest: &Manifest) -> Result<Vec<ImportedTrack>, String> {
-        manifest.validate()?;
+    fn read_snapshot(&self, manifest: &Manifest) -> Result<Vec<ImportedTrack>, LoadFailure> {
+        manifest.validate().map_err(LoadFailure::stable)?;
         let dir = self.root.join(SNAPSHOTS);
         let tracks = read_required_json(&dir.join(&manifest.tracks))?;
         let lyrics = read_required_json(&dir.join(&manifest.lyrics))?;
         Ok(merge_lyrics(tracks, lyrics))
     }
 
-    fn recover(&self, error: &str) -> Result<Vec<ImportedTrack>, String> {
+    fn recover(&self, error: LoadFailure) -> Result<Vec<ImportedTrack>, LoadFailure> {
         let recovered = (|| {
             let previous: Manifest = read_required_json(&self.root.join(PREVIOUS))?;
             let tracks = self.read_snapshot(&previous)?;
             let path = self.root.join(MANIFEST);
             if path.exists() {
-                backup_corrupt_file(&path)?;
+                backup_corrupt_file(&path).map_err(LoadFailure::transient)?;
             }
-            write_json_atomic(&path, &json_bytes(&previous)?)?;
-            Ok::<_, String>(tracks)
+            let bytes = json_bytes(&previous).map_err(LoadFailure::transient)?;
+            write_json_atomic(&path, &bytes).map_err(LoadFailure::transient)?;
+            Ok::<_, LoadFailure>(tracks)
         })();
         match recovered {
             Ok(tracks) => {
                 tracing::warn!(
-                    "曲库快照损坏，已恢复上一份完整快照，损坏文件保留为 .corrupt：{error}"
+                    "曲库快照损坏，已恢复上一份完整快照，损坏文件保留为 .corrupt：{}",
+                    error.message
                 );
                 Ok(tracks)
             }
-            Err(recovery_error) => Err(format!(
-                "{}：曲库读取失败，已中止写入以免覆盖数据：{error}；上一版恢复失败：{recovery_error}",
-                crate::ipc::error::CACHE_CORRUPT_MARKER
-            )),
+            Err(recovery) => Err(LoadFailure {
+                message: format!(
+                    "{}：曲库读取失败，已中止写入以免覆盖数据：{}；上一版恢复失败：{}",
+                    crate::ipc::error::CACHE_CORRUPT_MARKER,
+                    error.message,
+                    recovery.message
+                ),
+                stable: error.stable && recovery.stable,
+            }),
         }
+    }
+
+    /// 冷读涉及的文件现状。清单、上一版清单、两个旧版文件，加上快照目录里本模块生成的代次文件；
+    /// `.corrupt` 现场与临时文件不算（冷读自己会产生它们）。
+    pub(crate) fn fingerprint(&self) -> StorageFingerprint {
+        let mut files = Vec::new();
+        let mut stamp = |name: String, path: &Path| {
+            // 取不到元数据（不存在、一时读不了）就当它不在：指纹因此不同，下次照常重读
+            if let Ok(meta) = fs::metadata(path) {
+                files.push((name, meta.len(), meta.modified().ok()));
+            }
+        };
+        for name in [MANIFEST, PREVIOUS, LEGACY_TRACKS, LEGACY_LYRICS] {
+            stamp(name.to_string(), &self.root.join(name));
+        }
+        if let Ok(entries) = fs::read_dir(self.root.join(SNAPSHOTS)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if is_snapshot_name(name) {
+                    stamp(format!("{SNAPSHOTS}/{name}"), &entry.path());
+                }
+            }
+        }
+        files.sort();
+        StorageFingerprint(files)
     }
 
     pub(crate) fn save(
@@ -331,29 +418,203 @@ fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, String> {
     serde_json::to_vec(value).map_err(|err| format!("曲库序列化失败：{err}"))
 }
 
-fn read_required_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
-    read_optional_json(path)?.ok_or_else(|| format!("曲库快照文件缺失：{}", path.display()))
+fn read_required_json<T: DeserializeOwned>(path: &Path) -> Result<T, LoadFailure> {
+    read_optional_json(path)?
+        .ok_or_else(|| LoadFailure::stable(format!("曲库快照文件缺失：{}", path.display())))
 }
 
-fn read_optional_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+fn read_optional_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, LoadFailure> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(format!("无法读取 {}：{err}", path.display())),
+        Err(err) => {
+            return Err(LoadFailure::transient(format!(
+                "无法读取 {}：{err}",
+                path.display()
+            )))
+        }
     };
     serde_json::from_slice(&bytes).map(Some).map_err(|err| {
-        let backup = match backup_corrupt_file(path) {
+        // 备份的就是刚才解析失败的这份字节，不再回头读一遍文件
+        let backup = match backup_corrupt_bytes(path, &bytes) {
             Ok(backup) => format!("备份 {}", backup.display()),
             Err(error) => format!("备份失败，原文件保留：{error}"),
         };
-        format!("无法解析 {}（{}）：{err}", path.display(), backup)
+        LoadFailure::stable(format!("无法解析 {}（{}）：{err}", path.display(), backup))
     })
 }
 
+/// 把坏文件另存为 `<原文件名>.<唯一后缀>.corrupt`，原文件不动。
 pub(crate) fn backup_corrupt_file(path: &Path) -> Result<PathBuf, String> {
-    let backup = PathBuf::from(format!("{}.{}.corrupt", path.display(), unique_suffix()));
-    fs::copy(path, &backup).map_err(|err| format!("无法备份 {}：{err}", path.display()))?;
+    let bytes = fs::read(path).map_err(|err| format!("无法备份 {}：{err}", path.display()))?;
+    backup_corrupt_bytes(path, &bytes)
+}
+
+/// STO-01：同一份坏内容只留一份现场。曲库无法恢复时每条曲库命令都会重走一遍冷读，
+/// 此前每次都再复制一份——大曲库的元数据文件几十 MB 一份，没有上限也没有流程清理。
+/// 已有内容相同的现场就直接沿用；新写的现场落盘后按 [`MAX_CORRUPT_BACKUPS_PER_DIR`] 淘汰旧的。
+fn backup_corrupt_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let source = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing = list_corrupt_backups(dir);
+    let identical = existing.iter().find(|backup| {
+        backup.source == source
+            && backup.len == bytes.len() as u64
+            && file_has_content(&backup.path, bytes)
+    });
+    let backup = match identical {
+        Some(backup) => backup.path.clone(),
+        None => {
+            let backup = PathBuf::from(format!("{}.{}.corrupt", path.display(), unique_suffix()));
+            if let Err(err) = fs::write(&backup, bytes) {
+                // 写到一半（磁盘满）的现场没有意义，也不能让它被当成已备份
+                let _ = fs::remove_file(&backup);
+                return Err(format!("无法备份 {}：{err}", path.display()));
+            }
+            backup
+        }
+    };
+    prune_corrupt_backups(dir, &backup);
     Ok(backup)
+}
+
+/// 本模块生成的一份损坏现场。
+struct CorruptBackup {
+    path: PathBuf,
+    /// 被备份的原文件名
+    source: String,
+    /// 生成顺序（纳秒时间戳、进程内序号），越大越新
+    order: (u128, u128),
+    len: u64,
+}
+
+/// `<原文件名>.<纳秒>-<pid>-<序号>.corrupt` → （原文件名, 生成顺序）。后缀不是
+/// [`unique_suffix`] 的形状就不是本模块的文件（例如别的模块写的 `xxx.json.corrupt`）。
+fn parse_corrupt_backup_name(name: &str) -> Option<(&str, (u128, u128))> {
+    let (source, suffix) = name.strip_suffix(".corrupt")?.rsplit_once('.')?;
+    let mut parts = suffix.split('-').map(|part| {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        part.parse::<u128>().ok()
+    });
+    let (nanos, _pid, sequence) = (parts.next()??, parts.next()??, parts.next()??);
+    (parts.next().is_none() && !source.is_empty()).then_some((source, (nanos, sequence)))
+}
+
+/// 目录里全部损坏现场，最新的在前。
+fn list_corrupt_backups(dir: &Path) -> Vec<CorruptBackup> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut backups: Vec<CorruptBackup> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let (source, order) = parse_corrupt_backup_name(name.to_str()?)?;
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then(|| CorruptBackup {
+                path: entry.path(),
+                source: source.to_string(),
+                order,
+                len: meta.len(),
+            })
+        })
+        .collect();
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.order));
+    backups
+}
+
+/// 只淘汰本模块自己的现场：原文件名必须是清单、上一版清单、旧版两个文件或代次文件。
+fn is_owned_backup_source(source: &str) -> bool {
+    matches!(source, MANIFEST | PREVIOUS | LEGACY_TRACKS | LEGACY_LYRICS)
+        || is_snapshot_name(source)
+}
+
+/// 每个目录只留最新的 [`MAX_CORRUPT_BACKUPS_PER_DIR`] 份现场；`keep`（本次用到的那份）一定留下。
+fn prune_corrupt_backups(dir: &Path, keep: &Path) {
+    let owned: Vec<CorruptBackup> = list_corrupt_backups(dir)
+        .into_iter()
+        .filter(|backup| is_owned_backup_source(&backup.source))
+        .collect();
+    let is_kept = |backup: &CorruptBackup| backup.path.file_name() == keep.file_name();
+    let mut retained = usize::from(owned.iter().any(is_kept));
+    for backup in owned.iter().filter(|backup| !is_kept(backup)) {
+        if retained < MAX_CORRUPT_BACKUPS_PER_DIR {
+            retained += 1;
+        } else if let Err(err) = fs::remove_file(&backup.path) {
+            tracing::debug!("无法清理旧的损坏现场 {}：{err}", backup.path.display());
+        }
+    }
+}
+
+/// 流式比较文件内容，不把整个现场读进内存。读失败按「不同」处理（宁可多备份一份）。
+fn file_has_content(path: &Path, expected: &[u8]) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return offset == expected.len(),
+            Ok(read) => {
+                if expected.get(offset..offset + read) != Some(&buffer[..read]) {
+                    return false;
+                }
+                offset += read;
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// 冷读失败的进程内记忆（STO-01）。曲库无法恢复时内存快照一直是空的，此前每条曲库命令
+/// （切歌时的 `get_track_info`、导入、删除……）都把磁盘上几十 MB 的文件重读一遍再失败一次。
+/// 这里记下失败时的存储指纹与错误：存储文件没有变化就直接返回同一个错误，不碰磁盘；
+/// 用户换回好的文件后指纹变化，下一条命令照常重读。只记 [`LoadFailure::stable`] 的失败，
+/// 一时的 IO 错误每次都重试。
+pub(crate) struct LoadFailureMemo(parking_lot::Mutex<Option<RememberedFailure>>);
+
+struct RememberedFailure {
+    root: PathBuf,
+    fingerprint: StorageFingerprint,
+    message: String,
+}
+
+impl LoadFailureMemo {
+    pub(crate) const fn new() -> Self {
+        Self(parking_lot::Mutex::new(None))
+    }
+
+    /// 调用者与 [`LibraryStorage::load`] 一样要持有曲库锁。
+    pub(crate) fn load(&self, storage: &LibraryStorage) -> Result<Vec<ImportedTrack>, String> {
+        // 指纹在读之前取：读的过程中文件被换掉，下次比较时指纹必然不同，不会把旧错误粘住
+        let fingerprint = storage.fingerprint();
+        if let Some(remembered) = self.0.lock().as_ref() {
+            if remembered.root == storage.root && remembered.fingerprint == fingerprint {
+                return Err(remembered.message.clone());
+            }
+        }
+        match storage.try_load() {
+            Ok(tracks) => {
+                *self.0.lock() = None;
+                Ok(tracks)
+            }
+            Err(failure) => {
+                *self.0.lock() = failure.stable.then(|| RememberedFailure {
+                    root: storage.root.clone(),
+                    fingerprint,
+                    message: failure.message.clone(),
+                });
+                Err(failure.message)
+            }
+        }
+    }
 }
 
 /// 数据先 flush 到磁盘，再以同卷 rename 切换。唯一临时名避免并发恢复互相覆盖。
