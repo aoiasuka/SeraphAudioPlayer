@@ -21,67 +21,91 @@ static LIBRARY_MEMORY: parking_lot::RwLock<Option<Arc<LibrarySnapshot>>> =
 /// 存储文件没变就复用上一次的失败结果，不再重读磁盘（见 `storage::LoadFailureMemo`）。
 static LIBRARY_LOAD_FAILURE: LoadFailureMemo = LoadFailureMemo::new();
 
-pub(crate) fn collect_audio_files(
-    path: PathBuf,
-    tracks: &mut Vec<ImportedTrack>,
-    seen_files: &mut HashSet<String>,
-    visited_dirs: &mut HashSet<PathBuf>,
-    depth: usize,
-    warnings: &mut Vec<String>,
-    covers_dir: Option<&Path>,
-) -> Result<(), String> {
-    if path.is_dir() {
-        // L-14：symlink / Windows junction 可能指向祖先目录导致无限递归栈溢出。
-        // 用 canonicalize 后的真实路径去重 + 递归深度上限双重防护。
-        if depth >= MAX_IMPORT_RECURSION_DEPTH {
-            return Ok(());
-        }
-        let real = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if !visited_dirs.insert(real) {
-            return Ok(());
-        }
+/// 一次导入的遍历状态：扫出的曲目、警告、去重集合，以及按目录缓存的歌词 sidecar 索引
+/// （LIB-02：索引跟着这一次导入走，导入结束即丢弃，不会读到过期的目录内容）。
+pub(crate) struct ImportScan<'a> {
+    pub(crate) tracks: Vec<ImportedTrack>,
+    /// P3-11：单个子目录或文件读失败只累积警告，不中止整批导入。
+    pub(crate) warnings: Vec<String>,
+    seen_files: HashSet<String>,
+    visited_dirs: HashSet<PathBuf>,
+    covers_dir: Option<&'a Path>,
+    sidecars: SidecarLyricsIndex,
+}
 
-        // P3-11：单个子目录读失败（如无权限）只记警告并跳过，不中止整批导入。
-        let entries = match fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(err) => {
-                warnings.push(format!("无法读取目录 {}: {err}", path.display()));
-                return Ok(());
+impl<'a> ImportScan<'a> {
+    /// `covers_dir` 为空时不提取内嵌封面（拿不到应用数据目录时的降级）。
+    pub(crate) fn new(covers_dir: Option<&'a Path>) -> Self {
+        Self {
+            tracks: Vec::new(),
+            warnings: Vec::new(),
+            seen_files: HashSet::new(),
+            visited_dirs: HashSet::new(),
+            covers_dir,
+            sidecars: SidecarLyricsIndex::default(),
+        }
+    }
+
+    /// 收集一个文件，或递归收集一个目录下的全部音频文件。
+    pub(crate) fn collect(&mut self, path: PathBuf) {
+        self.collect_at(path, 0);
+    }
+
+    fn collect_at(&mut self, path: PathBuf, depth: usize) {
+        if path.is_dir() {
+            // L-14：symlink / Windows junction 可能指向祖先目录导致无限递归栈溢出。
+            // 用 canonicalize 后的真实路径去重 + 递归深度上限双重防护。
+            if depth >= MAX_IMPORT_RECURSION_DEPTH {
+                return;
             }
-        };
+            let real = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !self.visited_dirs.insert(real) {
+                return;
+            }
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
+            // P3-11：单个子目录读失败（如无权限）只记警告并跳过，不中止整批导入。
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
                 Err(err) => {
-                    warnings.push(format!("读取目录项失败 {}: {err}", path.display()));
-                    continue;
+                    self.warnings
+                        .push(format!("无法读取目录 {}: {err}", path.display()));
+                    return;
                 }
             };
-            collect_audio_files(
-                entry.path(),
-                tracks,
-                seen_files,
-                visited_dirs,
-                depth + 1,
-                warnings,
-                covers_dir,
-            )?;
-        }
-        return Ok(());
-    }
 
-    if path.is_file() && is_audio_file(&path) {
-        let key = import_dedupe_key(&path);
-        if seen_files.insert(key) {
-            match track_from_path(&path, covers_dir) {
-                Ok(track) => tracks.push(track),
-                Err(error) => warnings.push(format!("无法导入 {}：{error}", path.display())),
+            for entry in entries {
+                match entry {
+                    Ok(entry) => self.collect_at(entry.path(), depth + 1),
+                    Err(err) => self
+                        .warnings
+                        .push(format!("读取目录项失败 {}: {err}", path.display())),
+                }
+            }
+            return;
+        }
+
+        if path.is_file() && is_audio_file(&path) {
+            let key = import_dedupe_key(&path);
+            if self.seen_files.insert(key) {
+                let sidecar_lyrics = self
+                    .sidecars
+                    .find(&path)
+                    .and_then(|sidecar| read_sidecar_lyrics(&sidecar));
+                match track_from_path_with_lyrics(&path, self.covers_dir, sidecar_lyrics) {
+                    Ok(track) => self.tracks.push(track),
+                    Err(error) => self
+                        .warnings
+                        .push(format!("无法导入 {}：{error}", path.display())),
+                }
             }
         }
     }
 
-    Ok(())
+    /// 这一次导入为找歌词 sidecar 枚举过多少个目录。
+    #[cfg(test)]
+    pub(crate) fn sidecar_dirs_scanned(&self) -> usize {
+        self.sidecars.dirs.len()
+    }
 }
 
 pub(crate) fn read_cached_track(
@@ -615,6 +639,16 @@ pub(crate) fn track_from_path(
     path: &Path,
     covers_dir: Option<&Path>,
 ) -> Result<ImportedTrack, String> {
+    track_from_path_with_lyrics(path, covers_dir, external_lrc_lyrics(path))
+}
+
+/// `sidecar_lyrics` 是调用方已经找好并读出的同名歌词文件（没有就是 `None`）。批量导入经
+/// [`SidecarLyricsIndex`] 查找，每个目录只枚举一次（LIB-02）；单首走 [`track_from_path`]。
+fn track_from_path_with_lyrics(
+    path: &Path,
+    covers_dir: Option<&Path>,
+    sidecar_lyrics: Option<LyricDocument>,
+) -> Result<ImportedTrack, String> {
     let metadata = fs::metadata(path)
         .map_err(|err| format!("failed to read file metadata {}: {err}", path.display()))?;
     let path_string = path.to_string_lossy().to_string();
@@ -637,7 +671,7 @@ pub(crate) fn track_from_path(
         .unwrap_or_else(|| ext_format.is_some_and(is_dsd_format));
     let audio_metadata = parse_audio_metadata_with_dsd_hint(path, is_dsd);
     // 同名 sidecar 优先于标签内嵌歌词；两者都是文件类来源，`[offset:]` 已记进文档
-    let lyrics = external_lrc_lyrics(path).unwrap_or_else(|| audio_metadata.lyrics.clone());
+    let lyrics = sidecar_lyrics.unwrap_or_else(|| audio_metadata.lyrics.clone());
     let filename_metadata = parse_filename_metadata(stem);
     let title = audio_metadata
         .title
@@ -1278,15 +1312,19 @@ pub(crate) fn is_dsd_file(path: &Path) -> bool {
 const MAX_EXTERNAL_LYRICS_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<LyricDocument> {
-    let lyrics_path = find_lyrics_file(path)?;
+    read_sidecar_lyrics(&find_lyrics_file(path)?)
+}
+
+/// 读出并解析一个歌词 sidecar 文件；超过大小上限、读不了或解析不出歌词行都当没有。
+pub(crate) fn read_sidecar_lyrics(lyrics_path: &Path) -> Option<LyricDocument> {
     // 先看 metadata 再读，避免为了判大小把整个文件读进来
-    if fs::metadata(&lyrics_path)
+    if fs::metadata(lyrics_path)
         .map(|meta| meta.len() > MAX_EXTERNAL_LYRICS_BYTES)
         .unwrap_or(true)
     {
         return None;
     }
-    let bytes = fs::read(&lyrics_path).ok()?;
+    let bytes = fs::read(lyrics_path).ok()?;
     // `.ttml` sidecar 走 TTML 解析（逐字），其余仍按字节内容嗅探；LRC 的 `[offset:]` 记进文档
     let ext = lyrics_path.extension().and_then(|value| value.to_str());
     let (lyrics, offset_ms) = parse_lyrics_file_bytes_with_offset(ext, &bytes);
@@ -1299,42 +1337,115 @@ pub(crate) fn external_lrc_lyrics(path: &Path) -> Option<LyricDocument> {
 /// 同名歌词 sidecar 的扩展名，按优先级排列：`.ttml` 逐字优先于行级格式。
 const SIDECAR_LYRIC_EXTENSIONS: [&str; 5] = ["ttml", "lrc", "qrc", "krc", "yrc"];
 
+/// 每个 sidecar 扩展名一位，下标同 [`SIDECAR_LYRIC_EXTENSIONS`]。
+type SidecarExtensionSet = [bool; SIDECAR_LYRIC_EXTENSIONS.len()];
+
+fn sidecar_rank(extension: &str) -> Option<usize> {
+    SIDECAR_LYRIC_EXTENSIONS
+        .iter()
+        .position(|lyrics_ext| extension.eq_ignore_ascii_case(lyrics_ext))
+}
+
+/// 单首曲目的同名歌词查找：先按优先级精确检查（Windows 文件系统大小写不敏感，这一步就能
+/// 匹配到大小写不同的文件名），都不存在才枚举所在目录做大小写不敏感兜底。
+/// 批量导入不要逐首调它——没有歌词的曲目每首都会枚举一遍目录，改用 [`SidecarLyricsIndex`]。
 pub(crate) fn find_lyrics_file(path: &Path) -> Option<PathBuf> {
-    for extension in SIDECAR_LYRIC_EXTENSIONS {
-        let exact = path.with_extension(extension);
-        if exact.is_file() {
-            return Some(exact);
-        }
-    }
+    exact_sidecar(path, &[true; SIDECAR_LYRIC_EXTENSIONS.len()])
+        .or_else(|| SidecarDir::scan(path.parent()?).case_insensitive(path))
+}
 
-    let expected_stem = path.file_stem()?.to_string_lossy().to_lowercase();
-    let parent = path.parent()?;
-    let entries = fs::read_dir(parent).ok()?;
+/// 按优先级检查 `<stem>.<ext>` 是否存在，只查 `extensions` 里标记的扩展名。
+fn exact_sidecar(path: &Path, extensions: &SidecarExtensionSet) -> Option<PathBuf> {
+    SIDECAR_LYRIC_EXTENSIONS
+        .iter()
+        .zip(extensions)
+        .filter(|(_, wanted)| **wanted)
+        .map(|(extension, _)| path.with_extension(extension))
+        .find(|exact| exact.is_file())
+}
 
-    // 大小写不敏感兜底：同 stem 多个候选时仍按扩展名优先级取，不受目录枚举顺序影响
-    let mut best: Option<(usize, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let candidate = entry.path();
-        let Some(rank) = candidate
-            .extension()
-            .and_then(|value| value.to_str())
-            .and_then(|ext| {
-                SIDECAR_LYRIC_EXTENSIONS
-                    .iter()
-                    .position(|lyrics_ext| ext.eq_ignore_ascii_case(lyrics_ext))
-            })
-        else {
-            continue;
+/// 一个目录里的歌词 sidecar 候选。
+struct SidecarDir {
+    /// 目录里出现过哪些 sidecar 扩展名。一个都没有时，这个目录里的曲目不可能有同名歌词。
+    present: SidecarExtensionSet,
+    /// 小写 stem → 优先级最高的候选（同优先级取先枚举到的）。
+    by_stem: HashMap<String, (usize, PathBuf)>,
+}
+
+impl SidecarDir {
+    fn scan(dir: &Path) -> Self {
+        let mut index = Self {
+            present: [false; SIDECAR_LYRIC_EXTENSIONS.len()],
+            by_stem: HashMap::new(),
         };
-        let same_stem = candidate
-            .file_stem()
-            .map(|value| value.to_string_lossy().to_lowercase() == expected_stem)
-            .unwrap_or(false);
-
-        if same_stem && best.as_ref().is_none_or(|(current, _)| rank < *current) {
-            best = Some((rank, candidate));
+        let Ok(entries) = fs::read_dir(dir) else {
+            // 枚举不了就无从断言「这里没有歌词文件」：精确检查照做，兜底没有候选
+            index.present = [true; SIDECAR_LYRIC_EXTENSIONS.len()];
+            return index;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                // 漏读了目录项，同样不能据此跳过精确检查
+                index.present = [true; SIDECAR_LYRIC_EXTENSIONS.len()];
+                continue;
+            };
+            let candidate = entry.path();
+            let Some(rank) = candidate
+                .extension()
+                .and_then(|value| value.to_str())
+                .and_then(sidecar_rank)
+            else {
+                continue;
+            };
+            index.present[rank] = true;
+            let Some(stem) = candidate.file_stem() else {
+                continue;
+            };
+            let stem = stem.to_string_lossy().to_lowercase();
+            // 同 stem 多个候选时按扩展名优先级取，不受目录枚举顺序影响
+            match index.by_stem.get(&stem) {
+                Some((current, _)) if *current <= rank => {}
+                _ => {
+                    index.by_stem.insert(stem, (rank, candidate));
+                }
+            }
         }
+        index
     }
 
-    best.map(|(_, candidate)| candidate)
+    /// 大小写不敏感兜底：stem 小写后相同的候选。
+    fn case_insensitive(&self, path: &Path) -> Option<PathBuf> {
+        let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+        self.by_stem
+            .get(&stem)
+            .map(|(_, candidate)| candidate.clone())
+    }
+}
+
+/// 同名歌词 sidecar 的按目录索引（LIB-02）。此前导入时每首曲目都调一次 [`find_lyrics_file`]，
+/// 没有歌词文件的曲目每首都把所在目录枚举一遍——5000 首的文件夹要枚举 5000 次、2500 万个
+/// 目录项。现在一次导入里每个目录只枚举一次：
+/// - 目录里一个歌词扩展名的文件都没有（最常见）→ 直接判定没有，连精确检查都省掉；
+/// - 否则只对目录里出现过的扩展名做精确检查，再用同一份索引做大小写不敏感兜底。
+///
+/// 结果与逐首调用 [`find_lyrics_file`] 相同。索引只反映枚举那一刻的目录内容，
+/// 所以只在一次导入内使用，不要跨命令长期持有。
+#[derive(Default)]
+pub(crate) struct SidecarLyricsIndex {
+    dirs: HashMap<PathBuf, SidecarDir>,
+}
+
+impl SidecarLyricsIndex {
+    pub(crate) fn find(&mut self, path: &Path) -> Option<PathBuf> {
+        let parent = path.parent()?;
+        if !self.dirs.contains_key(parent) {
+            self.dirs
+                .insert(parent.to_path_buf(), SidecarDir::scan(parent));
+        }
+        let dir = self.dirs.get(parent)?;
+        if !dir.present.contains(&true) {
+            return None;
+        }
+        exact_sidecar(path, &dir.present).or_else(|| dir.case_insensitive(path))
+    }
 }

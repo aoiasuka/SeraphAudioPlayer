@@ -1305,6 +1305,98 @@ fn sidecar_lookup_prefers_ttml_over_lrc() {
 }
 
 #[test]
+fn sidecar_index_agrees_with_per_track_lookup() {
+    // LIB-02：按目录缓存的索引必须与逐首查找给出同一个结果。
+    let dir = TestLibraryDir::new();
+    let with_lyrics = dir.0.join("with");
+    let without_lyrics = dir.0.join("without");
+    fs::create_dir_all(&with_lyrics).unwrap();
+    fs::create_dir_all(&without_lyrics).unwrap();
+    for name in ["a.flac", "b.flac", "c.flac", "d.flac", "E.flac"] {
+        fs::write(with_lyrics.join(name), b"").unwrap();
+        fs::write(without_lyrics.join(name), b"").unwrap();
+    }
+    // a：两种扩展名都有，取优先级高的 ttml；b：只有 lrc；c：扩展名大写；
+    // d：没有歌词；E：歌词文件名大小写不同。另有不相干的文件。
+    for name in [
+        "a.lrc",
+        "a.ttml",
+        "b.lrc",
+        "c.LRC",
+        "e.krc",
+        "cover.jpg",
+        "notes.txt",
+    ] {
+        fs::write(with_lyrics.join(name), b"[00:01.00]x").unwrap();
+    }
+    fs::write(without_lyrics.join("cover.jpg"), b"x").unwrap();
+
+    let mut index = SidecarLyricsIndex::default();
+    for folder in [&with_lyrics, &without_lyrics] {
+        for name in [
+            "a.flac",
+            "b.flac",
+            "c.flac",
+            "d.flac",
+            "E.flac",
+            "missing.flac",
+        ] {
+            let audio = folder.join(name);
+            let key =
+                |found: Option<PathBuf>| found.map(|path| path.to_string_lossy().to_lowercase());
+            assert_eq!(
+                key(index.find(&audio)),
+                key(find_lyrics_file(&audio)),
+                "{}",
+                audio.display()
+            );
+        }
+    }
+    let mut lower = |name: &str| {
+        index
+            .find(&with_lyrics.join(name))
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_lowercase())
+    };
+    assert_eq!(lower("a.flac").as_deref(), Some("a.ttml"));
+    assert_eq!(lower("b.flac").as_deref(), Some("b.lrc"));
+    assert_eq!(lower("c.flac").as_deref(), Some("c.lrc"));
+    assert_eq!(lower("d.flac"), None);
+    assert_eq!(lower("E.flac").as_deref(), Some("e.krc"));
+    assert_eq!(index.find(&without_lyrics.join("a.flac")), None);
+}
+
+#[test]
+fn import_scan_enumerates_each_directory_once_for_sidecar_lyrics() {
+    // LIB-02：此前没有歌词文件的曲目每首都把所在目录枚举一遍（平方级）。
+    let dir = TestLibraryDir::new();
+    let album = dir.0.join("album");
+    let nested = album.join("disc2");
+    fs::create_dir_all(&nested).unwrap();
+    for index in 0..6 {
+        write_test_dsf(&album.join(format!("track{index}.dsf")));
+    }
+    write_test_dsf(&nested.join("bonus.dsf"));
+    fs::write(album.join("track3.lrc"), "[00:01.00]第三首").unwrap();
+
+    let mut scan = ImportScan::new(None);
+    scan.collect(dir.0.clone());
+    assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+    assert_eq!(scan.tracks.len(), 7);
+    assert_eq!(scan.sidecar_dirs_scanned(), 2, "album 与 disc2 各一次");
+    for track in &scan.tracks {
+        let has_sidecar = track.path.ends_with("track3.dsf");
+        assert_eq!(!track.lyrics.is_empty(), has_sidecar, "{}", track.path);
+        if has_sidecar {
+            assert_eq!(track.lyrics.source.kind, LyricSourceKind::Sidecar);
+            assert_eq!(track.lyrics.lines[0].text, "第三首");
+        }
+    }
+    // 同一个文件被重复传入（直接选中的文件 + 所在文件夹）只导入一次
+    scan.collect(album.join("track0.dsf"));
+    assert_eq!(scan.tracks.len(), 7);
+}
+
+#[test]
 fn krc_translation_stays_aligned_when_original_line_is_cleaned_away() {
     // 审2-S6：第二行原文清洗后为空（纯 word 标记无文本），主歌词不展示它，
     // 但后续行的译文必须仍按原始行号对齐到各自时间点，不整体前移错位。

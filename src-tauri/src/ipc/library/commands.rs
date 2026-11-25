@@ -145,25 +145,16 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
     // 放到 spawn_blocking，避免占用 Tauri 命令调度线程、阻塞其它 IPC（含播放控制）。
     let tracks =
         tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ImportedTrack>, String> {
-            let mut tracks = Vec::new();
-            let mut seen_files = HashSet::new();
-            let mut visited_dirs = HashSet::new();
-            // P3-11：子目录读失败只累积警告，不中止整批导入。
-            let mut warnings = Vec::new();
             // 拿不到应用数据目录时封面提取降级跳过，不影响导入本身
             let covers_dir = covers_dir_path(&app).ok();
-
+            // P3-11：子目录读失败只累积警告，不中止整批导入。
+            let mut scan = ImportScan::new(covers_dir.as_deref());
             for path in paths {
-                collect_audio_files(
-                    PathBuf::from(path),
-                    &mut tracks,
-                    &mut seen_files,
-                    &mut visited_dirs,
-                    0,
-                    &mut warnings,
-                    covers_dir.as_deref(),
-                )?;
+                scan.collect(PathBuf::from(path));
             }
+            let ImportScan {
+                tracks, warnings, ..
+            } = scan;
 
             for warning in &warnings {
                 tracing::warn!("import_tracks: {warning}");
