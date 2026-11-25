@@ -42,3 +42,8 @@ pub(crate) use super::{
     amll::*, display::*, dsd_tags::*, exclude::*, local_lyrics::*, lrc_export::*, lyrics::*,
     media_library::*, metadata::*, online_lyrics::*, types::*, wav_id3::*, zh::*,
 };
+
+// 测试夹具与辅助函数（LIB-04：不再混在生产文件里）
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use super::test_support::*;

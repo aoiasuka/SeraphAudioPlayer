@@ -1,7 +1,5 @@
 use super::prelude::*;
 use super::snapshot::LibrarySnapshot;
-#[cfg(test)]
-pub(crate) use super::storage::{backup_corrupt_file, write_json_atomic};
 use super::storage::{LibraryStorage, LoadFailureMemo};
 use std::sync::Arc;
 
@@ -101,8 +99,7 @@ impl<'a> ImportScan<'a> {
         }
     }
 
-    /// 这一次导入为找歌词 sidecar 枚举过多少个目录。
-    #[cfg(test)]
+    /// 这一次导入为找歌词 sidecar 枚举过多少个目录（诊断日志用）。
     pub(crate) fn sidecar_dirs_scanned(&self) -> usize {
         self.sidecars.dirs.len()
     }
@@ -143,18 +140,6 @@ fn load_tracks_from_disk(app: &AppHandle) -> Result<Vec<ImportedTrack>, String> 
     Ok(tracks.into_iter().map(enrich_cached_track).collect())
 }
 
-#[cfg(test)]
-pub(crate) fn read_tracks_from_file(path: &Path) -> Result<Vec<ImportedTrack>, String> {
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-
-    let bytes = fs::read(path)
-        .map_err(|err| format!("failed to read library cache {}: {err}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse library cache {}: {err}", path.display()))
-}
-
 /// P0-2：读改写路径专用读取。持锁调用，返回内存快照（已含歌词与 enrich）。
 /// 内存未加载时从磁盘加载；磁盘损坏时把坏文件备份为 `.corrupt` 并显式报错——
 /// 绝不能把损坏缓存当空库，否则随后的覆盖写会把用户整个曲库静默清空。
@@ -187,42 +172,6 @@ pub(crate) fn write_cached_tracks(
     // 落盘成功后刷新内存快照（存完整含歌词版本，读命令零成本命中）
     *LIBRARY_MEMORY.write() = Some(Arc::new(LibrarySnapshot::new(tracks)));
     Ok(())
-}
-
-/// 把曲目拆成「歌词清空的主记录」+「track_id → 歌词」映射，供磁盘分离存储。
-/// 纯函数，便于测试往返一致性。
-#[cfg(test)]
-pub(crate) fn split_lyrics_for_storage(
-    tracks: &[ImportedTrack],
-) -> (Vec<ImportedTrack>, HashMap<String, LyricDocument>) {
-    let mut lyrics_by_id = HashMap::new();
-    let stripped = tracks
-        .iter()
-        .map(|track| {
-            if !track.lyrics.is_empty() {
-                lyrics_by_id.insert(track.id.clone(), track.lyrics.clone());
-            }
-            ImportedTrack {
-                lyrics: LyricDocument::EMPTY,
-                ..track.clone()
-            }
-        })
-        .collect();
-    (stripped, lyrics_by_id)
-}
-
-/// 把歌词边车按 track_id 合并回主记录（读盘时用）。
-#[cfg(test)]
-pub(crate) fn merge_lyrics_from_storage(
-    mut tracks: Vec<ImportedTrack>,
-    lyrics_by_id: &HashMap<String, LyricDocument>,
-) -> Vec<ImportedTrack> {
-    for track in &mut tracks {
-        if let Some(lyrics) = lyrics_by_id.get(&track.id) {
-            track.lyrics = lyrics.clone();
-        }
-    }
-    tracks
 }
 
 pub(crate) fn merge_tracks_into_cache(
@@ -536,23 +485,50 @@ pub(crate) fn import_dedupe_key(path: &Path) -> String {
 }
 
 pub(crate) fn is_audio_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .and_then(audio_format_from_extension)
-        .is_some()
-        || audio_format_from_magic(path).is_some()
+    let extension = path.extension().and_then(|value| value.to_str());
+    if extension.and_then(audio_format_from_extension).is_some() {
+        return true;
+    }
+    // LIB-03：扩展名明摆着不是音频的文件不再打开嗅探。导入一个混着封面图、cue、log、
+    // 视频的文件夹时，此前每个这样的文件都多一次打开和读取。
+    if extension.is_some_and(is_known_non_audio_extension) {
+        return false;
+    }
+    audio_format_from_magic(path).is_some()
 }
 
-#[cfg(test)]
-pub(crate) fn audio_format_label(path: &Path) -> String {
-    audio_format_from_magic(path)
-        .or_else(|| {
-            path.extension()
-                .and_then(|value| value.to_str())
-                .and_then(audio_format_from_extension)
-        })
-        .unwrap_or("AUDIO")
-        .to_string()
+/// 音乐文件夹里常见、而且肯定不是音频的扩展名（LIB-03）。命中即跳过文件头嗅探。
+///
+/// 表里的类型本来就嗅探不出音频格式，跳过它们只省掉一次打开和读取；唯一会变的是被误判的
+/// 文件不再混进曲库——UTF-16 文本以 `FF FE` 开头，恰好像 MPEG 帧同步字，EAC 的抓轨日志
+/// （`.log`）就是这种编码。
+///
+/// **故意不在表里的**：MP4 家族（`mp4` / `m4v` / `mov` / `3gp` / `m4b`）以 `ftyp` 开头，
+/// 一直按 M4A 导入（只有音轨的 MP4、有声书）；`mpg` / `mpeg` / `mp2` / `mpa` 可能是 MPEG
+/// 音频基本流；`bin` / `dat` 之类含义不定。它们和没有扩展名的文件一样照旧嗅探。
+pub(crate) fn is_known_non_audio_extension(extension: &str) -> bool {
+    const IMAGES: &[&str] = &[
+        "jpg", "jpeg", "jpe", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "svg", "heic",
+        "avif", "psd",
+    ];
+    // 文本、清单、歌词、字幕、校验与日志
+    const TEXT: &[&str] = &[
+        "txt", "log", "cue", "nfo", "md", "json", "xml", "htm", "html", "pdf", "doc", "docx",
+        "rtf", "ini", "db", "m3u", "m3u8", "pls", "lrc", "ttml", "qrc", "krc", "yrc", "srt", "ass",
+        "ssa", "sfv", "md5", "ffp", "accurip", "toc", "url", "lnk",
+    ];
+    // 视频（MP4 家族与 MPEG 基本流除外，见上）
+    const VIDEO: &[&str] = &[
+        "mkv", "avi", "wmv", "flv", "webm", "ts", "m2ts", "vob", "rm", "rmvb",
+    ];
+    // 压缩包、镜像与可执行文件
+    const ARCHIVES: &[&str] = &[
+        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "exe", "dll", "msi", "bat", "cmd",
+    ];
+    [IMAGES, TEXT, VIDEO, ARCHIVES]
+        .into_iter()
+        .flatten()
+        .any(|known| extension.eq_ignore_ascii_case(known))
 }
 
 pub(crate) fn audio_format_from_magic(path: &Path) -> Option<&'static str> {
@@ -623,12 +599,44 @@ pub(crate) fn audio_format_from_extension(extension: &str) -> Option<&'static st
     }
 }
 
+/// MPEG 音频帧头（MP1 / MP2 / MP3）。LIB-03：此前只看 11 位同步字和「层不是保留值」，
+/// 任何以 `FF Ex` / `FF Fx` 开头的文件都会被当成 MP3。现在：
+/// - 4 字节帧头里的保留值全部排除：版本 `01`、层 `00`、比特率索引 `1111`、采样率索引 `11`、
+///   预加重 `10`。自由格式（比特率索引 `0000`）也不认——实际文件里几乎见不到，而以
+///   `FF Ex 0x` 开头的非音频二进制却不少。
+/// - `FF FE` 开头的一律不认：它是 UTF-16 LE 文本的 BOM（Windows 上的 `.reg`、EAC 抓轨日志、
+///   不少 cue 都是这种编码），而作为帧头只能是「MPEG-1 Layer I 带 CRC」，后面跟着的文字
+///   又常常凑成一个字段全部合法的帧头。两者撞上时按文本处理。
+///
+/// 扩展名本身是音频的文件不走嗅探，不受这些规则影响。
 pub(crate) fn is_mpeg_audio_header(header: &[u8]) -> bool {
-    header.len() >= 2 && header[0] == 0xff && (header[1] & 0xe0) == 0xe0 && (header[1] & 0x06) != 0
+    let [0xff, second, third, fourth, ..] = *header else {
+        return false;
+    };
+    if second & 0xe0 != 0xe0 || second == 0xfe {
+        return false;
+    }
+    let version = (second >> 3) & 0b11;
+    let layer = (second >> 1) & 0b11;
+    let bitrate_index = third >> 4;
+    let sample_rate_index = (third >> 2) & 0b11;
+    let emphasis = fourth & 0b11;
+    version != 0b01
+        && layer != 0b00
+        && bitrate_index != 0b1111
+        && bitrate_index != 0b0000
+        && sample_rate_index != 0b11
+        && emphasis != 0b10
 }
 
+/// AAC 的 ADTS 帧头：12 位同步字、层固定 `00`、采样率索引 0–12（13 / 14 保留，15 禁用）。
+/// 层必须是 `00` 这一条不能省——MPEG 帧头因为别的保留值被拒之后会落到这里，
+/// 只看同步字的话又会被当成 AAC 放进来。
 pub(crate) fn is_adts_header(header: &[u8]) -> bool {
-    header.len() >= 2 && header[0] == 0xff && (header[1] & 0xf0) == 0xf0
+    let [0xff, second, third, ..] = *header else {
+        return false;
+    };
+    second & 0xf6 == 0xf0 && (third >> 2) & 0x0f <= 12
 }
 
 pub(crate) fn is_dsd_format(format: &str) -> bool {
@@ -1236,75 +1244,6 @@ pub(crate) fn enrich_with_decoder_probe_dsd(
     if parsed.channels.is_none() && info.channels.0 <= u8::MAX as u16 {
         parsed.channels = Some(info.channels.0 as u8);
     }
-}
-
-#[cfg(test)]
-pub(crate) fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
-    // v0.5.1：曾是与正式路径重复的旧副本（漏掉 cover 与 DSD ID3 提取，测试
-    // 测不到真实链路）——改为直接委托 parse_audio_metadata_with_dsd_hint。
-    parse_audio_metadata_with_dsd_hint(path, is_dsd_file(path))
-}
-
-#[cfg(test)]
-pub(crate) fn write_test_dsf(path: &Path) {
-    use std::io::Write;
-
-    let channels = 2_u32;
-    let dsd_rate = 2_822_400_u32;
-    let sample_count = dsd_rate as u64;
-    let block_size_per_channel = 8_u32;
-    // 审2：数据体必须与 sample_count 自洽（每声道 sample_count/8 字节）——
-    // 解码器现在会把声明时长与文件真实大小交叉校验，虚大的 sample_count
-    // 不再被信任（此前夹具只写 16 字节数据却声称 1 秒时长）。
-    let bytes_per_channel = sample_count / 8;
-    let data_len = channels as u64 * bytes_per_channel;
-    let file_size = 28_u64 + 52 + 12 + data_len;
-
-    let mut file = fs::File::create(path).expect("create dsf");
-    file.write_all(b"DSD ").unwrap();
-    file.write_all(&28_u64.to_le_bytes()).unwrap();
-    file.write_all(&file_size.to_le_bytes()).unwrap();
-    file.write_all(&0_u64.to_le_bytes()).unwrap();
-
-    file.write_all(b"fmt ").unwrap();
-    file.write_all(&52_u64.to_le_bytes()).unwrap();
-    file.write_all(&1_u32.to_le_bytes()).unwrap();
-    file.write_all(&0_u32.to_le_bytes()).unwrap();
-    file.write_all(&2_u32.to_le_bytes()).unwrap();
-    file.write_all(&channels.to_le_bytes()).unwrap();
-    file.write_all(&dsd_rate.to_le_bytes()).unwrap();
-    file.write_all(&1_u32.to_le_bytes()).unwrap();
-    file.write_all(&sample_count.to_le_bytes()).unwrap();
-    file.write_all(&block_size_per_channel.to_le_bytes())
-        .unwrap();
-    file.write_all(&0_u32.to_le_bytes()).unwrap();
-
-    file.write_all(b"data").unwrap();
-    file.write_all(&(12_u64 + data_len).to_le_bytes()).unwrap();
-    // 0x69 = 01101001，DSD 静音位型
-    let body = vec![0x69_u8; data_len as usize];
-    file.write_all(&body).unwrap();
-}
-
-#[cfg(test)]
-pub(crate) fn temp_audio_path(prefix: &str, extension: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{nanos}.{extension}"))
-}
-
-#[cfg(test)]
-pub(crate) fn is_dsd_file(path: &Path) -> bool {
-    if let Some(format) = audio_format_from_magic(path) {
-        return is_dsd_format(format);
-    }
-
-    path.extension()
-        .and_then(|value| value.to_str())
-        .and_then(audio_format_from_extension)
-        .is_some_and(is_dsd_format)
 }
 
 /// F-06：外部歌词文件大小上限。与 `save_track_lyrics` 的 IPC 口径（4 MB）一致——

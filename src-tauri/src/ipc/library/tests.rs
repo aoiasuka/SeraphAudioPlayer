@@ -689,6 +689,112 @@ fn trusts_riff_magic_over_dsf_extension() {
     let _ = fs::remove_file(path);
 }
 
+#[test]
+fn known_non_audio_extensions_are_skipped_without_sniffing() {
+    // LIB-03：内容故意写成 FLAC 文件头——如果还去打开嗅探，就会被认成音频。
+    let dir = TestLibraryDir::new();
+    let flac_header = b"fLaC\0\0\0\x22 not really audio";
+    for name in [
+        "cover.jpg",
+        "rip.LOG",
+        "album.cue",
+        "booklet.pdf",
+        "clip.mkv",
+        "bonus.zip",
+        "song.lrc",
+    ] {
+        let path = dir.0.join(name);
+        fs::write(&path, flac_header).unwrap();
+        assert!(!is_audio_file(&path), "{name}");
+    }
+    // 不在表里的扩展名、没有扩展名的文件照旧按文件头识别
+    for name in ["track.bin", "track", "track.dat"] {
+        let path = dir.0.join(name);
+        fs::write(&path, flac_header).unwrap();
+        assert!(is_audio_file(&path), "{name}");
+    }
+    // MP4 家族一直按 M4A 导入，不能被这张表挡掉
+    let mp4 = dir.0.join("audiobook.mp4");
+    fs::write(&mp4, b"\0\0\0\x18ftypmp42\0\0\0\0mp42isom").unwrap();
+    assert!(is_audio_file(&mp4));
+    assert_eq!(audio_format_label(&mp4), "M4A");
+    // 音频扩展名不看内容
+    let empty = dir.0.join("song.flac");
+    fs::write(&empty, b"").unwrap();
+    assert!(is_audio_file(&empty));
+
+    let mut scan = ImportScan::new(None);
+    scan.collect(dir.0.clone());
+    let mut imported: Vec<String> = scan
+        .tracks
+        .iter()
+        .map(|track| {
+            Path::new(&track.path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    imported.sort();
+    assert_eq!(
+        imported,
+        [
+            "audiobook.mp4",
+            "song.flac",
+            "track",
+            "track.bin",
+            "track.dat"
+        ]
+    );
+}
+
+#[test]
+fn mpeg_and_adts_sniffing_rejects_reserved_header_fields() {
+    // 真实帧头：MPEG-1 Layer III 128k / 44.1k、MPEG-2 Layer III、MPEG-1 Layer II
+    for header in [
+        [0xff, 0xfb, 0x90, 0x64],
+        [0xff, 0xf3, 0x84, 0xc4],
+        [0xff, 0xfd, 0xa4, 0x00],
+    ] {
+        assert!(is_mpeg_audio_header(&header), "{header:02x?}");
+        assert_eq!(audio_format_from_header(&header), Some("MP3"));
+    }
+    // ADTS：MPEG-4 AAC-LC 44.1k、MPEG-2 AAC 48k
+    for header in [[0xff, 0xf1, 0x50, 0x80], [0xff, 0xf9, 0x4c, 0x80]] {
+        assert!(is_adts_header(&header), "{header:02x?}");
+        assert_eq!(audio_format_from_header(&header), Some("AAC"));
+    }
+
+    // LIB-03：此前只看 11 位同步字，下面这些都会被当成 MP3（或落到 ADTS 被当成 AAC）
+    for header in [
+        [0xff, 0xeb, 0x90, 0x64], // 版本 01（保留）
+        [0xff, 0xfb, 0xf0, 0x64], // 比特率索引 1111（非法）
+        [0xff, 0xfb, 0x00, 0x64], // 比特率索引 0000（自由格式，不认）
+        [0xff, 0xfb, 0x9c, 0x64], // 采样率索引 11（保留）
+        [0xff, 0xfb, 0x90, 0x66], // 预加重 10（保留）
+        [0xff, 0xfe, 0x45, 0x00], // UTF-16 LE 的 BOM 加字母 E
+        [0xff, 0xff, 0xff, 0xff], // 全 FF 填充
+        [0xff, 0xf1, 0x34, 0x80], // ADTS 采样率索引 13（保留）
+        [0xff, 0xf1, 0x7c, 0x80], // ADTS 采样率索引 15（禁用）
+    ] {
+        assert!(!is_mpeg_audio_header(&header), "{header:02x?}");
+        assert!(!is_adts_header(&header), "{header:02x?}");
+        assert_eq!(audio_format_from_header(&header), None, "{header:02x?}");
+    }
+    assert!(!is_mpeg_audio_header(&[0xff, 0xfb]), "不足 4 字节");
+
+    // 实际病例形态：UTF-16 LE 文本（EAC 抓轨日志、注册表导出）用了不在跳过表里的扩展名
+    let dir = TestLibraryDir::new();
+    let path = dir.0.join("settings.reg");
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in "Exact Audio Copy V1.6".encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    fs::write(&path, bytes).unwrap();
+    assert!(!is_audio_file(&path));
+}
+
 /// 手工拼一个尾部带 ID3v2.4 APIC 封面的最小 WAV。
 /// `u32_frame_size` 复刻违反规范的打标签工具：帧大小写普通 u32
 /// （v2.4 规范要求 syncsafe），封面超过 127 字节时两种解读不同，

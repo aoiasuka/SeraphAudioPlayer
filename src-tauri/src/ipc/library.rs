@@ -25,6 +25,8 @@ mod qq_des;
 mod snapshot;
 mod storage;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 mod ttml;
 mod types;

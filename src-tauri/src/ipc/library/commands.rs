@@ -152,6 +152,12 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
             for path in paths {
                 scan.collect(PathBuf::from(path));
             }
+            tracing::debug!(
+                tracks = scan.tracks.len(),
+                warnings = scan.warnings.len(),
+                lyric_dirs = scan.sidecar_dirs_scanned(),
+                "import_tracks 扫描完成"
+            );
             let ImportScan {
                 tracks, warnings, ..
             } = scan;
