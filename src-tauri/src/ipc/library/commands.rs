@@ -578,10 +578,31 @@ fn sanitize_lookup_keys(keys: Vec<String>) -> Vec<String> {
     out
 }
 
+/// 用户明确应用的在线歌词在入库前的整理。前端传回的文档来源自候选（已带 provider / 查找键）；
+/// 显式传入的查找键（AMLL 命中的候选携带的）经清洗后并入；用户明确应用 = 固定选择；
+/// hidden 是显示层标记，不落盘。
+///
+/// CMD-03：行数、单行字符数、音节与译文上限在这里再钳一次。候选正常来自后端自己、
+/// 早已钳过，但这条命令的入参是前端回传的整份文档——「所有入库歌词都受上限约束」（W-01）
+/// 不能依赖前端不出错。
+fn prepare_applied_lyrics(mut lyrics: LyricDocument, lookup_keys: Vec<String>) -> LyricDocument {
+    let lookup_keys = sanitize_lookup_keys(lookup_keys);
+    lyrics.source = std::mem::take(&mut lyrics.source).with_lookup_keys(lookup_keys);
+    lyrics.source.pinned = true;
+    lyrics.source.lookup_keys =
+        sanitize_lookup_keys(std::mem::take(&mut lyrics.source.lookup_keys));
+    let mut lines = clamp_lyrics(lyrics.lines);
+    for line in &mut lines {
+        line.hidden = false;
+    }
+    // `from_lines` 重新判定同步粒度与制作信息行；在线来源没有文件 offset，文档里恒为 0
+    LyricDocument::from_lines(lines, lyrics.source)
+}
+
 fn apply_online_lyrics_inner(
     app: &AppHandle,
     track_id: &str,
-    mut lyrics: LyricDocument,
+    lyrics: LyricDocument,
     track_path: Option<&str>,
     lookup_keys: Vec<String>,
 ) -> IpcResult<LyricDocument> {
@@ -591,17 +612,7 @@ fn apply_online_lyrics_inner(
     if lyrics.is_empty() {
         return Err(IpcError::invalid_input("lyrics file has no usable text"));
     }
-    // 前端传回的文档来源自候选（已带 provider / 查找键）；显式传入的查找键（AMLL 命中的候选
-    // 携带的）经清洗后并入；用户明确应用 = 固定选择。hidden 是显示层标记，不落盘。
-    let lookup_keys = sanitize_lookup_keys(lookup_keys);
-    lyrics.source = std::mem::take(&mut lyrics.source).with_lookup_keys(lookup_keys);
-    lyrics.source.pinned = true;
-    lyrics.source.lookup_keys =
-        sanitize_lookup_keys(std::mem::take(&mut lyrics.source.lookup_keys));
-    for line in &mut lyrics.lines {
-        line.hidden = false;
-    }
-    let lyrics = LyricDocument::from_lines(lyrics.lines, lyrics.source);
+    let lyrics = prepare_applied_lyrics(lyrics, lookup_keys);
 
     // P1-3：读改写序列全程持锁，防止与并发导入互相覆盖。
     let _guard = LIBRARY_LOCK.lock();
@@ -681,23 +692,68 @@ fn export_track_lyrics_inner(
         album: &track.album,
         tool: &tool,
     };
-    let content = lyrics_to_lrc(&track.lyrics.lines, format, options, &meta);
-    let written = content
-        .lines()
-        .filter(|line| line.starts_with('[') && line.as_bytes().get(3) == Some(&b':'))
-        .count();
-    fs::write(&target, content.as_bytes()).map_err(|err| {
+    // CMD-02：行数由序列化时直接数出来，不再从文本特征反推
+    let export = export_lrc(&track.lyrics.lines, format, options, &meta);
+    // SEC3-03：临时文件 + 改名，写到一半失败不会把已有的歌词文件截断
+    crate::ipc::fs_util::write_atomic(&target, export.text.as_bytes()).map_err(|err| {
         IpcError::new(
             crate::ipc::error::IpcErrorCode::Io,
             format!("failed to write lyrics file: {err}"),
         )
     })?;
-    Ok(written)
+    Ok(export.timed_lines)
 }
 
 #[cfg(test)]
 mod lookup_key_tests {
-    use super::sanitize_lookup_keys;
+    use super::super::prelude::*;
+    use super::{prepare_applied_lyrics, sanitize_lookup_keys};
+
+    #[test]
+    fn applied_lyrics_are_clamped_pinned_and_unhidden() {
+        // CMD-03：前端回传的整份文档不经过解析入口，入库前必须自己钳一次上限
+        let mut long_line = LyricLine::new(0, "字".repeat(MAX_LYRIC_LINE_CHARS + 50));
+        long_line.hidden = true;
+        long_line.translations = (0..MAX_LYRIC_TRANSLATIONS + 3)
+            .map(|_| LyricText::new("译".repeat(MAX_LYRIC_LINE_CHARS + 5)))
+            .collect();
+        let mut lines = vec![long_line];
+        lines.extend((1..MAX_LYRIC_LINES as u64 + 200).map(|index| {
+            let mut line = LyricLine::new(index * 1000, format!("第 {index} 行"));
+            line.hidden = true;
+            line
+        }));
+        let mut source = LyricSource::of(LyricSourceKind::Online);
+        source.lookup_keys = vec!["ncm-lyrics/1".into(), "../etc/passwd".into()];
+        let document = LyricDocument::from_lines(lines, source).with_offset(1234);
+
+        let applied = prepare_applied_lyrics(
+            document,
+            vec![
+                "qq-lyrics/2".into(),
+                "ncm-lyrics/1".into(),
+                "bad key".into(),
+            ],
+        );
+        assert_eq!(applied.lines.len(), MAX_LYRIC_LINES);
+        let first = &applied.lines[0];
+        assert_eq!(first.text.chars().count(), MAX_LYRIC_LINE_CHARS);
+        assert_eq!(first.translations.len(), MAX_LYRIC_TRANSLATIONS);
+        assert!(first
+            .translations
+            .iter()
+            .all(|text| text.text.chars().count() <= MAX_LYRIC_LINE_CHARS));
+        assert!(applied.lines.iter().all(|line| !line.hidden));
+        assert!(applied.source.pinned, "用户明确应用 = 固定选择");
+        assert_eq!(applied.source.kind, LyricSourceKind::Online);
+        assert_eq!(
+            applied.source.lookup_keys,
+            ["ncm-lyrics/1", "qq-lyrics/2"],
+            "非法键丢弃，文档自带的与显式传入的合并去重"
+        );
+        assert_eq!(applied.offset_ms, 0, "在线来源没有文件 offset");
+        assert_eq!(applied.sync, LyricSync::Line);
+    }
 
     #[test]
     fn sanitize_lookup_keys_filters_dedups_and_caps() {

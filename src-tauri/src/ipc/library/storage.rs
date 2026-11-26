@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -618,20 +618,8 @@ impl LoadFailureMemo {
 }
 
 /// 数据先 flush 到磁盘，再以同卷 rename 切换。唯一临时名避免并发恢复互相覆盖。
+/// 实现在 `ipc::fs_util::write_atomic`，导出类命令也用它（SEC3-03）。
 pub(crate) fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), unique_suffix()));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-    result.map_err(|err| {
-        let _ = fs::remove_file(&temp);
-        format!("写入 {} 失败：{err}", path.display())
-    })
+    crate::ipc::fs_util::write_atomic(path, bytes)
+        .map_err(|err| format!("写入 {} 失败：{err}", path.display()))
 }

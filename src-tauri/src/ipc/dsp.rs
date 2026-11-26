@@ -68,7 +68,8 @@ fn export_eq_preset_inner(path: &str, content: &str) -> IpcResult<()> {
     }
     // F-02：命令边界校验路径（绝对路径 + 扩展名白名单 + 父目录必须存在）
     let target = validate_export_path(path, &["json", "txt"])?;
-    std::fs::write(&target, content.as_bytes())
+    // SEC3-03：临时文件 + 改名，写到一半失败不会把已有的预设文件截断
+    super::fs_util::write_atomic(&target, content.as_bytes())
         .map_err(|err| IpcError::new(IpcErrorCode::Io, format!("写入预设失败: {err}")))?;
     Ok(())
 }

@@ -180,17 +180,28 @@ fn line_to_lrc(line: &LyricLine, format: LrcExportFormat, fmt: &Formatter) -> St
     out
 }
 
-/// 整篇歌词 → LRC 文本（UTF-8，`\n` 换行，无 BOM）。空文本行跳过。
-pub(crate) fn lyrics_to_lrc(
+/// 导出结果。
+pub(crate) struct LrcExport {
+    /// LRC 文本（UTF-8，`\n` 换行，无 BOM）
+    pub(crate) text: String,
+    /// 写出的带时间戳的行数：原文行加上各自的音译行、译文行，**不含**文件头的
+    /// `[ti:]` / `[ar:]` / `[al:]` / `[by:]`。CMD-02：此前调用方按「以 `[` 开头且第 4 个字节是
+    /// `:`」从文本里数，文件头的四种标签会被算进去，超过 99 分钟的时间戳反而数不到。
+    pub(crate) timed_lines: usize,
+}
+
+/// 整篇歌词 → LRC。空文本行跳过。
+pub(crate) fn export_lrc(
     lines: &[LyricLine],
     format: LrcExportFormat,
     options: &LrcExportOptions,
     meta: &LrcExportMeta<'_>,
-) -> String {
+) -> LrcExport {
     let fmt = Formatter {
         ms_digits: if options.ms_digits == 2 { 2 } else { 3 },
     };
     let mut out = String::new();
+    let mut timed_lines = 0_usize;
     for (key, value) in [
         ("ti", meta.title),
         ("ar", meta.artist),
@@ -221,10 +232,12 @@ pub(crate) fn lyrics_to_lrc(
                 out.push_str(&fmt.line_tag(start_ms));
                 out.push_str(&sanitize_lrc_text(roman.trim()));
                 out.push('\n');
+                timed_lines += 1;
             }
         }
         out.push_str(&line_to_lrc(line, format, &fmt));
         out.push('\n');
+        timed_lines += 1;
         if options.include_translation {
             for translation in line
                 .translations
@@ -235,15 +248,64 @@ pub(crate) fn lyrics_to_lrc(
                 out.push_str(&fmt.line_tag(start_ms));
                 out.push_str(&sanitize_lrc_text(translation.trim()));
                 out.push('\n');
+                timed_lines += 1;
             }
         }
     }
-    out
+    LrcExport {
+        text: out,
+        timed_lines,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 只关心文本的测试走这个；行数由 `timed_line_count_*` 单独覆盖。
+    fn lyrics_to_lrc(
+        lines: &[LyricLine],
+        format: LrcExportFormat,
+        options: &LrcExportOptions,
+        meta: &LrcExportMeta<'_>,
+    ) -> String {
+        export_lrc(lines, format, options, meta).text
+    }
+
+    #[test]
+    fn timed_line_count_excludes_header_tags_and_includes_long_timestamps() {
+        // CMD-02：文件头四个标签不是歌词行；超过 99 分钟的时间戳（分钟 3 位）也要数到
+        let mut bilingual = word_line(1000, 2000, "Hello", vec![word(1000, 2000, "Hello")]);
+        bilingual.translations = vec![LyricText::new("你好"), LyricText::new("こんにちは")];
+        bilingual.roman = Some(LyricText::new("ha-ro"));
+        let lines = [
+            bilingual,
+            LyricLine::new(6_000_000, "一百分钟处的一行"),
+            LyricLine::new(7_000_000, "   "),
+        ];
+        let meta = LrcExportMeta {
+            title: "标题",
+            artist: "艺术家",
+            album: "专辑",
+            tool: "Seraph Audio Player",
+        };
+        let options = LrcExportOptions::default();
+        let export = export_lrc(&lines, LrcExportFormat::Enhanced, &options, &meta);
+        assert!(export.text.contains("[100:00.000]一百分钟处的一行"));
+        assert_eq!(export.timed_lines, 5, "音译 + 原文 + 两条译文 + 第二句");
+        let body_lines = export.text.lines().filter(|line| !line.is_empty()).count();
+        assert_eq!(body_lines, export.timed_lines + 4, "另有 4 行文件头");
+
+        let plain = LrcExportOptions {
+            include_translation: false,
+            include_roman: false,
+            ..LrcExportOptions::default()
+        };
+        assert_eq!(
+            export_lrc(&lines, LrcExportFormat::Line, &plain, &NO_META).timed_lines,
+            2
+        );
+    }
 
     fn word(start: u64, end: u64, text: &str) -> LyricWord {
         LyricWord::new(start, (end > start).then_some(end), text)

@@ -24,7 +24,8 @@ fn export_app_config_inner(path: &str, content: &str) -> IpcResult<()> {
     }
     // F-02：命令边界不能相信渲染进程传来的路径（正常来自 dialog，但 IPC 可被绕过）
     let target = validate_export_path(path, &["json"])?;
-    std::fs::write(&target, content.as_bytes())
+    // SEC3-03：临时文件 + 改名，写到一半失败不会把已有的配置文件截断
+    super::fs_util::write_atomic(&target, content.as_bytes())
         .map_err(|err| IpcError::new(IpcErrorCode::Io, format!("写入配置失败: {err}")))?;
     Ok(())
 }
