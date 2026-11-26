@@ -8,33 +8,116 @@
 use super::error::{IpcError, IpcResult};
 use std::path::{Path, PathBuf};
 
-/// F-05：把系统工具名解析为 `%SystemRoot%\System32\<name>` 绝对路径。
+/// F-05：把系统工具名解析为 `<系统目录>\<name>` 绝对路径（`C:\Windows\System32\icacls.exe`）。
 ///
 /// `Command::new("icacls")` / `Command::new("explorer.exe")` 走的是 CreateProcess
 /// 搜索顺序,其中包含**应用自身所在目录**与(部分情形下的)当前工作目录——
 /// 应用从下载目录/共享盘直接运行时,同目录放一个 `icacls.exe` 即被优先执行。
 /// 系统工具一律走绝对路径,不给搜索顺序留缝。
 ///
-/// `SystemRoot` 缺失(异常环境)时回落到裸名,保持功能可用而不是直接失败。
+/// SEC3-02：系统目录由 `GetSystemDirectoryW` 给出，不读环境变量；取不到就**报错**。
+/// 此前读 `%SystemRoot%`，变量缺失时回落到裸名——正是上面要避免的搜索顺序，
+/// 与 M-1「外部工具找不到就报错，严禁回退裸名」的口径不一致。
 #[cfg(windows)]
-pub(crate) fn system32_tool(name: &str) -> PathBuf {
-    match std::env::var_os("SystemRoot") {
-        Some(root) if !root.is_empty() => Path::new(&root).join("System32").join(name),
-        _ => PathBuf::from(name),
-    }
+pub(crate) fn system32_tool(name: &str) -> Result<PathBuf, String> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    // SAFETY: 回调只把这两个参数原样交给系统函数，缓冲区与长度由 `query_directory` 保证匹配
+    query_directory(|buffer, len| unsafe { GetSystemDirectoryW(buffer, len) })
+        .map(|dir| dir.join(name))
+        .map_err(|err| format!("无法确定系统目录，已放弃调用 {name}：{err}"))
 }
 
-/// `%SystemRoot%\explorer.exe` 绝对路径（打开 URL / 定位文件都靠它）。
+/// `<Windows 目录>\explorer.exe` 绝对路径（打开 URL / 定位文件都靠它）。
 ///
 /// 2026-09-22 教训：explorer.exe **不在 System32**（那里只有 SysWOW64 的 32 位副本与
-/// `%SystemRoot%` 根目录下的 64 位本体），`system32_tool("explorer.exe")` 从 v0.5.7 起一直
+/// Windows 目录根下的 64 位本体），`system32_tool("explorer.exe")` 从 v0.5.7 起一直
 /// 指向不存在的文件，「前往下载」与「在资源管理器中显示」静默失败。系统工具路径必须
 /// 按各自真实位置解析，回归闸 `resolved_system_tools_actually_exist` 在 Windows 上实测存在性。
+///
+/// SEC3-02：Windows 目录由 `GetSystemWindowsDirectoryW` 给出（终端服务下 `GetWindowsDirectoryW`
+/// 可能返回每用户的私有目录），取不到就报错，不回落到裸名。
 #[cfg(windows)]
-pub(crate) fn explorer_exe() -> PathBuf {
-    match std::env::var_os("SystemRoot") {
-        Some(root) if !root.is_empty() => Path::new(&root).join("explorer.exe"),
-        _ => PathBuf::from("explorer.exe"),
+pub(crate) fn explorer_exe() -> Result<PathBuf, String> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    // SAFETY: 同 `system32_tool`
+    query_directory(|buffer, len| unsafe { GetSystemWindowsDirectoryW(buffer, len) })
+        .map(|dir| dir.join("explorer.exe"))
+        .map_err(|err| format!("无法确定 Windows 目录，已放弃调用资源管理器：{err}"))
+}
+
+/// 调用「把目录写进调用方缓冲区、返回长度」这一类 Win32 函数：成功时返回值是不含结尾 NUL 的
+/// 字符数；缓冲区不够时返回需要的大小（含 NUL）；失败返回 0。
+#[cfg(windows)]
+fn query_directory(query: impl Fn(*mut u16, u32) -> u32) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buffer = vec![0_u16; 260];
+    // 正常一次就够；缓冲区不够时按系统报的大小重试，最多三轮
+    for _ in 0..3 {
+        let written = query(buffer.as_mut_ptr(), buffer.len() as u32) as usize;
+        if written == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if written < buffer.len() {
+            let dir = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..written]));
+            // 结果要拿去拼可执行文件路径：不是「盘符 + 绝对路径」的一律不用
+            return if matches!(path_location(&dir), PathLocation::Local) && dir.is_absolute() {
+                Ok(dir)
+            } else {
+                Err(format!("系统返回了意外的目录：{}", dir.display()))
+            };
+        }
+        buffer.resize(written + 1, 0);
+    }
+    Err("目录长度反复变化".into())
+}
+
+/// 一个路径指向哪里（PL-01 / SEC3-01）。只看路径的写法，不碰文件系统——判断它的目的
+/// 正是决定「要不要去碰」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathLocation {
+    /// 盘符路径与相对路径；`\\?\C:\…` 只是关掉了路径规范化的盘符路径，也算本机。
+    /// （映射成盘符的网络驱动器同样落在这里：那是用户自己连上的主机。）
+    Local,
+    /// UNC 网络共享：`\\server\share\…`，以及它的 `\\?\UNC\…` / `\\.\UNC\…` 写法。
+    /// 探测或打开它，Windows 会向 `server` 发起 SMB 连接，域环境下还会带上 NTLM 认证。
+    Network { server: String, share: String },
+    /// 其余设备命名空间路径（`\\.\PhysicalDrive0`、`\\?\Volume{…}`、`\\?\GLOBALROOT\…` 等）。
+    Device,
+}
+
+pub(crate) fn path_location(path: &Path) -> PathLocation {
+    let text = path.to_string_lossy();
+    // NT 对象命名空间写法（`\??\UNC\server\share`、`\??\C:\…`）：部分 Win32 接口会把它当成
+    // 已经转换好的 NT 路径原样接受。正常的曲目路径不会长这样，一律按设备路径处理。
+    if text.starts_with(r"\??\") {
+        return PathLocation::Device;
+    }
+    // Windows 把正反斜杠都当分隔符：`//server/share` 与 `\\server\share` 是同一个 UNC 路径
+    let is_separator = |ch: char| ch == '\\' || ch == '/';
+    let mut chars = text.chars();
+    if !(chars.next().is_some_and(is_separator) && chars.next().is_some_and(is_separator)) {
+        return PathLocation::Local;
+    }
+    let network = |server: Option<&str>, share: Option<&str>| PathLocation::Network {
+        server: server.unwrap_or_default().to_lowercase(),
+        share: share.unwrap_or_default().to_lowercase(),
+    };
+    let mut parts = chars.as_str().split(is_separator);
+    let first = parts.next().unwrap_or_default();
+    if first != "?" && first != "." {
+        // 多写了分隔符（`\\\server\share`）时主机名是空串，照样归为网络路径、不放行
+        return network(Some(first), parts.next());
+    }
+    let second = parts.next().unwrap_or_default();
+    if second.eq_ignore_ascii_case("UNC") {
+        return network(parts.next(), parts.next());
+    }
+    let drive = second.as_bytes();
+    let is_drive = drive.len() == 2 && drive[0].is_ascii_alphabetic() && drive[1] == b':';
+    if first == "?" && is_drive {
+        PathLocation::Local
+    } else {
+        PathLocation::Device
     }
 }
 
@@ -145,10 +228,95 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn resolved_system_tools_actually_exist() {
-        // 2026-09-22：explorer.exe 不在 System32（只有 SysWOW64 与 %SystemRoot% 根目录），
+        // 2026-09-22：explorer.exe 不在 System32（只有 SysWOW64 与 Windows 目录根下），
         // `system32_tool("explorer.exe")` 让「前往下载」「在资源管理器中显示」从 v0.5.7 起一直失败
-        assert!(explorer_exe().is_file(), "{}", explorer_exe().display());
-        assert!(system32_tool("icacls.exe").is_file());
+        let explorer = explorer_exe().unwrap();
+        assert!(explorer.is_file(), "{}", explorer.display());
+        assert!(system32_tool("icacls.exe").unwrap().is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_tool_paths_are_absolute_and_do_not_depend_on_the_environment() {
+        // SEC3-02：路径来自系统 API，不读 `%SystemRoot%`。这里不去改进程环境（并行测试里
+        // 改环境变量会互相踩），只核对结果是绝对的盘符路径、而且与环境变量给出的位置一致。
+        for tool in [
+            system32_tool("icacls.exe").unwrap(),
+            explorer_exe().unwrap(),
+        ] {
+            assert!(tool.is_absolute(), "{}", tool.display());
+            assert_eq!(path_location(&tool), PathLocation::Local);
+            assert!(tool.parent().is_some_and(Path::is_dir));
+        }
+        if let Some(root) = std::env::var_os("SystemRoot").filter(|root| !root.is_empty()) {
+            let lower = |path: PathBuf| path.to_string_lossy().to_lowercase();
+            assert_eq!(
+                lower(system32_tool("icacls.exe").unwrap()),
+                lower(Path::new(&root).join("System32").join("icacls.exe"))
+            );
+            assert_eq!(
+                lower(explorer_exe().unwrap()),
+                lower(Path::new(&root).join("explorer.exe"))
+            );
+        }
+    }
+
+    #[test]
+    fn path_location_tells_local_network_and_device_paths_apart() {
+        let network = |server: &str, share: &str| PathLocation::Network {
+            server: server.into(),
+            share: share.into(),
+        };
+        for local in [
+            r"C:\Music\a.flac",
+            "D:/Music/a.flac",
+            r"relative\a.flac",
+            r"\rooted\a.flac",
+            "a.flac",
+            r"\\?\C:\Music\a.flac",
+            "",
+        ] {
+            assert_eq!(
+                path_location(Path::new(local)),
+                PathLocation::Local,
+                "{local}"
+            );
+        }
+        for (path, server, share) in [
+            (r"\\nas\music\a.flac", "nas", "music"),
+            (r"\\NAS\Music\a.flac", "nas", "music"),
+            ("//nas/music/a.flac", "nas", "music"),
+            (r"\/nas\music\a.flac", "nas", "music"),
+            (r"\\?\UNC\nas\music\a.flac", "nas", "music"),
+            (r"\\.\unc\nas\music\a.flac", "nas", "music"),
+            (r"\\192.168.1.9\share", "192.168.1.9", "share"),
+            (r"\\attacker.example\x", "attacker.example", "x"),
+            (r"\\server", "server", ""),
+            // 多写一个分隔符：主机名解析为空串，仍然不是本机路径
+            (r"\\\nas\music\a.flac", "", "nas"),
+        ] {
+            assert_eq!(
+                path_location(Path::new(path)),
+                network(server, share),
+                "{path}"
+            );
+        }
+        for device in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\C:\Music\a.flac",
+            r"\\.\pipe\name",
+            r"\\?\Volume{b75e2c83-0000-0000-0000-602f00000000}\a.flac",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.flac",
+            r"\\?\GLOBALROOT\Device\Mup\nas\music\a.flac",
+            r"\??\UNC\nas\music\a.flac",
+            r"\??\C:\Music\a.flac",
+        ] {
+            assert_eq!(
+                path_location(Path::new(device)),
+                PathLocation::Device,
+                "{device}"
+            );
+        }
     }
 
     fn temp_dir() -> PathBuf {

@@ -9,6 +9,52 @@ import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
 
 let libraryLoadSequence = 0;
 
+/** `import_playlist_m3u8` 的返回值。 */
+export interface M3u8ImportResult {
+  name: string;
+  paths: string[];
+  /** 被跳过的条目总数（含 `blocked`） */
+  skipped: number;
+  truncated?: boolean;
+  /** PL-01：因为指向网络共享或设备路径而没有去探测的条目数 */
+  blocked?: number;
+  /** 被拦下的网络主机名（后端已去重、封顶） */
+  blockedHosts?: string[];
+}
+
+/**
+ * PL-01：清单里指向网络共享 / 设备路径的条目后端不会去探测（探测本身就会向那台主机发起
+ * 连接）。这里把原因和补救办法讲清楚——只说「跳过 N 条」的话，用户分不清是文件没了还是被拦了。
+ * 没有被拦下的条目时返回空串。
+ */
+export function m3u8BlockedNote(
+  imported: Pick<M3u8ImportResult, "blocked" | "blockedHosts">
+): string {
+  const blocked = imported.blocked ?? 0;
+  if (blocked <= 0) return "";
+  const hosts = (imported.blockedHosts ?? []).filter((host) => host.trim().length > 0);
+  const where = hosts.length > 0 ? `（${hosts.join("、")}）` : "";
+  // 补救办法按实际入口写：本地音乐只有「拖进窗口」这一个导入方式。拖进来的是用户自己选的
+  // 文件，入库后这台主机就算已知，再导入同一份清单即可。
+  return `${blocked} 条指向网络共享或设备路径${where}，为避免向清单指定的主机发起连接未导入；确需导入时，先把该共享上的音乐文件夹拖进窗口入库，再重新导入清单`;
+}
+
+/** 歌单导入成功提示里括号内的那段：导入数、跳过数、截断与被拦下的说明。 */
+export function m3u8ImportSummary(
+  importedCount: number,
+  imported: Pick<M3u8ImportResult, "skipped" | "truncated" | "blocked" | "blockedHosts">
+): string {
+  const parts = [`${importedCount} 首`];
+  const blocked = Math.max(0, imported.blocked ?? 0);
+  // 被拦下的单独说明，「跳过」只报其余的（文件不存在、重复、网络流地址）
+  const otherSkipped = Math.max(0, imported.skipped - blocked);
+  if (otherSkipped > 0) parts.push(`跳过 ${otherSkipped} 条`);
+  if (imported.truncated) parts.push("清单超长已截断");
+  const blockedNote = m3u8BlockedNote(imported);
+  if (blockedNote) parts.push(blockedNote);
+  return parts.join("，");
+}
+
 function dedupeTracks(tracks: Track[]) {
   const byKey = new Map<string, Track>();
   const orderedKeys: string[] = [];
@@ -312,15 +358,17 @@ export function createLibraryActions(
       });
       if (typeof selected !== "string" || !selected) return;
 
-      const imported = await invoke<{
-        name: string;
-        paths: string[];
-        skipped: number;
-        truncated?: boolean;
-      }>("import_playlist_m3u8", { path: selected });
+      const imported = await invoke<M3u8ImportResult>("import_playlist_m3u8", { path: selected });
 
       if (imported.paths.length === 0) {
-        get().showNotification("清单中没有可用的本地音频文件");
+        const blockedNote = m3u8BlockedNote(imported);
+        // 一首都没导入而原因是网络路径被拦下时，要把原因说出来，否则用户只会觉得清单是坏的
+        get().showNotification(
+          blockedNote
+            ? `清单中没有可导入的音频文件：${blockedNote}`
+            : "清单中没有可用的本地音频文件",
+          blockedNote ? "error" : "info"
+        );
         return;
       }
 
@@ -360,10 +408,9 @@ export function createLibraryActions(
           },
         ],
       }));
-      const parts = [`${trackIds.length} 首`];
-      if (imported.skipped > 0) parts.push(`跳过 ${imported.skipped} 条`);
-      if (imported.truncated) parts.push("清单超长已截断");
-      get().showNotification(`已导入歌单「${name}」（${parts.join("，")}）`);
+      get().showNotification(
+        `已导入歌单「${name}」（${m3u8ImportSummary(trackIds.length, imported)}）`
+      );
     } catch (err) {
 
       console.warn("import_playlist_m3u8 failed", err);

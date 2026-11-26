@@ -14,22 +14,29 @@ use std::path::{Path, PathBuf};
 
 use super::error::{IpcError, IpcErrorCode, IpcResult};
 use super::library::decode_lyric_bytes;
-use super::path_guard::{validate_export_path, validate_import_path};
+use super::path_guard::{path_location, validate_export_path, validate_import_path, PathLocation};
 
 /// 防呆上限：超长清单截断（按有效条目数计），避免异常文件拖垮导入。
 const MAX_M3U8_ENTRIES: usize = 10_000;
 /// 清单大小上限：正常 .m3u/.m3u8 都在几 MB 内，防误选巨型文件整读进内存。
 const MAX_M3U8_BYTES: u64 = 32 * 1024 * 1024;
+/// 回传给前端的「被拦下的主机名」个数与单个长度上限（只用于提示文案）。
+const MAX_REPORTED_BLOCKED_HOSTS: usize = 5;
+const MAX_REPORTED_HOST_CHARS: usize = 64;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct M3u8Import {
     pub name: String,
     pub paths: Vec<String>,
-    /// 被跳过的条目数（网络流 URL、不存在的文件、重复条目等）
+    /// 被跳过的条目数（网络流 URL、不存在的文件、重复条目、被拦下的网络 / 设备路径等）
     pub skipped: usize,
     /// 有效条目数超过上限被截断
     pub truncated: bool,
+    /// PL-01：`skipped` 里因为指向网络共享或设备路径而**没有去探测**的条目数
+    pub blocked: usize,
+    /// 被拦下的网络主机名（去重，最多 [`MAX_REPORTED_BLOCKED_HOSTS`] 个），供提示文案使用
+    pub blocked_hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,13 +49,48 @@ pub struct M3u8ExportEntry {
 }
 
 #[tauri::command]
-pub async fn import_playlist_m3u8(path: String) -> IpcResult<M3u8Import> {
-    tauri::async_runtime::spawn_blocking(move || import_playlist_m3u8_inner(&path))
-        .await
-        .map_err(|err| IpcError::new(IpcErrorCode::Internal, format!("导入任务异常: {err}")))?
+pub async fn import_playlist_m3u8(app: tauri::AppHandle, path: String) -> IpcResult<M3u8Import> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 曲库里已有曲目所在的网络主机：用户此前自己连过、应用平时也会访问
+        let library_servers = super::library::library_network_servers(&app);
+        import_playlist_m3u8_inner(&path, &library_servers)
+    })
+    .await
+    .map_err(|err| IpcError::new(IpcErrorCode::Internal, format!("导入任务异常: {err}")))?
 }
 
-fn import_playlist_m3u8_inner(path: &str) -> IpcResult<M3u8Import> {
+/// PL-01：清单条目能不能去探测，由路径的写法决定，**在碰文件系统之前**判断。
+///
+/// 清单是外来文件。此前每一行都直接拿去 `is_file()`，而探测一个 `\\主机\共享\文件` 路径，
+/// Windows 就会向那台主机发起 SMB 连接，域环境下还附带 NTLM 认证质询——别人给的 `.m3u8`
+/// 里写上自己的主机名，导入时就能收到这台机器的连接（与 L-1 的 SMTC 封面同一类出站）。
+///
+/// - 本机路径：照旧。
+/// - 设备路径（`\\.\…`、卷 GUID、`\??\…`）：一律跳过。
+/// - 网络共享路径：只有主机是「清单文件自己所在的主机」或「曲库里已有曲目所在的主机」才探测。
+///   前者是用户刚刚亲手打开的位置（放在 NAS 上、条目写相对路径的清单照常可用），后者是
+///   用户此前自己从文件对话框导入过的共享（从本应用导出的清单可以原样导回）。
+///   两种情况都没有产生「清单让应用去连一台新主机」的效果。其余主机一律跳过，
+///   计入 `skipped` 与 `blocked`，主机名回传给前端用于说明。
+///
+/// 主机名按字符串比较（不区分大小写），`\\nas` 与 `\\nas.lan`、IP 写法算不同主机——
+/// 宁可多跳过。映射成盘符的网络驱动器（`Z:\…`）是用户自己连上的，按本机路径处理。
+fn may_probe(location: &PathLocation, own_server: Option<&str>, library: &HashSet<String>) -> bool {
+    match location {
+        PathLocation::Local => true,
+        PathLocation::Device => false,
+        // 空主机名（`\\\server\…` 这类写法解析出来的）不与任何主机相等
+        PathLocation::Network { server, .. } => {
+            !server.is_empty()
+                && (own_server == Some(server.as_str()) || library.contains(server.as_str()))
+        }
+    }
+}
+
+fn import_playlist_m3u8_inner(
+    path: &str,
+    library_servers: &HashSet<String>,
+) -> IpcResult<M3u8Import> {
     // F-02：只接受 .m3u8/.m3u 且必须是已存在的普通文件
     let source = validate_import_path(path, &["m3u8", "m3u"])?;
     if let Ok(meta) = fs::metadata(&source) {
@@ -67,11 +109,18 @@ fn import_playlist_m3u8_inner(path: &str) -> IpcResult<M3u8Import> {
     let text = decode_lyric_bytes(&bytes);
     let text = text.trim_start_matches('\u{feff}');
     let base_dir = source.parent().unwrap_or(Path::new("."));
+    // 清单自己所在的主机（清单在本机时没有）
+    let own_server = match path_location(&source) {
+        PathLocation::Network { server, .. } if !server.is_empty() => Some(server),
+        _ => None,
+    };
 
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
     let mut skipped = 0usize;
     let mut truncated = false;
+    let mut blocked = 0usize;
+    let mut blocked_hosts: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -100,6 +149,26 @@ fn import_playlist_m3u8_inner(path: &str) -> IpcResult<M3u8Import> {
         } else {
             base_dir.join(candidate)
         };
+        // PL-01：判断的是**最终要探测的路径**（相对条目拼上清单目录之后），而且在探测之前
+        let location = path_location(&resolved);
+        if !may_probe(&location, own_server.as_deref(), library_servers) {
+            skipped += 1;
+            blocked += 1;
+            if let PathLocation::Network { server, .. } = location {
+                let shown: String = server
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(MAX_REPORTED_HOST_CHARS)
+                    .collect();
+                if !shown.is_empty()
+                    && blocked_hosts.len() < MAX_REPORTED_BLOCKED_HOSTS
+                    && !blocked_hosts.contains(&shown)
+                {
+                    blocked_hosts.push(shown);
+                }
+            }
+            continue;
+        }
         if !resolved.is_file() {
             skipped += 1;
             continue;
@@ -127,6 +196,8 @@ fn import_playlist_m3u8_inner(path: &str) -> IpcResult<M3u8Import> {
         paths,
         skipped,
         truncated,
+        blocked,
+        blocked_hosts,
     })
 }
 
@@ -250,7 +321,8 @@ fn export_playlist_m3u8_inner(path: &str, entries: &[M3u8ExportEntry]) -> IpcRes
         ));
     }
 
-    fs::write(&target, content.as_bytes())
+    // PL-02：临时文件 + 改名。此前直接覆盖写，导出到已有清单时中途失败会把原文件截断
+    super::fs_util::write_atomic(&target, content.as_bytes())
         .map_err(|err| IpcError::new(IpcErrorCode::Io, format!("写入清单失败: {err}")))?;
     Ok(())
 }
@@ -267,6 +339,140 @@ mod tests {
             std::env::temp_dir().join(format!("seraph-m3u8-test-{}-{case}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    /// 曲库里没有任何网络主机时的导入。
+    fn import(path: &str) -> IpcResult<M3u8Import> {
+        import_playlist_m3u8_inner(path, &HashSet::new())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn network_and_device_entries_are_skipped_without_being_probed() {
+        // PL-01：别人给的清单里写着网络共享路径。`blocked` 只在「探测之前就跳过」的分支上
+        // 累加，所以它等于条目数就说明这些路径一条都没有拿去碰文件系统。
+        let dir = temp_dir("pl01-block");
+        let local = dir.join("local.flac");
+        fs::write(&local, b"x").unwrap();
+        let list_path = dir.join("untrusted.m3u8");
+        let entries = [
+            r"\\attacker.invalid\share\a.flac",
+            "//attacker.invalid/share/b.flac",
+            r"\\?\UNC\Attacker.invalid\share\c.flac",
+            "file:////attacker.invalid/share/d.flac",
+            r"\\other.invalid\x\e.flac",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\Mup\third.invalid\share\f.flac",
+        ];
+        // 多写一个分隔符的不是合法 UNC 前缀：它不算绝对路径，会被拼到清单所在的盘上，
+        // 探测的是本机的 `<盘符>:\empty-host.invalid\share\g.flac`——不出站，按「文件不存在」跳过
+        let malformed = r"\\\empty-host.invalid\share\g.flac";
+        let candidate = PathBuf::from(malformed);
+        assert!(!candidate.is_absolute());
+        let resolved = dir.join(&candidate);
+        assert_eq!(
+            path_location(&resolved),
+            PathLocation::Local,
+            "{}",
+            resolved.display()
+        );
+        let mut content = String::from("#EXTM3U\n");
+        for entry in entries {
+            content.push_str(entry);
+            content.push('\n');
+        }
+        content.push_str(malformed);
+        content.push_str("\nlocal.flac\n");
+        fs::write(&list_path, content).unwrap();
+
+        let started = std::time::Instant::now();
+        let imported = import(&list_path.to_string_lossy()).unwrap();
+        assert_eq!(imported.paths.len(), 1, "{:?}", imported.paths);
+        assert!(imported.paths[0].ends_with("local.flac"));
+        assert_eq!(imported.blocked, entries.len());
+        assert_eq!(imported.skipped, entries.len() + 1);
+        assert_eq!(
+            imported.blocked_hosts,
+            ["attacker.invalid", "other.invalid"],
+            "主机名去重；设备路径不报主机"
+        );
+        // 真去解析这几个主机名，单是名字解析超时就远不止这点时间
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // 曲库里有别的主机也不放行这些
+        let library = HashSet::from(["media-nas.invalid".to_string()]);
+        let imported = import_playlist_m3u8_inner(&list_path.to_string_lossy(), &library).unwrap();
+        assert_eq!(imported.blocked, entries.len());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_entries_are_probed_only_for_already_trusted_hosts() {
+        // PL-01 的放行规则（纯判断，不碰网络）
+        let network = |server: &str| PathLocation::Network {
+            server: server.into(),
+            share: "music".into(),
+        };
+        let none = HashSet::new();
+        let library = HashSet::from(["nas".to_string()]);
+
+        assert!(may_probe(&PathLocation::Local, None, &none));
+        assert!(!may_probe(&PathLocation::Device, Some("nas"), &library));
+
+        // 清单在本机、曲库里没有这台主机 → 不探测
+        assert!(!may_probe(&network("nas"), None, &none));
+        // 清单自己就在这台主机上（用户刚亲手打开的位置）
+        assert!(may_probe(&network("nas"), Some("nas"), &none));
+        assert!(!may_probe(&network("evil"), Some("nas"), &none));
+        // 曲库里已有这台主机上的曲目（用户此前自己导入过）
+        assert!(may_probe(&network("nas"), None, &library));
+        assert!(!may_probe(&network("evil"), None, &library));
+        // 空主机名永远不算已信任，哪怕两边都是空的
+        assert!(!may_probe(
+            &network(""),
+            Some(""),
+            &HashSet::from([String::new()])
+        ));
+
+        // 放在共享上的清单里写相对路径：拼出来的仍是同一台主机，所以照常可用
+        #[cfg(windows)]
+        {
+            let playlist = Path::new(r"\\NAS\Music\lists\fav.m3u8");
+            let resolved = playlist.parent().unwrap().join(r"..\album\01.flac");
+            assert_eq!(path_location(playlist), network("nas"));
+            assert_eq!(path_location(&resolved), network("nas"));
+        }
+    }
+
+    #[test]
+    fn blocked_host_names_are_capped_for_the_notification() {
+        let dir = temp_dir("pl01-cap");
+        let list_path = dir.join("many-hosts.m3u8");
+        let mut content = String::from("#EXTM3U\n");
+        // 超长主机名排在最前，才能进到回传的那几个里、考到长度上限
+        content.push_str(&format!("\\\\{}\\share\\a.flac\n", "h".repeat(300)));
+        for index in 0..20 {
+            content.push_str(&format!("\\\\host{index}.invalid\\share\\a.flac\n"));
+        }
+        fs::write(&list_path, content).unwrap();
+        let imported = import(&list_path.to_string_lossy()).unwrap();
+        // 非 Windows 上这些不是绝对路径，会被拼到清单目录下当成普通的不存在文件
+        if cfg!(windows) {
+            assert_eq!(imported.blocked, 21);
+            assert_eq!(imported.blocked_hosts.len(), MAX_REPORTED_BLOCKED_HOSTS);
+            assert_eq!(
+                imported.blocked_hosts[0],
+                "h".repeat(MAX_REPORTED_HOST_CHARS)
+            );
+            assert_eq!(imported.blocked_hosts[1], "host0.invalid");
+        }
+        assert!(imported.paths.is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -287,7 +493,7 @@ mod tests {
         writeln!(file, "missing-file.flac").unwrap();
         drop(file);
 
-        let imported = import_playlist_m3u8_inner(&list_path.to_string_lossy()).unwrap();
+        let imported = import(&list_path.to_string_lossy()).unwrap();
         assert_eq!(imported.name, "test-list");
         assert_eq!(imported.paths.len(), 2);
         assert_eq!(imported.skipped, 2, "URL 与缺失文件都应计入 skipped");
@@ -307,7 +513,7 @@ mod tests {
         let list_path = dir.join("gbk-list.m3u");
         fs::write(&list_path, &encoded).unwrap();
 
-        let imported = import_playlist_m3u8_inner(&list_path.to_string_lossy()).unwrap();
+        let imported = import(&list_path.to_string_lossy()).unwrap();
         assert_eq!(imported.paths.len(), 1, "GBK 中文路径应能解码命中文件");
         assert!(imported.paths[0].ends_with("思念.mp3"));
 
@@ -328,7 +534,7 @@ mod tests {
         let content = format!("#EXTM3U\n{abs}\n{abs}\n{uri}\nfile://otherhost/share/x.flac\n");
         fs::write(&list_path, content).unwrap();
 
-        let imported = import_playlist_m3u8_inner(&list_path.to_string_lossy()).unwrap();
+        let imported = import(&list_path.to_string_lossy()).unwrap();
         assert_eq!(
             imported.paths.len(),
             1,
@@ -364,7 +570,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_list_and_empty_export() {
-        assert!(import_playlist_m3u8_inner("Z:/definitely/missing.m3u8").is_err());
+        assert!(import("Z:/definitely/missing.m3u8").is_err());
         assert!(export_playlist_m3u8_inner("out.m3u8", &[]).is_err());
     }
 }

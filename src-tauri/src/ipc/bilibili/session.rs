@@ -448,7 +448,10 @@ pub(crate) fn restrict_session_file_permissions(path: &Path) -> Result<(), Strin
             .ok()
             .filter(|name| !name.trim().is_empty() && !name.contains(':'))
             .ok_or_else(|| "无法确定当前用户，已中止会话文件写入".to_string())?;
-        let mut command = Command::new(crate::ipc::path_guard::system32_tool("icacls.exe"));
+        // SEC3-02：系统目录取不到时同样拒绝写盘，不回退到按搜索顺序找 icacls
+        let icacls = crate::ipc::path_guard::system32_tool("icacls.exe")
+            .map_err(|err| format!("无法收窄会话文件权限，已中止写入：{err}"))?;
+        let mut command = Command::new(icacls);
         hide_console_window(&mut command);
         command
             .arg(path)

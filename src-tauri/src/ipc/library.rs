@@ -41,8 +41,8 @@ pub(crate) use lyrics::decode_lyric_bytes;
 #[cfg(test)]
 pub(crate) use media_library::import_track_key;
 pub(crate) use media_library::{
-    mark_tracks_cache_missing_by_paths, merge_tracks_into_cache, read_cached_track,
-    replace_track_in_cache,
+    library_network_servers, library_references_path, mark_tracks_cache_missing_by_paths,
+    merge_tracks_into_cache, read_cached_track, replace_track_in_cache,
 };
 pub(crate) use metadata::{
     color_pair, format_bitrate, format_channels, format_file_size, format_sample_rate,

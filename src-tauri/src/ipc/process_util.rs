@@ -214,7 +214,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn completed_process_reports_status_and_stderr() {
-        let mut command = Command::new(crate::ipc::path_guard::system32_tool("cmd.exe"));
+        let mut command = Command::new(crate::ipc::path_guard::system32_tool("cmd.exe").unwrap());
         command.args(["/D", "/C", "echo oops 1>&2 & exit 3"]);
         let output = run_bounded(&mut command, Duration::from_secs(10), || false).unwrap();
         assert_eq!(output.status.code(), Some(3));
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn hung_process_is_killed_at_the_deadline() {
         let started = Instant::now();
-        let mut command = Command::new(crate::ipc::path_guard::system32_tool("ping.exe"));
+        let mut command = Command::new(crate::ipc::path_guard::system32_tool("ping.exe").unwrap());
         command.args(["-n", "30", "127.0.0.1"]);
         let err = run_bounded(&mut command, Duration::from_millis(300), || false).unwrap_err();
         assert!(matches!(err, WaitError::TimedOut(_)));
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn cancellation_after_spawn_stops_the_process() {
         let started = Instant::now();
-        let mut command = Command::new(crate::ipc::path_guard::system32_tool("ping.exe"));
+        let mut command = Command::new(crate::ipc::path_guard::system32_tool("ping.exe").unwrap());
         command.args(["-n", "30", "127.0.0.1"]);
         let err = run_bounded(&mut command, Duration::from_secs(10), || {
             started.elapsed() >= Duration::from_millis(100)

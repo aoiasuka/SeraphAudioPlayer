@@ -121,6 +121,40 @@ pub(crate) fn read_library_snapshot(app: &AppHandle) -> Result<Arc<LibrarySnapsh
     read_library_snapshot_for_update(app)
 }
 
+/// 曲库里是否有哪首曲目的文件路径就是 `path`。**不碰文件系统**：只比较归一化后的字符串
+/// （ASCII 大小写、正反斜杠），所以 `path` 是网络共享路径时也不会因为这次查询连出去。
+/// 曲库读不出来按「没有」处理。SEC3-01 用它决定一个网络路径能不能交给资源管理器。
+pub(crate) fn library_references_path(app: &AppHandle, path: &Path) -> bool {
+    read_library_snapshot(app).is_ok_and(|snapshot| tracks_reference_path(&snapshot.tracks, path))
+}
+
+pub(crate) fn tracks_reference_path(tracks: &[ImportedTrack], path: &Path) -> bool {
+    let wanted = normalize_cover_key(&path.to_string_lossy());
+    tracks
+        .iter()
+        .any(|track| normalize_cover_key(&track.path) == wanted)
+}
+
+/// 曲库里已有曲目所在的网络主机（小写）。同样不碰文件系统，只看路径的写法。
+/// PL-01 用它判断清单里的网络共享条目指向的是不是用户此前自己导入过的主机；
+/// 曲库读不出来按「没有」处理（结果是多跳过，不是多放行）。
+pub(crate) fn library_network_servers(app: &AppHandle) -> HashSet<String> {
+    read_library_snapshot(app)
+        .map(|snapshot| network_servers_of(&snapshot.tracks))
+        .unwrap_or_default()
+}
+
+pub(crate) fn network_servers_of(tracks: &[ImportedTrack]) -> HashSet<String> {
+    use crate::ipc::path_guard::{path_location, PathLocation};
+    tracks
+        .iter()
+        .filter_map(|track| match path_location(Path::new(&track.path)) {
+            PathLocation::Network { server, .. } if !server.is_empty() => Some(server),
+            _ => None,
+        })
+        .collect()
+}
+
 fn read_library_snapshot_for_update(app: &AppHandle) -> Result<Arc<LibrarySnapshot>, String> {
     if let Some(snapshot) = LIBRARY_MEMORY.read().as_ref() {
         return Ok(Arc::clone(snapshot));

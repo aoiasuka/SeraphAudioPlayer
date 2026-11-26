@@ -52,7 +52,12 @@ sha2 = "0.10"
 qrcodegen = "=1.8.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    # SEC3-02：系统目录 / Windows 目录走 API（GetSystemDirectoryW），不读 %SystemRoot%
+    "Win32_System_SystemInformation",
+] }
 # SMTC 系统媒体控件（媒体键 / 系统媒体浮窗）
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 # 任务栏缩略图播控按钮 + 图标进度条（ITaskbarList3 / 窗口子类化 / 运行时绘制图标）

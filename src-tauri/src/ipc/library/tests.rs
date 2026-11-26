@@ -690,6 +690,53 @@ fn trusts_riff_magic_over_dsf_extension() {
 }
 
 #[test]
+fn library_path_lookup_ignores_case_and_separators_without_touching_disk() {
+    // SEC3-01：网络共享路径能不能交给资源管理器，取决于曲库里有没有这首曲目。
+    // 比较是纯字符串的——用 `.invalid` 主机也瞬间返回，说明没有去探测它。
+    let tracks = vec![
+        test_imported_track("a", r"\\Media-NAS.invalid\Music\Album\01.flac", "NAS"),
+        test_imported_track("b", "D:/Music/b.flac", "Local"),
+    ];
+    for known in [
+        r"\\media-nas.invalid\music\album\01.FLAC",
+        "//MEDIA-NAS.invalid/Music/Album/01.flac",
+        r"d:\music\B.flac",
+    ] {
+        assert!(tracks_reference_path(&tracks, Path::new(known)), "{known}");
+    }
+    for unknown in [
+        r"\\media-nas.invalid\music\album\02.flac",
+        r"\\other-host.invalid\Music\Album\01.flac",
+        r"\\media-nas.invalid\music\album",
+        "",
+    ] {
+        assert!(
+            !tracks_reference_path(&tracks, Path::new(unknown)),
+            "{unknown}"
+        );
+    }
+    assert!(!tracks_reference_path(&[], Path::new(r"D:\Music\b.flac")));
+
+    // PL-01：清单里的网络共享条目只认这些主机（小写、去重；设备路径与本机路径不算）
+    let mut library = tracks;
+    library.push(test_imported_track(
+        "c",
+        r"\\media-nas.invalid\other\c.flac",
+        "C",
+    ));
+    library.push(test_imported_track(
+        "d",
+        r"\\?\UNC\Second.invalid\m\d.flac",
+        "D",
+    ));
+    library.push(test_imported_track("e", r"\\.\PhysicalDrive0", "E"));
+    library.push(test_imported_track("f", r"\\\empty-host\share\f.flac", "F"));
+    let mut servers: Vec<String> = network_servers_of(&library).into_iter().collect();
+    servers.sort();
+    assert_eq!(servers, ["media-nas.invalid", "second.invalid"]);
+}
+
+#[test]
 fn local_track_ids_are_pinned() {
     // LIB-01：本地曲目 ID 是「路径 ASCII 小写」的稳定哈希。收藏、歌单、歌词都按它关联，
     // 这里的值变了就等于所有用户的本地曲目一次全部换了身份。

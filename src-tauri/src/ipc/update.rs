@@ -119,8 +119,9 @@ pub fn open_release_page(url: String) -> IpcResult<()> {
 
     #[cfg(windows)]
     {
-        // F-05：走绝对路径，避免裸名被同目录同名 EXE 劫持（explorer 本体在 %SystemRoot%）
-        Command::new(crate::ipc::path_guard::explorer_exe())
+        // F-05：走绝对路径，避免裸名被同目录同名 EXE 劫持（explorer 本体在 Windows 目录根下）
+        let explorer = crate::ipc::path_guard::explorer_exe().map_err(IpcError::from)?;
+        Command::new(explorer)
             .arg(&url)
             .spawn()
             .map_err(|err| IpcError::from(format!("打开浏览器失败: {err}")))?;
