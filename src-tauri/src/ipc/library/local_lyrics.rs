@@ -74,7 +74,7 @@ pub(crate) fn normalize_for_match(value: &str) -> String {
 }
 
 /// 去掉尾部括号段（版本后缀 / ID），例如 `唯一 (国语)` → `唯一`，可反复剥。
-fn strip_trailing_parens(value: &str) -> &str {
+pub(crate) fn strip_trailing_parens(value: &str) -> &str {
     let mut current = value.trim();
     loop {
         let Some(open) = current.rfind(['(', '（']) else {
