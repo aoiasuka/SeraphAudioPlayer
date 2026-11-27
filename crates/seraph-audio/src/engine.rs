@@ -1,6 +1,6 @@
 use crate::{
     backend::{BackendError, Result},
-    device::{output_device_by_id, resolve_output_device_id},
+    device::{resolve_output_device, ResolvedOutputDevice},
     spectrum::SpectrumTap,
 };
 use cpal::{
@@ -326,6 +326,9 @@ pub struct PlaybackEngine {
     session: Option<PlaybackSession>,
     volume: f32,
     selected_device_id: Option<String>,
+    /// DEV-01：切换设备这条命令里刚枚举到的设备。随后重建会话时直接用它，不再枚举一遍；
+    /// 只在 `set_output_device` 执行期间有值，命令结束即清掉，不会被别的命令拿去用。
+    device_hint: Option<ResolvedOutputDevice>,
     driver: OutputDriver,
     /// 频谱 tap：跨 session 常驻，渲染循环写、Controller 暴露给上层读
     spectrum: Arc<SpectrumTap>,
@@ -454,6 +457,7 @@ impl PlaybackEngine {
             // 前端恢复设置之前保持静音，系统媒体键也不能绕过启动音量同步。
             volume: 0.0,
             selected_device_id: None,
+            device_hint: None,
             driver: OutputDriver::WasapiExclusive,
             spectrum,
             dsp,
@@ -631,14 +635,15 @@ impl PlaybackEngine {
         track_id: &str,
         start_seconds: f64,
     ) -> Result<OpenedOutput> {
-        let device = self.output_device()?;
+        // DEV-01：设备与端点 ID 一次取齐，下面的 24 位探测和独占渲染线程都用这个端点 ID
+        let (device, endpoint_id) = self.selected_output()?;
         let (sample_format, config) = select_output_config(&device, info, driver)?;
         // OUT5-01：独占模式下 16 位及以下的源，设备支持时也用 24 位容器输出，
         // 软件音量衰减不再直接吃掉 16 位的分辨率。设备不支持（或探测失败）时保持 16 位。
         let sample_format = if driver == OutputDriver::WasapiExclusive
             && sample_format == SampleFormat::I16
             && exclusive_supports_24_bit(
-                self.selected_device_id.as_deref(),
+                endpoint_id.as_deref(),
                 config.sample_rate.0,
                 config.channels,
             ) {
@@ -670,11 +675,6 @@ impl PlaybackEngine {
 
         let (stream, render_worker) = match driver {
             OutputDriver::WasapiExclusive => {
-                let endpoint_id = self
-                    .selected_device_id
-                    .as_deref()
-                    .map(resolve_output_device_id)
-                    .transpose()?;
                 let worker = spawn_wasapi_exclusive_render_worker(
                     endpoint_id,
                     config.clone(),
@@ -825,16 +825,16 @@ impl PlaybackEngine {
     }
 
     pub fn set_output_device(&mut self, device_id: String) -> Result<()> {
-        let device_id = resolve_output_device_id(&device_id)?;
-        output_device_by_id(&device_id)?;
-        if self.selected_device_id.as_deref() == Some(device_id.as_str()) {
+        // DEV-01：校验 ID 与取设备是同一次枚举（此前两个函数各枚举一遍）
+        let resolved = resolve_output_device(&device_id)?;
+        if self.selected_device_id.as_deref() == Some(resolved.id.as_str()) {
             return Ok(());
         }
 
         // L-2：先记住旧 id 再切换——新设备重建会话失败时回滚，
         // 否则坏设备 id 残留，后续播放持续失败直到手动再换设备。
         let previous_device_id = self.selected_device_id.clone();
-        self.selected_device_id = Some(device_id);
+        self.selected_device_id = Some(resolved.id.clone());
         let Some(session) = self.session.as_ref() else {
             return Ok(());
         };
@@ -844,7 +844,11 @@ impl PlaybackEngine {
         let seconds = session.shared.progress_seconds();
         let was_paused = session.shared.paused.load(Ordering::Acquire);
         self.stop_session();
-        if let Err(err) = self.play_file(path.clone(), track_id.clone(), Some(seconds)) {
+        // 重建会话直接用刚才枚举到的设备；这条命令之外不留着它（设备随时可能被拔掉）
+        self.device_hint = Some(resolved);
+        let rebuilt = self.play_file(path.clone(), track_id.clone(), Some(seconds));
+        self.device_hint = None;
+        if let Err(err) = rebuilt {
             self.selected_device_id = previous_device_id;
             // 回滚到旧设备恢复播放；旧设备也起不来（拔掉等）时保持停止态，
             // 原始错误仍然上抛。
@@ -861,14 +865,23 @@ impl PlaybackEngine {
         Ok(())
     }
 
-    fn output_device(&self) -> Result<cpal::Device> {
-        if let Some(device_id) = self.selected_device_id.as_deref() {
-            return output_device_by_id(device_id);
-        }
-
-        cpal::default_host()
-            .default_output_device()
-            .ok_or_else(|| BackendError::DeviceLost("no default output device".into()))
+    /// 当前选定的输出设备，以及它的端点 ID（跟随系统默认设备时没有）。
+    ///
+    /// DEV-01：一次枚举得到两样。此前取设备枚举一轮，独占模式下探测 24 位支持和启动渲染
+    /// 线程前又各解析一遍端点 ID——每次起播最多三轮「cpal 枚举 + WASAPI 枚举」。
+    /// 正处在切换设备的命令里时，直接用那条命令刚枚举到的结果。
+    fn selected_output(&self) -> Result<(cpal::Device, Option<String>)> {
+        let Some(selected) = self.selected_device_id.as_deref() else {
+            let device = cpal::default_host()
+                .default_output_device()
+                .ok_or_else(|| BackendError::DeviceLost("no default output device".into()))?;
+            return Ok((device, None));
+        };
+        let resolved = match self.device_hint.as_ref().filter(|hint| hint.id == selected) {
+            Some(hint) => hint.clone(),
+            None => resolve_output_device(selected)?,
+        };
+        Ok((resolved.device, Some(resolved.id)))
     }
 
     fn stop_session(&mut self) {
@@ -1345,16 +1358,11 @@ fn spawn_wasapi_exclusive_render_worker(
 ///
 /// 在独立线程里做：COM 需要按线程初始化，且驱动调用可能卡住——超时按「不支持」处理，
 /// 调用方退回 16 位，行为与改动前一致。
+///
+/// `endpoint_id` 是已经解析好的 WASAPI 端点 ID；`None` 表示系统默认设备。
 #[cfg(windows)]
-fn exclusive_supports_24_bit(
-    selected_device_id: Option<&str>,
-    sample_rate: u32,
-    channels: u16,
-) -> bool {
-    let endpoint_id = match selected_device_id.map(resolve_output_device_id).transpose() {
-        Ok(id) => id,
-        Err(_) => return false,
-    };
+fn exclusive_supports_24_bit(endpoint_id: Option<&str>, sample_rate: u32, channels: u16) -> bool {
+    let endpoint_id = endpoint_id.map(str::to_owned);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         use wasapi::{Direction, SampleType, WaveFormat};
@@ -1386,7 +1394,7 @@ fn exclusive_supports_24_bit(
 
 #[cfg(not(windows))]
 fn exclusive_supports_24_bit(
-    _selected_device_id: Option<&str>,
+    _endpoint_id: Option<&str>,
     _sample_rate: u32,
     _channels: u16,
 ) -> bool {
