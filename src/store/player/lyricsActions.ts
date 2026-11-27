@@ -1,4 +1,5 @@
 import { invoke, normalizeIpcError, withIpcErrorReason } from "@/lib/tauri";
+import { bytesToBase64 } from "@/lib/base64";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
 import type {
@@ -325,11 +326,12 @@ export function createLyricsActions(
     }
 
     try {
-      const lyricsBytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      // FE3-04：内容以 base64 文本传给后端（此前是数字数组，2 MB 的文件要序列化成约 7 MB 的 JSON）
+      const lyricsBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
       const lyrics = await invoke<LyricDocument>("save_track_lyrics", {
         trackId: track.id,
         trackPath: track.path,
-        lyricsBytes,
+        lyricsBase64,
         preferTraditional: get().preferTraditionalLyrics,
       });
 

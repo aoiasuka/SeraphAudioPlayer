@@ -262,6 +262,21 @@ describe("player store lyrics error messages", () => {
     );
   });
 
+  it("导入歌词把文件内容以 base64 文本交给后端（FE3-04）", async () => {
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValueOnce(lyricDocument([{ startMs: 1000, text: "第一行" }]));
+    await usePlayerStore
+      .getState()
+      .importLyricsForCurrentTrack(new File(["[00:01.00]第一行"], "a.lrc"));
+    const [command, args] = invokeMock.mock.calls[0];
+    expect(command).toBe("save_track_lyrics");
+    expect(args).toMatchObject({
+      lyricsBase64: Buffer.from("[00:01.00]第一行", "utf8").toString("base64"),
+    });
+    expect(args).not.toHaveProperty("lyricsBytes");
+    expect(usePlayerStore.getState().notification?.text).toBe("已导入 1 行歌词");
+  });
+
   it("导入歌词的对象形态错误保留具体原因", async () => {
     invokeMock.mockRejectedValueOnce({
       code: "invalid_input",

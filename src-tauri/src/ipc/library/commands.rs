@@ -194,16 +194,42 @@ pub async fn import_tracks(app: AppHandle, paths: Vec<String>) -> IpcResult<Vec<
     Ok(tracks)
 }
 
+/// 手动导入的歌词文件大小上限。前端限制 2 MB，但 IPC 可被绕过，后端独立校验；
+/// 设为 4 MB 留余量，同时阻挡明显异常输入。
+const MAX_LYRICS_BYTES: usize = 4 * 1024 * 1024;
+
+/// FE3-04：歌词文件内容以 base64 文本过 IPC。此前前端把字节转成数字数组放进 JSON 参数——
+/// 2 MB 的文件变成 200 万个元素、约 7 MB 的 JSON，前后端各解析一遍；base64 只有约 2.7 MB，
+/// 而且是一个字符串。解码前先按长度拒掉超限的输入，不为它分配内存。
+fn decode_lyrics_payload(encoded: &str) -> IpcResult<Vec<u8>> {
+    let encoded = encoded.trim();
+    if encoded.is_empty() {
+        return Err(IpcError::invalid_input("lyrics file is empty"));
+    }
+    // 每 3 个字节编码成 4 个字符（末尾补齐到 4 的倍数）
+    let max_encoded_len = MAX_LYRICS_BYTES.div_ceil(3) * 4;
+    if encoded.len() > max_encoded_len {
+        return Err(IpcError::invalid_input(format!(
+            "lyrics file too large: over {MAX_LYRICS_BYTES} bytes"
+        )));
+    }
+    BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| IpcError::invalid_input("lyrics file content is not valid base64"))
+}
+
 #[tauri::command]
 pub async fn save_track_lyrics(
     app: AppHandle,
     track_id: String,
-    lyrics_bytes: Vec<u8>,
+    lyrics_base64: String,
     track_path: Option<String>,
     prefer_traditional: Option<bool>,
 ) -> IpcResult<LyricDocument> {
     // H-1：持锁 + 可能的 lofty/ffprobe 探测（未入库曲目）都是阻塞操作，放 spawn_blocking。
+    // base64 解码也在这里做，不占命令调度线程。
     tauri::async_runtime::spawn_blocking(move || {
+        let lyrics_bytes = decode_lyrics_payload(&lyrics_base64)?;
         save_track_lyrics_inner(
             &app,
             &track_id,
@@ -236,9 +262,6 @@ fn save_track_lyrics_inner(
         return Err(IpcError::invalid_input("lyrics file is empty"));
     }
 
-    // 后端独立校验大小：前端虽然限制了 2MB，但 IPC 可被绕过；
-    // 设为 4MB 留余量，同时阻挡明显异常输入。
-    const MAX_LYRICS_BYTES: usize = 4 * 1024 * 1024;
     if lyrics_bytes.len() > MAX_LYRICS_BYTES {
         return Err(IpcError::invalid_input(format!(
             "lyrics file too large: {} bytes (limit {})",
@@ -707,7 +730,41 @@ fn export_track_lyrics_inner(
 #[cfg(test)]
 mod lookup_key_tests {
     use super::super::prelude::*;
-    use super::{prepare_applied_lyrics, sanitize_lookup_keys};
+    use super::{
+        decode_lyrics_payload, prepare_applied_lyrics, sanitize_lookup_keys, MAX_LYRICS_BYTES,
+    };
+    use crate::ipc::error::IpcErrorCode;
+
+    #[test]
+    fn lyrics_payload_is_decoded_from_base64_with_a_size_guard() {
+        // FE3-04：内容原样往返（含非 UTF-8 字节——加密的 QRC / KRC 就是二进制）
+        let bytes: Vec<u8> = (0..=255_u8).cycle().take(5000).collect();
+        let encoded = BASE64_STANDARD.encode(&bytes);
+        assert_eq!(decode_lyrics_payload(&encoded).unwrap(), bytes);
+        assert_eq!(
+            decode_lyrics_payload(&format!("  {encoded}\n")).unwrap(),
+            bytes
+        );
+        let text = "[00:01.00]第一行";
+        assert_eq!(
+            decode_lyrics_payload(&BASE64_STANDARD.encode(text)).unwrap(),
+            text.as_bytes()
+        );
+
+        for bad in ["", "   ", "不是 base64", "abc", "YWJj!!!!"] {
+            let err = decode_lyrics_payload(bad).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidInput, "{bad:?}");
+        }
+        // 刚好到上限的能过，超出的在解码之前就被拒
+        let at_limit = BASE64_STANDARD.encode(vec![b'a'; MAX_LYRICS_BYTES]);
+        assert_eq!(
+            decode_lyrics_payload(&at_limit).unwrap().len(),
+            MAX_LYRICS_BYTES
+        );
+        let over = BASE64_STANDARD.encode(vec![b'a'; MAX_LYRICS_BYTES + 3]);
+        let err = decode_lyrics_payload(&over).unwrap_err();
+        assert!(err.message.contains("too large"), "{}", err.message);
+    }
 
     #[test]
     fn applied_lyrics_are_clamped_pinned_and_unhidden() {
