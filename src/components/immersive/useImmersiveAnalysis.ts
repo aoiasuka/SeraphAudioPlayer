@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
+import { FIELD_POINT_TIERS, fieldPointBudget } from "@/lib/analysis/fieldDensity";
 import { createAnalysisSession, pollVisualizer } from "@/lib/analysis/polling";
 import { applyAnalysisFrame, createAnalysisView, stepAnalysisView } from "@/lib/analysis/view";
 import { ANALYSIS_BIN_COUNT, SPECTRUM_DB_FLOOR, LEVEL_DB_FLOOR } from "@/lib/analysis/types";
@@ -10,6 +11,9 @@ import { drawImmersiveField, drawImmersiveLevels, drawImmersiveSpectrum, IMMERSI
 
 export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
   const [context] = useState(() => ({ view: createAnalysisView(), sessionId: createAnalysisSession(), trail: [] as Float32Array[], frameTime: 0 }));
+  // 声场画布越大，向后端要的采样点越多（三档，见 fieldDensity.ts）
+  const [fieldPoints, setFieldPoints] = useState<number>(FIELD_POINT_TIERS[0]);
+  const fieldPointsRef = useRef(fieldPoints);
   const spectrumRef = useRef<HTMLCanvasElement>(null);
   const fieldRef = useRef<HTMLCanvasElement>(null);
   const levelsRef = useRef<HTMLCanvasElement>(null);
@@ -56,7 +60,13 @@ export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
       }
       draw(spectrumRef, (ctx, w, h) => { geometryRef.current = drawImmersiveSpectrum(ctx, w, h, view, colors, cursorRef.current); });
       // 声场面积较小，使用至少 2 倍像素密度保留斜线、文字和散点细节。
-      draw(fieldRef, (ctx, w, h) => drawImmersiveField(ctx, w, h, colors, trail), 2);
+      let fieldExtent = 0;
+      draw(fieldRef, (ctx, w, h) => { fieldExtent = drawImmersiveField(ctx, w, h, colors, trail); }, 2);
+      const wanted = fieldPointBudget(fieldExtent, fieldPointsRef.current);
+      if (wanted !== fieldPointsRef.current) {
+        fieldPointsRef.current = wanted;
+        setFieldPoints(wanted);
+      }
       draw(levelsRef, (ctx, w, h) => drawImmersiveLevels(ctx, w, h, view, colors));
       const bin = cursorRef.current;
       if (bin === null) setText(frequencyRef.current, "20 Hz — 20 kHz · dBFS");
@@ -116,8 +126,8 @@ export function useImmersiveAnalysis(playing: boolean, frozen: boolean) {
       applyAnalysisFrame(context.view, frame, performance.now() / 1000);
       context.frameTime = usePlayerStore.getState().currentTime;
       scheduleRef.current?.();
-    }, { spectrum: true, loudness: false, levels: true, field: true, scope: false });
-  }, [context, playing, frozen]);
+    }, { spectrum: true, loudness: false, levels: true, field: true, scope: false, fieldPoints });
+  }, [context, playing, frozen, fieldPoints]);
 
   const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
     cursorRef.current = spectrumBinFromX(event.clientX - event.currentTarget.getBoundingClientRect().left, geometryRef.current, ANALYSIS_BIN_COUNT);

@@ -22,8 +22,12 @@ const HOPS_PER_LRA_SAMPLE: usize = 10;
 /// 门限块历史上限（100ms 一块 ≈ 5.5 小时），超出丢最旧，积分退化为"最近窗口"。
 const MAX_GATING_BLOCKS: usize = 200_000;
 const MAX_LRA_SAMPLES: usize = 20_000;
-/// 声场散点最多保留的样本对数，放大窗口时仍有足够的真实采样密度。
-const MAX_SCATTER_PAIRS: usize = 480;
+/// 声场散点每帧的样本对数：默认档。显示端没有特别要求时用它（侧栏、普通尺寸的窗口）。
+pub const DEFAULT_SCATTER_PAIRS: usize = 480;
+/// 声场散点每帧的样本对数上限。画布大的时候显示端会要更多的点——点云的展开范围随画布
+/// 线性放大，点数不变的话密度按面积的倒数下降，大屏上显得稀疏。一帧（约 33 ms）本身只有
+/// 1500 帧上下的样本，再多就没有真实采样可取了。
+pub const MAX_SCATTER_PAIRS: usize = 1440;
 /// 绝对门限 -70 LUFS 对应的块能量。
 const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 /// 示波器环形缓冲帧数（@48kHz ≈ 42.7ms 时间窗）。
@@ -141,6 +145,8 @@ pub struct AnalysisFeatures {
     pub levels: bool,
     pub stereo: bool,
     pub waveform: bool,
+    /// 声场散点每帧最多要多少对样本；引擎会钳到 `1..=MAX_SCATTER_PAIRS`。
+    pub scatter_pairs: usize,
 }
 
 impl Default for AnalysisFeatures {
@@ -150,6 +156,7 @@ impl Default for AnalysisFeatures {
             levels: true,
             stereo: true,
             waveform: true,
+            scatter_pairs: DEFAULT_SCATTER_PAIRS,
         }
     }
 }
@@ -362,15 +369,21 @@ impl AnalysisEngine {
                 Some(self.true_peak_max_linear.unwrap_or(0.0).max(block_tp));
         }
 
-        // 声场散点：等距抽取，点数受 MAX_SCATTER_PAIRS 限制。
-        let stride = frames.div_ceil(MAX_SCATTER_PAIRS).max(1);
+        // 声场散点：等距抽取，点数不超过显示端要的对数。
         self.scatter.clear();
         if !features.stereo {
             return;
         }
-        let mut frame = 0;
-        while frame < frames {
-            let offset = frame * channels;
+        let pairs = features.scatter_pairs.clamp(1, MAX_SCATTER_PAIRS);
+        // 默认档沿用整数步长（与此前的输出逐点相同）；更高的档位按小数步长取，
+        // 否则 1500 帧里要 960 对只能取到步长 2 的 750 对，档位之间拉不开。
+        let mut step = (frames as f64 / pairs as f64).max(1.0);
+        if pairs <= DEFAULT_SCATTER_PAIRS {
+            step = step.ceil();
+        }
+        let mut position = 0.0_f64;
+        while (position as usize) < frames && self.scatter.len() < pairs * 2 {
+            let offset = position as usize * channels;
             let left = interleaved[offset];
             let right = if channels > 1 {
                 interleaved[offset + 1]
@@ -379,7 +392,7 @@ impl AnalysisEngine {
             };
             self.scatter.push(left);
             self.scatter.push(right);
-            frame += stride;
+            position += step;
         }
     }
 
@@ -794,6 +807,56 @@ mod tests {
         assert!(snapshot.correlation > 0.99);
         assert_eq!(snapshot.scatter.len() % 2, 0);
         assert!(!snapshot.scatter.is_empty());
+    }
+
+    /// 一次 push 之后声场散点里的样本对。左声道是帧序号、右声道是它的相反数，
+    /// 这样能直接看出取的是哪几帧。
+    fn scatter_frames(frames: usize, scatter_pairs: usize) -> Vec<usize> {
+        let mut engine = AnalysisEngine::new(FS, 2);
+        let samples: Vec<f32> = (0..frames).flat_map(|n| [n as f32, -(n as f32)]).collect();
+        let features = AnalysisFeatures {
+            scatter_pairs,
+            ..AnalysisFeatures::default()
+        };
+        engine.push_with_features(&samples, features);
+        let scatter = engine.snapshot_with_features(features).scatter;
+        assert_eq!(scatter.len() % 2, 0);
+        scatter
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                assert_eq!(pair[0], -pair[1], "左右声道取自同一帧");
+                pair[0] as usize
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scatter_density_follows_the_requested_pair_count() {
+        // 一帧的样本量：48 kHz 下 33 ms ≈ 1584 帧
+        let frames = 1584;
+
+        // 默认档与此前完全相同：整数步长 ceil(1584 / 480) = 4
+        let base = scatter_frames(frames, DEFAULT_SCATTER_PAIRS);
+        assert_eq!(base, (0..frames).step_by(4).collect::<Vec<_>>());
+        assert_eq!(base.len(), 396);
+
+        // 更高的档位确实给出更多的点，等距、不重复、覆盖整帧
+        for (pairs, expected) in [(960, 960), (1440, 1440), (5000, 1440)] {
+            let picked = scatter_frames(frames, pairs);
+            assert_eq!(picked.len(), expected, "{pairs}");
+            assert!(picked.windows(2).all(|w| w[0] < w[1]), "{pairs}");
+            assert_eq!(picked[0], 0);
+            assert!(*picked.last().unwrap() >= frames - 3, "{pairs}");
+            let widest = picked.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+            assert!(widest <= 2, "{pairs}: 间隔 {widest}");
+        }
+
+        // 样本比要的点少：有多少取多少
+        assert_eq!(scatter_frames(300, 1440), (0..300).collect::<Vec<_>>());
+        // 0 按 1 处理，不会除零
+        assert_eq!(scatter_frames(frames, 0), vec![0]);
     }
 
     #[test]

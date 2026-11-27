@@ -6,6 +6,7 @@
  * 高能量警示 = 印章红；数字一律等宽 Courier。
  */
 
+import { pageFieldPointSize } from "./fieldDensity";
 import {
   FREQ_MAX,
   FREQ_MIN,
@@ -505,16 +506,20 @@ export function drawSoundField(
   mode: SoundFieldMode,
   trail: Float32Array[],
   showCorrelation = true
-) {
+): number {
   ctx.clearRect(0, 0, w, h);
   const corrH = showCorrelation ? 34 : 0;
   const mainH = h - corrH;
-  if (mainH < 40) return;
+  if (mainH < 40) return 0;
+  // 图形的半径（半圆半径 / 菱形半对角线）；返回给调用方，用来决定向后端要多少点
+  let extent = 0;
 
   if (mode === "polar") {
     const cx = w / 2;
     const cy = mainH - 10;
     const radius = Math.max(10, Math.min(w * 0.42, mainH - 26));
+    extent = radius;
+    const dot = pageFieldPointSize(radius);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
@@ -581,7 +586,7 @@ export function drawSoundField(
         const px = cx + Math.sin(phi) * r * radius;
         const py = cy - Math.cos(phi) * r * radius;
         if (r > 0.82 && age === 0) ctx.fillStyle = hexAlpha(colors.stamp, 0.8);
-        ctx.fillRect(px - 1.1, py - 1.1, 2.2, 2.2);
+        ctx.fillRect(px - dot / 2, py - dot / 2, dot, dot);
         if (r > 0.82 && age === 0) ctx.fillStyle = hexAlpha(colors.ink, alpha);
       }
     }
@@ -589,6 +594,8 @@ export function drawSoundField(
     const cx = w / 2;
     const cyc = mainH / 2 + 2;
     const size = Math.max(10, Math.min(w, mainH) / 2 - 18);
+    extent = size;
+    const dot = pageFieldPointSize(size);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
@@ -621,18 +628,18 @@ export function drawSoundField(
         const right = pts[k + 1];
         const gx = ((right - left) / Math.SQRT2 / 1.35) * size;
         const gy = ((left + right) / Math.SQRT2 / 1.35) * size;
-        ctx.fillRect(cx + gx - 1.1, cyc - gy - 1.1, 2.2, 2.2);
+        ctx.fillRect(cx + gx - dot / 2, cyc - gy - dot / 2, dot, dot);
       }
     }
   }
 
   // 相关度表
-  if (!showCorrelation) return;
+  if (!showCorrelation) return extent;
   const corr = view.stereo.corr;
   const y0 = h - corrH + 8;
   const bx0 = 86;
   const bx1 = w - 56;
-  if (bx1 <= bx0) return;
+  if (bx1 <= bx0) return extent;
   ctx.font = TW9;
   ctx.textAlign = "left";
   ctx.fillStyle = colors.ink3;
@@ -661,6 +668,7 @@ export function drawSoundField(
   ctx.textAlign = "right";
   ctx.fillStyle = corr < 0 ? colors.stamp : colors.ink;
   ctx.fillText(`${corr >= 0 ? "+" : ""}${corr.toFixed(2)}`, w - 8, y0 + 9);
+  return extent;
 }
 
 // ============================================================

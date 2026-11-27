@@ -1,22 +1,26 @@
 import { clamp, LEVEL_DB_FLOOR, SPECTRUM_DB_FLOOR, type AnalysisView } from "@/lib/analysis/types";
+import { immersiveFieldPointSize } from "@/lib/analysis/fieldDensity";
 import { formatFreq, type ArchiveColors, type SpectrumGeometry } from "@/lib/analysis/render";
 
 const FONT = '10px "Courier Prime", "Courier New", monospace';
 const FIELD_TRAIL_ALPHA = [0.85, 0.36, 0.16, 0.075, 0.035, 0.015];
 export const IMMERSIVE_FIELD_TRAIL_FRAMES = FIELD_TRAIL_ALPHA.length;
 
-/** 声场：保留短余晖，随画布尺寸略增点径，并对齐像素保持清晰。 */
+/**
+ * 声场：保留短余晖，随画布尺寸增大点径，并对齐像素保持清晰。
+ * 返回菱形的半对角线（CSS 像素；没画时为 0），调用方据此决定向后端要多少点。
+ */
 export function drawImmersiveField(
   ctx: CanvasRenderingContext2D, w: number, h: number,
   colors: ArchiveColors, trail: Float32Array[],
-) {
+): number {
   ctx.clearRect(0, 0, w, h);
-  if (w < 40 || h < 40) return;
+  if (w < 40 || h < 40) return 0;
   const cx = w / 2, cy = h / 2;
   const size = Math.max(10, Math.min(w, h) / 2 - 10);
   const transform = ctx.getTransform();
   const scaleX = transform.a || 1, scaleY = transform.d || 1;
-  const pointSize = clamp(size / 110, 1.1, 1.75);
+  const pointSize = immersiveFieldPointSize(size);
   const pointPixels = Math.max(1, Math.round(Math.min(scaleX, scaleY) * pointSize));
   const pointW = pointPixels / scaleX, pointH = pointPixels / scaleY;
   const outline = () => {
@@ -61,6 +65,7 @@ export function drawImmersiveField(
   ctx.textAlign = "center";
   ctx.fillText("+L", cx - size / 2 - 14, cy - size / 2 - 8);
   ctx.fillText("+R", cx + size / 2 + 14, cy - size / 2 - 8);
+  return size;
 }
 
 export function levelLabel(value: number, hasData: boolean) {

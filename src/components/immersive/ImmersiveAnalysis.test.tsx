@@ -50,7 +50,7 @@ describe("沉浸分析的真实数据与生命周期", () => {
   it("只请求频谱、电平和声场；冻结停止 IPC，保留仪表且不暂停播放器", async () => {
     render(<ImmersiveAnalysis />);
     await advance(120);
-    expect(bridge.invoke).toHaveBeenCalledWith("get_analysis_frame", expect.objectContaining({ demand: { spectrum: true, loudness: false, levels: true, field: true, scope: false } }));
+    expect(bridge.invoke).toHaveBeenCalledWith("get_analysis_frame", expect.objectContaining({ demand: { spectrum: true, loudness: false, levels: true, field: true, scope: false, fieldPoints: 480 } }));
     expect(screen.getByLabelText("声道相关度")).not.toHaveTextContent("—");
     fireEvent.click(screen.getByRole("button", { name: "冻结画面" }));
     await advance(20);
@@ -138,6 +138,41 @@ describe("沉浸分析的真实数据与生命周期", () => {
     act(() => useImmersiveStore.getState().close());
     await advance(70);
     expect(bridge.invoke.mock.calls.at(-1)?.[1].request.sessionId).toBe(backgroundSession);
+  });
+
+  it("声场画布大时向后端多要采样点，普通尺寸保持默认档", async () => {
+    // jsdom 没有布局也没有 canvas：给容器一个尺寸、给一个什么都不做的 2D 上下文
+    const gradient = { addColorStop() {} };
+    const context = new Proxy({}, {
+      get: (_target, key) =>
+        key === "getTransform" ? () => ({ a: 1, d: 1 })
+          : key === "measureText" ? () => ({ width: 10 })
+          : typeof key === "string" && key.startsWith("create") ? () => gradient
+          : () => undefined,
+      set: () => true,
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as never);
+    const size = { value: 220 };
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => size.value);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => size.value);
+    const requestedPoints = () => bridge.invoke.mock.calls
+      .filter(([command]) => command === "get_analysis_frame")
+      .map(([, args]) => (args as { demand: { fieldPoints: number } }).demand.fieldPoints);
+
+    // 220 px 的容器：菱形半径 100 px，最低档
+    const small = render(<ImmersiveAnalysis />);
+    await advance(200);
+    expect(new Set(requestedPoints())).toEqual(new Set([480]));
+    small.unmount();
+
+    // 700 px 的容器：半径 340 px，最高档
+    bridge.invoke.mockClear();
+    size.value = 700;
+    render(<ImmersiveAnalysis />);
+    // 第一帧画出来才知道画布多大；换档是一次状态更新，随后的轮询带上新的档位
+    for (let step = 0; step < 12; step += 1) await advance(40);
+    expect(requestedPoints()[0]).toBe(480);
+    expect(requestedPoints().at(-1)).toBe(1440);
   });
 
   it("纯浏览器不伪造分析数据，冻结和键盘游标仍可使用", async () => {

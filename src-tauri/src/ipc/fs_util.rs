@@ -60,11 +60,25 @@ mod tests {
         dir
     }
 
+    /// 目录里的文件名，不含别的程序放进来的 `.tmp`。本机杀软会在改名的瞬间留下一个
+    /// `LIST.M3U8.tmp` 这样的临时文件（偶发）；我们自己的临时文件名是
+    /// `<目标名>.<纳秒>-<pid>-<序号>.tmp`，残留了照样会被数到。
     fn file_names(dir: &Path) -> Vec<String> {
+        let ours = |name: &str| {
+            name.strip_suffix(".tmp")
+                .and_then(|rest| rest.rsplit_once('.'))
+                .is_some_and(|(_, suffix)| {
+                    suffix.split('-').count() == 3
+                        && suffix
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+                })
+        };
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.to_ascii_lowercase().ends_with(".tmp") || ours(name))
             .collect();
         names.sort();
         names

@@ -16,6 +16,8 @@ export interface AnalysisDemand {
   levels: boolean;
   field: boolean;
   scope: boolean;
+  /** 声场散点每帧要多少对采样点（见 `fieldDensity.ts`）；不给时后端用默认档 480。 */
+  fieldPoints?: number;
 }
 
 /**

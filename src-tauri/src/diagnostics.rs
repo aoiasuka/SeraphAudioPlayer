@@ -326,7 +326,13 @@ mod tests {
                 .unwrap();
         }
         drop(file);
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 4);
+        // 只数日志文件：本机杀软偶尔会在目录里留下一个瞬时的临时文件
+        let logs = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
+            .count();
+        assert_eq!(logs, 4);
         assert_eq!(
             fs::read_to_string(root.join("seraph.log")).unwrap(),
             "line 9\n"

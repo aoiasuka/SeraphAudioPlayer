@@ -30,6 +30,9 @@ pub struct AnalysisDemand {
     pub levels: bool,
     pub field: bool,
     pub scope: bool,
+    /// 声场散点每帧要多少对样本。画布大时显示端会多要（480 / 960 / 1440 三档），
+    /// 不给就是默认档；超出上限的值由分析引擎钳住。
+    pub field_points: u16,
 }
 
 impl Default for AnalysisDemand {
@@ -40,6 +43,7 @@ impl Default for AnalysisDemand {
             levels: true,
             field: true,
             scope: true,
+            field_points: seraph_visualizer::analysis::DEFAULT_SCATTER_PAIRS as u16,
         }
     }
 }
@@ -51,6 +55,7 @@ impl AnalysisDemand {
             levels: self.levels,
             stereo: self.field,
             waveform: self.scope,
+            scatter_pairs: usize::from(self.field_points),
         }
     }
 
@@ -457,6 +462,7 @@ mod tests {
             levels: false,
             field: false,
             scope: true,
+            ..AnalysisDemand::default()
         };
         let subscription = Subscription {
             request: FrameRequest {
