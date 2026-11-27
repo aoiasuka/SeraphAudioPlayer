@@ -1,4 +1,4 @@
-import { invoke, normalizeIpcError } from "@/lib/tauri";
+import { invoke, normalizeIpcError, withIpcErrorReason } from "@/lib/tauri";
 import { sanitizeExcludeRules } from "@/lib/lyrics/exclude";
 import { isValidAmllTtmlDbUrl, normalizeAmllTtmlDbUrl } from "@/lib/lyrics/settings";
 import type {
@@ -8,8 +8,17 @@ import type {
   OnlineLyricsCandidate,
   Track,
 } from "@/types/track";
-import { sendCommand } from "./commands";
+import { sendCommandAsync } from "./commands";
+import { createConfirmedQueue, createConfirmedRecordQueue } from "./confirmedQueue";
 import type { PlayerStore, PlayerStoreGet, PlayerStoreSet } from "./types";
+
+/** 两个显示选项共用一条后端命令（`set_lyrics_display_options`）。 */
+type LyricsDisplayKey = "showLyricsCredits" | "ignoreLyricsFileOffset";
+
+const LYRICS_DISPLAY_LABEL: Record<LyricsDisplayKey, string> = {
+  showLyricsCredits: "显示制作信息",
+  ignoreLyricsFileOffset: "忽略文件 offset",
+};
 
 /** `find_local_lyrics` 的返回。 */
 interface LocalLyricsMatch {
@@ -117,6 +126,40 @@ export function createLyricsActions(
   | "setCurrentTrackLyricsPinned"
   | "findLocalLyricsForTrack"
 > {
+  // FE3-02：排除规则与两个显示选项的实际效果都在后端（给歌词行打隐藏标记、还原时间偏移）。
+  // 此前先改 store 再「发了就不管」，同步失败时开关已经切过去、歌词却没有变化。
+  // 现在与输出设备、任务栏开关同型：串行提交，失败回到后端确认过的值并提示。
+  const enqueueExcludeRules = createConfirmedQueue<PlayerStore["lyricsExcludeRules"]>();
+  let excludeRulesRevision = 0;
+  const enqueueDisplayOption = createConfirmedRecordQueue<LyricsDisplayKey, boolean>();
+  const displayRevisions: Record<LyricsDisplayKey, number> = {
+    showLyricsCredits: 0,
+    ignoreLyricsFileOffset: 0,
+  };
+  const commitLyricsDisplayOption = (key: LyricsDisplayKey, value: boolean) => {
+    const { showLyricsCredits, ignoreLyricsFileOffset } = get();
+    const revision = ++displayRevisions[key];
+    set({ [key]: value } as Pick<PlayerStore, LyricsDisplayKey>);
+    enqueueDisplayOption(
+      { showLyricsCredits, ignoreLyricsFileOffset },
+      key,
+      value,
+      (next) =>
+        sendCommandAsync("set_lyrics_display_options", { options: lyricsDisplayOptionsOf(next) }),
+      () => undefined,
+      (err, confirmed) => {
+        console.warn("Tauri command failed: set_lyrics_display_options", err);
+        // 用户在这之后又拨过同一个开关：以后面那次的结果为准
+        if (revision !== displayRevisions[key] || get()[key] !== value) return;
+        set({ [key]: confirmed } as Pick<PlayerStore, LyricsDisplayKey>);
+        get().showNotification(
+          withIpcErrorReason(`「${LYRICS_DISPLAY_LABEL[key]}」未生效，已恢复原设置`, err),
+          "error"
+        );
+      }
+    );
+  };
+
   return {
   setLyricsFolder: (folder) => {
     const normalized = folder.trim();
@@ -188,9 +231,28 @@ export function createLyricsActions(
 
   setLyricsExcludeRules: (rules) => {
     const sanitized = sanitizeExcludeRules(rules);
+    const previous = get().lyricsExcludeRules;
+    const revision = ++excludeRulesRevision;
     set({ lyricsExcludeRules: sanitized });
-    // 匹配在 Rust 侧：同步规则，后端会广播 seraph://lyrics-rules-updated 让各窗口重拉歌词
-    sendCommand("set_lyrics_exclude_rules", { rules: sanitized });
+    // 匹配在 Rust 侧：同步规则，后端会广播 seraph://lyrics-rules-updated 让各窗口重拉歌词。
+    // FE3-02：实际效果全在后端，同步失败时界面不能停在「已生效」的样子——回到上一次
+    // 后端确认过的规则并提示。
+    enqueueExcludeRules(
+      previous,
+      sanitized,
+      () => sendCommandAsync("set_lyrics_exclude_rules", { rules: sanitized }),
+      () => undefined,
+      (err, confirmed) => {
+        console.warn("Tauri command failed: set_lyrics_exclude_rules", err);
+        // 用户在这之后又改过规则：以后面那次的结果为准
+        if (revision !== excludeRulesRevision) return;
+        set({ lyricsExcludeRules: confirmed });
+        get().showNotification(
+          withIpcErrorReason("歌词排除规则未生效，已恢复为之前的规则", err),
+          "error"
+        );
+      }
+    );
   },
 
   setShowLyricsTranslation: (enabled) => {
@@ -205,15 +267,13 @@ export function createLyricsActions(
 
   setShowLyricsCredits: (enabled) => {
     if (get().showLyricsCredits === enabled) return;
-    set({ showLyricsCredits: enabled });
     // 投影在 Rust 侧（回传前按 hidden 打标），后端变更后广播让主窗口与任务栏重拉
-    sendCommand("set_lyrics_display_options", { options: lyricsDisplayOptionsOf(get()) });
+    commitLyricsDisplayOption("showLyricsCredits", enabled);
   },
 
   setIgnoreLyricsFileOffset: (enabled) => {
     if (get().ignoreLyricsFileOffset === enabled) return;
-    set({ ignoreLyricsFileOffset: enabled });
-    sendCommand("set_lyrics_display_options", { options: lyricsDisplayOptionsOf(get()) });
+    commitLyricsDisplayOption("ignoreLyricsFileOffset", enabled);
   },
 
   setCurrentTrackLyricsPinned: async (pinned) => {

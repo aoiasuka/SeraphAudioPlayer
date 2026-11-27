@@ -100,7 +100,7 @@ describe("player store lyrics settings reset", () => {
     });
   });
 
-  it("resetLyricsSettings 恢复 11 个字段、经 IPC 同步后端（规则与显示选项）并提示；不动任务栏设置", () => {
+  it("resetLyricsSettings 恢复 11 个字段、经 IPC 同步后端（规则与显示选项）并提示；不动任务栏设置", async () => {
     usePlayerStore.getState().resetLyricsSettings();
 
     expect(usePlayerStore.getState()).toMatchObject({
@@ -117,19 +117,22 @@ describe("player store lyrics settings reset", () => {
       ignoreLyricsFileOffset: false,
       taskbarLyricsEnabled: true,
     });
+    expect(usePlayerStore.getState().notification?.text).toBe("歌词设置已恢复默认");
     expect(invokeMock).toHaveBeenCalledWith("set_lyrics_exclude_rules", { rules: [] });
+    // 两个显示选项共用一条命令、串行提交：第二条等第一条确认后才发
+    await flushAsyncQueue();
     expect(invokeMock).toHaveBeenLastCalledWith("set_lyrics_display_options", {
       options: { ignoreFileOffset: false, showCredits: true },
     });
-    expect(usePlayerStore.getState().notification?.text).toBe("歌词设置已恢复默认");
   });
 
-  it("显示选项 setter：变化时同步后端一次，无变化不重复调用", () => {
+  it("显示选项 setter：变化时同步后端一次，无变化不重复调用", async () => {
     invokeMock.mockClear();
     usePlayerStore.getState().setShowLyricsCredits(true);
     expect(invokeMock).toHaveBeenCalledWith("set_lyrics_display_options", {
       options: { ignoreFileOffset: true, showCredits: true },
     });
+    await flushAsyncQueue();
     invokeMock.mockClear();
     usePlayerStore.getState().setShowLyricsCredits(true);
     expect(invokeMock).not.toHaveBeenCalled();
@@ -137,6 +140,67 @@ describe("player store lyrics settings reset", () => {
     expect(invokeMock).toHaveBeenCalledWith("set_lyrics_display_options", {
       options: { ignoreFileOffset: false, showCredits: true },
     });
+    await flushAsyncQueue();
+  });
+
+  it("FE3-02：显示选项同步失败时回滚并提示；另一个开关不夹带未确认的值", async () => {
+    await flushAsyncQueue();
+    usePlayerStore.setState({
+      showLyricsCredits: true,
+      ignoreLyricsFileOffset: false,
+      notification: null,
+    });
+    invokeMock.mockClear();
+    invokeMock.mockRejectedValueOnce({ code: "internal", message: "后端拒绝" });
+
+    // 连拨两个开关：第一条会失败
+    usePlayerStore.getState().setShowLyricsCredits(false);
+    usePlayerStore.getState().setIgnoreLyricsFileOffset(true);
+    expect(usePlayerStore.getState()).toMatchObject({
+      showLyricsCredits: false,
+      ignoreLyricsFileOffset: true,
+    });
+    await flushAsyncQueue();
+
+    // 第一个开关回到确认过的值并报错；第二个照常生效
+    expect(usePlayerStore.getState()).toMatchObject({
+      showLyricsCredits: true,
+      ignoreLyricsFileOffset: true,
+    });
+    const notification = usePlayerStore.getState().notification;
+    expect(notification?.level).toBe("error");
+    expect(notification?.text).toContain("显示制作信息");
+    expect(notification?.text).toContain("后端拒绝");
+    // 第二条命令带的是「显示制作信息」确认过的值（true），不是那个失败了的乐观值
+    expect(invokeMock.mock.calls).toEqual([
+      ["set_lyrics_display_options", { options: { ignoreFileOffset: false, showCredits: false } }],
+      ["set_lyrics_display_options", { options: { ignoreFileOffset: true, showCredits: true } }],
+    ]);
+  });
+
+  it("FE3-02：排除规则同步失败时回到上一次确认过的规则；之后又改过的以后者为准", async () => {
+    await flushAsyncQueue();
+    const confirmed = [{ id: "k", kind: "keyword" as const, pattern: "作词" }];
+    const rejected = [{ id: "r", kind: "regex" as const, pattern: "^制作" }];
+    usePlayerStore.setState({ lyricsExcludeRules: confirmed, notification: null });
+    invokeMock.mockClear();
+    invokeMock.mockRejectedValueOnce({ code: "invalid_input", message: "规则无效" });
+
+    usePlayerStore.getState().setLyricsExcludeRules(rejected);
+    expect(usePlayerStore.getState().lyricsExcludeRules).toEqual(rejected);
+    await flushAsyncQueue();
+    expect(usePlayerStore.getState().lyricsExcludeRules).toEqual(confirmed);
+    expect(usePlayerStore.getState().notification?.level).toBe("error");
+    expect(usePlayerStore.getState().notification?.text).toContain("规则无效");
+
+    // 失败的那条还没返回时用户又改了一次：不被迟到的回滚覆盖
+    usePlayerStore.setState({ notification: null });
+    invokeMock.mockRejectedValueOnce({ code: "invalid_input", message: "规则无效" });
+    usePlayerStore.getState().setLyricsExcludeRules(rejected);
+    usePlayerStore.getState().setLyricsExcludeRules([]);
+    await flushAsyncQueue();
+    expect(usePlayerStore.getState().lyricsExcludeRules).toEqual([]);
+    expect(usePlayerStore.getState().notification).toBeNull();
   });
 });
 

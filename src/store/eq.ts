@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { invoke, normalizeIpcError } from "@/lib/tauri";
+import { invoke, ipcErrorReason } from "@/lib/tauri";
 import { DEFAULT_EQ_BANDS } from "@/lib/eqPresets";
 import {
   MAX_EQ_BANDS,
@@ -70,15 +70,29 @@ export function buildDspSettings(state: {
 
 // 下发去抖：拖动 slider 时高频变化，合并到 ~60ms 一次 IPC。
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
+/** 上一次已经提示过的失败原因；下发成功后清空（FE3-03）。 */
+let lastPushFailure: string | null = null;
 
 function pushToEngine(settings: DspSettings) {
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(() => {
     pushTimer = null;
-    void invoke("set_dsp_settings", { settings }).catch((err) => {
-
-      console.warn("set_dsp_settings failed", normalizeIpcError(err).message);
-    });
+    void invoke("set_dsp_settings", { settings })
+      .then(() => {
+        lastPushFailure = null;
+      })
+      .catch((err) => {
+        const reason = ipcErrorReason(err) || "未知错误";
+        console.warn("set_dsp_settings failed", reason);
+        // FE3-03：此前只写控制台——后端拒绝一份设置时，界面上的曲线与实际出声的不一致，
+        // 用户无从知道。同一个原因只提示一次：拖动滑块时每 60 ms 下发一次，不能刷屏；
+        // 下发成功过之后再失败会重新提示。
+        if (reason === lastPushFailure) return;
+        lastPushFailure = reason;
+        usePlayerStore
+          .getState()
+          .showNotification(`均衡器设置未生效，实际音效可能与界面不一致：${reason}`, "error");
+      });
   }, 60);
 }
 

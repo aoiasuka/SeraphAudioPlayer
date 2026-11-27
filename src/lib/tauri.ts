@@ -195,3 +195,22 @@ export function normalizeIpcError(err: unknown): IpcError {
         : String(err);
   return { code: "internal", message };
 }
+
+/**
+ * 拼进提示文案用的失败原因；拿不到有意义的原因时返回空串。
+ *
+ * `normalizeIpcError` 对没有消息的 reject 值（`undefined`、`null`、普通对象）给出的是
+ * `String(err)`——`"undefined"`、`"[object Object]"`。原样拼进「××失败：」后面就成了
+ * 「失败：undefined」。要把原因展示给用户时用这个函数，按是否为空决定带不带冒号后半句。
+ */
+export function ipcErrorReason(err: unknown): string {
+  if (err == null) return "";
+  const message = normalizeIpcError(err).message.trim();
+  return message === "[object Object]" ? "" : message;
+}
+
+/** `前缀：原因`；没有可展示的原因时只有前缀。 */
+export function withIpcErrorReason(prefix: string, err: unknown): string {
+  const reason = ipcErrorReason(err);
+  return reason ? `${prefix}：${reason}` : prefix;
+}

@@ -70,6 +70,65 @@ describe("refreshBilibiliState（UI4-02）", () => {
   });
 });
 
+describe("流媒体失败提示（UI3-03）", () => {
+  const notification = () => usePlayerStore.getState().notification;
+
+  it("FFmpeg 下载失败：结构化错误的原因不丢，按错误级别提示", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "download_ffmpeg") {
+        throw { code: "network", message: "SHA-256 校验不通过" };
+      }
+      return undefined;
+    });
+    await usePlayerStore.getState().startFfmpegDownload();
+    expect(usePlayerStore.getState().ffmpegDownload.stage).toBe("error");
+    expect(notification()?.level).toBe("error");
+    expect(notification()?.text).toBe("FFmpeg 下载失败：SHA-256 校验不通过");
+
+    // 字符串形态的 reject 同样带上原因；拿不到原因时只说失败
+    usePlayerStore.setState({ ffmpegDownload: { stage: "idle", percent: 0 } });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "download_ffmpeg") throw "磁盘已满";
+      return undefined;
+    });
+    await usePlayerStore.getState().startFfmpegDownload();
+    expect(notification()?.text).toBe("FFmpeg 下载失败：磁盘已满");
+
+    usePlayerStore.setState({ ffmpegDownload: { stage: "idle", percent: 0 } });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "download_ffmpeg") throw undefined;
+      return undefined;
+    });
+    await usePlayerStore.getState().startFfmpegDownload();
+    expect(notification()?.text).toBe("FFmpeg 下载失败");
+    expect(notification()?.level).toBe("error");
+  });
+
+  it("二维码生成失败带原因并按错误级别提示", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "bilibili_login_qrcode") throw { code: "timeout", message: "请求超时" };
+      return undefined;
+    });
+    await usePlayerStore.getState().startLoginPolling();
+    expect(notification()?.level).toBe("error");
+    expect(notification()?.text).toBe("无法生成 B 站登录二维码：请求超时");
+    expect(usePlayerStore.getState().isLoginBusy).toBe(false);
+    expect(usePlayerStore.getState().loginQr).toBeNull();
+  });
+
+  it("刷新状态失败：手动刷新才提示，进入页面时的自动刷新不打扰", async () => {
+    invokeMock.mockImplementation(async () => {
+      throw { code: "network", message: "网络不可用" };
+    });
+    await usePlayerStore.getState().refreshBilibiliState();
+    expect(notification()).toBeNull();
+
+    await usePlayerStore.getState().refreshBilibiliState({ force: true });
+    expect(notification()?.level).toBe("error");
+    expect(notification()?.text).toBe("刷新 B 站状态失败：网络不可用");
+  });
+});
+
 describe("流媒体导入偏好（UI4-02）", () => {
   it("写进 store，离开页面不丢", () => {
     const { setBilibiliImportPreference } = usePlayerStore.getState();

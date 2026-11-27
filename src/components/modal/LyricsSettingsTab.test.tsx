@@ -150,7 +150,7 @@ describe("歌词设置标签页", () => {
     expect(within(screen.getByRole("dialog")).getByText("当前曲目没有被隐藏的行")).toBeInTheDocument();
   });
 
-  it("恢复歌词设置默认值：confirm 取消不动，确认后 11 个字段回默认并同步后端清空规则与显示选项", () => {
+  it("恢复歌词设置默认值：confirm 取消不动，确认后 11 个字段回默认并同步后端清空规则与显示选项", async () => {
     usePlayerStore.setState({
       lyricsSourcePriority: "kugou",
       preferTraditionalLyrics: true,
@@ -186,13 +186,16 @@ describe("歌词设置标签页", () => {
       ignoreLyricsFileOffset: false,
     });
     expect(bridge.invoke).toHaveBeenCalledWith("set_lyrics_exclude_rules", { rules: [] });
-    expect(bridge.invoke).toHaveBeenCalledWith("set_lyrics_display_options", {
-      options: { ignoreFileOffset: false, showCredits: true },
-    });
+    // FE3-02：两个显示选项共用一条命令、串行提交，第二条等第一条确认后才发
+    await vi.waitFor(() =>
+      expect(bridge.invoke).toHaveBeenLastCalledWith("set_lyrics_display_options", {
+        options: { ignoreFileOffset: false, showCredits: true },
+      })
+    );
     expect(usePlayerStore.getState().notification?.text).toBe("歌词设置已恢复默认");
   });
 
-  it("显示制作信息 / 忽略文件 offset 两个开关即时写 store 并经 IPC 同步后端投影", () => {
+  it("显示制作信息 / 忽略文件 offset 两个开关即时写 store 并经 IPC 同步后端投影", async () => {
     render(<LyricsSettingsTab />);
     fireEvent.click(screen.getByRole("button", { name: "显示制作信息" }));
     expect(usePlayerStore.getState().showLyricsCredits).toBe(false);
@@ -200,10 +203,13 @@ describe("歌词设置标签页", () => {
       options: { ignoreFileOffset: false, showCredits: false },
     });
     fireEvent.click(screen.getByRole("button", { name: "忽略文件 offset" }));
+    // 开关立即切换；命令排在上一条之后发出
     expect(usePlayerStore.getState().ignoreLyricsFileOffset).toBe(true);
-    expect(bridge.invoke).toHaveBeenLastCalledWith("set_lyrics_display_options", {
-      options: { ignoreFileOffset: true, showCredits: false },
-    });
+    await vi.waitFor(() =>
+      expect(bridge.invoke).toHaveBeenLastCalledWith("set_lyrics_display_options", {
+        options: { ignoreFileOffset: true, showCredits: false },
+      })
+    );
   });
 
   it("AMLL 地址弹窗：非 Tauri 环境「测试连接」禁用", () => {

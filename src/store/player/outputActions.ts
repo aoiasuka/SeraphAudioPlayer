@@ -1,6 +1,7 @@
 import { invoke, isTauriRuntime, normalizeIpcError } from "@/lib/tauri";
 import type { OutputDevice, Track } from "@/types/track";
 import { sendCommand, sendCommandAsync } from "./commands";
+import { createConfirmedQueue } from "./confirmedQueue";
 import { playbackErrorMessage } from "./playbackActions";
 import { bumpPlayEpoch, currentPlayEpoch } from "./playEpoch";
 import { syncPlaybackQueue } from "./queueSync";
@@ -99,40 +100,6 @@ type BackendToggleKey =
   | "taskbarProgressEnabled"
   | "taskbarLyricsEnabled"
   | "taskbarLyricsClickThrough";
-
-/** 同一设置串行提交；旧成功仍更新确认值，失败不能把乐观值当作回滚基线。 */
-function createConfirmedQueue<T>() {
-  let confirmed: T;
-  const queue: Array<() => Promise<void>> = [];
-  const drain = async () => {
-    while (queue.length > 0) {
-      await queue[0]();
-      queue.shift();
-    }
-  };
-  return (
-    previous: T,
-    value: T,
-    send: () => Promise<void>,
-    onSuccess: () => void | Promise<void>,
-    onFailure: (err: unknown, confirmed: T) => void
-  ) => {
-    const idle = queue.length === 0;
-    // 队列空闲时从 store 接续水合/外部刷新；在途期间绝不重新读取乐观状态作基线。
-    if (idle) confirmed = previous;
-    queue.push(async () => {
-      try {
-        await send();
-      } catch (err) {
-        onFailure(err, confirmed);
-        return;
-      }
-      confirmed = value;
-      await onSuccess();
-    });
-    if (idle) void drain();
-  };
-}
 
 /** 后端确认后才提示，失败回到串行队列最后一次成功的值。 */
 function commitBackendToggle(

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { invoke } from "@/lib/tauri";
 import { buildDspSettings, useEqStore } from "@/store/eq";
+import { usePlayerStore } from "@/store/player";
 import { GENRE_EQ_PRESETS, DEFAULT_EQ_BANDS } from "@/lib/eqPresets";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -115,5 +116,48 @@ describe("eq store", () => {
     expect(state.preamp).toBe(0);
     expect(state.activePresetId).toBe("flat");
     expect(state.bands.every((band) => band.gain === 0)).toBe(true);
+  });
+
+  it("FE3-03：下发失败时提示一次，同一原因不刷屏，成功过后再失败会重新提示", async () => {
+    await flush();
+    const notifications = () => usePlayerStore.getState().notificationHistory.length;
+    usePlayerStore.setState({ notification: null, notificationHistory: [] });
+    invokeMock.mockRejectedValue({ code: "invalid_input", message: "频段参数越界" });
+
+    useEqStore.getState().setPreamp(-1);
+    await flush();
+    const notification = usePlayerStore.getState().notification;
+    expect(notification?.level).toBe("error");
+    expect(notification?.text).toContain("均衡器设置未生效");
+    expect(notification?.text).toContain("频段参数越界");
+    expect(notifications()).toBe(1);
+
+    // 拖动滑块期间反复失败：不再重复提示
+    useEqStore.getState().setPreamp(-2);
+    await flush();
+    useEqStore.getState().setPreamp(-3);
+    await flush();
+    expect(notifications()).toBe(1);
+
+    // 原因变了要说
+    invokeMock.mockRejectedValue("音频线程不可用");
+    useEqStore.getState().setPreamp(-4);
+    await flush();
+    expect(notifications()).toBe(2);
+    expect(usePlayerStore.getState().notification?.text).toContain("音频线程不可用");
+
+    // 下发成功过一次之后，同一个原因再出现也重新提示
+    invokeMock.mockResolvedValue(undefined);
+    useEqStore.getState().setPreamp(-5);
+    await flush();
+    expect(notifications()).toBe(2);
+    invokeMock.mockRejectedValue("音频线程不可用");
+    useEqStore.getState().setPreamp(-6);
+    await flush();
+    expect(notifications()).toBe(3);
+
+    invokeMock.mockResolvedValue(undefined);
+    useEqStore.getState().setPreamp(0);
+    await flush();
   });
 });

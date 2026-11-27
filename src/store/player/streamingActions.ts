@@ -1,4 +1,4 @@
-import { invoke } from "@/lib/tauri";
+import { invoke, withIpcErrorReason } from "@/lib/tauri";
 import type {
   BilibiliFfmpegStatus,
   BilibiliLoginPollResult,
@@ -173,6 +173,10 @@ export function createStreamingActions(
       } catch (err) {
 
         console.warn("Tauri command failed: bilibili status", err);
+        // UI3-03：用户手动点「刷新状态」时要有反馈；进入页面时的自动刷新失败不打扰
+        if (options?.force) {
+          get().showNotification(withIpcErrorReason("刷新 B 站状态失败", err), "error");
+        }
       }
     },
 
@@ -200,8 +204,9 @@ export function createStreamingActions(
       } catch (err) {
         settleFfmpegDownloadSession(session);
         set({ ffmpegDownload: { stage: "error", percent: 0 } });
-        const reason = typeof err === "string" ? err : "下载失败";
-        get().showNotification(reason);
+        // UI3-03：先归一再取原因（后端以 `{ code, message }` reject 时此前只剩「下载失败」），
+        // 并按错误级别提示——停留更久、不被普通提示顶掉。
+        get().showNotification(withIpcErrorReason("FFmpeg 下载失败", err), "error");
 
         console.warn("download_ffmpeg failed", err);
       }
@@ -229,7 +234,7 @@ export function createStreamingActions(
       } catch (err) {
 
         console.warn("Tauri command failed: bilibili_login_qrcode", err);
-        get().showNotification("无法生成 B 站登录二维码");
+        get().showNotification(withIpcErrorReason("无法生成 B 站登录二维码", err), "error");
       } finally {
         set({ isLoginBusy: false });
       }
