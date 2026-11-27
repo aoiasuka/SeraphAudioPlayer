@@ -14,6 +14,10 @@ use std::{
 
 const MANIFEST: &str = "library-snapshot.json";
 const PREVIOUS: &str = "library-snapshot.previous.json";
+/// STO-02：按天滚动的第三代。恢复只有「上一版」一代时，连续两次提交之间有文件悄悄坏掉
+/// 就没有退路了；这份清单最多每 [`DAILY_INTERVAL`] 更新一次，指向更早的一代。
+const DAILY: &str = "library-snapshot.daily.json";
+pub(crate) const DAILY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 const SNAPSHOTS: &str = "library-snapshots";
 /// 迁移到快照存储之前的两个文件，只在没有任何清单时读取。
 const LEGACY_TRACKS: &str = "library-cache.json";
@@ -242,36 +246,57 @@ impl LibraryStorage {
         Ok(merge_lyrics(tracks, lyrics))
     }
 
+    /// 当前一代读不出来时依次尝试上一版、按天滚动的那一代（STO-02）。
     fn recover(&self, error: LoadFailure) -> Result<Vec<ImportedTrack>, LoadFailure> {
-        let recovered = (|| {
-            let previous: Manifest = read_required_json(&self.root.join(PREVIOUS))?;
-            let tracks = self.read_snapshot(&previous)?;
-            let path = self.root.join(MANIFEST);
-            if path.exists() {
-                backup_corrupt_file(&path).map_err(LoadFailure::transient)?;
+        let mut failures = Vec::new();
+        let mut stable = error.stable;
+        for (name, label) in [(PREVIOUS, "上一版"), (DAILY, "每日快照")] {
+            match self.restore_from(name) {
+                Ok(tracks) => {
+                    tracing::warn!(
+                        "曲库快照损坏，已从{label}恢复，损坏文件保留为 .corrupt：{}",
+                        error.message
+                    );
+                    return Ok(tracks);
+                }
+                Err(failure) => {
+                    stable &= failure.stable;
+                    failures.push(format!("{label}：{}", failure.message));
+                }
             }
-            let bytes = json_bytes(&previous).map_err(LoadFailure::transient)?;
-            write_json_atomic(&path, &bytes).map_err(LoadFailure::transient)?;
-            Ok::<_, LoadFailure>(tracks)
-        })();
-        match recovered {
-            Ok(tracks) => {
-                tracing::warn!(
-                    "曲库快照损坏，已恢复上一份完整快照，损坏文件保留为 .corrupt：{}",
-                    error.message
-                );
-                Ok(tracks)
-            }
-            Err(recovery) => Err(LoadFailure {
-                message: format!(
-                    "{}：曲库读取失败，已中止写入以免覆盖数据：{}；上一版恢复失败：{}",
-                    crate::ipc::error::CACHE_CORRUPT_MARKER,
-                    error.message,
-                    recovery.message
-                ),
-                stable: error.stable && recovery.stable,
-            }),
         }
+        Err(LoadFailure {
+            message: format!(
+                "{}：曲库读取失败，已中止写入以免覆盖数据：{}；恢复失败（{}）",
+                crate::ipc::error::CACHE_CORRUPT_MARKER,
+                error.message,
+                failures.join("；")
+            ),
+            stable,
+        })
+    }
+
+    /// 用 `name` 这份清单恢复：它和它引用的两个文件都读得出来，才把它写成当前清单。
+    fn restore_from(&self, name: &str) -> Result<Vec<ImportedTrack>, LoadFailure> {
+        let manifest: Manifest = read_required_json(&self.root.join(name))?;
+        let tracks = self.read_snapshot(&manifest)?;
+        let path = self.root.join(MANIFEST);
+        if path.exists() {
+            backup_corrupt_file(&path).map_err(LoadFailure::transient)?;
+        }
+        let bytes = json_bytes(&manifest).map_err(LoadFailure::transient)?;
+        write_json_atomic(&path, &bytes).map_err(LoadFailure::transient)?;
+        Ok(tracks)
+    }
+
+    /// 每日快照是否该更新了：没有，或者上次更新已经超过 [`DAILY_INTERVAL`]。
+    /// 取不到时间、时间在未来（改过系统时钟）都按该更新处理。
+    fn daily_is_stale(&self) -> bool {
+        fs::metadata(self.root.join(DAILY))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_none_or(|age| age >= DAILY_INTERVAL)
     }
 
     /// 冷读涉及的文件现状。清单、上一版清单、两个旧版文件，加上快照目录里本模块生成的代次文件；
@@ -284,7 +309,7 @@ impl LibraryStorage {
                 files.push((name, meta.len(), meta.modified().ok()));
             }
         };
-        for name in [MANIFEST, PREVIOUS, LEGACY_TRACKS, LEGACY_LYRICS] {
+        for name in [MANIFEST, PREVIOUS, DAILY, LEGACY_TRACKS, LEGACY_LYRICS] {
             stamp(name.to_string(), &self.root.join(name));
         }
         if let Ok(entries) = fs::read_dir(self.root.join(SNAPSHOTS)) {
@@ -369,13 +394,27 @@ impl LibraryStorage {
             write(&self.root.join(PREVIOUS), &json_bytes(manifest)?)?;
         }
         write(&self.root.join(MANIFEST), &json_bytes(&next)?)?;
+        // STO-02：提交已经完成。每日快照到期时，把刚被替换下来的那一代记成每日快照——
+        // 它是这次提交之前一直在用的版本。写不成只记日志，不影响这次提交的结果。
+        if let Some(manifest) = current.as_ref().filter(|_| self.daily_is_stale()) {
+            let written =
+                json_bytes(manifest).and_then(|bytes| write(&self.root.join(DAILY), &bytes));
+            if let Err(err) = written {
+                tracing::warn!("曲库每日快照未能更新：{err}");
+            }
+        }
         self.cleanup(&next, current.as_ref());
         Ok(stats)
     }
 
     fn cleanup(&self, current: &Manifest, previous: Option<&Manifest>) {
+        // 每日快照引用的两个文件同样保留；它自己读不出来时就没有什么可保留的
+        let daily = read_optional_json::<Manifest>(&self.root.join(DAILY))
+            .ok()
+            .flatten();
         let keep: HashSet<&str> = std::iter::once(current)
             .chain(previous)
+            .chain(daily.as_ref())
             .flat_map(|manifest| [manifest.tracks.as_str(), manifest.lyrics.as_str()])
             .collect();
         let Ok(entries) = fs::read_dir(self.root.join(SNAPSHOTS)) else {
@@ -530,8 +569,10 @@ fn list_corrupt_backups(dir: &Path) -> Vec<CorruptBackup> {
 
 /// 只淘汰本模块自己的现场：原文件名必须是清单、上一版清单、旧版两个文件或代次文件。
 fn is_owned_backup_source(source: &str) -> bool {
-    matches!(source, MANIFEST | PREVIOUS | LEGACY_TRACKS | LEGACY_LYRICS)
-        || is_snapshot_name(source)
+    matches!(
+        source,
+        MANIFEST | PREVIOUS | DAILY | LEGACY_TRACKS | LEGACY_LYRICS
+    ) || is_snapshot_name(source)
 }
 
 /// 每个目录只留最新的 [`MAX_CORRUPT_BACKUPS_PER_DIR`] 份现场；`keep`（本次用到的那份）一定留下。

@@ -348,6 +348,77 @@ fn repeated_loads_of_an_unrecoverable_library_do_not_pile_up_backups() {
 }
 
 #[test]
+fn daily_snapshot_recovers_when_current_and_previous_are_both_broken() {
+    use super::storage::DAILY_INTERVAL;
+    // STO-02：此前只有「上一版」一代可退。
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let snapshots = dir.0.join("library-snapshots");
+    let daily = dir.0.join("library-snapshot.daily.json");
+    let version = |title: &str| vec![test_imported_track("a", "C:/a.flac", title)];
+    let tracks_file = |manifest: &str| {
+        let value: Value =
+            serde_json::from_slice(&fs::read(dir.0.join(manifest)).unwrap()).unwrap();
+        snapshots.join(value["tracks"].as_str().unwrap())
+    };
+
+    storage.save(&version("v1"), None).unwrap();
+    assert!(!daily.exists(), "第一次提交之前没有可记的一代");
+    storage.save(&version("v2"), Some(&version("v1"))).unwrap();
+    let daily_bytes = fs::read(&daily).unwrap();
+    storage.save(&version("v3"), Some(&version("v2"))).unwrap();
+    assert_eq!(fs::read(&daily).unwrap(), daily_bytes, "一天之内不重复更新");
+    // 三代的数据文件都留着：当前 v3、上一版 v2、每日 v1
+    assert!(tracks_file("library-snapshot.daily.json").is_file());
+
+    // 当前一代和上一版的数据文件都坏了
+    fs::write(tracks_file("library-snapshot.json"), b"{broken").unwrap();
+    fs::write(tracks_file("library-snapshot.previous.json"), b"{broken").unwrap();
+    assert_eq!(dir.storage().load().unwrap(), version("v1"));
+    assert_eq!(
+        dir.storage().load().unwrap(),
+        version("v1"),
+        "恢复结果跨重启保持"
+    );
+
+    // 每日快照过期后，下一次提交把被替换下来的那一代记进去
+    storage.save(&version("v4"), Some(&version("v1"))).unwrap();
+    assert_eq!(fs::read(&daily).unwrap(), daily_bytes, "还没到期");
+    let two_days_ago = std::time::SystemTime::now() - DAILY_INTERVAL * 2;
+    fs::File::options()
+        .write(true)
+        .open(&daily)
+        .unwrap()
+        .set_modified(two_days_ago)
+        .unwrap();
+    storage.save(&version("v5"), Some(&version("v4"))).unwrap();
+    assert_ne!(fs::read(&daily).unwrap(), daily_bytes);
+    fs::write(tracks_file("library-snapshot.json"), b"{broken").unwrap();
+    fs::remove_file(dir.0.join("library-snapshot.previous.json")).unwrap();
+    assert_eq!(dir.storage().load().unwrap(), version("v4"));
+}
+
+#[test]
+fn failing_to_write_the_daily_snapshot_does_not_fail_the_commit() {
+    let dir = TestLibraryDir::new();
+    let storage = dir.storage();
+    let old = vec![test_imported_track("a", "C:/a.flac", "old")];
+    storage.save(&old, None).unwrap();
+    let mut updated = old.clone();
+    updated[0].title = "new".into();
+    storage
+        .save_with(&updated, Some(&old), |path, bytes| {
+            if path.ends_with("library-snapshot.daily.json") {
+                return Err("模拟磁盘写入失败".into());
+            }
+            write_json_atomic(path, bytes)
+        })
+        .unwrap();
+    assert_eq!(dir.storage().load().unwrap(), updated);
+    assert!(!dir.0.join("library-snapshot.daily.json").exists());
+}
+
+#[test]
 fn corrupt_backups_are_capped_per_directory_and_keep_the_newest() {
     use super::storage::MAX_CORRUPT_BACKUPS_PER_DIR;
     // STO-01：反复出现不同的坏内容时，现场数量也要有上限；不是本模块生成的 .corrupt 不动。
