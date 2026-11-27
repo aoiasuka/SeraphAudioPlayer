@@ -61,5 +61,13 @@ export function useVirtualRows(
     rememberView(scrollKey, top);
   };
 
-  return { scrollRef, onScroll, ...range };
+  /** 回到顶部：列表内容整体换了（改了搜索词、排序）时用，同时清掉记住的滚动位置。 */
+  const scrollToTop = () => {
+    setScrollTop(0);
+    rememberView(scrollKey, 0);
+    pendingRestore.current = null;
+    scrollRef.current?.scrollTo({ top: 0 });
+  };
+
+  return { scrollRef, onScroll, scrollToTop, ...range };
 }

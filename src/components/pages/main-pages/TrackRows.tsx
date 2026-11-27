@@ -1,11 +1,12 @@
 import { ListPlus, ListChecks, Heart, Search, Trash2, X } from "lucide-react";
-import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "@/components/ui/dialog";
+import { useVirtualRows } from "@/hooks/useVirtualRows";
 import { formatSeconds } from "@/lib/format";
 import { trackIndexById as sharedTrackIndexById } from "@/lib/trackIndex";
 import { buildTrackMenuEntries } from "@/lib/trackMenu";
 import { cn } from "@/lib/utils";
-import { recallView, rememberView, useRememberedState } from "@/lib/viewMemory";
+import { useRememberedState } from "@/lib/viewMemory";
 import { showContextMenu, useContextMenuStore } from "@/store/contextMenu";
 import { usePlayerStore } from "@/store/player";
 import type { PlayScope } from "@/store/player/types";
@@ -18,7 +19,6 @@ import {
 } from "./trackFilters";
 
 const TRACK_ROW_HEIGHT = 59;
-const TRACK_ROW_OVERSCAN = 6;
 
 function compactQualityLabel(track: Track) {
   const prefix = `${track.format} `;
@@ -32,7 +32,6 @@ function compactQualityLabel(track: Track) {
  * 时恢复（见 `lib/viewMemory.ts`）。不同列表用不同的键；不传则每次从头开始。
  */
 export function TrackRows({ tracks, empty, scopeName = "当前列表", stateKey }: { tracks: Track[]; empty: string; scopeName?: string; stateKey?: string }) {
-  const scrollKey = stateKey ? `${stateKey}:scroll` : null;
   const playlist = usePlayerStore((s) => s.playlist);
   const currentTrack = usePlayerStore((s) => s.currentTrack());
   const isPlaying = usePlayerStore((s) => s.isPlaying);
@@ -47,11 +46,6 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表", stateKey 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const selectAllRef = useRef<HTMLInputElement | null>(null);
-  const [scrollTop, setScrollTop] = useState(() => recallView(scrollKey, 0));
-  const [viewportHeight, setViewportHeight] = useState(420);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  // 进入页面时要恢复到的滚动位置；容器首次挂载后应用一次即清空
-  const pendingScrollRestore = useRef<number | null>(recallView<number | null>(scrollKey, null));
   const [trackToAddId, setTrackToAddId] = useState<string | null>(null);
   const [query, setQuery] = useRememberedState(stateKey ? `${stateKey}:query` : null, "");
   const deferredQuery = useDeferredValue(query);
@@ -103,57 +97,19 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表", stateKey 
       null,
     [playlist, trackToAddId, tracks]
   );
-  const visibleRows = useMemo(() => {
-    const effectiveScrollTop = Math.min(scrollTop, Math.max(0, displayTracks.length * TRACK_ROW_HEIGHT - viewportHeight));
-    const start = Math.max(
-      0,
-      Math.floor(effectiveScrollTop / TRACK_ROW_HEIGHT) - TRACK_ROW_OVERSCAN
-    );
-    const end = Math.min(
-      displayTracks.length,
-      Math.ceil((effectiveScrollTop + viewportHeight) / TRACK_ROW_HEIGHT) +
-        TRACK_ROW_OVERSCAN
-    );
-
-    return {
-      tracks: displayTracks.slice(start, end),
-      start,
-      paddingTop: start * TRACK_ROW_HEIGHT,
-      paddingBottom: (displayTracks.length - end) * TRACK_ROW_HEIGHT,
-    };
-  }, [scrollTop, displayTracks, viewportHeight]);
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    setScrollTop(element.scrollTop);
-    rememberView(scrollKey, element.scrollTop);
-  };
-  const hasTracks = tracks.length > 0;
-  // M-17：滚动容器实际挂载条件是「过滤后非空」（displayTracks）——搜索无结果
-  // 会卸载容器、清词后重挂。observer 的 effect 必须跟随该信号重跑，否则重挂的
-  // 新容器无人观察，viewportHeight 永久卡 0，所有列表页只渲染首屏十几行。
-  const hasVisibleTracks = displayTracks.length > 0;
-  // 发现6：用 ResizeObserver 测量容器实际高度，修复首屏高窗口/resize 时底部曲目空白
-  useLayoutEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-
-    const updateViewport = () => setViewportHeight(element.clientHeight);
-    updateViewport();
-    // 回到页面：把滚动条放回离开时的位置（首屏的占位高度已按记住的位置算好）
-    const restore = pendingScrollRestore.current;
-    pendingScrollRestore.current = null;
-    if (restore !== null && restore > 0) element.scrollTop = restore;
-    const resizeObserver = new ResizeObserver(updateViewport);
-    resizeObserver.observe(element);
-    return () => resizeObserver.disconnect();
-  }, [hasTracks, hasVisibleTracks]);
-
-  const resetScroll = () => {
-    setScrollTop(0);
-    rememberView(scrollKey, 0);
-    pendingScrollRestore.current = null;
-    scrollRef.current?.scrollTo({ top: 0 });
-  };
+  // UI3-02：虚拟滚动走共享的 `useVirtualRows`（此前这里另有一套手写实现，要与它分别维护）。
+  // M-17：滚动容器的挂载条件是「过滤后非空」——搜索无结果会卸载容器、清词后重挂，
+  // `mountKey` 跟着这个信号变，hook 才会重新观察新容器的高度。
+  const rows = useVirtualRows(displayTracks.length, TRACK_ROW_HEIGHT, {
+    mountKey: displayTracks.length > 0,
+    stateKey,
+  });
+  const visibleTracks = useMemo(
+    () => displayTracks.slice(rows.start, rows.end),
+    [displayTracks, rows.start, rows.end]
+  );
+  // 搜索词、排序变了：列表内容整体换了，回到顶部
+  const resetScroll = rows.scrollToTop;
 
   if (tracks.length === 0) {
     return (
@@ -269,16 +225,16 @@ export function TrackRows({ tracks, empty, scopeName = "当前列表", stateKey 
         </div>
       ) : (
       <div
-        ref={scrollRef}
+        ref={rows.scrollRef}
         className="min-h-0 flex-1 overflow-y-auto pr-1"
-        onScroll={handleScroll}
+        onScroll={rows.onScroll}
       >
-        <div style={{ paddingTop: visibleRows.paddingTop, paddingBottom: visibleRows.paddingBottom }}>
-        {visibleRows.tracks.map((track, visibleIndex) => {
+        <div style={{ paddingTop: rows.paddingTop, paddingBottom: rows.paddingBottom }}>
+        {visibleTracks.map((track, visibleIndex) => {
           const index = trackIndexById.get(track.id) ?? -1;
           const active = currentTrack?.id === track.id;
           const favorite = !!liked[track.id];
-          const displayIndex = visibleRows.start + visibleIndex + 1;
+          const displayIndex = rows.start + visibleIndex + 1;
           const recNo = displayIndex
             .toString()
             .padStart(3, "0");

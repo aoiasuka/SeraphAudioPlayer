@@ -6,8 +6,34 @@ import { useVirtualRows } from "./useVirtualRows";
 
 function List({ count, stateKey }: { count: number; stateKey?: string }) {
   const rows = useVirtualRows(count, 50, { mountKey: count > 0, stateKey });
-  return count ? <div ref={rows.scrollRef} onScroll={rows.onScroll} data-testid="scroll"><span>{rows.start}</span></div> : null;
+  return count ? (
+    <>
+      <button type="button" onClick={rows.scrollToTop}>top</button>
+      <div ref={rows.scrollRef} onScroll={rows.onScroll} data-testid="scroll"><span>{rows.start}</span></div>
+    </>
+  ) : null;
 }
+
+it("scrollToTop 回到顶部并清掉记住的位置（UI3-02）", () => {
+  const first = render(<List count={500} stateKey="tracks:top" />);
+  const scroll = screen.getByTestId("scroll");
+  // jsdom 没有实现 scrollTo
+  scroll.scrollTo = ((options: ScrollToOptions) => {
+    scroll.scrollTop = options.top ?? 0;
+  }) as typeof scroll.scrollTo;
+  fireEvent.scroll(scroll, { target: { scrollTop: 10000 } });
+  expect(scroll.textContent).not.toBe("0");
+
+  fireEvent.click(screen.getByRole("button", { name: "top" }));
+  expect(scroll.textContent).toBe("0");
+  expect(scroll.scrollTop).toBe(0);
+  first.unmount();
+
+  // 重建后不再恢复到之前的位置
+  render(<List count={500} stateKey="tracks:top" />);
+  expect(screen.getByTestId("scroll").textContent).toBe("0");
+  expect(screen.getByTestId("scroll").scrollTop).toBe(0);
+});
 
 beforeEach(() => {
   forgetAllViews();
