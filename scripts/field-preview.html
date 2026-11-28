@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>field preview</title>
+<!--
+  声场散点的可视化预览：直接导入项目里的绘制函数，用合成的立体声信号渲染几种典型情况。
+  调 src/lib/analysis/fieldDensity.ts 里的参数之前先看这个，别只算数字。
+
+  用法：npm run dev，然后打开 http://127.0.0.1:1420/scripts/field-preview.html
+  要模拟系统缩放，用无头浏览器截图：
+    chrome --headless=new --force-device-scale-factor=1.5 --window-size=1060,320
+      --screenshot=out.png http://127.0.0.1:1420/scripts/field-preview.html
+  画布按 238 px 见方渲染——2560×1440、缩放 150% 下沉浸页声场的实测大小。
+-->
+<style>
+  body { margin: 0; padding: 16px; background: #f4efe6; font: 11px "Courier New", monospace; color: #2b2722; }
+  .grid { display: grid; grid-template-columns: repeat(4, 238px); gap: 18px 22px; }
+  .box { position: relative; width: 238px; height: 238px; }
+  .box canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  p { margin: 4px 0 0; white-space: pre; line-height: 1.35; }
+</style>
+<div class="grid" id="grid"></div>
+<script type="module">
+// 直接用项目里的真实实现：画布准备、点径、余晖、像素比全部走生产代码。
+import { drawImmersiveField, IMMERSIVE_FIELD_TRAIL_FRAMES } from "/src/components/immersive/analysisRender.ts";
+import { IMMERSIVE_FIELD_POINTS, fieldPixelRatio } from "/src/lib/analysis/fieldDensity.ts";
+import { prepCanvas } from "/src/lib/analysis/render.ts";
+
+const colors = new Proxy({ ink: "#2b2722", line: "#cfc6b6" }, { get: (target, key) => target[key] ?? "#2b2722" });
+function rng(seed) { return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296; }
+function gauss(r) { return Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r()); }
+function makeFrames(count, corr, level, rate) {
+  const r = rng(20261128), n = Math.round(rate * 0.033), sideRatio = Math.sqrt((1 - corr) / (1 + corr));
+  return Array.from({ length: count }, () => {
+    const env = 0.75 + 0.5 * r(), frame = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const tail = 0.55 + 0.9 * r() * r() * 2;
+      const mid = gauss(r) * level * env * tail, side = gauss(r) * level * sideRatio * env * tail;
+      frame[i * 2] = (mid - side) / Math.SQRT2; frame[i * 2 + 1] = (mid + side) / Math.SQRT2;
+    }
+    return frame;
+  });
+}
+// 后端的抽取（analysis.rs）
+function decimate(frame, pairs) {
+  const n = frame.length / 2; let step = Math.max(1, n / pairs); if (pairs <= 480) step = Math.ceil(step);
+  const out = [];
+  for (let p = 0; Math.floor(p) < n && out.length < pairs * 2; p += step) { const i = Math.floor(p); out.push(frame[i * 2], frame[i * 2 + 1]); }
+  return Float32Array.from(out);
+}
+const cases = [
+  { name: "宽声场 96k（接近截图）", corr: 0.55, level: 0.52, rate: 96000 },
+  { name: "中等 96k", corr: 0.63, level: 0.30, rate: 96000 },
+  { name: "窄声场 44.1k", corr: 0.92, level: 0.28, rate: 44100 },
+  { name: "安静片段 44.1k", corr: 0.7, level: 0.08, rate: 44100 },
+];
+for (const c of cases) {
+  const cell = document.createElement("div");
+  const box = document.createElement("div"); box.className = "box";
+  const canvas = document.createElement("canvas"); box.append(canvas); cell.append(box);
+  document.getElementById("grid").append(cell);
+  const trail = makeFrames(14, c.corr, c.level, c.rate).slice(-IMMERSIVE_FIELD_TRAIL_FRAMES).map((f) => decimate(f, IMMERSIVE_FIELD_POINTS));
+  const prepared = prepCanvas(canvas, { w: 238, h: 238 }, fieldPixelRatio(window.devicePixelRatio));
+  drawImmersiveField(prepared.ctx, prepared.w, prepared.h, colors, trail);
+  const p = document.createElement("p");
+  p.textContent = `${c.name}\n${trail[0].length / 2} pts × ${trail.length} 帧  画布 ${canvas.width}px (dpr ${window.devicePixelRatio})`;
+  cell.append(p);
+}
+document.title = "done";
+</script>

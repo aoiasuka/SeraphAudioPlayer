@@ -506,19 +506,16 @@ export function drawSoundField(
   mode: SoundFieldMode,
   trail: Float32Array[],
   showCorrelation = true
-): number {
+) {
   ctx.clearRect(0, 0, w, h);
   const corrH = showCorrelation ? 34 : 0;
   const mainH = h - corrH;
-  if (mainH < 40) return 0;
-  // 图形的半径（半圆半径 / 菱形半对角线）；返回给调用方，用来决定向后端要多少点
-  let extent = 0;
+  if (mainH < 40) return;
 
   if (mode === "polar") {
     const cx = w / 2;
     const cy = mainH - 10;
     const radius = Math.max(10, Math.min(w * 0.42, mainH - 26));
-    extent = radius;
     const dot = pageFieldPointSize(radius);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.2;
@@ -594,7 +591,6 @@ export function drawSoundField(
     const cx = w / 2;
     const cyc = mainH / 2 + 2;
     const size = Math.max(10, Math.min(w, mainH) / 2 - 18);
-    extent = size;
     const dot = pageFieldPointSize(size);
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.2;
@@ -634,12 +630,12 @@ export function drawSoundField(
   }
 
   // 相关度表
-  if (!showCorrelation) return extent;
+  if (!showCorrelation) return;
   const corr = view.stereo.corr;
   const y0 = h - corrH + 8;
   const bx0 = 86;
   const bx1 = w - 56;
-  if (bx1 <= bx0) return extent;
+  if (bx1 <= bx0) return;
   ctx.font = TW9;
   ctx.textAlign = "left";
   ctx.fillStyle = colors.ink3;
@@ -668,7 +664,6 @@ export function drawSoundField(
   ctx.textAlign = "right";
   ctx.fillStyle = corr < 0 ? colors.stamp : colors.ink;
   ctx.fillText(`${corr >= 0 ? "+" : ""}${corr.toFixed(2)}`, w - 8, y0 + 9);
-  return extent;
 }
 
 // ============================================================

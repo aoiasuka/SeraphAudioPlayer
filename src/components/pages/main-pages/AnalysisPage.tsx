@@ -37,7 +37,7 @@ import {
   HISTORY_WINDOW_SEC,
 } from "@/lib/analysis/types";
 import { isTauriRuntime } from "@/lib/tauri";
-import { FIELD_POINT_TIERS, fieldPointBudget } from "@/lib/analysis/fieldDensity";
+import { PAGE_FIELD_POINTS } from "@/lib/analysis/fieldDensity";
 import { createAnalysisSession, pollVisualizer, visualizerPoller } from "@/lib/analysis/polling";
 import { cn } from "@/lib/utils";
 import {
@@ -353,9 +353,6 @@ export function AnalysisPage() {
   const viewRef = useRef(createAnalysisView());
   const colorsRef = useRef<ArchiveColors | null>(null);
   const trailRef = useRef<Float32Array[]>([]);
-  // 声场面板越大，向后端要的采样点越多（三档，见 fieldDensity.ts）
-  const [fieldPoints, setFieldPoints] = useState<number>(FIELD_POINT_TIERS[0]);
-  const fieldPointsRef = useRef(fieldPoints);
   const cursorBinRef = useRef<number | null>(null);
   const spectrumGeomRef = useRef<SpectrumGeometry | null>(null);
   const heatCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -437,7 +434,7 @@ export function AnalysisPage() {
         (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000), {
           spectrum: panels.spectrum || panels.spectrogram,
           loudness: panels.loudness, levels: panels.levels, field: panels.field, scope: panels.scope,
-          fieldPoints,
+          fieldPoints: PAGE_FIELD_POINTS,
         });
     }
     const simulator = createAnalysisSimulator();
@@ -446,7 +443,7 @@ export function AnalysisPage() {
       read: async () => simulator.next(POLL_INTERVAL_MS / 1000),
       onData: (frame) => applyAnalysisFrame(view, frame, performance.now() / 1000),
     });
-  }, [isPlaying, sessionId, panels.spectrum, panels.spectrogram, panels.loudness, panels.levels, panels.field, panels.scope, visibleCount, editing, immersiveOpen, fieldPoints]);
+  }, [isPlaying, sessionId, panels.spectrum, panels.spectrogram, panels.loudness, panels.levels, panels.field, panels.scope, visibleCount, editing, immersiveOpen]);
 
   // 换曲目：后端通过 sessionId 原子切换会话，前端同步清空显示。
   useEffect(() => {
@@ -529,9 +526,8 @@ export function AnalysisPage() {
           });
         }
       });
-      let fieldExtent = 0;
-      draw(fieldCanvas, (ctx, w, h) => {
-        fieldExtent = drawSoundField(
+      draw(fieldCanvas, (ctx, w, h) =>
+        drawSoundField(
           ctx,
           w,
           h,
@@ -540,13 +536,8 @@ export function AnalysisPage() {
           opts.fieldMode,
           trail,
           opts.fieldShowCorrelation
-        );
-      });
-      const wantedPoints = fieldPointBudget(fieldExtent, fieldPointsRef.current);
-      if (wantedPoints !== fieldPointsRef.current) {
-        fieldPointsRef.current = wantedPoints;
-        setFieldPoints(wantedPoints);
-      }
+        )
+      );
       draw(spectrumCanvas, (ctx, w, h) => {
         spectrumGeomRef.current = drawSpectrumChart(
           ctx,

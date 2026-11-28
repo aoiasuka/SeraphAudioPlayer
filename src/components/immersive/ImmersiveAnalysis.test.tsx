@@ -50,7 +50,7 @@ describe("沉浸分析的真实数据与生命周期", () => {
   it("只请求频谱、电平和声场；冻结停止 IPC，保留仪表且不暂停播放器", async () => {
     render(<ImmersiveAnalysis />);
     await advance(120);
-    expect(bridge.invoke).toHaveBeenCalledWith("get_analysis_frame", expect.objectContaining({ demand: { spectrum: true, loudness: false, levels: true, field: true, scope: false, fieldPoints: 480 } }));
+    expect(bridge.invoke).toHaveBeenCalledWith("get_analysis_frame", expect.objectContaining({ demand: { spectrum: true, loudness: false, levels: true, field: true, scope: false, fieldPoints: 1440 } }));
     expect(screen.getByLabelText("声道相关度")).not.toHaveTextContent("—");
     fireEvent.click(screen.getByRole("button", { name: "冻结画面" }));
     await advance(20);
@@ -140,39 +140,52 @@ describe("沉浸分析的真实数据与生命周期", () => {
     expect(bridge.invoke.mock.calls.at(-1)?.[1].request.sessionId).toBe(backgroundSession);
   });
 
-  it("声场画布大时向后端多要采样点，普通尺寸保持默认档", async () => {
-    // jsdom 没有布局也没有 canvas：给容器一个尺寸、给一个什么都不做的 2D 上下文
-    const gradient = { addColorStop() {} };
-    const context = new Proxy({}, {
-      get: (_target, key) =>
-        key === "getTransform" ? () => ({ a: 1, d: 1 })
-          : key === "measureText" ? () => ({ width: 10 })
-          : typeof key === "string" && key.startsWith("create") ? () => gradient
-          : () => undefined,
-      set: () => true,
+  it("声场每帧固定要 1440 个点，画布像素比是设备像素比的整数倍", async () => {
+    // jsdom 没有布局也没有 canvas：给容器一个尺寸、给一个只记录矩形的 2D 上下文
+    const rects: Array<{ canvas: HTMLCanvasElement | null; w: number; h: number }> = [];
+    const contexts = new WeakMap<HTMLCanvasElement, unknown>();
+    const contextFor = (canvas: HTMLCanvasElement) => {
+      let scale = 1;
+      return new Proxy({}, {
+        get: (_target, key) =>
+          key === "setTransform" ? (a: number) => { scale = a; }
+            : key === "getTransform" ? () => ({ a: scale, d: scale })
+            : key === "fillRect" ? (_x: number, _y: number, w: number, h: number) => { rects.push({ canvas, w, h }); }
+            : key === "measureText" ? () => ({ width: 10 })
+            : typeof key === "string" && key.startsWith("create") ? () => ({ addColorStop() {} })
+            : () => undefined,
+        set: () => true,
+      });
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
+      if (!contexts.has(this)) contexts.set(this, contextFor(this));
+      return contexts.get(this) as never;
     });
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as never);
-    const size = { value: 220 };
-    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => size.value);
-    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => size.value);
-    const requestedPoints = () => bridge.invoke.mock.calls
+    // 2560×1440、系统缩放 150% 下实测的声场容器：约 238 px 见方
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(238);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(238);
+    vi.stubGlobal("devicePixelRatio", 1.5);
+
+    render(<ImmersiveAnalysis />);
+    for (let step = 0; step < 6; step += 1) await advance(40);
+
+    const requested = bridge.invoke.mock.calls
       .filter(([command]) => command === "get_analysis_frame")
       .map(([, args]) => (args as { demand: { fieldPoints: number } }).demand.fieldPoints);
+    expect(requested.length).toBeGreaterThan(2);
+    expect(new Set(requested)).toEqual(new Set([1440]));
 
-    // 220 px 的容器：菱形半径 100 px，最低档
-    const small = render(<ImmersiveAnalysis />);
-    await advance(200);
-    expect(new Set(requestedPoints())).toEqual(new Set([480]));
-    small.unmount();
-
-    // 700 px 的容器：半径 340 px，最高档
-    bridge.invoke.mockClear();
-    size.value = 700;
-    render(<ImmersiveAnalysis />);
-    // 第一帧画出来才知道画布多大；换档是一次状态更新，随后的轮询带上新的档位
-    for (let step = 0; step < 12; step += 1) await advance(40);
-    expect(requestedPoints()[0]).toBe(480);
-    expect(requestedPoints().at(-1)).toBe(1440);
+    // 像素比 3（= 1.5 × 2）：缩到 150% 显示是整数比。此前是 2，每个点落在 1.5 个设备像素上
+    const field = screen.getByRole("img", { name: "左右声道矢量图" }) as HTMLCanvasElement;
+    expect(field.width).toBe(238 * 3);
+    expect(field.height).toBe(238 * 3);
+    // 每个点 4 个画布像素见方 = 2 个设备像素
+    const points = rects.filter((rect) => rect.canvas === field);
+    expect(points.length).toBeGreaterThan(0);
+    for (const point of points) {
+      expect(point.w * 3).toBeCloseTo(4, 6);
+      expect(point.h * 3).toBeCloseTo(4, 6);
+    }
   });
 
   it("纯浏览器不伪造分析数据，冻结和键盘游标仍可使用", async () => {
